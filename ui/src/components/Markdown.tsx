@@ -1,23 +1,22 @@
 import ReactMarkdown from "react-markdown";
+import rehypeSanitize from "rehype-sanitize";
+import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import type { ReactNode } from "react";
 import AgentChart, { splitAgentContent } from "./AgentChart";
 
-/* ==================== fixMarkdown:校验与修正预处理 ====================
- * 纯函数,负责把模型输出的“半吊子” Markdown 规整为可稳定渲染的形式:
- * 1. 全角管道 `｜` 规整为半角 `|`(表格行内),全角连字符在分隔行规整为 `-`
- * 2. 表头后缺失 `|---|` 分隔行时自动插入
- * 3. 数据行管道符与表头列数不齐时补齐(空单元格)/截断(多余并入最后一列)
- * 4. 表格前若不是空行则补空行(GFM 要求表格独占块)
- * 5. 去掉孤立 `###` 碎片行(只有井号没有内容)
- * 6. 代码围栏 ``` 未闭合时补收尾
+/* ==================== 标准 Markdown 兼容预处理 ====================
+ * Markdown 的语义解析完全交给 react-markdown + remark-gfm/remark-breaks。
+ * 这里仅修正常见的模型流式输出瑕疵，并坚持两个原则：
+ * 1. 保守：没有充分结构证据时原样保留，绝不把普通的 `A | B` 变成表格。
+ * 2. 幂等：同一段文本重复处理不会继续改变结构。
  */
 
 /** 拆一行表格为单元格数组(去掉首尾的管道符再切分) */
 function splitRow(line: string): string[] {
   let l = line.trim();
   if (l.startsWith("|")) l = l.slice(1);
-  if (l.endsWith("|")) l = l.slice(1);
+  if (l.endsWith("|")) l = l.slice(0, -1);
   return l.split("|").map((s) => s.trim());
 }
 
@@ -48,6 +47,25 @@ function makeSeparator(cols: number): string {
   return "| " + Array.from({ length: cols }, () => "---").join(" | ") + " |";
 }
 
+/** 模型偶尔把二级标题和表头粘在同一行，拆开后再交给 GFM。 */
+function splitJoinedHeadingAndTable(line: string): [string, string] | null {
+  const match = line.match(/^(\s*#{1,6}\s+[^|]*?\S)\s*(\|.*)$/);
+  if (!match || splitRow(match[2]).length < 2) return null;
+  return [match[1], match[2]];
+}
+
+/** 只修正成对出现的转义/全角粗体标记，避免把普通星号改成 Markdown。 */
+function normalizeEmphasis(line: string): string {
+  return line
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/\\\*\\\*([^\n]+?)\\\*\\\*/g, "**$1**")
+    .replace(/＊＊([^\n]+?)＊＊/g, "**$1**")
+    .replace(/\*\*\s+([^*\n]+?)\s+\*\*/g, "**$1**")
+    // CommonMark 会拒绝 `**（中文标点）**的` 这种紧邻中文的闭合标记。
+    // 无可见内容的注释只提供语法边界，最终会被安全过滤器移除。
+    .replace(/\*\*([^*\n]+?)\*\*(?=[\p{L}\p{N}])/gu, "**$1**<!-- -->");
+}
+
 export function fixMarkdown(src: string): string {
   const rawLines = src.split("\n");
   const lines: string[] = [];
@@ -67,14 +85,19 @@ export function fixMarkdown(src: string): string {
     }
     // 孤立 ### 碎片(只有井号和空白)
     if (/^\s*#{1,6}\s*$/.test(line)) continue;
-    // 全角管道规整(仅在像表格行的行内)
-    let fixed = line;
+    let fixed = normalizeEmphasis(line);
+    // 全角管道规整。它仍须通过第二遍的严格结构判断才会成为表格。
     if (fixed.includes("｜")) fixed = fixed.replace(/｜/g, "|");
     // 全角/长连字符在“分隔行样式”的行里规整为 -
     if (/^[\s|:：—–-]+$/.test(fixed) && /[—–]/.test(fixed)) {
       fixed = fixed.replace(/[—–]/g, "-").replace(/:/g, ":");
     }
-    lines.push(fixed);
+    const joined = splitJoinedHeadingAndTable(fixed);
+    if (joined) {
+      lines.push(joined[0], "", joined[1]);
+    } else {
+      lines.push(fixed);
+    }
   }
   // 围栏未闭合:补齐
   if (inFence) lines.push("```");
@@ -102,13 +125,16 @@ export function fixMarkdown(src: string): string {
       block.push(lines[i]);
       i++;
     }
-    // 单行且不像表头(下一行不是分隔行也无法构成表格):按原文输出
-    if (block.length === 1 && !isSeparatorRow(block[0])) {
-      // 孤立的一行含管道,可能是不完整表头:补分隔行让它至少能成表
-      const cols = splitRow(block[0]).length;
-      if (out.length > 0 && out[out.length - 1].trim() !== "") out.push("");
-      out.push(normalizeRow(splitRow(block[0]), cols));
-      out.push(makeSeparator(cols));
+    const explicitTable = block.length >= 2 && isSeparatorRow(block[1]);
+    const headerCols = splitRow(block[0]).length;
+    const implicitTable =
+      block.length >= 3 &&
+      !block.some(isSeparatorRow) &&
+      block.every((row) => splitRow(row).length === headerCols);
+
+    // 单行、双行或列数不稳定的竖线文本都保持原样，等待后续流式内容补全。
+    if (!explicitTable && !implicitTable) {
+      out.push(...block);
       continue;
     }
     const headerCells = splitRow(block[0]);
@@ -117,7 +143,7 @@ export function fixMarkdown(src: string): string {
     if (out.length > 0 && out[out.length - 1].trim() !== "") out.push("");
     out.push(normalizeRow(headerCells, cols));
     let bodyStart = 1;
-    if (block.length > 1 && isSeparatorRow(block[1])) {
+    if (explicitTable) {
       out.push(makeSeparator(cols));
       bodyStart = 2;
     } else {
@@ -157,7 +183,8 @@ function MarkdownBody({ src }: { src: string }) {
   return (
     <div className="md space-y-2 text-sm leading-relaxed">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkBreaks]}
+        rehypePlugins={[rehypeSanitize]}
         components={{
           h1: ({ children }) => (
             <h1 className="border-b border-slate-200 pb-1 pt-2 text-base font-bold dark:border-slate-800">

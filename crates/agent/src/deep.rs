@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 use astock_backtest::data::PriceSeries;
 use astock_backtest::engine::{BacktestEngine, EngineConfig as BtConfig};
 use astock_backtest::metrics::MetricsConfig;
+use astock_backtest::strategies::{FormulaStrategy, FormulaStrategySpec};
 use astock_backtest::strategy::{BuyHold, MaCross, Strategy, TurtleBreakout};
 use astock_core::{Adjust, Bar, KlinePeriod, Symbol};
 use astock_fundamental::model::{
@@ -32,7 +33,7 @@ use astock_fundamental::{anomaly, metrics, scores, valuation, FundamentalClient}
 use astock_graph::{
     Engine as GraphEngine, Event, GraphStore, ImpactEntry, ImpactReport, Node, Relation,
 };
-use astock_market_data::DataProvider;
+use astock_market_data::{DataProvider, JoinQuantProvider, FINANCE_NEWS_SOURCES};
 use astock_technical as tech;
 use astock_trading_rules::{RuleSet, TradeSide};
 use chrono::NaiveDate;
@@ -55,6 +56,20 @@ fn require_fundamental<'a>(ctx: &'a ToolContext, tool: &str) -> Result<&'a Funda
         .ok_or_else(|| tool_err(tool, "基本面能力不可用：当前上下文未装配 FundamentalClient"))
 }
 
+fn require_joinquant<'a>(ctx: &'a ToolContext, tool: &str) -> Result<&'a JoinQuantProvider> {
+    let provider = ctx
+        .joinquant
+        .as_deref()
+        .ok_or_else(|| tool_err(tool, "聚宽研究通道未装配"))?;
+    if !provider.available() {
+        return Err(tool_err(
+            tool,
+            "聚宽研究通道未配置账号，请先在设置中填写聚宽账号和密码",
+        ));
+    }
+    Ok(provider)
+}
+
 /// RFC 3339 "now" without chrono's `clock` feature.
 fn now_rfc3339() -> String {
     chrono::DateTime::from_timestamp(now_secs(), 0)
@@ -66,6 +81,460 @@ fn invalid_args(tool: &str, msg: impl Into<String>) -> AgentError {
     AgentError::InvalidArgs {
         tool: tool.to_string(),
         msg: msg.into(),
+    }
+}
+
+fn research_date(tool: &str, raw: Option<&str>, fallback: NaiveDate) -> Result<NaiveDate> {
+    match raw {
+        Some(value) => NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d")
+            .map_err(|_| invalid_args(tool, format!("日期 `{value}` 格式应为 YYYY-MM-DD"))),
+        None => Ok(fallback),
+    }
+}
+
+fn bounded_text(value: Option<&Value>, max_chars: usize) -> String {
+    value
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .chars()
+        .take(max_chars)
+        .collect()
+}
+
+// ---------------------------------------------------------------------
+// research_news
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ResearchNewsArgs {
+    /// 可选关键词，如公司名、行业、政策主题；留空返回最新财经快讯
+    keyword: Option<String>,
+    /// 可选股票代码或名称；配置问财接口时会并行补充公告、新闻与结构化事件
+    stock: Option<String>,
+    /// 公共来源标识；省略时使用财联社、金十、华尔街见闻、MKTNews 与格隆汇
+    sources: Option<Vec<String>>,
+    /// 最终最多返回条数，默认 50、最大 100
+    limit: Option<usize>,
+    /// 是否只保留上游标记的重要快讯
+    important_only: Option<bool>,
+}
+
+/// Multi-source finance headlines plus optional iwencai stock events.
+pub struct ResearchNews;
+
+#[async_trait]
+impl AgentTool for ResearchNews {
+    fn name(&self) -> &'static str {
+        "research_news"
+    }
+
+    fn description(&self) -> &'static str {
+        "聚合财联社、金十、华尔街见闻、MKTNews、格隆汇等财经快讯，并在已配置时用问财官方接口补充个股公告/新闻/事件。各来源有缓存、并发上限、一次重试和失败回退；快讯仅作线索，不能单独形成交易结论"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        schema_value::<ResearchNewsArgs>()
+    }
+
+    fn cache_ttl_secs(&self) -> i64 {
+        300
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
+        let args: ResearchNewsArgs = parse_args(self.name(), args)?;
+        let provider = ctx
+            .finance_news
+            .as_deref()
+            .ok_or_else(|| tool_err(self.name(), "财经快讯聚合器未装配"))?;
+        let sources = args.sources.unwrap_or_else(|| {
+            [
+                "cls-telegraph",
+                "jin10",
+                "wallstreetcn-quick",
+                "mktnews-flash",
+                "gelonghui",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+        });
+        let known = FINANCE_NEWS_SOURCES
+            .iter()
+            .map(|row| row.0)
+            .collect::<HashSet<_>>();
+        if sources.iter().any(|source| !known.contains(source.trim())) {
+            return Err(invalid_args(
+                self.name(),
+                format!(
+                    "包含不支持的快讯来源；可选：{}",
+                    known.into_iter().collect::<Vec<_>>().join("、")
+                ),
+            ));
+        }
+        let limit = args.limit.unwrap_or(50).clamp(1, 100);
+        let keyword = args
+            .keyword
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        if keyword.is_some_and(|value| value.chars().count() > 100) {
+            return Err(invalid_args(self.name(), "新闻关键词不能超过 100 个字符"));
+        }
+        let stock = args
+            .stock
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        if stock.is_some_and(|value| value.chars().count() > 80) {
+            return Err(invalid_args(
+                self.name(),
+                "股票代码或名称不能超过 80 个字符",
+            ));
+        }
+
+        let news_future = provider.latest(&sources, 100);
+        let event_future = async {
+            match (stock, ctx.iwencai.as_deref()) {
+                (Some(stock), Some(iwencai)) if iwencai.available() => {
+                    Some(iwencai.stock_events(stock).await)
+                }
+                _ => None,
+            }
+        };
+        let (batch, stock_events) = tokio::join!(news_future, event_future);
+        let mut batch = batch.map_err(|error| tool_err(self.name(), error.to_string()))?;
+        if args.important_only.unwrap_or(false) {
+            batch.items.retain(|item| item.important);
+        }
+        if let Some(keyword) = keyword {
+            let keyword = keyword.to_lowercase();
+            batch.items.retain(|item| {
+                item.title.to_lowercase().contains(&keyword)
+                    || item.summary.to_lowercase().contains(&keyword)
+            });
+        }
+        batch.items.truncate(limit);
+        let iwencai = match stock_events {
+            Some(Ok(events)) => json!({
+                "available": true,
+                "stock": stock,
+                "announcements": events.announcements,
+                "news": events.news,
+                "events": events.events,
+            }),
+            Some(Err(error)) => {
+                json!({"available": true, "stock": stock, "error": error.to_string()})
+            }
+            None if stock.is_some() => json!({
+                "available": false,
+                "stock": stock,
+                "note": "未配置问财接口密钥，本轮仅使用公共财经快讯与其他已启用工具",
+            }),
+            None => Value::Null,
+        };
+        let full = json!({
+            "keyword": keyword,
+            "headlines": batch.items,
+            "successful_sources": batch.successful_sources,
+            "stale_sources": batch.stale_sources,
+            "source_errors": batch.errors,
+            "iwencai_stock_evidence": iwencai,
+            "governance": {
+                "max_concurrency": 3,
+                "retry_count": 1,
+                "cache": "逐来源按上游更新频率缓存；失败时保留进程内最后成功副本",
+            },
+            "warning": "公共快讯和搜索摘要只用于发现线索；重大资金判断必须用监管机构、交易所、公司公告或多个独立来源核实",
+        });
+        let summary = json!({
+            "keyword": full["keyword"],
+            "headlines": full["headlines"].as_array().map(|rows| rows.iter().take(40).cloned().collect::<Vec<_>>()).unwrap_or_default(),
+            "successful_sources": full["successful_sources"],
+            "stale_sources": full["stale_sources"],
+            "iwencai_stock_evidence": full["iwencai_stock_evidence"],
+            "warning": full["warning"],
+        });
+        Ok(ToolResult {
+            summary_json: summary,
+            full_json: Some(full),
+            cache_key: String::new(),
+            source: "finance_news+iwencai".to_string(),
+            fetched_at: now_rfc3339(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------
+// search_web
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct WebSearchArgs {
+    /// 2-500 字符的检索词；时效问题应包含日期，政策问题应包含发布机构
+    query: String,
+}
+
+/// MiniMax Coding Plan official web search.
+pub struct SearchWeb;
+
+#[async_trait]
+impl AgentTool for SearchWeb {
+    fn name(&self) -> &'static str {
+        "search_web"
+    }
+
+    fn description(&self) -> &'static str {
+        "通过 MiniMax Coding Plan 官方联网搜索获取实时外部资料，返回标题、链接、摘要和日期。政策与重大新闻优先检索监管机构、交易所和公司官网，并与行情/公告工具交叉验证"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        schema_value::<WebSearchArgs>()
+    }
+
+    fn cache_ttl_secs(&self) -> i64 {
+        600
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
+        let args: WebSearchArgs = parse_args(self.name(), args)?;
+        let query = args.query.trim();
+        if query.chars().count() < 2 || query.chars().count() > 500 {
+            return Err(invalid_args(self.name(), "检索词须为 2-500 个字符"));
+        }
+        let client = ctx
+            .minimax_search
+            .as_deref()
+            .ok_or_else(|| tool_err(self.name(), "MiniMax 联网搜索未装配，请检查 MiniMax 配置"))?;
+        let raw = client
+            .web_search(query)
+            .await
+            .map_err(|error| tool_err(self.name(), error.to_string()))?;
+        let results = raw
+            .get("organic")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .take(20)
+            .filter_map(|row| {
+                let title = bounded_text(row.get("title"), 300);
+                let link = bounded_text(row.get("link"), 2_048);
+                if title.is_empty()
+                    || !(link.starts_with("https://") || link.starts_with("http://"))
+                {
+                    return None;
+                }
+                Some(json!({
+                    "title": title,
+                    "link": link,
+                    "snippet": bounded_text(row.get("snippet"), 1_000),
+                    "date": bounded_text(row.get("date"), 80),
+                }))
+            })
+            .collect::<Vec<_>>();
+        let related = raw
+            .get("related_searches")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .take(10)
+            .filter_map(|row| {
+                let value = bounded_text(row.get("query"), 300);
+                (!value.is_empty()).then_some(value)
+            })
+            .collect::<Vec<_>>();
+        if results.is_empty() {
+            return Err(tool_err(self.name(), "MiniMax 联网搜索没有返回可用结果"));
+        }
+        let payload = json!({
+            "query": query,
+            "results": results,
+            "related_searches": related,
+            "note": "搜索摘要是线索而非已核实事实；重要政策、公告和资金决策必须打开原始来源并与其他数据交叉验证",
+        });
+        Ok(ToolResult {
+            summary_json: payload.clone(),
+            full_json: Some(payload),
+            cache_key: String::new(),
+            source: "minimax_web_search".to_string(),
+            fetched_at: now_rfc3339(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------
+// run_joinquant_research
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct JoinQuantResearchArgs {
+    /// 研究模板：daily（日线）/ valuation（估值快照）/ index_components（指数成分）/ macro_cpi（宏观 CPI）
+    study: String,
+    /// daily 使用的 6 位证券代码
+    symbol: Option<String>,
+    /// valuation 使用的证券代码，最多 30 只
+    symbols: Option<Vec<String>>,
+    /// index_components 使用的指数代码，默认 000300
+    index: Option<String>,
+    /// daily 开始日期 YYYY-MM-DD，默认结束日前 365 天
+    start_date: Option<String>,
+    /// daily 结束日期 YYYY-MM-DD，默认今天
+    end_date: Option<String>,
+    /// valuation/index_components 的截面日期 YYYY-MM-DD，默认今天
+    date: Option<String>,
+    /// macro_cpi 返回月数，默认 24、最大 120
+    limit: Option<usize>,
+}
+
+/// Fixed-template research in JoinQuant's Python environment.
+pub struct RunJoinQuantResearch;
+
+#[async_trait]
+impl AgentTool for RunJoinQuantResearch {
+    fn name(&self) -> &'static str {
+        "run_joinquant_research"
+    }
+
+    fn description(&self) -> &'static str {
+        "显式调用聚宽研究环境做低频交叉验证：前复权日线、历史估值截面、指数成分或宏观 CPI。只运行内置固定 Python 模板，不接收任意代码；调用全局串行且至少间隔 2 秒"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        schema_value::<JoinQuantResearchArgs>()
+    }
+
+    fn cache_ttl_secs(&self) -> i64 {
+        21_600
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
+        let args: JoinQuantResearchArgs = parse_args(self.name(), args)?;
+        let provider = require_joinquant(ctx, self.name())?;
+        let today = chrono::DateTime::from_timestamp(now_secs(), 0)
+            .map(|value| value.date_naive())
+            .ok_or_else(|| tool_err(self.name(), "系统日期不可用"))?;
+        let study = args.study.trim().to_ascii_lowercase();
+
+        let (summary, full) = match study.as_str() {
+            "daily" => {
+                let raw_symbol = args
+                    .symbol
+                    .as_deref()
+                    .ok_or_else(|| invalid_args(self.name(), "daily 研究必须提供 symbol"))?;
+                let symbol = parse_symbol(self.name(), raw_symbol)?;
+                let end = research_date(self.name(), args.end_date.as_deref(), today)?;
+                let start = research_date(
+                    self.name(),
+                    args.start_date.as_deref(),
+                    end - chrono::Duration::days(365),
+                )?;
+                let span = end.signed_duration_since(start).num_days();
+                if !(0..=3_650).contains(&span) {
+                    return Err(invalid_args(
+                        self.name(),
+                        "daily 日期范围须按先后填写且最长为 10 年",
+                    ));
+                }
+                let fetched = provider
+                    .daily(&symbol, start, end)
+                    .await
+                    .map_err(|error| tool_err(self.name(), error.to_string()))?;
+                let tail = fetched
+                    .data
+                    .iter()
+                    .rev()
+                    .take(20)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>();
+                (
+                    json!({
+                        "study": "daily",
+                        "symbol": symbol.code(),
+                        "start": fetched.data.first().map(|row| row.date.to_string()),
+                        "end": fetched.data.last().map(|row| row.date.to_string()),
+                        "bars": fetched.data.len(),
+                        "tail": tail,
+                        "adjust": "前复权",
+                    }),
+                    json!({"study": "daily", "symbol": symbol.code(), "rows": fetched.data}),
+                )
+            }
+            "valuation" => {
+                let raw_symbols = args
+                    .symbols
+                    .ok_or_else(|| invalid_args(self.name(), "valuation 研究必须提供 symbols"))?;
+                if raw_symbols.is_empty() || raw_symbols.len() > 30 {
+                    return Err(invalid_args(self.name(), "symbols 须包含 1-30 只证券"));
+                }
+                let symbols = raw_symbols
+                    .iter()
+                    .map(|raw| parse_symbol(self.name(), raw))
+                    .collect::<Result<Vec<_>>>()?;
+                let date = research_date(self.name(), args.date.as_deref(), today)?;
+                let rows = provider
+                    .valuation(&symbols, date)
+                    .await
+                    .map_err(|error| tool_err(self.name(), error.to_string()))?
+                    .into_iter()
+                    .map(|row| {
+                        json!({
+                            "代码": row.code,
+                            "市盈率": row.pe_ratio,
+                            "市净率": row.pb_ratio,
+                            "市销率": row.ps_ratio,
+                            "市现率": row.pcf_ratio,
+                            "总市值_亿元": row.market_cap,
+                            "流通市值_亿元": row.circulating_market_cap,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let payload = json!({"study": "valuation", "date": date.to_string(), "rows": rows});
+                (payload.clone(), payload)
+            }
+            "index_components" => {
+                let index = args.index.as_deref().unwrap_or("000300");
+                let date = research_date(self.name(), args.date.as_deref(), today)?;
+                let rows = provider
+                    .index_components(index, date)
+                    .await
+                    .map_err(|error| tool_err(self.name(), error.to_string()))?;
+                (
+                    json!({
+                        "study": "index_components",
+                        "index": index,
+                        "date": date.to_string(),
+                        "count": rows.len(),
+                        "sample": rows.iter().take(100).collect::<Vec<_>>(),
+                    }),
+                    json!({"study": "index_components", "index": index, "date": date.to_string(), "rows": rows}),
+                )
+            }
+            "macro_cpi" => {
+                let limit = args.limit.unwrap_or(24).clamp(1, 120);
+                let rows = provider
+                    .macro_cpi(limit)
+                    .await
+                    .map_err(|error| tool_err(self.name(), error.to_string()))?;
+                let payload = json!({"study": "macro_cpi", "count": rows.len(), "rows": rows});
+                (payload.clone(), payload)
+            }
+            _ => {
+                return Err(invalid_args(
+                    self.name(),
+                    "study 仅支持 daily / valuation / index_components / macro_cpi",
+                ))
+            }
+        };
+
+        Ok(ToolResult {
+            summary_json: summary,
+            full_json: Some(full),
+            cache_key: String::new(),
+            source: "joinquant".to_string(),
+            fetched_at: now_rfc3339(),
+        })
     }
 }
 
@@ -1408,8 +1877,10 @@ pub async fn relationship_graph_json(
 struct BacktestArgs {
     /// 6位证券代码
     symbol: String,
-    /// 策略：ma_cross（双均线，默认）/ turtle（海龟突破）/ buy_hold（买入持有基准）
+    /// 策略：ma_cross（双均线，默认）/ turtle / buy_hold / formula_dsl（AI 公式策略）
     strategy: Option<String>,
+    /// formula_dsl 的完整受限策略定义；只能组合历史价格、SMA、区间高低点、RSI 与布尔/比较条件
+    spec: Option<Value>,
     /// ma_cross 快线窗口（交易日），默认 5
     fast: Option<u32>,
     /// ma_cross 慢线窗口（交易日），默认 20
@@ -1431,7 +1902,7 @@ impl AgentTool for RunBacktest {
         "run_backtest"
     }
     fn description(&self) -> &'static str {
-        "策略回测：双均线(ma_cross)/海龟突破(turtle)/买入持有(buy_hold)，含 T+1、整手、涨跌停与费用约束；输出 CAGR/Sharpe/最大回撤/胜率/交易次数（交易明细入缓存）"
+        "策略回测：双均线/海龟突破/买入持有，或生成受限 formula_dsl 公式策略；公式只能读取当前及历史行情，禁止任意代码、文件与网络。含 T+1、整手、涨跌停和费用约束，输出完整绩效与交易审计"
     }
     fn parameters_schema(&self) -> Value {
         schema_value::<BacktestArgs>()
@@ -1450,6 +1921,7 @@ impl AgentTool for RunBacktest {
             args.slow,
             args.entry_n,
             args.exit_n,
+            args.spec.as_ref(),
             bars,
         )
         .await?;
@@ -1609,6 +2081,7 @@ impl AgentTool for IterateStrategy {
                     candidate.slow,
                     candidate.entry_n,
                     candidate.exit_n,
+                    None,
                     *window,
                 )
                 .await
@@ -1729,6 +2202,7 @@ pub async fn run_backtest_json(
     slow: Option<u32>,
     entry_n: Option<u32>,
     exit_n: Option<u32>,
+    formula_spec: Option<&Value>,
     bars: u32,
 ) -> Result<Value> {
     let tool = "run_backtest";
@@ -1757,7 +2231,7 @@ pub async fn run_backtest_json(
     .map_err(|e| tool_err(tool, e.to_string()))?;
 
     let name = strategy.unwrap_or("ma_cross").to_ascii_lowercase();
-    let mut strat: Box<dyn Strategy> = match name.as_str() {
+    let (mut strat, params): (Box<dyn Strategy>, Value) = match name.as_str() {
         "ma_cross" | "ma" => {
             let f = fast.unwrap_or(5) as usize;
             let s = slow.unwrap_or(20) as usize;
@@ -1767,7 +2241,10 @@ pub async fn run_backtest_json(
                     format!("ma_cross 需要 1 <= fast({f}) < slow({s})"),
                 ));
             }
-            Box::new(MaCross::new(f, s))
+            (
+                Box::new(MaCross::new(f, s)),
+                json!({"fast": fast.unwrap_or(5), "slow": slow.unwrap_or(20)}),
+            )
         }
         "turtle" | "turtle_breakout" => {
             let e = entry_n.unwrap_or(20) as usize;
@@ -1778,22 +2255,31 @@ pub async fn run_backtest_json(
                     format!("turtle 需要 entry_n({e}) >= 2 且 exit_n({x}) >= 1"),
                 ));
             }
-            Box::new(TurtleBreakout::new(e, x))
+            (
+                Box::new(TurtleBreakout::new(e, x)),
+                json!({"entry_n": entry_n.unwrap_or(20), "exit_n": exit_n.unwrap_or(10)}),
+            )
         }
-        "buy_hold" | "buyhold" => Box::new(BuyHold),
+        "buy_hold" | "buyhold" => (Box::new(BuyHold), json!({})),
+        "formula_dsl" | "formula" => {
+            let raw = formula_spec
+                .ok_or_else(|| invalid_args(tool, "formula_dsl 必须提供 spec 公式策略定义"))?;
+            let spec: FormulaStrategySpec =
+                serde_json::from_value(raw.clone()).map_err(|error| {
+                    invalid_args(tool, format!("formula_dsl spec 格式错误：{error}"))
+                })?;
+            let strategy = FormulaStrategy::try_new(spec)
+                .map_err(|error| invalid_args(tool, error.to_string()))?;
+            let audited = serde_json::to_value(strategy.spec())
+                .map_err(|error| tool_err(tool, format!("序列化公式策略失败：{error}")))?;
+            (Box::new(strategy), audited)
+        }
         other => {
             return Err(invalid_args(
                 tool,
-                format!("未知策略 `{other}`：可选 ma_cross / turtle / buy_hold"),
+                format!("未知策略 `{other}`：可选 ma_cross / turtle / buy_hold / formula_dsl"),
             ))
         }
-    };
-    let params = match name.as_str() {
-        "ma_cross" | "ma" => json!({"fast": fast.unwrap_or(5), "slow": slow.unwrap_or(20)}),
-        "turtle" | "turtle_breakout" => {
-            json!({"entry_n": entry_n.unwrap_or(20), "exit_n": exit_n.unwrap_or(10)})
-        }
-        _ => json!({}),
     };
 
     let rules =
@@ -2441,6 +2927,10 @@ mod tests {
             storage,
             graph,
             fundamental: None,
+            joinquant: None,
+            minimax_search: None,
+            finance_news: None,
+            iwencai: None,
         }
     }
 

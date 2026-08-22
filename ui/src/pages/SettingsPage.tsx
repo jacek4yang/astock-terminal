@@ -7,12 +7,15 @@ import {
   getDataDir,
   settingsGetProviderStatus,
   settingsSetProviderCredentials,
+  settingsGetAgentModelRouting,
+  settingsSetAgentModelRouting,
   errMsg,
   type MinimaxStatus,
   type ModelQuotaStatus,
   type QuotaStatus,
   type CacheStats,
   type ProviderStatus,
+  type AgentModelRoutingSettings,
 } from "../lib/api";
 import { fmtBytes } from "../lib/format";
 import { ErrorBox, Term } from "../components/ui";
@@ -51,6 +54,26 @@ const EMPTY_CREDS: CredValues = {
   jq_pwd: "",
   socks5: "",
 };
+
+const DEFAULT_MODEL_ROUTING: AgentModelRoutingSettings = {
+  coordinator_model: "auto",
+  fast_model: "auto",
+  deep_model: "auto",
+  verifier_model: "auto",
+  multi_agent_enabled: true,
+  max_parallel_agents: 3,
+};
+
+const MODEL_ROUTE_FIELDS: {
+  key: "coordinator_model" | "fast_model" | "deep_model" | "verifier_model";
+  label: string;
+  help: string;
+}[] = [
+  { key: "coordinator_model", label: "主分析师", help: "普通深度研究与最终综合" },
+  { key: "fast_model", label: "快速任务", help: "行情快问和低延迟整理" },
+  { key: "deep_model", label: "极深任务", help: "计划模式、大额资金和复杂策略" },
+  { key: "verifier_model", label: "复核专家", help: "证据、风险、量化和政策独立审计" },
+];
 
 function quotaDate(value: number | null): string {
   if (value == null || value <= 0) return "未知";
@@ -166,6 +189,9 @@ export default function SettingsPage() {
   const [mmMsg, setMmMsg] = useState<string | null>(null);
   const [mmErr, setMmErr] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [modelRouting, setModelRouting] = useState<AgentModelRoutingSettings>(DEFAULT_MODEL_ROUTING);
+  const [modelRoutingMsg, setModelRoutingMsg] = useState<string | null>(null);
+  const [modelRoutingSaving, setModelRoutingSaving] = useState(false);
 
   const [dataDir, setDataDir] = useState<string | null>(null);
   const [cache, setCache] = useState<CacheStats | null>(null);
@@ -211,11 +237,34 @@ export default function SettingsPage() {
     }
   }, []);
 
+  const loadModelRouting = useCallback(async () => {
+    try {
+      setModelRouting(await settingsGetAgentModelRouting());
+    } catch (e) {
+      setMmErr(errMsg(e));
+    }
+  }, []);
+
   useEffect(() => {
     loadMinimax();
     loadCache();
     loadProviders();
-  }, [loadMinimax, loadCache, loadProviders]);
+    loadModelRouting();
+  }, [loadMinimax, loadCache, loadProviders, loadModelRouting]);
+
+  const saveModelRouting = async () => {
+    setModelRoutingSaving(true);
+    setModelRoutingMsg(null);
+    try {
+      const saved = await settingsSetAgentModelRouting(modelRouting);
+      setModelRouting(saved);
+      setModelRoutingMsg("模型路由与多专家上限已保存，下一轮研究任务生效");
+    } catch (e) {
+      setMmErr(errMsg(e));
+    } finally {
+      setModelRoutingSaving(false);
+    }
+  };
 
   // 逐项提交五个字段;空串 = 清除该项(后端契约,缺失/空值即清除,绝不回显)
   const saveProviders = async () => {
@@ -341,6 +390,75 @@ export default function SettingsPage() {
         )}
       </Section>
 
+      <Section title="Agent 模型路由与多专家协作">
+        <div className="muted text-xs leading-relaxed">
+          模型列表来自 MiniMax 官方接口，不写死版本。选择“auto”由系统自动探测；也可直接填写未来新增的模型 ID。
+        </div>
+        <datalist id="minimax-model-options">
+          <option value="auto">自动选择可用模型</option>
+          {(mmStatus?.available_models ?? []).map((model) => (
+            <option key={model.id} value={model.id} />
+          ))}
+        </datalist>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {MODEL_ROUTE_FIELDS.map((field) => (
+            <label key={field.key} className="rounded border border-slate-200 p-2.5 text-xs dark:border-slate-800">
+              <span className="font-medium">{field.label}</span>
+              <span className="muted ml-2">{field.help}</span>
+              <input
+                className="input mt-2 w-full"
+                list="minimax-model-options"
+                value={modelRouting[field.key]}
+                onChange={(event) =>
+                  setModelRouting((routing) => ({ ...routing, [field.key]: event.target.value }))
+                }
+              />
+            </label>
+          ))}
+        </div>
+        <div className="flex flex-wrap items-center gap-4 rounded border border-slate-200 p-2.5 text-xs dark:border-slate-800">
+          <label className="flex cursor-pointer items-center gap-2">
+            <input
+              type="checkbox"
+              checked={modelRouting.multi_agent_enabled}
+              onChange={(event) =>
+                setModelRouting((routing) => ({
+                  ...routing,
+                  multi_agent_enabled: event.target.checked,
+                }))
+              }
+            />
+            深度任务启用独立专家复核
+          </label>
+          <label className="flex items-center gap-2">
+            <span>极深任务最多并行专家</span>
+            <select
+              className="input !w-20"
+              value={modelRouting.max_parallel_agents}
+              onChange={(event) =>
+                setModelRouting((routing) => ({
+                  ...routing,
+                  max_parallel_agents: Number(event.target.value),
+                }))
+              }
+            >
+              {[1, 2, 3, 4].map((count) => (
+                <option key={count} value={count}>{count}</option>
+              ))}
+            </select>
+          </label>
+          <span className="muted">
+            深入模式最多 2 位，极深/计划模式按此上限；主分析师统一工具权限并负责最终结论。
+          </span>
+        </div>
+        <div className="flex items-center gap-3">
+          <button className="btn-primary" onClick={saveModelRouting} disabled={modelRoutingSaving}>
+            {modelRoutingSaving ? "保存中…" : "保存模型路由"}
+          </button>
+          {modelRoutingMsg && <span className="text-xs text-down">{modelRoutingMsg}</span>}
+        </div>
+      </Section>
+
       <Section title="访问频率与重试治理">
         <div className="grid gap-3 text-xs lg:grid-cols-2">
           <div className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
@@ -359,6 +477,8 @@ export default function SettingsPage() {
               <div>· 超时、访问过快、服务端临时异常或防护拦截后会自动放慢请求，间隔范围为 100 毫秒至 30 秒；成功后逐步恢复。</div>
               <div>· 单请求 8 秒超时；主机池切换间隔 300 毫秒；连续 3 次瞬态失败触发熔断。</div>
               <div>· 熔断冷却从 10 分钟指数增长到 1 小时；实时/K线/搜索/全市场/宽度缓存分别为 2/15/15/60/120 秒。</div>
+              <div>· 财经快讯最多 3 路并发、瞬时失败重试 1 次，并按来源的 2-30 分钟更新周期缓存；失败会保留最后成功副本。</div>
+              <div>· 聚宽研究调用全局串行且至少间隔 2 秒，只执行日线、估值、指数成分和宏观数据固定模板。</div>
             </div>
           </div>
         </div>

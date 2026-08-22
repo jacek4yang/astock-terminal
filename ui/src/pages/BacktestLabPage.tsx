@@ -9,8 +9,7 @@ import { ErrorBox, LoadBar, Term } from "../components/ui";
  * 回测实验室(纯前端页)。
  * 契约:docs/command-contract.md `run_backtest`;`list_strategies` 由后端并行
  * 补契约,前端 try/catch 优雅降级为内置策略清单(与 crates/backtest 注册表对齐)。
- * 当前后端 run_backtest 仅支持 ma_cross/turtle/buy_hold 的扁平参数;新策略参数
- * 以 `params` JSON + `pool` 一并发送(未知参数会被后端忽略),agent-D 落地后即生效。
+ * 长耗时回测统一在后端任务中运行，离开页面后仍可恢复状态与结果。
  */
 
 // ==================== 类型(与 run_backtest_json 返回对齐) ====================
@@ -99,6 +98,12 @@ const BUILTIN_STRATEGIES: StrategyMeta[] = [
     multi_symbol: false,
   },
   {
+    name: "formula_dsl",
+    label: "AI 公式策略",
+    description: "由 AI 或用户组合历史价格、均线、区间高低点与 RSI；禁止任意代码、文件和网络访问",
+    multi_symbol: false,
+  },
+  {
     name: "min_corr_etf_rotation",
     label: "最小相关轮动",
     description: "候选池两两相关矩阵,持有平均相关最低的 N 只等权,月度再平衡(多标的,需新版后端)",
@@ -140,6 +145,25 @@ const PARAM_FIELDS: Record<string, ParamField[]> = {
   ],
   buy_hold: [],
 };
+
+const FORMULA_TEMPLATE = JSON.stringify(
+  {
+    version: 1,
+    name: "短期均线上穿长期均线",
+    entry: {
+      op: "cross_above",
+      left: { kind: "sma", field: "close", window: 5 },
+      right: { kind: "sma", field: "close", window: 20 },
+    },
+    exit: {
+      op: "cross_below",
+      left: { kind: "sma", field: "close", window: 5 },
+      right: { kind: "sma", field: "close", window: 20 },
+    },
+  },
+  null,
+  2,
+);
 
 // ==================== 工具 ====================
 
@@ -331,7 +355,7 @@ export default function BacktestLabPage() {
       setParamVals(next);
     } else {
       setParamVals({});
-      setParamsJson("{}");
+      setParamsJson(strategy === "formula_dsl" ? FORMULA_TEMPLATE : "{}");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [strategy]);
@@ -597,16 +621,28 @@ export default function BacktestLabPage() {
             </label>
           ))}
           {!fields && (
-            <label className="flex flex-col gap-1">
+            <label className="flex min-w-80 flex-1 flex-col gap-1">
               <span className="micro-label">
-                <Term label="高级策略参数" tip='该策略暂无预设输入项，可按“参数名与数值”的结构填写高级条件' />
+                <Term
+                  label={strategy === "formula_dsl" ? "可审计策略条件" : "高级策略参数"}
+                  tip={
+                    strategy === "formula_dsl"
+                      ? "只允许历史行情、SMA、区间最高/最低、RSI 与布尔比较；深度、节点、窗口均有限制，不执行任意脚本"
+                      : '该策略暂无预设输入项，可按“参数名与数值”的结构填写高级条件'
+                  }
+                />
               </span>
-              <input
-                className="input w-64 text-xs"
+              <textarea
+                className="input min-h-28 w-full resize-y font-mono text-[11px] leading-4"
                 value={paramsJson}
                 onChange={(e) => setParamsJson(e.target.value)}
                 spellCheck={false}
               />
+              {strategy === "formula_dsl" && (
+                <span className="muted text-[11px]">
+                  Agent 可在对话中调用「策略回测」自动生成并验证这类条件；结果仍需样本外与人工风控复核
+                </span>
+              )}
             </label>
           )}
           {meta.multi_symbol && (

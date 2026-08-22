@@ -3,7 +3,7 @@
 
 use astock_minimax::{KeyStore, MinimaxClient, QuotaStatus, Region, SecretKey, ServiceInfo};
 use astock_storage::CleanupPolicy;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::State;
 
@@ -12,6 +12,92 @@ use crate::state::AppState;
 
 /// Storage settings key for the custom data directory.
 const DATA_DIR_SETTING: &str = "data_dir";
+const AGENT_MODEL_ROUTING_SETTING: &str = "agent.model_routing.v1";
+
+/// Capability-to-model mapping used by the main analyst and isolated
+/// specialist reviewers. `auto` delegates selection to the live MiniMax
+/// catalog; arbitrary provider model IDs remain accepted for future releases.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentModelRoutingSettings {
+    pub coordinator_model: String,
+    pub fast_model: String,
+    pub deep_model: String,
+    pub verifier_model: String,
+    pub multi_agent_enabled: bool,
+    pub max_parallel_agents: u8,
+}
+
+impl Default for AgentModelRoutingSettings {
+    fn default() -> Self {
+        Self {
+            coordinator_model: "auto".into(),
+            fast_model: "auto".into(),
+            deep_model: "auto".into(),
+            verifier_model: "auto".into(),
+            multi_agent_enabled: true,
+            max_parallel_agents: 3,
+        }
+    }
+}
+
+impl AgentModelRoutingSettings {
+    fn normalize(mut self) -> Result<Self, CmdError> {
+        for model in [
+            &mut self.coordinator_model,
+            &mut self.fast_model,
+            &mut self.deep_model,
+            &mut self.verifier_model,
+        ] {
+            *model = model.trim().to_string();
+            if model.is_empty() {
+                *model = "auto".to_string();
+            }
+            if model.len() > 128 || model.chars().any(char::is_control) {
+                return Err(CmdError::new("invalid_param", "模型 ID 格式无效"));
+            }
+        }
+        if !(1..=4).contains(&self.max_parallel_agents) {
+            return Err(CmdError::new(
+                "invalid_param",
+                "并行专家数量必须在 1 到 4 之间",
+            ));
+        }
+        Ok(self)
+    }
+
+    pub fn route_for(&self, research_mode: &str, reasoning_depth: &str) -> Option<String> {
+        let chosen = if research_mode == "quick" {
+            &self.fast_model
+        } else if reasoning_depth == "maximum" || research_mode == "plan" {
+            &self.deep_model
+        } else {
+            &self.coordinator_model
+        };
+        (chosen != "auto").then(|| chosen.clone())
+    }
+
+    pub fn verifier_model(&self, fallback: Option<&str>) -> Option<String> {
+        if self.verifier_model != "auto" {
+            Some(self.verifier_model.clone())
+        } else {
+            fallback.map(str::to_string)
+        }
+    }
+}
+
+pub async fn load_agent_model_routing(
+    storage: &astock_storage::Storage,
+) -> AgentModelRoutingSettings {
+    storage
+        .settings_get(AGENT_MODEL_ROUTING_SETTING)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .and_then(|settings: AgentModelRoutingSettings| settings.normalize().ok())
+        .unwrap_or_default()
+}
 
 /// `ServiceInfo` JSON without any key material: `{region, api_host, www_host}`.
 fn service_info_json(info: &ServiceInfo) -> Value {
@@ -125,6 +211,14 @@ pub async fn minimax_status(state: State<'_, AppState>) -> Result<Value, CmdErro
             None
         }
     };
+    let available_models = match client.available_models().await {
+        Ok(models) => Some(models),
+        Err(e) => {
+            tracing::warn!(error = %e, "minimax model discovery failed");
+            None
+        }
+    };
+    let model_routing = load_agent_model_routing(&state.storage).await;
     let mut out = json!({ "has_key": true });
     let obj = out.as_object_mut().expect("object");
     if let Some(info) = &info {
@@ -143,7 +237,33 @@ pub async fn minimax_status(state: State<'_, AppState>) -> Result<Value, CmdErro
     if let Some(quota) = quota {
         obj.insert("quota".into(), quota);
     }
+    if let Some(models) = available_models {
+        obj.insert("available_models".into(), json!(models));
+    }
+    obj.insert("model_routing".into(), json!(model_routing));
     Ok(out)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn settings_get_agent_model_routing(
+    state: State<'_, AppState>,
+) -> Result<AgentModelRoutingSettings, CmdError> {
+    Ok(load_agent_model_routing(&state.storage).await)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn settings_set_agent_model_routing(
+    state: State<'_, AppState>,
+    settings: AgentModelRoutingSettings,
+) -> Result<AgentModelRoutingSettings, CmdError> {
+    let settings = settings.normalize()?;
+    let encoded = serde_json::to_string(&settings)
+        .map_err(|error| CmdError::new("settings", error.to_string()))?;
+    state
+        .storage
+        .settings_set(AGENT_MODEL_ROUTING_SETTING, &encoded)
+        .await?;
+    Ok(settings)
 }
 
 /// Current Token Plan quota for all models.
@@ -499,6 +619,52 @@ mod tests {
         assert_eq!(normalize(Some("".into())), None);
         assert_eq!(normalize(Some("   ".into())), None);
         assert_eq!(normalize(Some("  tok  ".into())), Some("tok".into()));
+    }
+
+    #[test]
+    fn model_routing_accepts_future_ids_and_routes_by_difficulty() {
+        let settings = AgentModelRoutingSettings {
+            coordinator_model: " MiniMax-M4-future ".into(),
+            fast_model: "MiniMax-M3-highspeed".into(),
+            deep_model: "MiniMax-M4-deep".into(),
+            verifier_model: "auto".into(),
+            multi_agent_enabled: true,
+            max_parallel_agents: 4,
+        }
+        .normalize()
+        .unwrap();
+        assert_eq!(
+            settings.route_for("quick", "deep").as_deref(),
+            Some("MiniMax-M3-highspeed")
+        );
+        assert_eq!(
+            settings.route_for("deep", "maximum").as_deref(),
+            Some("MiniMax-M4-deep")
+        );
+        assert_eq!(
+            settings.route_for("deep", "deep").as_deref(),
+            Some("MiniMax-M4-future")
+        );
+        assert_eq!(
+            settings
+                .verifier_model(Some("MiniMax-M4-future"))
+                .as_deref(),
+            Some("MiniMax-M4-future")
+        );
+    }
+
+    #[test]
+    fn model_routing_rejects_unsafe_or_unbounded_values() {
+        let settings = AgentModelRoutingSettings {
+            max_parallel_agents: 5,
+            ..Default::default()
+        };
+        assert!(settings.normalize().is_err());
+        let settings = AgentModelRoutingSettings {
+            deep_model: "bad\nmodel".into(),
+            ..Default::default()
+        };
+        assert!(settings.normalize().is_err());
     }
 
     #[tokio::test]

@@ -28,6 +28,7 @@ import {
 } from "../lib/agentLabels";
 import {
   appendAgentTurn,
+  DEFAULT_AGENT_TOOLS,
   handleAgentEnvelope,
   nextAgentKey,
   patchLastAssistant,
@@ -42,6 +43,54 @@ import {
 } from "../agentSession";
 
 export type { ChatMsg } from "../agentSession";
+
+const RESEARCH_MODES = [
+  { id: "quick" as const, label: "快速", detail: "只取必要证据，适合行情快问" },
+  { id: "deep" as const, label: "深度", detail: "多源验证、反方证据与情景分析" },
+  { id: "plan" as const, label: "计划", detail: "先分批澄清需求，再列计划并执行" },
+];
+
+const REASONING_DEPTHS = [
+  { id: "standard" as const, label: "标准" },
+  { id: "deep" as const, label: "深入" },
+  { id: "maximum" as const, label: "极深" },
+];
+
+const TOOL_GROUPS = [
+  {
+    label: "行情与技术",
+    tools: [
+      "get_quote",
+      "get_kline",
+      "compute_indicators",
+      "run_full_analysis",
+      "run_chanlun",
+      "get_fund_flow",
+      "get_market_breadth",
+      "get_market_regime",
+    ],
+  },
+  {
+    label: "基本面与估值",
+    tools: ["get_fundamentals", "run_valuation"],
+  },
+  {
+    label: "扫描与横向比较",
+    tools: ["search_stock", "compare_stocks", "scan_market", "get_watchlist", "get_cached_detail"],
+  },
+  {
+    label: "产业链与关系",
+    tools: ["get_industry_chain", "run_supply_chain_shock", "build_relationship_graph"],
+  },
+  {
+    label: "策略实验",
+    tools: ["run_backtest", "iterate_strategy"],
+  },
+  {
+    label: "外部研究数据",
+    tools: ["research_news", "search_web", "run_joinquant_research"],
+  },
+] as const;
 
 // ==================== 数据模型 ====================
 
@@ -211,7 +260,7 @@ function ResearchProgress({ progress }: { progress: AgentProgress }) {
   const currentPhase = Math.max(0, PROGRESS_PHASE_ORDER.indexOf(progress.phase));
   return (
     <div className="rounded-lg border border-blue-200 bg-blue-50/80 px-3 py-2.5 text-xs dark:border-blue-900/70 dark:bg-blue-950/30">
-      <div className="mb-2 grid grid-cols-4 gap-1">
+      <div className="mb-2 grid grid-cols-5 gap-1">
         {PROGRESS_PHASE_ORDER.map((phase, index) => (
           <div
             key={phase}
@@ -256,6 +305,7 @@ function ResearchProgress({ progress }: { progress: AgentProgress }) {
           <span>· 独立分析最多 6 项并行，完成一项更新一项</span>
           <span>· 普通步骤 45–60 秒自动降级，长计算单独限时</span>
           <span>· 对话、证据与任务状态持续保存，切换页面不中断</span>
+          <span>· 深度任务可由独立专家并行复核，主分析师统一综合</span>
         </div>
       </details>
     </div>
@@ -331,12 +381,21 @@ export default function AgentChat({
   const err = useAgentSession((s) => s.err);
   const progress = useAgentSession((s) => s.progress);
   const pendingQuestions = useAgentSession((s) => s.pendingQuestions ?? []);
+  const researchMode = useAgentSession((s) => s.researchMode ?? "deep");
+  const reasoningDepth = useAgentSession((s) => s.reasoningDepth ?? "deep");
+  const enabledTools = useAgentSession((s) => s.enabledTools ?? [...DEFAULT_AGENT_TOOLS]);
+  const autoResumeOnQuota = useAgentSession((s) => s.autoResumeOnQuota ?? true);
   const setInput = useAgentSession((s) => s.setInput);
   const setStatus = useAgentSession((s) => s.setStatus);
   const setErr = useAgentSession((s) => s.setErr);
+  const setResearchMode = useAgentSession((s) => s.setResearchMode);
+  const setReasoningDepth = useAgentSession((s) => s.setReasoningDepth);
+  const setEnabledTools = useAgentSession((s) => s.setEnabledTools);
+  const setAutoResumeOnQuota = useAgentSession((s) => s.setAutoResumeOnQuota);
   const [tasks, setTasks] = useState<AgentTask[]>([]);
   const [convs, setConvs] = useState<AgentConversation[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -435,7 +494,17 @@ export default function AgentChat({
       payload = `【上下文】用户在查看 ${currentSymbol} ${currentName ?? ""}\n`.replace(/\s+\n/, "\n") + q;
     }
     try {
-      const r = await agentAsk(payload, session.conversationId, handleAgentEnvelope);
+      const r = await agentAsk(
+        payload,
+        session.conversationId,
+        handleAgentEnvelope,
+        {
+          research_mode: session.researchMode ?? "deep",
+          reasoning_depth: session.reasoningDepth ?? "deep",
+          enabled_tools: session.enabledTools ?? [...DEFAULT_AGENT_TOOLS],
+          auto_resume_on_quota: session.autoResumeOnQuota ?? true,
+        },
+      );
       setAgentRunIdentity(r.task_id, r.conversation_id);
       refreshTasks();
       refreshConvs();
@@ -676,6 +745,12 @@ export default function AgentChat({
           >
             自动上下文压缩{compactionCount ? ` · ${compactionCount}` : ""}
           </span>
+          <span className="chip bg-blue-600/10 text-blue-600 dark:text-blue-400">
+            {RESEARCH_MODES.find((mode) => mode.id === researchMode)?.label ?? "深度"}模式
+          </span>
+          <span className="chip bg-amber-500/10 text-amber-700 dark:text-amber-300">
+            {REASONING_DEPTHS.find((depth) => depth.id === reasoningDepth)?.label ?? "深入"}思考
+          </span>
           {taskId && status !== "idle" && (
             <span className="chip num bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-300" title={taskId}>
               {{
@@ -688,6 +763,9 @@ export default function AgentChat({
             </span>
           )}
           <div className="ml-auto flex items-center gap-2">
+            <button className="btn" onClick={() => setSettingsOpen((open) => !open)}>
+              研究设置
+            </button>
             <button className="btn-primary" onClick={newChat} disabled={running}>
               新对话
             </button>
@@ -703,6 +781,123 @@ export default function AgentChat({
             )}
           </div>
         </div>
+
+        {settingsOpen && (
+          <div className="border-b border-slate-200 bg-slate-50/80 px-4 py-3 text-xs dark:border-slate-800 dark:bg-slate-900/70">
+            <div className="grid gap-4 xl:grid-cols-[1fr_0.75fr_2fr]">
+              <fieldset disabled={running}>
+                <legend className="micro-label mb-1.5">研究流程</legend>
+                <div className="grid gap-1.5">
+                  {RESEARCH_MODES.map((mode) => (
+                    <button
+                      key={mode.id}
+                      type="button"
+                      className={
+                        "rounded border px-2.5 py-2 text-left transition-colors " +
+                        (researchMode === mode.id
+                          ? "border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300"
+                          : "border-slate-200 bg-white hover:border-slate-300 dark:border-slate-700 dark:bg-slate-900")
+                      }
+                      onClick={() => setResearchMode(mode.id)}
+                    >
+                      <span className="font-medium">{mode.label}模式</span>
+                      <span className="muted ml-2">{mode.detail}</span>
+                    </button>
+                  ))}
+                </div>
+              </fieldset>
+
+              <fieldset disabled={running}>
+                <legend className="micro-label mb-1.5">思考深度</legend>
+                <div className="flex gap-1.5">
+                  {REASONING_DEPTHS.map((depth) => (
+                    <button
+                      key={depth.id}
+                      type="button"
+                      className={reasoningDepth === depth.id ? "btn-primary flex-1" : "btn flex-1"}
+                      onClick={() => setReasoningDepth(depth.id)}
+                    >
+                      {depth.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="muted mt-2 leading-relaxed">
+                  极深模式会提高证据核验、反例、压力情景和稳健性检查上限，耗时与额度也会增加。
+                </p>
+                <label className="mt-3 flex cursor-pointer items-start gap-2 rounded border border-slate-200 bg-white p-2 dark:border-slate-700 dark:bg-slate-900">
+                  <input
+                    className="mt-0.5"
+                    type="checkbox"
+                    checked={autoResumeOnQuota}
+                    onChange={(event) => setAutoResumeOnQuota(event.target.checked)}
+                  />
+                  <span>
+                    <span className="block font-medium">额度恢复后自动继续</span>
+                    <span className="muted mt-0.5 block leading-relaxed">
+                      保存当前计划、证据和步骤，等待下一额度窗口后从断点续跑。
+                    </span>
+                  </span>
+                </label>
+              </fieldset>
+
+              <fieldset disabled={running}>
+                <div className="mb-1.5 flex items-center gap-2">
+                  <legend className="micro-label">本轮可用工具</legend>
+                  <span className="num muted">{enabledTools.length} / {DEFAULT_AGENT_TOOLS.length}</span>
+                  <button className="btn ml-auto" type="button" onClick={() => setEnabledTools([...DEFAULT_AGENT_TOOLS])}>
+                    全部开启
+                  </button>
+                  <button className="btn" type="button" onClick={() => setEnabledTools([])}>
+                    全部关闭
+                  </button>
+                </div>
+                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                  {TOOL_GROUPS.map((group) => {
+                    const allOn = group.tools.every((tool) => enabledTools.includes(tool));
+                    return (
+                      <div key={group.label} className="rounded border border-slate-200 bg-white p-2 dark:border-slate-700 dark:bg-slate-900">
+                        <label className="mb-1.5 flex cursor-pointer items-center gap-2 font-medium">
+                          <input
+                            type="checkbox"
+                            checked={allOn}
+                            onChange={(event) => {
+                              const groupSet = new Set<string>(group.tools);
+                              setEnabledTools(
+                                event.target.checked
+                                  ? [...new Set([...enabledTools, ...group.tools])]
+                                  : enabledTools.filter((tool) => !groupSet.has(tool)),
+                              );
+                            }}
+                          />
+                          {group.label}
+                        </label>
+                        <div className="grid gap-1">
+                          {group.tools.map((tool) => (
+                            <label key={tool} className="muted flex cursor-pointer items-center gap-1.5">
+                              <input
+                                type="checkbox"
+                                checked={enabledTools.includes(tool)}
+                                onChange={(event) =>
+                                  setEnabledTools(
+                                    event.target.checked
+                                      ? [...new Set([...enabledTools, tool])]
+                                      : enabledTools.filter((item) => item !== tool),
+                                  )
+                                }
+                              />
+                              {toolDisplayName(tool)}
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </fieldset>
+            </div>
+            {running && <div className="muted mt-2">当前后台任务已锁定本轮设置；新设置会用于下一轮提问。</div>}
+          </div>
+        )}
 
         {hasKey === false && (
           <div className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300">
@@ -750,6 +945,7 @@ export default function AgentChat({
                     </>
                   )}
                   系统会自动补齐应用退出时未返回的分析结果，避免工具链不匹配错误（错误码 2013）。
+                  {autoResumeOnQuota && " 已开启额度恢复后自动续跑；也可立即手动尝试。"}
                 </span>
                 <button className="btn-primary" onClick={resume}>
                   继续分析
@@ -874,7 +1070,8 @@ const PROGRESS_PHASE_LABELS: Record<string, string> = {
   preparing: "准备任务",
   reasoning: "理解与规划",
   tools: "取数与计算",
+  reviewing: "多专家复核",
   synthesizing: "图表与结论",
 };
 
-const PROGRESS_PHASE_ORDER = ["preparing", "reasoning", "tools", "synthesizing"];
+const PROGRESS_PHASE_ORDER = ["preparing", "reasoning", "tools", "reviewing", "synthesizing"];

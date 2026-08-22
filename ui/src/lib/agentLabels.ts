@@ -21,6 +21,9 @@ const TOOL_NAMES: Record<string, string> = {
   build_relationship_graph: "股票关系网络分析",
   run_backtest: "历史回测验证",
   iterate_strategy: "策略迭代与稳健性检验",
+  run_joinquant_research: "聚宽研究数据核验",
+  search_web: "联网检索权威资料",
+  research_news: "财经新闻与公告研究",
   get_market_regime: "市场环境识别",
   market_regime: "市场环境识别",
   industry_chain: "产业链位置分析",
@@ -49,6 +52,14 @@ const ARG_NAMES: Record<string, string> = {
   max_depth: "分析层级",
   threshold: "筛选门槛",
   risk_budget: "风险预算",
+  study: "研究项目",
+  stock: "股票",
+  sources: "新闻来源",
+  keyword: "新闻关键词",
+  important_only: "仅看重要快讯",
+  date: "截面日期",
+  index: "指数代码",
+  spec: "可审计策略条件",
 };
 
 const VALUE_NAMES: Record<string, string> = {
@@ -64,6 +75,11 @@ const VALUE_NAMES: Record<string, string> = {
   buy_hold: "买入并持有",
   zscore_mean_reversion: "均值回归策略",
   min_corr_etf_rotation: "低相关基金轮动策略",
+  formula_dsl: "AI 公式策略",
+  daily: "历史日线",
+  valuation: "历史估值截面",
+  index_components: "指数成分",
+  macro_cpi: "宏观居民消费价格指数",
 };
 
 export function toolDisplayName(name: string | null | undefined): string {
@@ -79,6 +95,9 @@ export function sourceDisplayName(source: string | null | undefined): string {
   if (lower.includes("eastmoney_quote")) return "东方财富实时行情";
   if (lower.includes("eastmoney")) return "东方财富市场数据";
   if (lower.includes("tdx")) return "通达信行情数据";
+  if (lower.includes("joinquant")) return "聚宽研究数据";
+  if (lower.includes("minimax_web_search")) return "MiniMax 联网检索";
+  if (lower.includes("finance_news") && lower.includes("iwencai")) return "财经快讯与问财事件数据";
   if (lower.includes("graph")) return "本地产业关系图谱";
   if (lower.includes("technical")) return "本地技术分析引擎";
   if (lower.includes("cache") || lower.includes("storage")) return "本地数据快照";

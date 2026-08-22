@@ -14,14 +14,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use astock_agent::{
-    default_registry, AgentEngine, AgentError, AgentEvent, EngineConfig, TaskSpec, TaskStream,
-    ToolContext,
+    default_registry, AgentEngine, AgentError, AgentEvent, EngineConfig, SpecialistRoute, TaskSpec,
+    TaskStream, ToolContext,
 };
 use astock_market_data::DataProvider;
 use astock_minimax::{ChatMessage as ProviderChatMessage, MinimaxClient, ToolCall};
 use astock_storage::{AgentTask, ChatMessage as StoredChatMessage};
 use futures::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{ipc::Channel, State};
 
@@ -53,6 +53,83 @@ pub struct AgentResumeResponse {
 pub struct AgentCancelResponse {
     /// Whether the task existed and was marked cancelled.
     pub cancelled: bool,
+}
+
+/// Per-run controls selected in the chat UI. Values are validated at the
+/// desktop boundary so persisted tasks can safely resume with the same
+/// behavior even after the UI has navigated away.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AgentRunOptions {
+    pub research_mode: String,
+    pub reasoning_depth: String,
+    pub enabled_tools: Option<Vec<String>>,
+    pub auto_resume_on_quota: bool,
+}
+
+impl Default for AgentRunOptions {
+    fn default() -> Self {
+        Self {
+            research_mode: "deep".to_string(),
+            reasoning_depth: "deep".to_string(),
+            enabled_tools: None,
+            auto_resume_on_quota: true,
+        }
+    }
+}
+
+impl AgentRunOptions {
+    fn normalize(self) -> Result<(String, String, Vec<String>, u32, bool), CmdError> {
+        if !matches!(self.research_mode.as_str(), "quick" | "deep" | "plan") {
+            return Err(CmdError::new("invalid_param", "不支持的研究模式"));
+        }
+        if !matches!(
+            self.reasoning_depth.as_str(),
+            "standard" | "deep" | "maximum"
+        ) {
+            return Err(CmdError::new("invalid_param", "不支持的思考深度"));
+        }
+
+        let known: Vec<String> = default_registry()
+            .names()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let requested = self.enabled_tools.unwrap_or_else(|| known.clone());
+        let unknown: Vec<&String> = requested
+            .iter()
+            .filter(|name| !known.contains(name))
+            .collect();
+        if !unknown.is_empty() {
+            return Err(CmdError::new(
+                "invalid_param",
+                format!(
+                    "包含未注册的工具：{}",
+                    unknown.into_iter().cloned().collect::<Vec<_>>().join("、")
+                ),
+            ));
+        }
+        // Normalize to the registry's stable order and remove duplicates.
+        let enabled = known
+            .into_iter()
+            .filter(|name| requested.contains(name))
+            .collect();
+        let mut max_rounds = match self.research_mode.as_str() {
+            "quick" => 12,
+            "plan" => 40,
+            _ => 32,
+        };
+        if self.reasoning_depth == "maximum" {
+            max_rounds = max_rounds.max(48);
+        }
+        Ok((
+            self.research_mode,
+            self.reasoning_depth,
+            enabled,
+            max_rounds,
+            self.auto_resume_on_quota,
+        ))
+    }
 }
 
 /// One row of `agent_tasks`: `{id, kind, status, created_at, updated_at}`.
@@ -126,6 +203,10 @@ fn build_engine(state: &AppState, backend: Arc<MinimaxClient>) -> AgentEngine {
         storage: state.storage.clone(),
         graph: Some(state.graph.clone()),
         fundamental: Some(state.fundamental.clone()),
+        joinquant: Some(state.market.joinquant.clone()),
+        minimax_search: Some(backend.clone()),
+        finance_news: Some(state.market.finance_news.clone()),
+        iwencai: Some(state.market.iwencai.clone()),
     };
     AgentEngine::new(backend, default_registry(), ctx, EngineConfig::default())
 }
@@ -168,6 +249,17 @@ fn task_conversation_id(task: &AgentTask) -> String {
         })
         .filter(|id| !id.trim().is_empty())
         .unwrap_or_else(|| task.id.clone())
+}
+
+fn task_auto_resume_on_quota(task: &AgentTask) -> bool {
+    serde_json::from_str::<Value>(&task.state_json)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/spec/auto_resume_on_quota")
+                .and_then(Value::as_bool)
+        })
+        .unwrap_or(false)
 }
 
 /// Project a stored task row to its summary (drops `state_json`).
@@ -262,6 +354,8 @@ fn spawn_forwarder(
     handles: Arc<Mutex<std::collections::HashMap<String, tauri::async_runtime::JoinHandle<()>>>>,
     task_id: String,
     conversation_id: String,
+    engine: AgentEngine,
+    auto_resume_on_quota: bool,
     mut stream: TaskStream,
     on_event: Channel<AgentStreamEnvelope>,
 ) {
@@ -270,10 +364,39 @@ fn spawn_forwarder(
         let handles = Arc::clone(&handles);
         tauri::async_runtime::spawn(async move {
             let mut seq = 0_u64;
-            while let Some(event) = stream.next().await {
-                seq += 1;
-                if let Err(e) = on_event.send(event_payload(&id, &conversation_id, seq, &event)) {
-                    tracing::warn!(task_id = %id, error = %e, "agent channel send failed");
+            let mut resume_attempt = 0_u32;
+            loop {
+                let mut reset_at_unix = None;
+                while let Some(event) = stream.next().await {
+                    if let AgentEvent::Suspended {
+                        reason: astock_agent::SuspendReason::QuotaExhausted { reset_at_unix: at },
+                    } = &event
+                    {
+                        reset_at_unix = *at;
+                    }
+                    seq += 1;
+                    if let Err(e) = on_event.send(event_payload(&id, &conversation_id, seq, &event))
+                    {
+                        tracing::warn!(task_id = %id, error = %e, "agent channel send failed");
+                    }
+                }
+                if !auto_resume_on_quota {
+                    break;
+                }
+                let Some(delay) = quota_resume_delay(reset_at_unix, resume_attempt) else {
+                    break;
+                };
+                tracing::info!(task_id = %id, ?delay, "waiting for quota window before automatic resume");
+                tokio::time::sleep(delay).await;
+                match engine.resume_task(&id).await {
+                    Ok(next) => {
+                        stream = next;
+                        resume_attempt = resume_attempt.saturating_add(1);
+                    }
+                    Err(error) => {
+                        tracing::warn!(task_id = %id, %error, "automatic agent resume failed");
+                        break;
+                    }
                 }
             }
             handles.lock().expect("agent handles poisoned").remove(&id);
@@ -285,6 +408,17 @@ fn spawn_forwarder(
         .insert(task_id, forwarder);
 }
 
+fn quota_resume_delay(reset_at_unix: Option<u64>, attempt: u32) -> Option<std::time::Duration> {
+    let reset_at = reset_at_unix?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(reset_at);
+    let until_reset = reset_at.saturating_sub(now).saturating_add(3);
+    let retry_floor = 5_u64.saturating_mul(1_u64 << attempt.min(5));
+    Some(std::time::Duration::from_secs(until_reset.max(retry_floor)))
+}
+
 /// Start a new agent task answering `question`. Requires a configured
 /// MiniMax key (kind `no_key` otherwise). Returns immediately; progress
 /// streams on `agent-event`.
@@ -293,6 +427,7 @@ pub async fn agent_ask(
     state: State<'_, AppState>,
     question: String,
     conversation_id: Option<String>,
+    options: Option<AgentRunOptions>,
     on_event: Channel<AgentStreamEnvelope>,
 ) -> Result<AgentAskResponse, CmdError> {
     let question = question.trim().to_string();
@@ -309,18 +444,71 @@ pub async fn agent_ask(
         .clone()
         .expect("ensure_minimax just built it");
 
+    let (research_mode, reasoning_depth, enabled_tools, max_rounds, auto_resume_on_quota) =
+        options.unwrap_or_default().normalize()?;
+    let model_routing = crate::commands::settings::load_agent_model_routing(&state.storage).await;
+    let routed_model = model_routing.route_for(&research_mode, &reasoning_depth);
+    let specialist_count = if !model_routing.multi_agent_enabled
+        || research_mode == "quick"
+        || reasoning_depth == "standard"
+    {
+        0
+    } else if reasoning_depth == "maximum" || research_mode == "plan" {
+        usize::from(model_routing.max_parallel_agents)
+    } else {
+        usize::from(model_routing.max_parallel_agents.min(2))
+    };
+    let specialist_model = model_routing.verifier_model(routed_model.as_deref());
+    let specialist_templates = [
+        (
+            "证据审计师",
+            "逐项检查数字是否来自工具、时点和口径是否一致，指出证据冲突、陈旧数据与缺口。",
+        ),
+        (
+            "风险与反方分析师",
+            "站在反方检查行业、公司、流动性、仓位集中、尾部情景和结论失效条件。",
+        ),
+        (
+            "量化策略审计师",
+            "检查未来函数、过拟合、样本外不足、参数敏感性、交易成本、容量和A股执行约束。",
+        ),
+        (
+            "政策与事件审计师",
+            "检查政策和新闻的时间、来源权威性、传导链条以及市场是否已经提前定价。",
+        ),
+    ];
+    let specialists = specialist_templates
+        .into_iter()
+        .take(specialist_count)
+        .map(|(name, instruction)| SpecialistRoute {
+            name: name.to_string(),
+            instruction: instruction.to_string(),
+            model: specialist_model.clone(),
+        })
+        .collect();
     let conversation_id = conversation_id
         .filter(|id| !id.trim().is_empty())
         .unwrap_or_else(new_conversation_id);
     let task_id = new_task_id();
     let engine = build_engine(&state, backend);
-    let stream = engine.run_task(
-        TaskSpec::new(task_id.clone(), "chat", question).in_conversation(conversation_id.clone()),
-    );
+    let mut spec = TaskSpec::new(task_id.clone(), "chat", question)
+        .in_conversation(conversation_id.clone())
+        .with_run_options(
+            research_mode,
+            reasoning_depth,
+            enabled_tools,
+            auto_resume_on_quota,
+        )
+        .with_specialists(specialists);
+    spec.max_rounds = Some(max_rounds);
+    spec.model = routed_model;
+    let stream = engine.run_task(spec);
     spawn_forwarder(
         Arc::clone(&state.agent_handles),
         task_id.clone(),
         conversation_id.clone(),
+        engine,
+        auto_resume_on_quota,
         stream,
         on_event,
     );
@@ -355,6 +543,7 @@ pub async fn agent_resume(
         .await?
         .ok_or_else(|| CmdError::new("not_found", format!("task not found: {task_id}")))?;
     let conversation_id = task_conversation_id(&record);
+    let auto_resume_on_quota = task_auto_resume_on_quota(&record);
     let engine = build_engine(&state, backend);
     let stream = engine.resume_task(&task_id).await.map_err(|e| match e {
         AgentError::TaskNotFound(_) => CmdError::new("not_found", e.to_string()),
@@ -365,6 +554,8 @@ pub async fn agent_resume(
         Arc::clone(&state.agent_handles),
         task_id,
         conversation_id,
+        engine,
+        auto_resume_on_quota,
         stream,
         on_event,
     );
@@ -528,5 +719,30 @@ mod tests {
         let message = normalize_message(&plain);
         assert_eq!(message.content, "plain text");
         assert!(message.malformed);
+    }
+
+    #[test]
+    fn run_options_are_future_safe_and_registry_ordered() {
+        let (mode, depth, tools, rounds, auto_resume) = AgentRunOptions {
+            research_mode: "plan".into(),
+            reasoning_depth: "maximum".into(),
+            enabled_tools: Some(vec!["run_backtest".into(), "get_quote".into()]),
+            auto_resume_on_quota: true,
+        }
+        .normalize()
+        .unwrap();
+        assert_eq!(mode, "plan");
+        assert_eq!(depth, "maximum");
+        assert_eq!(tools, vec!["get_quote", "run_backtest"]);
+        assert_eq!(rounds, 48);
+        assert!(auto_resume);
+    }
+
+    #[test]
+    fn automatic_quota_resume_has_a_retry_floor() {
+        let now = now_secs().max(0) as u64;
+        assert!(quota_resume_delay(Some(now), 0).unwrap().as_secs() >= 5);
+        assert!(quota_resume_delay(Some(now), 3).unwrap().as_secs() >= 40);
+        assert!(quota_resume_delay(None, 0).is_none());
     }
 }

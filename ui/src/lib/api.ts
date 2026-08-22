@@ -725,6 +725,24 @@ export interface MinimaxStatus {
   api_host?: string;
   model?: string;
   quota?: QuotaStatus;
+  available_models?: AvailableMinimaxModel[];
+  model_routing?: AgentModelRoutingSettings;
+}
+
+export interface AvailableMinimaxModel {
+  id: string;
+  object: string;
+  created: number;
+  owned_by: string;
+}
+
+export interface AgentModelRoutingSettings {
+  coordinator_model: string;
+  fast_model: string;
+  deep_model: string;
+  verifier_model: string;
+  multi_agent_enabled: boolean;
+  max_parallel_agents: number;
 }
 
 /** minimax_set_key 返回的服务信息(key 永不回显) */
@@ -754,6 +772,10 @@ export interface CacheCleanupResult {
 export const minimaxSetKey = (key: string) => cmd<ServiceInfo>("minimax_set_key", { key });
 export const minimaxStatus = () => cmd<MinimaxStatus>("minimax_status");
 export const minimaxQuota = () => cmd<QuotaStatus>("minimax_quota");
+export const settingsGetAgentModelRouting = () =>
+  cmd<AgentModelRoutingSettings>("settings_get_agent_model_routing");
+export const settingsSetAgentModelRouting = (settings: AgentModelRoutingSettings) =>
+  cmd<AgentModelRoutingSettings>("settings_set_agent_model_routing", { settings });
 export const cacheStats = () => cmd<CacheStats>("cache_stats");
 export const cacheCleanup = (targetMb: number) =>
   // backend uses #[tauri::command(rename_all = "snake_case")] — keys must be snake_case
@@ -922,6 +944,15 @@ export interface AgentStreamEnvelope {
   event: AgentEvent;
 }
 
+export type AgentResearchMode = "quick" | "deep" | "plan";
+export type AgentReasoningDepth = "standard" | "deep" | "maximum";
+export interface AgentRunOptions {
+  research_mode: AgentResearchMode;
+  reasoning_depth: AgentReasoningDepth;
+  enabled_tools: string[];
+  auto_resume_on_quota: boolean;
+}
+
 function agentChannel(handler: (message: AgentStreamEnvelope) => void) {
   const channel = new Channel<AgentStreamEnvelope>();
   channel.onmessage = handler;
@@ -932,10 +963,12 @@ export const agentAsk = (
   question: string,
   conversationId: string | null,
   onEvent: (message: AgentStreamEnvelope) => void,
+  options?: AgentRunOptions,
 ) =>
   cmd<{ task_id: string; conversation_id: string }>("agent_ask", {
     question,
     conversation_id: conversationId,
+    options,
     on_event: agentChannel(onEvent),
   });
 export const agentResume = (

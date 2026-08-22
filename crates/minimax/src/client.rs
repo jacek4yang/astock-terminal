@@ -7,9 +7,9 @@ use futures::{Stream, StreamExt};
 
 use crate::chat::{ChatChunk, ChatRequest, ChatResponse, ChatStream};
 use crate::error::MinimaxError;
-use crate::http::{map_http_error, Http, ReqwestHttp};
+use crate::http::{map_base_resp, map_http_error, Http, ReqwestHttp};
 use crate::key::SecretKey;
-use crate::models::ModelCatalog;
+use crate::models::{AvailableModel, AvailableModelsResponse, ModelCatalog};
 use crate::quota::QuotaStatus;
 use crate::rate_gate::RateGate;
 use crate::region::{RegionDetector, ServiceInfo};
@@ -100,6 +100,74 @@ impl MinimaxClient {
             return Err(map_http_error(resp.status, &resp.headers, &resp.body));
         }
         crate::quota::parse_remains(&resp.body)
+    }
+
+    /// Discover the models available to this key. This avoids baking current
+    /// model names into the desktop UI and automatically surfaces future
+    /// MiniMax releases.
+    pub async fn available_models(&self) -> Result<Vec<AvailableModel>, MinimaxError> {
+        let service = self.detect_service().await?;
+        let url = format!("{}/v1/models", service.api_host);
+        let resp = self.http.get(&url, Some(&self.key)).await?;
+        if resp.status != 200 {
+            return Err(map_http_error(resp.status, &resp.headers, &resp.body));
+        }
+        let parsed: AvailableModelsResponse = serde_json::from_slice(&resp.body)
+            .map_err(|error| MinimaxError::Parse(format!("models response: {error}")))?;
+        Ok(parsed.data)
+    }
+
+    /// Search the public web through MiniMax Coding Plan's official search
+    /// endpoint (the same endpoint exposed by `minimax-coding-plan-mcp`).
+    /// The returned JSON keeps titles, links, snippets and dates so callers
+    /// can preserve source attribution instead of treating search text as fact.
+    pub async fn web_search(&self, query: &str) -> Result<serde_json::Value, MinimaxError> {
+        let query = query.trim();
+        if query.chars().count() < 2 || query.chars().count() > 500 {
+            return Err(MinimaxError::Parse(
+                "web search query must contain 2-500 characters".to_string(),
+            ));
+        }
+        let service = self.detect_service().await?;
+        let url = format!("{}/v1/coding_plan/search", service.api_host);
+        let body = serde_json::json!({"q": query});
+        let http = &self.http;
+        let key = &self.key;
+        self.gate
+            .run(|| async {
+                let response = http
+                    .post_with_headers(
+                        &url,
+                        Some(key),
+                        Some(&body),
+                        &[("MM-API-Source", "Minimax-MCP")],
+                    )
+                    .await?;
+                if response.status != 200 {
+                    return Err(map_http_error(
+                        response.status,
+                        &response.headers,
+                        &response.body,
+                    ));
+                }
+                let value: serde_json::Value = serde_json::from_slice(&response.body)
+                    .map_err(|error| MinimaxError::Parse(format!("web search: {error}")))?;
+                let code = value
+                    .get("base_resp")
+                    .and_then(|base| base.get("status_code"))
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(-1);
+                if code != 0 {
+                    let message = value
+                        .get("base_resp")
+                        .and_then(|base| base.get("status_msg"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown web search error");
+                    return Err(map_base_resp(code, message));
+                }
+                Ok(value)
+            })
+            .await
     }
 
     /// Probe the model fallback chain and return the selected model (cached).

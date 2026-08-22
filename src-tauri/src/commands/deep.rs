@@ -432,6 +432,7 @@ async fn run_backtest_impl(
                 slow,
                 entry_n,
                 exit_n,
+                None,
                 bars,
             )
             .await
@@ -441,12 +442,31 @@ async fn run_backtest_impl(
             let symbol = require_symbol(&symbol)?;
             run_registry_single(market, rules, &symbol, &params, bars).await
         }
+        "formula_dsl" | "formula" => {
+            let symbol = require_symbol(&symbol)?;
+            let spec = params.as_ref().ok_or_else(|| {
+                CmdError::new("invalid_param", "AI 公式策略需要填写完整的策略定义")
+            })?;
+            run_backtest_json(
+                market,
+                &symbol,
+                Some("formula_dsl"),
+                None,
+                None,
+                None,
+                None,
+                Some(spec),
+                bars,
+            )
+            .await
+            .map_err(agent_err)
+        }
         "min_corr_etf_rotation" => run_registry_rotation(market, rules, pool, &params, bars).await,
         other => Err(CmdError::new(
             "invalid_param",
             format!(
                 "未知策略 `{other}`:可选 ma_cross / turtle / buy_hold / \
-                 zscore_mean_reversion / min_corr_etf_rotation"
+                 zscore_mean_reversion / formula_dsl / min_corr_etf_rotation"
             ),
         )),
     }

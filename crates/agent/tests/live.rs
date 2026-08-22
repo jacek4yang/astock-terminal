@@ -29,6 +29,10 @@ async fn live_one_tool_conversation() {
         storage,
         graph: None,
         fundamental: None,
+        joinquant: None,
+        minimax_search: None,
+        finance_news: None,
+        iwencai: None,
     };
     let registry = ToolRegistry::new(vec![Arc::new(EchoTool::new()) as Arc<dyn AgentTool>]);
     let engine = AgentEngine::new(
@@ -80,6 +84,10 @@ async fn live_market_data_tool_conversation() {
         storage,
         graph: None,
         fundamental: None,
+        joinquant: None,
+        minimax_search: None,
+        finance_news: None,
+        iwencai: None,
     };
     let engine = AgentEngine::new(
         Arc::new(client),

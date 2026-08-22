@@ -17,7 +17,8 @@ use serde_json::Value;
 use astock_core::{Adjust, KlinePeriod};
 use astock_fundamental::FundamentalClient;
 use astock_graph::GraphStore;
-use astock_market_data::DataProvider;
+use astock_market_data::{DataProvider, FinanceNewsProvider, IwencaiOpenApi, JoinQuantProvider};
+use astock_minimax::MinimaxClient;
 use astock_minimax::ToolSpec;
 use astock_storage::{Storage, ToolCacheEntry};
 
@@ -40,6 +41,14 @@ pub struct ToolContext {
     pub graph: Option<GraphStore>,
     /// Fundamental-data client (EastMoney F10 bundle + analytics).
     pub fundamental: Option<Arc<FundamentalClient>>,
+    /// 可选的聚宽研究环境；显式调用、低频串行，不进入普通行情自动切换链。
+    pub joinquant: Option<Arc<JoinQuantProvider>>,
+    /// MiniMax Coding Plan 官方联网搜索入口；与聊天复用同一安全密钥客户端。
+    pub minimax_search: Option<Arc<MinimaxClient>>,
+    /// 公共财经快讯聚合器（无凭据），用于发现事件线索。
+    pub finance_news: Option<Arc<FinanceNewsProvider>>,
+    /// 可选问财官方接口，用于个股公告、新闻和结构化事件补证。
+    pub iwencai: Option<Arc<IwencaiOpenApi>>,
 }
 
 impl ToolContext {
@@ -50,6 +59,10 @@ impl ToolContext {
             storage,
             graph: None,
             fundamental: None,
+            joinquant: None,
+            minimax_search: None,
+            finance_news: None,
+            iwencai: None,
         }
     }
 
@@ -61,6 +74,29 @@ impl ToolContext {
     ) -> Self {
         self.graph = graph;
         self.fundamental = fundamental;
+        self
+    }
+
+    /// Attach the explicit, credential-gated JoinQuant research channel.
+    pub fn with_joinquant(mut self, joinquant: Option<Arc<JoinQuantProvider>>) -> Self {
+        self.joinquant = joinquant;
+        self
+    }
+
+    /// Attach MiniMax's official Coding Plan web search capability.
+    pub fn with_minimax_search(mut self, client: Option<Arc<MinimaxClient>>) -> Self {
+        self.minimax_search = client;
+        self
+    }
+
+    /// Attach public headlines plus the optional official iwencai evidence source.
+    pub fn with_news_sources(
+        mut self,
+        finance_news: Option<Arc<FinanceNewsProvider>>,
+        iwencai: Option<Arc<IwencaiOpenApi>>,
+    ) -> Self {
+        self.finance_news = finance_news;
+        self.iwencai = iwencai;
         self
     }
 }
@@ -136,6 +172,24 @@ impl ToolRegistry {
             .iter()
             .map(|t| ToolSpec::function(t.name(), t.description(), t.parameters_schema()))
             .collect()
+    }
+
+    /// Tool specs in registry order, restricted to the names enabled for one
+    /// task. Keeping registry order stable preserves the provider's prompt
+    /// cache prefix for identical tool configurations.
+    pub fn specs_for(&self, enabled: Option<&[String]>) -> Vec<ToolSpec> {
+        self.tools
+            .iter()
+            .filter(|tool| enabled.is_none_or(|names| names.iter().any(|name| name == tool.name())))
+            .map(|tool| {
+                ToolSpec::function(tool.name(), tool.description(), tool.parameters_schema())
+            })
+            .collect()
+    }
+
+    /// Registered names in their stable prompt order.
+    pub fn names(&self) -> Vec<&'static str> {
+        self.tools.iter().map(|tool| tool.name()).collect()
     }
 
     /// Look up a tool by name.
@@ -322,6 +376,10 @@ mod tests {
             storage,
             graph: None,
             fundamental: None,
+            joinquant: None,
+            minimax_search: None,
+            finance_news: None,
+            iwencai: None,
         };
         let args = json!({"text": "hi"});
         let first = registry.dispatch("echo", args.clone(), &ctx).await.unwrap();

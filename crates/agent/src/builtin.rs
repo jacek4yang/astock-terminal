@@ -1366,6 +1366,9 @@ pub fn default_registry() -> ToolRegistry {
         Arc::new(crate::deep::BuildRelationshipGraph),
         Arc::new(crate::deep::RunBacktest),
         Arc::new(crate::deep::IterateStrategy),
+        Arc::new(crate::deep::RunJoinQuantResearch),
+        Arc::new(crate::deep::SearchWeb),
+        Arc::new(crate::deep::ResearchNews),
         Arc::new(crate::deep::GetMarketRegime),
     ])
 }
@@ -1570,6 +1573,10 @@ mod tests {
                 storage,
                 graph: None,
                 fundamental: None,
+                joinquant: None,
+                minimax_search: None,
+                finance_news: None,
+                iwencai: None,
             },
         )
     }
@@ -1589,7 +1596,7 @@ mod tests {
     #[tokio::test]
     async fn tool_schemas_are_valid() {
         let registry = default_registry();
-        assert_eq!(registry.len(), 20);
+        assert_eq!(registry.len(), 23);
         let mut names = Vec::new();
         for spec in registry.specs() {
             assert_eq!(spec.kind, "function");
@@ -1630,6 +1637,9 @@ mod tests {
             "build_relationship_graph",
             "run_backtest",
             "iterate_strategy",
+            "run_joinquant_research",
+            "search_web",
+            "research_news",
             "get_market_regime",
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
@@ -1886,6 +1896,10 @@ mod tests {
             storage,
             graph: None,
             fundamental: None,
+            joinquant: None,
+            minimax_search: None,
+            finance_news: None,
+            iwencai: None,
         };
         let registry = default_registry();
         let r = dispatch(&registry, &ctx, "get_watchlist", json!({})).await;

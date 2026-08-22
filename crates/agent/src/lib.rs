@@ -32,8 +32,8 @@ pub use backend::{ChatBackend, ChatChunkStream};
 pub use builtin::default_registry;
 pub use error::{AgentError, Result};
 pub use orchestrator::{
-    compact_history, AgentEngine, AgentEvent, EngineConfig, SuspendReason, TaskSpec, TaskStream,
-    SNAPSHOT_MARKER,
+    compact_history, AgentEngine, AgentEvent, EngineConfig, SpecialistRoute, SuspendReason,
+    TaskSpec, TaskStream, SNAPSHOT_MARKER,
 };
 pub use report::{AgentReport, Conclusion, Evidence};
 pub use tools::{AgentTool, ToolContext, ToolRegistry, ToolResult};

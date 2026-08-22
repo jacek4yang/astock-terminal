@@ -28,6 +28,17 @@ use crate::tools::{now_secs, ToolContext, ToolRegistry};
 /// A boxed event stream for one running task.
 pub type TaskStream = Pin<Box<dyn Stream<Item = AgentEvent> + Send>>;
 
+/// One isolated, tool-free specialist participating in a bounded review
+/// panel. The host chooses the role prompt and model; the main analyst alone
+/// owns tools and the final answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpecialistRoute {
+    pub name: String,
+    pub instruction: String,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
 /// What to work on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskSpec {
@@ -49,6 +60,24 @@ pub struct TaskSpec {
     /// to the system message after the stable prompt prefix.
     #[serde(default)]
     pub context: Option<String>,
+    /// Per-run tool allowlist. `None` keeps the backward-compatible behavior
+    /// of enabling every registered tool; an empty list means text-only.
+    #[serde(default)]
+    pub enabled_tools: Option<Vec<String>>,
+    /// User-selected workflow: quick / deep / plan.
+    #[serde(default)]
+    pub research_mode: Option<String>,
+    /// User-selected analysis depth: standard / deep / maximum.
+    #[serde(default)]
+    pub reasoning_depth: Option<String>,
+    /// Continue this durable task after the provider's rolling quota window
+    /// resets. Scheduling is handled by the desktop host.
+    #[serde(default)]
+    pub auto_resume_on_quota: bool,
+    /// Optional isolated specialists used once, after the main analyst has a
+    /// first evidence-backed draft. Empty keeps the single-agent path.
+    #[serde(default)]
+    pub specialists: Vec<SpecialistRoute>,
 }
 
 impl TaskSpec {
@@ -62,6 +91,11 @@ impl TaskSpec {
             max_rounds: None,
             model: None,
             context: None,
+            enabled_tools: None,
+            research_mode: None,
+            reasoning_depth: None,
+            auto_resume_on_quota: false,
+            specialists: Vec::new(),
         }
     }
 
@@ -75,6 +109,48 @@ impl TaskSpec {
     pub fn in_conversation(mut self, conversation_id: impl Into<String>) -> Self {
         self.conversation_id = Some(conversation_id.into());
         self
+    }
+
+    /// Attach validated user-facing research controls to this durable task.
+    pub fn with_run_options(
+        mut self,
+        research_mode: impl Into<String>,
+        reasoning_depth: impl Into<String>,
+        enabled_tools: Vec<String>,
+        auto_resume_on_quota: bool,
+    ) -> Self {
+        self.research_mode = Some(research_mode.into());
+        self.reasoning_depth = Some(reasoning_depth.into());
+        self.enabled_tools = Some(enabled_tools);
+        self.auto_resume_on_quota = auto_resume_on_quota;
+        self
+    }
+
+    pub fn with_specialists(mut self, specialists: Vec<SpecialistRoute>) -> Self {
+        self.specialists = specialists;
+        self
+    }
+
+    fn runtime_directive(&self) -> String {
+        let mode = match self.research_mode.as_deref().unwrap_or("deep") {
+            "quick" => "快速模式：只调用回答当前问题必需的工具，优先在较少轮次内给出可核验结论。",
+            "plan" => "计划模式：先判断目标、资金规模、期限、风险承受力和交易限制是否足以决定研究路线。若缺少会实质改变结论的信息，本轮只提出不超过3个具体问题并停止；用户回答后检查仍未明确的关键项，可继续分批提问。信息充分后先列研究计划，再按计划取证、反证和综合。",
+            _ => "深度模式：主动进行多源取证、交叉验证和反方检验，只在证据足以支持结论后完成回答。",
+        };
+        let depth = match self.reasoning_depth.as_deref().unwrap_or("deep") {
+            "standard" => "思考深度为标准：聚焦最重要的证据、风险和可执行下一步。",
+            "maximum" => "思考深度为极深：按大额资金决策标准，检查数据口径、反例、市场状态变化、参数敏感性、压力情景、容量与流动性；不得用更长篇幅代替更强证据。",
+            _ => "思考深度为深入：至少核对关键数据口径、反方证据、失效条件和三种情景。",
+        };
+        let tools = match self.enabled_tools.as_deref() {
+            Some([]) => "本轮用户关闭了全部工具：不得发起工具调用，只能说明现有上下文能支持的内容与证据缺口。".to_string(),
+            Some(names) => format!(
+                "本轮只允许调用这些工具：{}。任何未列出的工具都已被用户关闭，不得尝试调用。",
+                names.join("、")
+            ),
+            None => "本轮可使用系统注册的全部工具。".to_string(),
+        };
+        format!("【本轮研究控制】\n{mode}\n{depth}\n{tools}")
     }
 
     fn conversation_id(&self) -> &str {
@@ -239,6 +315,8 @@ struct TaskState {
     evidence: Vec<Evidence>,
     #[serde(default)]
     context_compactions: u32,
+    #[serde(default)]
+    multi_agent_reviewed: bool,
 }
 
 /// How many trailing messages are never compacted.
@@ -403,6 +481,7 @@ impl AgentEngine {
             round: 0,
             evidence: Vec::new(),
             context_compactions: 0,
+            multi_agent_reviewed: false,
         };
         self.run_loop(state, messages, tx).await;
     }
@@ -488,7 +567,22 @@ impl AgentEngine {
                     },
                 );
             }
-            let mut request = ChatRequest::new(model.clone(), compacted);
+            let mut request_messages = compacted;
+            // A transient system control keeps the stored user message clean
+            // while applying changed controls on every turn and after resume.
+            let directive = state.spec.runtime_directive();
+            if let Some(system) = request_messages
+                .iter_mut()
+                .find(|message| message.role == "system")
+            {
+                let mut content = system.content_text().unwrap_or_default();
+                content.push('\n');
+                content.push_str(&directive);
+                system.content = Some(Value::String(content));
+            } else {
+                request_messages.insert(0, ChatMessage::system(directive));
+            }
+            let mut request = ChatRequest::new(model.clone(), request_messages);
             // Official MiniMax guidance recommends separated reasoning for
             // OpenAI-compatible calls. We preserve `reasoning_details` on the
             // assistant message for protocol-complete tool chains while only
@@ -497,7 +591,10 @@ impl AgentEngine {
                 .extra
                 .insert("reasoning_split".to_string(), Value::Bool(true));
             if !last_round {
-                request = request.with_tools(self.tools.specs());
+                let specs = self.tools.specs_for(state.spec.enabled_tools.as_deref());
+                if !specs.is_empty() {
+                    request = request.with_tools(specs);
+                }
             }
             if let Some(t) = self.config.temperature {
                 request = request.with_temperature(t);
@@ -640,18 +737,27 @@ impl AgentEngine {
                     }
                 }
             }
-            if let Err(e) = append_message(
-                &self.ctx.storage,
-                &task_id,
-                &conversation_id,
-                &mut messages,
-                &assistant,
-            )
-            .await
-            {
-                self.finish_with_error(&state, &tx, format!("storage: {e}"))
-                    .await;
-                return;
+            let awaiting_specialist_review = calls.is_empty()
+                && !state.multi_agent_reviewed
+                && !state.spec.specialists.is_empty();
+            // A first draft awaiting specialist review is internal working
+            // material, not a durable user-facing answer. Persist tool-call
+            // messages and final/single-agent answers normally; the reviewed
+            // branch below persists a hidden system packet instead.
+            if !awaiting_specialist_review {
+                if let Err(e) = append_message(
+                    &self.ctx.storage,
+                    &task_id,
+                    &conversation_id,
+                    &mut messages,
+                    &assistant,
+                )
+                .await
+                {
+                    self.finish_with_error(&state, &tx, format!("storage: {e}"))
+                        .await;
+                    return;
+                }
             }
 
             if calls.is_empty() {
@@ -659,6 +765,93 @@ impl AgentEngine {
                     self.finish_with_error(&state, &tx, "模型未产出最终回答".to_string())
                         .await;
                     return;
+                }
+                if awaiting_specialist_review {
+                    send(
+                        &tx,
+                        AgentEvent::TextReset {
+                            message: "主分析师初稿已形成，正在进入多专家独立复核".to_string(),
+                        },
+                    );
+                    send(
+                        &tx,
+                        AgentEvent::Progress {
+                            phase: "reviewing".to_string(),
+                            message: format!(
+                                "{} 位独立专家正在并行检查证据、风险与策略稳健性",
+                                state.spec.specialists.len()
+                            ),
+                            round: state.round + 1,
+                            max_rounds,
+                            completed: Some(0),
+                            total: Some(state.spec.specialists.len()),
+                        },
+                    );
+                    let packet =
+                        specialist_review_packet(&state.spec.prompt, &clean_text, &messages);
+                    match self
+                        .run_specialist_panel(
+                            &state.spec.specialists,
+                            &packet,
+                            &model,
+                            &tx,
+                            state.round + 1,
+                            max_rounds,
+                        )
+                        .await
+                    {
+                        Ok(review) => {
+                            let review_message = ChatMessage::system(format!(
+                                "【主分析师待修订初稿】\n{clean_text}\n\n【多Agent独立复核结果】\n{review}\n主分析师必须核对这些意见与工具证据，修正初稿后再输出最终结论；不得把专家意见当作新事实，也不得展示初稿、审查材料或私有推理。"
+                            ));
+                            if let Err(error) = append_message(
+                                &self.ctx.storage,
+                                &task_id,
+                                &conversation_id,
+                                &mut messages,
+                                &review_message,
+                            )
+                            .await
+                            {
+                                self.finish_with_error(&state, &tx, format!("storage: {error}"))
+                                    .await;
+                                return;
+                            }
+                            state.multi_agent_reviewed = true;
+                            state.round += 1;
+                            if let Err(error) = self.save_state(&state, "running").await {
+                                self.finish_with_error(&state, &tx, format!("storage: {error}"))
+                                    .await;
+                                return;
+                            }
+                            continue;
+                        }
+                        Err(MinimaxError::QuotaExhausted { window_reset_at }) => {
+                            self.suspend(state, &tx, window_reset_at).await;
+                            return;
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "specialist panel failed; completing from main evidence");
+                            state.multi_agent_reviewed = true;
+                            if let Err(storage_error) = append_message(
+                                &self.ctx.storage,
+                                &task_id,
+                                &conversation_id,
+                                &mut messages,
+                                &assistant,
+                            )
+                            .await
+                            {
+                                self.finish_with_error(
+                                    &state,
+                                    &tx,
+                                    format!("storage: {storage_error}"),
+                                )
+                                .await;
+                                return;
+                            }
+                        }
+                    }
                 }
                 let report =
                     assemble_report(&task_id, &clean_text, state.evidence.clone(), now_secs());
@@ -706,7 +899,13 @@ impl AgentEngine {
                 },
             );
             let executed = self
-                .execute_round(&calls, &tx, state.round + 1, max_rounds)
+                .execute_round(
+                    &calls,
+                    &tx,
+                    state.round + 1,
+                    max_rounds,
+                    state.spec.enabled_tools.as_deref(),
+                )
                 .await;
             for exec in executed {
                 if exec.ok {
@@ -744,6 +943,78 @@ impl AgentEngine {
                 return;
             }
         }
+    }
+
+    async fn run_specialist_panel(
+        &self,
+        specialists: &[SpecialistRoute],
+        packet: &str,
+        fallback_model: &str,
+        tx: &mpsc::UnboundedSender<AgentEvent>,
+        round: u32,
+        max_rounds: u32,
+    ) -> std::result::Result<String, MinimaxError> {
+        let total = specialists.len();
+        let mut pending = futures::stream::iter(specialists.iter().cloned().enumerate())
+            .map(|(index, specialist)| async move {
+                let model = specialist
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| fallback_model.to_string());
+                let messages = vec![
+                    ChatMessage::system(format!(
+                        "你是隔离运行的{}。{} 你不能调用工具，不得补造数字，只能审查所给材料；输出不超过500字的结构化中文审查意见。",
+                        specialist.name, specialist.instruction
+                    )),
+                    ChatMessage::user(packet.to_string()),
+                ];
+                let mut request = ChatRequest::new(model, messages).with_temperature(0.1);
+                request
+                    .extra
+                    .insert("reasoning_split".to_string(), Value::Bool(true));
+                request
+                    .extra
+                    .insert("max_completion_tokens".to_string(), json!(1600));
+                let mut stream = self.backend.chat_stream(&request).await?;
+                let mut text = String::new();
+                while let Some(chunk) = stream.next().await {
+                    if let Some(delta) = chunk?.raw_delta() {
+                        text.push_str(&delta);
+                    }
+                }
+                let (_, visible) = astock_minimax::split_reasoning(&text);
+                if visible.trim().is_empty() {
+                    return Err(MinimaxError::Parse(format!(
+                        "{}未返回可见审查意见",
+                        specialist.name
+                    )));
+                }
+                Ok::<_, MinimaxError>((index, specialist.name, visible))
+            })
+            .buffer_unordered(total.clamp(1, 4));
+
+        let mut reviews = Vec::with_capacity(total);
+        while let Some(result) = pending.next().await {
+            let item = result?;
+            reviews.push(item);
+            send(
+                tx,
+                AgentEvent::Progress {
+                    phase: "reviewing".to_string(),
+                    message: format!("多专家复核已完成 {} / {total}", reviews.len()),
+                    round,
+                    max_rounds,
+                    completed: Some(reviews.len()),
+                    total: Some(total),
+                },
+            );
+        }
+        reviews.sort_by_key(|(index, _, _)| *index);
+        Ok(reviews
+            .into_iter()
+            .map(|(_, name, review)| format!("### {name}\n{review}"))
+            .collect::<Vec<_>>()
+            .join("\n\n"))
     }
 
     /// One transparent, tool-free repair pass for a truncated answer or an
@@ -838,14 +1109,18 @@ impl AgentEngine {
         tx: &mpsc::UnboundedSender<AgentEvent>,
         round: u32,
         max_rounds: u32,
+        enabled_tools: Option<&[String]>,
     ) -> Vec<ToolExec> {
         let total = calls.len();
-        let mut pending =
-            futures::stream::iter(calls.iter().cloned().enumerate())
-                .map(|(idx, call)| async move {
-                    (idx, self.execute_one(call, idx + 1, total, tx).await)
-                })
-                .buffer_unordered(self.config.max_parallel_tools.max(1));
+        let mut pending = futures::stream::iter(calls.iter().cloned().enumerate())
+            .map(|(idx, call)| async move {
+                (
+                    idx,
+                    self.execute_one(call, idx + 1, total, tx, enabled_tools)
+                        .await,
+                )
+            })
+            .buffer_unordered(self.config.max_parallel_tools.max(1));
         let mut indexed: Vec<(usize, ToolExec)> = Vec::with_capacity(total);
         while let Some(item) = pending.next().await {
             indexed.push(item);
@@ -873,6 +1148,7 @@ impl AgentEngine {
         position: usize,
         total: usize,
         tx: &mpsc::UnboundedSender<AgentEvent>,
+        enabled_tools: Option<&[String]>,
     ) -> ToolExec {
         let call_id = call.id.clone().unwrap_or_else(|| "call_0".to_string());
         let name = call
@@ -944,6 +1220,31 @@ impl AgentEngine {
                 timeout_ms: tool_timeout_secs(&name) * 1000,
             },
         );
+        if enabled_tools.is_some_and(|allowed| !allowed.iter().any(|item| item == &name)) {
+            let error = format!("工具 {name} 已被用户在本轮研究设置中关闭");
+            send(
+                tx,
+                AgentEvent::ToolCallFinished {
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                    cache_key: String::new(),
+                    elapsed_ms: 0,
+                    success: false,
+                    source: None,
+                    fetched_at: None,
+                    error: Some(error.clone()),
+                },
+            );
+            return ToolExec {
+                ok: false,
+                call_id,
+                name: name.clone(),
+                cache_key: String::new(),
+                source: String::new(),
+                fetched_at: String::new(),
+                message_content: json!({ "tool": name, "error": error }).to_string(),
+            };
+        }
         let started = Instant::now();
         // A provider or a deterministic engine must not hold the whole model
         // round hostage indefinitely. Timeout is applied at the orchestration
@@ -1109,6 +1410,26 @@ impl AgentEngine {
     }
 }
 
+fn specialist_review_packet(prompt: &str, draft: &str, messages: &[ChatMessage]) -> String {
+    let mut evidence = String::new();
+    let tool_messages: Vec<&ChatMessage> = messages
+        .iter()
+        .filter(|message| message.role == "tool")
+        .collect();
+    let start = tool_messages.len().saturating_sub(16);
+    for message in &tool_messages[start..] {
+        if let Some(content) = message.content_text() {
+            evidence.push_str(&content);
+            evidence.push('\n');
+        }
+    }
+    let evidence: String = evidence.chars().take(18_000).collect();
+    let draft: String = draft.chars().take(8_000).collect();
+    format!(
+        "【用户问题】\n{prompt}\n\n【主分析师初稿】\n{draft}\n\n【确定性工具结果摘要】\n{evidence}\n请只指出：证据是否支持、冲突或遗漏、反例、风险、需要主分析师修正之处。"
+    )
+}
+
 fn explicitly_requests_chart(prompt: &str) -> bool {
     ["画图", "图表", "折线图", "柱状图", "走势图", "交互图"]
         .iter()
@@ -1119,8 +1440,9 @@ fn explicitly_requests_chart(prompt: &str) -> bool {
 /// background allowance; ordinary research tools fail soft within one minute.
 fn tool_timeout_secs(name: &str) -> u64 {
     match name {
-        "scan_market" | "run_backtest" | "iterate_strategy" => 180,
-        "get_fundamentals" | "run_valuation" | "compare_stocks" => 60,
+        "scan_market" | "run_backtest" | "iterate_strategy" | "run_joinquant_research" => 180,
+        "get_fundamentals" | "run_valuation" | "compare_stocks" | "research_news"
+        | "search_web" => 60,
         _ => 45,
     }
 }
@@ -1137,6 +1459,9 @@ fn tool_progress_stage(name: &str, elapsed_ms: u64, timeout_ms: u64) -> &'static
         "run_full_analysis" => "汇总行情、资金与市场环境并运行信号引擎",
         "get_fundamentals" | "run_valuation" => "读取财务报表并校验关键字段",
         "run_backtest" | "iterate_strategy" => "执行有上限的历史计算与稳健性检验",
+        "run_joinquant_research" => "等待聚宽研究环境并执行受限数据模板",
+        "research_news" => "并行读取多家财经快讯并核验可用的个股事件",
+        "search_web" => "通过 MiniMax 联网检索权威来源并保留原始链接",
         "scan_market" => "并行分析候选股票并更新排名",
         _ => "等待数据源返回并执行确定性计算",
     }
@@ -1637,6 +1962,10 @@ mod tests {
             storage,
             graph: None,
             fundamental: None,
+            joinquant: None,
+            minimax_search: None,
+            finance_news: None,
+            iwencai: None,
         };
         let registry = ToolRegistry::new(vec![echo as Arc<dyn AgentTool>]);
         AgentEngine::new(chat, registry, ctx, EngineConfig::default())
@@ -1701,6 +2030,87 @@ mod tests {
             requests[0].extra.get("reasoning_split"),
             Some(&Value::Bool(true))
         );
+    }
+
+    #[tokio::test]
+    async fn specialist_panel_reviews_once_then_main_analyst_synthesizes() {
+        let (_dir, storage) = test_storage();
+        let chat = Arc::new(ScriptedChat::new("main-model"));
+        chat.push_text("主分析师初稿");
+        chat.push_text("证据口径需要核对");
+        chat.push_text("需要补充尾部风险");
+        chat.push_text("多专家复核后的最终答案");
+        let echo = Arc::new(EchoTool::new());
+        let engine = build_engine(storage.clone(), chat.clone(), echo);
+        let task = spec("t-panel").with_specialists(vec![
+            SpecialistRoute {
+                name: "证据审计师".into(),
+                instruction: "检查证据".into(),
+                model: Some("review-model".into()),
+            },
+            SpecialistRoute {
+                name: "风险审计师".into(),
+                instruction: "检查风险".into(),
+                model: Some("review-model".into()),
+            },
+        ]);
+
+        let events = collect(engine.run_task(task)).await;
+        assert!(events.iter().any(
+            |event| matches!(event, AgentEvent::Progress { phase, .. } if phase == "reviewing")
+        ));
+        let completed = events.iter().find_map(|event| match event {
+            AgentEvent::Completed { report } => Some(report),
+            _ => None,
+        });
+        assert!(completed
+            .expect("panel task completes")
+            .answer
+            .contains("最终答案"));
+
+        {
+            let requests = chat.requests.lock().unwrap();
+            assert_eq!(requests.len(), 4);
+            assert_eq!(requests[0].model, "main-model");
+            assert!(requests[1..3]
+                .iter()
+                .all(|request| request.model == "review-model" && request.tools.is_none()));
+            assert!(requests[3].messages.iter().any(|message| {
+                message.role == "system"
+                    && message
+                        .content_text()
+                        .is_some_and(|text| text.contains("多Agent独立复核结果"))
+            }));
+        }
+        let stored = storage.conversation_load("t-panel").await.unwrap();
+        let assistant_rows = stored
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .collect::<Vec<_>>();
+        assert_eq!(assistant_rows.len(), 1, "内部初稿不得显示为历史答案");
+        assert!(assistant_rows[0].content.contains("最终答案"));
+        assert!(!assistant_rows[0].content.contains("主分析师初稿"));
+    }
+
+    #[tokio::test]
+    async fn disabled_tools_are_not_offered_or_executed() {
+        let (_dir, storage) = test_storage();
+        let chat = Arc::new(ScriptedChat::new("test-model"));
+        chat.push_tool_call("c1", "echo", json!({"text": "blocked"}));
+        chat.push_text("已说明工具关闭");
+        let echo = Arc::new(EchoTool::new());
+        let engine = build_engine(storage, chat.clone(), echo.clone());
+        let mut task = spec("t-disabled");
+        task.enabled_tools = Some(Vec::new());
+
+        let events = collect(engine.run_task(task)).await;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolCallFinished { success: false, error: Some(error), .. }
+                if error.contains("已被用户")
+        )));
+        assert_eq!(echo.calls.load(Ordering::SeqCst), 0);
+        assert!(chat.requests.lock().unwrap()[0].tools.is_none());
     }
 
     #[tokio::test]
@@ -1781,7 +2191,8 @@ mod tests {
             );
         }
 
-        // Without context the system message is the bare stable prompt.
+        // Without stock context the stable prefix remains intact; per-run
+        // controls are appended transiently and never stored as user text.
         let chat2 = Arc::new(ScriptedChat::new("test-model"));
         chat2.push_text("完成");
         let echo2 = Arc::new(EchoTool::new());
@@ -1793,7 +2204,9 @@ mod tests {
             .any(|e| matches!(e, AgentEvent::Completed { .. })));
         let requests2 = chat2.requests.lock().unwrap();
         let sys2 = requests2[0].messages[0].content_text().unwrap();
-        assert_eq!(sys2, crate::prompt::system_prompt());
+        assert!(sys2.starts_with(&crate::prompt::system_prompt()));
+        assert!(sys2.contains("【本轮研究控制】"));
+        assert!(!sys2.contains("当前上下文:"));
     }
 
     #[tokio::test]
@@ -1922,6 +2335,7 @@ mod tests {
             round: 0,
             evidence: Vec::new(),
             context_compactions: 0,
+            multi_agent_reviewed: false,
         };
         engine.save_state(&state, "running").await.unwrap();
 
@@ -2029,6 +2443,10 @@ mod tests {
             storage,
             graph: None,
             fundamental: None,
+            joinquant: None,
+            minimax_search: None,
+            finance_news: None,
+            iwencai: None,
         };
         let registry = ToolRegistry::new(vec![echo as Arc<dyn AgentTool>]);
         let engine = AgentEngine::new(
@@ -2298,6 +2716,10 @@ mod tests {
                 storage: storage.clone(),
                 graph: None,
                 fundamental: None,
+                joinquant: None,
+                minimax_search: None,
+                finance_news: None,
+                iwencai: None,
             };
             let registry = ToolRegistry::new(vec![echo.clone() as Arc<dyn AgentTool>]);
             AgentEngine::new(chat, registry, ctx, config.clone())

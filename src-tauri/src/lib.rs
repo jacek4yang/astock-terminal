@@ -100,6 +100,8 @@ pub fn run() {
             commands::settings::set_data_dir,
             commands::settings::settings_set_provider_credentials,
             commands::settings::settings_get_provider_status,
+            commands::settings::settings_get_agent_model_routing,
+            commands::settings::settings_set_agent_model_routing,
             // Agent
             commands::agent::agent_ask,
             commands::agent::agent_resume,

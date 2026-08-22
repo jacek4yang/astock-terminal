@@ -75,6 +75,26 @@ async fn quota_parses_over_the_wire() {
 }
 
 #[tokio::test]
+async fn coding_plan_web_search_preserves_sources() {
+    let server = common::spawn(|req| {
+        if req.path.ends_with("/v1/token_plan/remains") {
+            return RawResponse::json(200, &quota_body(80));
+        }
+        assert!(req.path.ends_with("/v1/coding_plan/search"));
+        assert!(req.body.contains("政策"));
+        RawResponse::json(
+            200,
+            r#"{"organic":[{"title":"监管文件","link":"https://example.com/policy","snippet":"摘要","date":"2026-08-22"}],"related_searches":[],"base_resp":{"status_code":0,"status_msg":"success"}}"#,
+        )
+    });
+    let client = common::test_client("cn-key", &server.url);
+    let payload = client.web_search("2026 政策").await.unwrap();
+    assert_eq!(payload["organic"][0]["title"], "监管文件");
+    assert_eq!(payload["organic"][0]["link"], "https://example.com/policy");
+    assert_eq!(server.count_path("coding_plan/search"), 1);
+}
+
+#[tokio::test]
 async fn model_fallback_skips_failing_models() {
     let calls = Arc::new(AtomicUsize::new(0));
     let server = common::spawn({

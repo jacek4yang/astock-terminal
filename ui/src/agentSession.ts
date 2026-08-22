@@ -1,6 +1,37 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import type { AgentReport, AgentStreamEnvelope } from "./lib/api";
+import type {
+  AgentReasoningDepth,
+  AgentReport,
+  AgentResearchMode,
+  AgentStreamEnvelope,
+} from "./lib/api";
+
+export const DEFAULT_AGENT_TOOLS = [
+  "get_quote",
+  "get_kline",
+  "compute_indicators",
+  "run_full_analysis",
+  "run_chanlun",
+  "get_fund_flow",
+  "get_market_breadth",
+  "get_market_regime",
+  "search_stock",
+  "compare_stocks",
+  "scan_market",
+  "get_watchlist",
+  "get_cached_detail",
+  "get_fundamentals",
+  "run_valuation",
+  "get_industry_chain",
+  "run_supply_chain_shock",
+  "build_relationship_graph",
+  "run_backtest",
+  "iterate_strategy",
+  "run_joinquant_research",
+  "search_web",
+  "research_news",
+] as const;
 
 export interface ToolCallItem {
   key: number;
@@ -64,10 +95,18 @@ interface AgentSessionState {
   progress: AgentProgress | null;
   /** Follow-up questions accepted while the current background run continues. */
   pendingQuestions: string[];
+  researchMode: AgentResearchMode;
+  reasoningDepth: AgentReasoningDepth;
+  enabledTools: string[];
+  autoResumeOnQuota: boolean;
   setInput: (input: string) => void;
   setStatus: (status: RunStatus) => void;
   setErr: (err: string | null) => void;
   setMsgs: (msgs: ChatMsg[]) => void;
+  setResearchMode: (mode: AgentResearchMode) => void;
+  setReasoningDepth: (depth: AgentReasoningDepth) => void;
+  setEnabledTools: (tools: string[]) => void;
+  setAutoResumeOnQuota: (enabled: boolean) => void;
 }
 
 let keySeq = Date.now();
@@ -86,14 +125,37 @@ export const useAgentSession = create<AgentSessionState>()(
       err: null,
       progress: null,
       pendingQuestions: [],
+      researchMode: "deep",
+      reasoningDepth: "deep",
+      enabledTools: [...DEFAULT_AGENT_TOOLS],
+      autoResumeOnQuota: true,
       setInput: (input) => set({ input }),
       setStatus: (status) => set({ status }),
       setErr: (err) => set({ err }),
       setMsgs: (msgs) => set({ msgs }),
+      setResearchMode: (researchMode) => set({ researchMode }),
+      setReasoningDepth: (reasoningDepth) => set({ reasoningDepth }),
+      setEnabledTools: (enabledTools) => set({ enabledTools }),
+      setAutoResumeOnQuota: (autoResumeOnQuota) => set({ autoResumeOnQuota }),
     }),
     {
       name: "astock-agent-session-v2",
+      version: 3,
       storage: createJSONStorage(() => window.localStorage),
+      migrate: (persisted, version) => {
+        const state = persisted as Partial<AgentSessionState>;
+        const enabled = Array.isArray(state.enabledTools) ? state.enabledTools : [];
+        const legacyDefaults = DEFAULT_AGENT_TOOLS.slice(0, 20);
+        // Existing users who had the former complete tool set enabled should
+        // automatically receive newly installed research capabilities. A
+        // customized allowlist remains untouched.
+        const hadAllLegacyTools = legacyDefaults.every((tool) => enabled.includes(tool));
+        return {
+          ...state,
+          enabledTools:
+            version < 3 && hadAllLegacyTools ? [...DEFAULT_AGENT_TOOLS] : enabled,
+        } as AgentSessionState;
+      },
       partialize: (state) => ({
         msgs: state.msgs,
         input: state.input,
@@ -105,6 +167,10 @@ export const useAgentSession = create<AgentSessionState>()(
         err: state.err,
         progress: state.progress,
         pendingQuestions: state.pendingQuestions,
+        researchMode: state.researchMode,
+        reasoningDepth: state.reasoningDepth,
+        enabledTools: state.enabledTools,
+        autoResumeOnQuota: state.autoResumeOnQuota,
       }),
     },
   ),
@@ -269,6 +335,14 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
 
 export function appendAgentTurn(question: string) {
   const state = useAgentSession.getState();
+  const maxRounds =
+    state.reasoningDepth === "maximum"
+      ? 48
+      : state.researchMode === "quick"
+        ? 12
+        : state.researchMode === "plan"
+          ? 40
+          : 32;
   useAgentSession.setState({
     input: "",
     err: null,
@@ -278,7 +352,7 @@ export function appendAgentTurn(question: string) {
       phase: "preparing",
       message: "正在创建后台研究任务",
       round: 1,
-      maxRounds: 32,
+      maxRounds,
       completed: null,
       total: null,
       updatedAt: Date.now(),

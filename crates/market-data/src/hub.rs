@@ -26,8 +26,8 @@ use crate::cache::{ttl, TtlCache};
 use crate::http::HttpClient;
 use crate::provider::DataProvider;
 use crate::providers::{
-    EastMoney, EmDataCenter, IwencaiOpenApi, JoinQuantProvider, SinaKline, TdxProvider,
-    TencentKline, TushareProvider,
+    EastMoney, EmDataCenter, FinanceNewsProvider, IwencaiOpenApi, JoinQuantProvider, SinaKline,
+    TdxProvider, TencentKline, TushareProvider,
 };
 use crate::security_master::SecurityMaster;
 use crate::validate::{filter_valid_bars, filter_valid_index_bars};
@@ -373,6 +373,8 @@ pub struct MarketData {
     pub tushare: Arc<TushareProvider>,
     /// Optional iwencai OpenAPI adapter (key from `IWENCAI_KEY`).
     pub iwencai: Arc<IwencaiOpenApi>,
+    /// Public, credential-free finance headlines with bounded caching/retry.
+    pub finance_news: Arc<FinanceNewsProvider>,
     /// Canonical security identity and classification index.
     pub security_master: Arc<SecurityMaster>,
     inner: Arc<Inner>,
@@ -424,6 +426,7 @@ impl MarketData {
         let joinquant = Arc::new(JoinQuantProvider::from_env());
         let tushare = Arc::new(TushareProvider::from_env(http.clone(), cache.clone()));
         let iwencai = Arc::new(IwencaiOpenApi::from_env(http.clone(), cache.clone()));
+        let finance_news = Arc::new(FinanceNewsProvider::new(http.clone(), cache.clone()));
         let chain = chain.unwrap_or_else(|| {
             vec![
                 tencent.clone() as Arc<dyn DataProvider>,
@@ -462,6 +465,7 @@ impl MarketData {
             joinquant,
             tushare,
             iwencai,
+            finance_news,
             security_master,
         }
     }
