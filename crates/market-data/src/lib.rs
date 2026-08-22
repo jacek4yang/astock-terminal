@@ -52,8 +52,9 @@ pub use hub::MarketData;
 pub use provider::{DataProvider, Failover};
 pub use providers::{
     EastMoney, EastMoneyF10, EmDataCenter, F10Report, FinanceNewsBatch, FinanceNewsItem,
-    FinanceNewsProvider, IndustryClassified, IwencaiOpenApi, JoinQuantProvider, SinaKline,
-    TdxProvider, TencentKline, TushareProvider, FINANCE_NEWS_SOURCES,
+    FinanceNewsProvider, IndustryClassified, IwencaiOpenApi, JoinQuantProvider, NewsCapabilities,
+    NewsDeliveryMode, NewsErrorKind, NewsProviderHealth, NewsTrustTier, SinaKline, TdxProvider,
+    TencentKline, TushareProvider, FINANCE_NEWS_SOURCES,
 };
 pub use proxy::{ProxyConfig, ProxyRoute};
 pub use security_master::SecurityMaster;

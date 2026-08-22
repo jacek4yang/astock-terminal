@@ -216,6 +216,44 @@ export interface ProviderHealthItem {
 
 export const getProviderHealth = () => cmd<ProviderHealthItem[]>("get_provider_health");
 
+export type NewsTrustTier =
+  | "first_party_disclosure"
+  | "licensed_media"
+  | "public_aggregator"
+  | "search_lead";
+
+export type NewsDeliveryMode = "push_stream" | "scheduled_index" | "published_incremental";
+
+/** 可插拔资讯来源的能力、调度约束与运行状态。读取快照不会访问上游。 */
+export interface NewsProviderHealthItem {
+  provider_id: string;
+  display_name: string;
+  enabled: boolean;
+  circuit_state: "closed" | "open" | string;
+  trust_tier: NewsTrustTier;
+  trust_tier_name: string;
+  modes: NewsDeliveryMode[];
+  license: string;
+  endpoint: string;
+  min_refresh_secs: number;
+  rate_limit_per_minute: number;
+  last_success_at: number | null;
+  last_latency_ms: number | null;
+  attempts: number;
+  failures: number;
+  failure_rate: number;
+  stale: boolean;
+  cursor_present: boolean;
+  cooldown_remaining_secs: number | null;
+  last_error_kind: string | null;
+}
+
+export const getNewsProviderHealth = () =>
+  cmd<NewsProviderHealthItem[]>("get_news_provider_health");
+
+export const setNewsProviderEnabled = (providerId: string, enabled: boolean) =>
+  cmd<void>("set_news_provider_enabled", { provider_id: providerId, enabled });
+
 // ==================== 分析引擎 ====================
 
 export interface TradePlan {

@@ -10,6 +10,8 @@
 - `get_stock_bundle(symbol, period, adjust, count) -> { quote, kline: {bars, source} | null, fund_flow_30d: FundFlow[] | null, analysis: SignalJson | null, chanlun_daily: ChanlunDailyJson | null, missing: string[] }`
   - 股票页一次取数:K 线只拉一次(走上面的持久缓存),`analysis` 与 `chanlun_daily` 由同一组 bars 推导;资金流走自带 15s TTL 通道。除 `quote` 失败为硬错误外,各分区独立降级:null + `missing` 记录分区名(`kline` 缺失时 `analysis`/`chanlun_daily` 一并缺失)。
 - `get_provider_health() -> [{name, state: "closed"|"open"|"half_open", cooldown_remaining_secs: number|null}]` — 各数据源熔断器快照,供设置页健康面板。
+- `get_news_provider_health() -> [NewsProviderHealth]` — 返回每一路财经资讯来源的可信层级、采集方式、许可、刷新/频率上限、延迟、成功时间、失败率、陈旧状态、持久游标和熔断状态；只读本地快照，不访问上游。
+- `set_news_provider_enabled(provider_id, enabled) -> void` — 持久启停单一财经资讯来源；停用后该来源的最后成功副本也不会参与研究。
 - `get_minute(symbol) -> { points: {time,price,avg_price,volume}[], pre_close, name }`
 - `search_stocks(keyword) -> {code,name,classify}[]`
 - `get_market_breadth() -> {up,down,flat,total,breadth_ratio}`

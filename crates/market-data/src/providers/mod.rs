@@ -9,6 +9,7 @@ pub mod em_datacenter;
 pub mod finance_news;
 pub mod iwencai_openapi;
 pub mod joinquant;
+pub mod news_ingest;
 pub mod sina;
 pub mod tdx_adapter;
 pub mod tencent;
@@ -27,6 +28,11 @@ pub use finance_news::{
 };
 pub use iwencai_openapi::{IwencaiOpenApi, StockEvents, WencaiRows};
 pub use joinquant::JoinQuantProvider;
+pub use news_ingest::{
+    ConfiguredJsonNewsProvider, JsonNewsProviderConfig, NewsCapabilities, NewsDeliveryMode,
+    NewsErrorKind, NewsIngestRequest, NewsProvider, NewsProviderError, NewsProviderHealth,
+    NewsTrustTier,
+};
 pub use sina::SinaKline;
 pub use tdx_adapter::TdxProvider;
 pub use tencent::TencentKline;

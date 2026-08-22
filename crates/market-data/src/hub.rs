@@ -35,6 +35,7 @@ use astock_core::{
     Adjust, Bar, DataError, Fetched, FundFlowPoint, KlinePeriod, MarketBreadth, MinuteData, Quote,
     SearchResult, Source, StockListItem, Symbol,
 };
+use astock_storage::Storage;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::future::{BoxFuture, FutureExt, Shared};
@@ -394,7 +395,19 @@ impl MarketData {
 
     /// Build from existing shared components.
     pub fn with_shared(http: Arc<HttpClient>, cache: Arc<TtlCache>) -> Self {
-        Self::build(http, cache, None, BreakerConfig::default())
+        Self::build(http, cache, None, BreakerConfig::default(), None)
+    }
+
+    /// Production constructor with persistent news cursors, provider enable
+    /// flags and last-good snapshots in the shared application storage.
+    pub fn with_storage(storage: Storage) -> Self {
+        Self::build(
+            Arc::new(HttpClient::new()),
+            Arc::new(TtlCache::default()),
+            None,
+            BreakerConfig::default(),
+            Some(storage),
+        )
     }
 
     /// Test/diagnostic constructor: custom kline failover chain and breaker
@@ -408,6 +421,7 @@ impl MarketData {
             Arc::new(TtlCache::default()),
             Some(chain),
             breaker_config,
+            None,
         )
     }
 
@@ -416,6 +430,7 @@ impl MarketData {
         cache: Arc<TtlCache>,
         chain: Option<Vec<Arc<dyn DataProvider>>>,
         breaker_config: BreakerConfig,
+        storage: Option<Storage>,
     ) -> Self {
         let tencent = Arc::new(TencentKline::new(http.clone()));
         let sina = Arc::new(SinaKline::new(http.clone()));
@@ -426,7 +441,15 @@ impl MarketData {
         let joinquant = Arc::new(JoinQuantProvider::from_env());
         let tushare = Arc::new(TushareProvider::from_env(http.clone(), cache.clone()));
         let iwencai = Arc::new(IwencaiOpenApi::from_env(http.clone(), cache.clone()));
-        let finance_news = Arc::new(FinanceNewsProvider::new(http.clone(), cache.clone()));
+        let finance_news = Arc::new(match storage {
+            Some(storage) => FinanceNewsProvider::with_storage(
+                http.clone(),
+                cache.clone(),
+                storage,
+                em_datacenter.clone(),
+            ),
+            None => FinanceNewsProvider::new(http.clone(), cache.clone()),
+        });
         let chain = chain.unwrap_or_else(|| {
             vec![
                 tencent.clone() as Arc<dyn DataProvider>,

@@ -360,6 +360,36 @@ pub async fn get_provider_health(
     Ok(state.market.provider_health())
 }
 
+/// Detailed health and declared capabilities for each pluggable news source.
+/// Reading this snapshot never contacts an upstream service.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_news_provider_health(
+    state: State<'_, AppState>,
+) -> Result<Vec<astock_market_data::NewsProviderHealth>, CmdError> {
+    Ok(state.market.finance_news.provider_health().await)
+}
+
+/// Persistently enable or disable one news source. Manual disable is strict:
+/// stale data from the source will not participate in later research.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn set_news_provider_enabled(
+    state: State<'_, AppState>,
+    provider_id: String,
+    enabled: bool,
+) -> Result<(), CmdError> {
+    state
+        .market
+        .finance_news
+        .set_provider_enabled(&provider_id, enabled)
+        .await
+        .map_err(|error| {
+            CmdError::new(
+                format!("news_provider_{:?}", error.kind).to_ascii_lowercase(),
+                error.message,
+            )
+        })
+}
+
 /// Intraday minute (分时) series for the current session.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_minute(

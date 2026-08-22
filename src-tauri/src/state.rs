@@ -164,7 +164,7 @@ impl AppState {
             crate::commands::settings::load_provider_credentials_into_env(&storage),
         );
 
-        let market = Arc::new(MarketData::new());
+        let market = Arc::new(MarketData::with_storage(storage.clone()));
         match tauri::async_runtime::block_on(storage.securities_list()) {
             Ok(records) => market.security_master.merge_records(records),
             Err(error) => tracing::warn!(%error, "failed to load cached security master"),

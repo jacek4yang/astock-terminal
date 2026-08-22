@@ -1,28 +1,34 @@
-//! 有界的公共财经快讯聚合器。
+//! Provider-neutral finance-news facade.
 //!
-//! 数据结构与来源治理参考 Apache-2.0 项目 niuone 对 NewsNow 的接入：
-//! 来源白名单、最多 3 路并发、一次瞬时错误重试、响应大小限制、逐来源缓存
-//! 与失败时保留最后成功副本。快讯只用于发现线索，不属于权威公告源。
+//! NewsNow is one optional discovery provider. Official announcement mirrors
+//! and validated user-configured JSON providers participate through the same
+//! [`NewsProvider`] contract and fail independently.
 
 use crate::cache::TtlCache;
 use crate::http::HttpClient;
 use astock_core::DataError;
 use astock_security::UrlSecurityPolicy;
-use dashmap::DashMap;
+use astock_storage::Storage;
+use async_trait::async_trait;
 use futures::{stream, StreamExt};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::env;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Semaphore;
+
+use super::em_datacenter::{EmDataCenter, NoticeNode};
+use super::news_ingest::{
+    bounded_raw, classify_data_error, ConfiguredJsonNewsProvider, JsonNewsProviderConfig,
+    NewsCapabilities, NewsDeliveryMode, NewsIngestOutcome, NewsIngestRequest, NewsIngestor,
+    NewsPage, NewsProvider, NewsProviderError, NewsProviderHealth, NewsTrustTier,
+};
 
 pub const NEWSNOW_ENDPOINT: &str = "https://newsnow.busiyi.world/api/s";
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CONCURRENT: usize = 3;
-const RETRY_PAUSE: Duration = Duration::from_millis(500);
 
 /// 财经来源白名单：(稳定标识、中文名称、上游建议刷新间隔秒)。
 pub const FINANCE_NEWS_SOURCES: &[(&str, &str, u64)] = &[
@@ -49,6 +55,17 @@ pub struct FinanceNewsItem {
     pub published_at_ms: Option<i64>,
     pub important: bool,
     pub rank: usize,
+    /// Provider instance that fetched the item (separate from channel/source).
+    pub provider_id: String,
+    /// Evidence authority classification exposed to Agent and UI.
+    pub trust_tier: NewsTrustTier,
+    pub trust_tier_name: String,
+    pub license: String,
+    pub parser_version: String,
+    /// Bounded original provider row for offline re-parsing/audit. Agent strips
+    /// this field before model context to avoid needless prompt expansion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_payload: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -64,22 +81,82 @@ struct SourceSnapshot {
     items: Vec<FinanceNewsItem>,
 }
 
-/// Shared public-news client. It deliberately has no credentials.
+/// Stable facade used by Agent/UI. Provider additions do not change callers.
 pub struct FinanceNewsProvider {
-    http: Arc<HttpClient>,
-    cache: Arc<TtlCache>,
-    permits: Semaphore,
-    last_good: DashMap<String, SourceSnapshot>,
+    ingestor: NewsIngestor,
 }
 
 impl FinanceNewsProvider {
     pub fn new(http: Arc<HttpClient>, cache: Arc<TtlCache>) -> Self {
-        Self {
-            http,
-            cache,
-            permits: Semaphore::new(MAX_CONCURRENT),
-            last_good: DashMap::new(),
+        Self::build(http, cache, None, None)
+    }
+
+    pub fn with_storage(
+        http: Arc<HttpClient>,
+        cache: Arc<TtlCache>,
+        storage: Storage,
+        announcements: Arc<EmDataCenter>,
+    ) -> Self {
+        Self::build(http, cache, Some(storage), Some(announcements))
+    }
+
+    fn build(
+        http: Arc<HttpClient>,
+        cache: Arc<TtlCache>,
+        storage: Option<Storage>,
+        announcements: Option<Arc<EmDataCenter>>,
+    ) -> Self {
+        let endpoints = env::var("ASTOCK_NEWSNOW_ENDPOINTS")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|values| !values.is_empty())
+            .unwrap_or_else(|| vec![NEWSNOW_ENDPOINT.to_string()]);
+        let mut providers: Vec<Arc<dyn NewsProvider>> = Vec::new();
+        for (index, endpoint) in endpoints.into_iter().enumerate() {
+            match NewsNowProvider::new(
+                format!("newsnow-{}", index + 1),
+                endpoint,
+                http.clone(),
+                cache.clone(),
+            ) {
+                Ok(provider) => providers.push(Arc::new(provider)),
+                Err(error) => tracing::warn!(
+                    provider = %error.provider_id,
+                    kind = ?error.kind,
+                    "ignored invalid NewsNow provider configuration"
+                ),
+            }
         }
+        if let Some(announcements) = announcements {
+            providers.push(Arc::new(OfficialAnnouncementProvider::new(announcements)));
+        }
+        if let Ok(raw) = env::var("ASTOCK_NEWS_PROVIDERS") {
+            match serde_json::from_str::<Vec<JsonNewsProviderConfig>>(&raw) {
+                Ok(configs) => {
+                    for config in configs {
+                        match ConfiguredJsonNewsProvider::new(config, http.clone(), cache.clone()) {
+                            Ok(provider) => providers.push(Arc::new(provider)),
+                            Err(error) => tracing::warn!(
+                                provider = %error.provider_id,
+                                kind = ?error.kind,
+                                "ignored invalid configured news provider"
+                            ),
+                        }
+                    }
+                }
+                Err(_) => tracing::warn!("ASTOCK_NEWS_PROVIDERS is not valid JSON; ignored"),
+            }
+        }
+        let ingestor = NewsIngestor::new(providers, storage)
+            .expect("built-in news provider configuration must be valid");
+        Self { ingestor }
     }
 
     /// Load several allowlisted sources and merge them newest-first.
@@ -105,98 +182,181 @@ impl FinanceNewsProvider {
                 unique.push(source);
             }
         }
-        let per_source = per_source.clamp(1, 100);
-        let outcomes = stream::iter(unique.into_iter().map(|source| async move {
-            let result = self.fetch_source(&source, per_source).await;
-            (source, result)
-        }))
-        .buffered(MAX_CONCURRENT)
-        .collect::<Vec<_>>()
-        .await;
-
-        let mut batch = FinanceNewsBatch::default();
-        for (source, result) in outcomes {
-            match result {
-                Ok(snapshot) => {
-                    batch.successful_sources.push(source);
-                    batch.items.extend(snapshot.items);
-                }
-                Err(error) => {
-                    batch.errors.push(format!("{source}: {error}"));
-                    if let Some(snapshot) = self.last_good.get(&source) {
-                        batch.stale_sources.push(source);
-                        batch.items.extend(snapshot.items.clone());
-                    }
-                }
-            }
-        }
-        let mut seen = HashSet::new();
-        batch.items.retain(|row| seen.insert(row.id.clone()));
-        batch.items.sort_by(|left, right| {
-            right
-                .published_at_ms
-                .unwrap_or_default()
-                .cmp(&left.published_at_ms.unwrap_or_default())
-                .then_with(|| left.rank.cmp(&right.rank))
-        });
-        if batch.items.is_empty() {
-            return Err(DataError::AllFailed {
-                op: "finance news",
-                details: batch.errors.join("; "),
-            });
-        }
-        Ok(batch)
+        let selected = self
+            .ingestor
+            .provider_ids()
+            .into_iter()
+            .filter(|id| id != "official-a-share-announcements")
+            .collect::<Vec<_>>();
+        let outcome = self
+            .ingestor
+            .ingest(
+                NewsIngestRequest {
+                    source_ids: unique,
+                    limit: per_source.clamp(1, 100),
+                    ..Default::default()
+                },
+                Some(&selected),
+            )
+            .await;
+        outcome_to_batch(outcome)
     }
 
-    async fn fetch_source(&self, source: &str, limit: usize) -> Result<SourceSnapshot, DataError> {
-        let (_, _, ttl_seconds) = source_meta(source).expect("source checked");
-        let key = format!("finance_news_{source}_{limit}");
+    /// Unified research query. Official disclosures participate only when a
+    /// symbol is supplied; public feeds remain discovery sources.
+    pub async fn research(
+        &self,
+        sources: &[String],
+        symbol: Option<&str>,
+        keyword: Option<&str>,
+        limit: usize,
+    ) -> Result<FinanceNewsBatch, DataError> {
+        let selected = symbol.is_none().then(|| {
+            self.ingestor
+                .provider_ids()
+                .into_iter()
+                .filter(|id| id != "official-a-share-announcements")
+                .collect::<Vec<_>>()
+        });
+        let outcome = self
+            .ingestor
+            .ingest(
+                NewsIngestRequest {
+                    source_ids: sources.to_vec(),
+                    symbol: symbol.map(ToString::to_string),
+                    keyword: keyword.map(ToString::to_string),
+                    limit: limit.clamp(1, 200),
+                    ..Default::default()
+                },
+                selected.as_deref(),
+            )
+            .await;
+        outcome_to_batch(outcome)
+    }
+
+    pub async fn provider_health(&self) -> Vec<NewsProviderHealth> {
+        self.ingestor.health().await
+    }
+
+    pub async fn set_provider_enabled(
+        &self,
+        provider_id: &str,
+        enabled: bool,
+    ) -> Result<(), NewsProviderError> {
+        self.ingestor.set_enabled(provider_id, enabled).await
+    }
+}
+
+fn outcome_to_batch(outcome: NewsIngestOutcome) -> Result<FinanceNewsBatch, DataError> {
+    let batch = FinanceNewsBatch {
+        items: outcome.items,
+        successful_sources: outcome.successful_providers,
+        stale_sources: outcome.stale_providers,
+        errors: outcome.errors.iter().map(ToString::to_string).collect(),
+    };
+    if batch.items.is_empty() {
+        Err(DataError::AllFailed {
+            op: "finance news",
+            details: batch.errors.join("; "),
+        })
+    } else {
+        Ok(batch)
+    }
+}
+
+struct NewsNowProvider {
+    capabilities: NewsCapabilities,
+    http: Arc<HttpClient>,
+    cache: Arc<TtlCache>,
+}
+
+impl NewsNowProvider {
+    fn new(
+        provider_id: String,
+        endpoint: String,
+        http: Arc<HttpClient>,
+        cache: Arc<TtlCache>,
+    ) -> Result<Self, NewsProviderError> {
+        let capabilities = NewsCapabilities {
+            provider_id,
+            display_name: "NewsNow 公共快讯".to_string(),
+            endpoint,
+            modes: [NewsDeliveryMode::ScheduledIndex].into(),
+            min_refresh_secs: 120,
+            rate_limit_per_minute: 30,
+            license: "公共聚合发现层；必须回链并核对原始来源许可".to_string(),
+            trust_tier: NewsTrustTier::PublicAggregator,
+            parser_version: "newsnow-v2".to_string(),
+            supports_symbol_filter: false,
+        };
+        capabilities.validate()?;
+        Ok(Self {
+            capabilities,
+            http,
+            cache,
+        })
+    }
+
+    async fn fetch_source(
+        &self,
+        source: &str,
+        limit: usize,
+    ) -> Result<SourceSnapshot, NewsProviderError> {
+        let (_, _, ttl_seconds) = source_meta(source).ok_or_else(|| {
+            NewsProviderError::new(
+                &self.capabilities.provider_id,
+                super::news_ingest::NewsErrorKind::Configuration,
+                format!("不支持的 NewsNow 频道 {source}"),
+                false,
+            )
+        })?;
+        let key = format!(
+            "finance_news_{}_{}_{}",
+            self.capabilities.provider_id, source, limit
+        );
         if let Some(snapshot) = self
             .cache
             .get::<SourceSnapshot>(&key, Duration::from_secs(ttl_seconds))
         {
-            self.last_good.insert(source.to_string(), snapshot.clone());
             return Ok(snapshot);
         }
-        let _permit = self
-            .permits
-            .acquire()
-            .await
-            .map_err(|_| DataError::NoProvider("finance news scheduler closed"))?;
         let params = vec![
             ("id".to_string(), source.to_string()),
             ("latest".to_string(), "true".to_string()),
         ];
-        let mut response = self.http.get_text(NEWSNOW_ENDPOINT, &params).await;
-        if matches!(
-            response,
-            Err(DataError::RateLimited(_)) | Err(DataError::Network { .. })
-        ) {
-            tokio::time::sleep(RETRY_PAUSE).await;
-            response = self.http.get_text(NEWSNOW_ENDPOINT, &params).await;
-        }
-        let response = response?;
+        let response = self
+            .http
+            .get_text(&self.capabilities.endpoint, &params)
+            .await
+            .map_err(|error| classify_data_error(&self.capabilities.provider_id, error))?;
         if response.body.len() > MAX_RESPONSE_BYTES {
-            return Err(DataError::Parse {
-                upstream: "newsnow".to_string(),
-                message: "response exceeds 2 MiB".to_string(),
-            });
+            return Err(NewsProviderError::new(
+                &self.capabilities.provider_id,
+                super::news_ingest::NewsErrorKind::Parse,
+                "响应超过 2 MiB",
+                false,
+            ));
         }
         if response
             .content_type
             .as_deref()
             .is_some_and(|value| !value.to_ascii_lowercase().contains("json"))
         {
-            return Err(DataError::Parse {
-                upstream: "newsnow".to_string(),
-                message: "response is not JSON".to_string(),
-            });
+            return Err(NewsProviderError::new(
+                &self.capabilities.provider_id,
+                super::news_ingest::NewsErrorKind::Parse,
+                "响应不是 JSON",
+                false,
+            ));
         }
-        let value: Value =
-            serde_json::from_str(&response.body).map_err(|error| DataError::Parse {
-                upstream: "newsnow".to_string(),
-                message: error.to_string(),
-            })?;
+        let value: Value = serde_json::from_str(&response.body).map_err(|_| {
+            NewsProviderError::new(
+                &self.capabilities.provider_id,
+                super::news_ingest::NewsErrorKind::Parse,
+                "响应 JSON 无法解析",
+                false,
+            )
+        })?;
         let status = value
             .get("status")
             .and_then(Value::as_str)
@@ -204,22 +364,152 @@ impl FinanceNewsProvider {
             .to_ascii_lowercase();
         let rows = value.get("items").and_then(Value::as_array);
         if !matches!(status.as_str(), "success" | "cache") || rows.is_none() {
-            return Err(DataError::Parse {
-                upstream: "newsnow".to_string(),
-                message: "missing valid status or items".to_string(),
-            });
+            return Err(NewsProviderError::new(
+                &self.capabilities.provider_id,
+                super::news_ingest::NewsErrorKind::Parse,
+                "缺少有效 status/items",
+                false,
+            ));
         }
         let items = rows
             .into_iter()
             .flatten()
             .take(limit)
             .enumerate()
-            .filter_map(|(index, row)| normalize_item(source, row, index + 1))
+            .filter_map(|(index, row)| normalize_item(&self.capabilities, source, row, index + 1))
             .collect::<Vec<_>>();
         let snapshot = SourceSnapshot { items };
         self.cache.set(&key, &snapshot);
-        self.last_good.insert(source.to_string(), snapshot.clone());
         Ok(snapshot)
+    }
+}
+
+#[async_trait]
+impl NewsProvider for NewsNowProvider {
+    fn capabilities(&self) -> &NewsCapabilities {
+        &self.capabilities
+    }
+
+    async fn fetch(&self, request: NewsIngestRequest) -> Result<NewsPage, NewsProviderError> {
+        let sources = if request.source_ids.is_empty() {
+            FINANCE_NEWS_SOURCES
+                .iter()
+                .map(|row| row.0.to_string())
+                .collect::<Vec<_>>()
+        } else {
+            request.source_ids
+        };
+        let outcomes = stream::iter(sources.into_iter().map(|source| async move {
+            self.fetch_source(&source, request.limit.clamp(1, 100))
+                .await
+        }))
+        .buffer_unordered(MAX_CONCURRENT)
+        .collect::<Vec<_>>()
+        .await;
+        let mut items = Vec::new();
+        let mut last_error = None;
+        for outcome in outcomes {
+            match outcome {
+                Ok(snapshot) => items.extend(snapshot.items),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        if items.is_empty() {
+            return Err(last_error.unwrap_or_else(|| {
+                NewsProviderError::new(
+                    &self.capabilities.provider_id,
+                    super::news_ingest::NewsErrorKind::Empty,
+                    "所有 NewsNow 频道均为空",
+                    false,
+                )
+            }));
+        }
+        let next_cursor = items.first().map(|item| item.id.clone());
+        Ok(NewsPage { items, next_cursor })
+    }
+}
+
+struct OfficialAnnouncementProvider {
+    capabilities: NewsCapabilities,
+    announcements: Arc<EmDataCenter>,
+}
+
+impl OfficialAnnouncementProvider {
+    fn new(announcements: Arc<EmDataCenter>) -> Self {
+        Self {
+            capabilities: NewsCapabilities {
+                provider_id: "official-a-share-announcements".to_string(),
+                display_name: "A 股公司公告".to_string(),
+                endpoint: "https://np-anotice-stock.eastmoney.com/api/security/ann".to_string(),
+                modes: [
+                    NewsDeliveryMode::ScheduledIndex,
+                    NewsDeliveryMode::PublishedIncremental,
+                ]
+                .into(),
+                min_refresh_secs: 300,
+                rate_limit_per_minute: 20,
+                license: "上市公司公开披露；展示标题与原公告回链".to_string(),
+                trust_tier: NewsTrustTier::FirstPartyDisclosure,
+                parser_version: "em-announcement-v1".to_string(),
+                supports_symbol_filter: true,
+            },
+            announcements,
+        }
+    }
+}
+
+#[async_trait]
+impl NewsProvider for OfficialAnnouncementProvider {
+    fn capabilities(&self) -> &NewsCapabilities {
+        &self.capabilities
+    }
+
+    async fn fetch(&self, request: NewsIngestRequest) -> Result<NewsPage, NewsProviderError> {
+        let Some(symbol) = request.symbol.as_deref().filter(|value| !value.is_empty()) else {
+            return Ok(NewsPage::default());
+        };
+        let fetched = self
+            .announcements
+            .notices(Some(symbol), NoticeNode::All, None, None, 1)
+            .await
+            .map_err(|error| classify_data_error(&self.capabilities.provider_id, error))?;
+        let items = fetched
+            .data
+            .into_iter()
+            .take(request.limit.clamp(1, 200))
+            .enumerate()
+            .map(|(index, row)| FinanceNewsItem {
+                id: format!("{}:{}", self.capabilities.provider_id, row.art_code),
+                source_id: "official-announcement".to_string(),
+                source_name: "上市公司公告".to_string(),
+                title: row.title.clone(),
+                summary: row.column_name.clone(),
+                url: row.url.clone(),
+                published_at: row
+                    .notice_date
+                    .map(|date| date.to_string())
+                    .unwrap_or_default(),
+                published_at_ms: row.notice_date.and_then(|date| {
+                    date.and_hms_opt(0, 0, 0)
+                        .map(|value| value.and_utc().timestamp_millis() - 8 * 3_600_000)
+                }),
+                important: matches!(row.column_name.as_str(), "重大事项" | "风险提示"),
+                rank: index + 1,
+                provider_id: self.capabilities.provider_id.clone(),
+                trust_tier: self.capabilities.trust_tier,
+                trust_tier_name: self.capabilities.trust_tier.chinese_name().to_string(),
+                license: self.capabilities.license.clone(),
+                parser_version: self.capabilities.parser_version.clone(),
+                raw_payload: serde_json::to_value(&row)
+                    .ok()
+                    .as_ref()
+                    .and_then(bounded_raw),
+            })
+            .collect::<Vec<_>>();
+        Ok(NewsPage {
+            next_cursor: items.first().map(|item| item.id.clone()),
+            items,
+        })
     }
 }
 
@@ -230,7 +520,12 @@ fn source_meta(source: &str) -> Option<(&'static str, &'static str, u64)> {
         .find(|(id, _, _)| *id == source)
 }
 
-fn normalize_item(source: &str, raw: &Value, rank: usize) -> Option<FinanceNewsItem> {
+fn normalize_item(
+    capabilities: &NewsCapabilities,
+    source: &str,
+    raw: &Value,
+    rank: usize,
+) -> Option<FinanceNewsItem> {
     let (_, source_name, _) = source_meta(source)?;
     let title = clean_text(raw.get("title"), 1_000);
     if title.is_empty() {
@@ -280,7 +575,37 @@ fn normalize_item(source: &str, raw: &Value, rank: usize) -> Option<FinanceNewsI
         published_at_ms,
         important,
         rank,
+        provider_id: capabilities.provider_id.clone(),
+        trust_tier: capabilities.trust_tier,
+        trust_tier_name: capabilities.trust_tier.chinese_name().to_string(),
+        license: capabilities.license.clone(),
+        parser_version: capabilities.parser_version.clone(),
+        raw_payload: bounded_raw(raw),
     })
+}
+
+#[cfg(test)]
+impl FinanceNewsItem {
+    pub(crate) fn fixture(capabilities: &NewsCapabilities, title: &str) -> Self {
+        Self {
+            id: format!("{}:fixture", capabilities.provider_id),
+            source_id: capabilities.provider_id.clone(),
+            source_name: capabilities.display_name.clone(),
+            title: title.to_string(),
+            summary: String::new(),
+            url: capabilities.endpoint.clone(),
+            published_at: String::new(),
+            published_at_ms: Some(1),
+            important: false,
+            rank: 1,
+            provider_id: capabilities.provider_id.clone(),
+            trust_tier: capabilities.trust_tier,
+            trust_tier_name: capabilities.trust_tier.chinese_name().to_string(),
+            license: capabilities.license.clone(),
+            parser_version: capabilities.parser_version.clone(),
+            raw_payload: None,
+        }
+    }
 }
 
 fn clean_text(value: Option<&Value>, max: usize) -> String {
@@ -333,6 +658,7 @@ fn important_marker(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn sanitizes_news_items() {
@@ -343,7 +669,15 @@ mod tests {
             "url": "javascript:alert(1)",
             "extra": {"hover": "补充", "info": "重要"}
         });
-        let item = normalize_item("cls-telegraph", &row, 1).unwrap();
+        let capabilities = NewsNowProvider::new(
+            "newsnow-test".into(),
+            NEWSNOW_ENDPOINT.into(),
+            Arc::new(HttpClient::new()),
+            Arc::new(TtlCache::default()),
+        )
+        .unwrap()
+        .capabilities;
+        let item = normalize_item(&capabilities, "cls-telegraph", &row, 1).unwrap();
         assert_eq!(item.title, "政策 & 市场");
         assert!(item.url.is_empty());
         assert!(item.important);
