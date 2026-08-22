@@ -8,6 +8,10 @@ use astock_news_intelligence::{
     AgentConclusionReview, EventCluster, EventClusterDetail, NewsEventClusterer,
 };
 use astock_storage::{ArchivedNewsRevision, NewsUserAction, NewsUserState};
+use astock_trading_rules::{
+    classify_news_session, publication_precision_from_source, EffectiveNewsSession,
+    NewsSessionInput,
+};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -56,6 +60,7 @@ pub struct NewsCenterItem {
     pub verification_name: String,
     pub event: Option<NewsCenterEventMeta>,
     pub entity_links: Vec<DocumentEntityLink>,
+    pub effective_session: EffectiveNewsSession,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -292,6 +297,26 @@ pub async fn query_news_center(
         let (important, importance_reason) = importance(&revision, event);
         let event_type = classify_event(&revision.title).to_string();
         let (verification, verification_name) = classify_verification(&revision);
+        let stale_age = now.saturating_sub(revision.last_observed_at).max(0);
+        let effective_session = classify_news_session(
+            &state.rules,
+            &NewsSessionInput {
+                event_time_utc: revision.event_time.utc,
+                publish_time_utc: revision.publish_time.utc,
+                first_seen_time_utc: revision.first_seen_time_utc,
+                revision_time_utc: revision.revision_time.utc,
+                publication_precision: publication_precision_from_source(
+                    revision.publish_time.utc,
+                    revision.publish_time.original.as_deref(),
+                ),
+                stale: stale_age > 600,
+                verified: matches!(verification, "primary" | "verified_media"),
+                discovery_only: verification == "discovery_only",
+                old_republication: event.is_some_and(|meta| meta.old_republication)
+                    || stale_age > 86_400,
+            },
+        )
+        .map_err(|error| CmdError::new("news_session", error.to_string()))?;
         let haystack = format!(
             "{} {} {} {} {}",
             revision.title,
@@ -350,6 +375,7 @@ pub async fn query_news_center(
             verification.to_string(),
             verification_name.to_string(),
             event.cloned(),
+            effective_session,
         ));
     }
     matched.sort_by(|left, right| {
@@ -394,6 +420,7 @@ pub async fn query_news_center(
                 verification,
                 verification_name,
                 event,
+                effective_session,
             )| {
                 let entity_links = links_by_revision
                     .remove(&revision.revision_id)
@@ -414,6 +441,7 @@ pub async fn query_news_center(
                         status: meta.status,
                     }),
                     entity_links,
+                    effective_session,
                 }
             },
         )

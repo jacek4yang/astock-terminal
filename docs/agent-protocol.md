@@ -43,6 +43,8 @@
 
 联网研究分为财经快讯聚合、MiniMax 官方搜索和固定模板聚宽调研。`search_web` 的标题与摘要固定标为 `discovery_only`，只用于发现 URL；引用前必须通过 `fetch_source_document` 读取原始 HTML、JSON、PDF 或正式附件，必要时用 `read_document` 下钻不可变版本的页码/段落。字段冲突由 `compare_source_evidence` 并列保留原值、单位、时点和位置。若搜索后没有一级来源版本，最终回答会被确定性追加“一级来源原文未核验”，搜索摘要不得标为【事实】。Agent 最终结论引用的 `source_version_id`/`fact_id` 会单独持久化，供后续修订审计。
 
+`research_news` 使用统一交易日历和四时钟分类器，仅注入目标交易会话的有界资讯上下文。15:00 后、休市日和收盘后海外事件自动进入下一交易日；仅日期和缺失发布时间采用保守口径。`effective_session.can_increase_confidence=false` 的 stale、未核验、聚合线索或旧闻只能用于继续核验/历史解释，不能提高仓位或结论置信度。事件回测调用同一个分类器并以 `first_seen/revision_time` 阻止未来信息倒灌。
+
 AI 生成策略使用版本化公式 DSL，仅能读取当前及历史 OHLCV、有限指标和布尔条件；限制表达式深度、节点、窗口与偏移，不执行任意 Lua、Python、文件、网络或进程操作。聚宽能力同样使用固定查询模板，不接受模型生成的任意 Python。
 
 ## 结构化报告与发布门禁

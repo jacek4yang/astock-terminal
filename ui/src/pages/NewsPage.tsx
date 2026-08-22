@@ -46,6 +46,24 @@ const VERIFICATION_CLASS: Record<string, string> = {
   discovery_only: "border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300",
 };
 
+const SESSION_ROLE: Record<string, string> = {
+  same_day_premarket: "当日盘前",
+  intraday: "当日盘中",
+  next_trading_day: "下一交易日",
+  historical_only: "仅作历史背景",
+};
+
+const MARKET_PHASE: Record<string, string> = {
+  premarket: "盘前",
+  opening_auction: "开盘集合竞价",
+  morning_trading: "上午连续交易",
+  lunch_break: "午间休市",
+  afternoon_trading: "下午连续交易",
+  closing_auction: "收盘集合竞价",
+  after_close: "收盘后",
+  non_trading_day: "休市日",
+};
+
 const EMPTY_QUERY: NewsCenterQuery = {
   keyword: "",
   category: "all",
@@ -165,6 +183,9 @@ function NewsRow({
         <span className="rounded bg-slate-100 px-1.5 py-0.5 dark:bg-slate-800">{EVENT_LABEL[item.event_type] ?? item.event_type}</span>
         {revision.supersedes_revision_id && <span className="rounded bg-violet-500/10 px-1.5 py-0.5 text-violet-600 dark:text-violet-300">修订版</span>}
         {item.event?.old_republication && <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-amber-600">旧闻重发</span>}
+        <span className={`rounded px-1.5 py-0.5 ${item.effective_session.can_increase_confidence ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "bg-amber-500/10 text-amber-700 dark:text-amber-300"}`} title={item.effective_session.rationale}>
+          影响 {item.effective_session.target_trading_date} · {SESSION_ROLE[item.effective_session.role]}
+        </span>
         {item.event && <span>独立来源 {item.event.independent_sources}</span>}
         {item.event?.conflict_fields.length ? <span className="text-red-600 dark:text-red-300">{item.event.conflict_fields.length} 项冲突</span> : null}
         {verifiedEntities.slice(0, 3).map((link) => <span key={link.link_id} className="rounded bg-blue-500/10 px-1.5 py-0.5 text-blue-600 dark:text-blue-300">{link.final_entity_name}{link.listed_code ? ` ${link.listed_code}` : ""}</span>)}
@@ -225,6 +246,13 @@ function DetailPanel({
           <div><span className="muted">来源等级</span><div>{revision.source_name}</div></div>
           <div><span className="muted">语言</span><div>{revision.language}</div></div>
         </div>
+        <section className={`rounded border p-2 ${item.effective_session.can_increase_confidence ? "border-emerald-200 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950/30" : "border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/30"}`}>
+          <h3 className="font-semibold">交易会话归属</h3>
+          <div className="mt-1">影响交易日：<b>{item.effective_session.target_trading_date}</b> · {SESSION_ROLE[item.effective_session.role]} · {MARKET_PHASE[item.effective_session.phase]}</div>
+          <div className="muted mt-1">最早可用：{item.effective_session.effective_at_china}{item.effective_session.time_uncertain ? " · 发布时间不精确，已保守处理" : ""}</div>
+          <div className="mt-1 leading-5">{item.effective_session.rationale}</div>
+          {!item.effective_session.can_increase_confidence && <div className="mt-1 font-medium text-amber-700 dark:text-amber-300">仅作核验线索/历史背景，不得据此提高仓位或结论置信度。</div>}
+        </section>
         <div className="flex flex-wrap gap-2">
           <button type="button" className="btn-primary" onClick={() => onAgent(false)}>交给智能助手深度分析</button>
           <button type="button" className="btn" onClick={() => onAgent(true)}>分析是否已被市场交易</button>

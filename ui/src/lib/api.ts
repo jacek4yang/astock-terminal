@@ -485,6 +485,36 @@ export interface NewsCenterEventMeta {
   status: string;
 }
 
+export type EffectiveSessionRole =
+  | "same_day_premarket"
+  | "intraday"
+  | "next_trading_day"
+  | "historical_only";
+
+export type EffectiveMarketPhase =
+  | "premarket"
+  | "opening_auction"
+  | "morning_trading"
+  | "lunch_break"
+  | "afternoon_trading"
+  | "closing_auction"
+  | "after_close"
+  | "non_trading_day";
+
+export interface EffectiveNewsSession {
+  target_trading_date: string;
+  role: EffectiveSessionRole;
+  phase: EffectiveMarketPhase;
+  effective_at_utc: number;
+  effective_at_china: string;
+  publication_precision: "exact_time" | "date_only" | "missing";
+  time_uncertain: boolean;
+  evidence_use: "decision_evidence" | "verification_lead" | "historical_context";
+  can_increase_confidence: boolean;
+  rationale: string;
+  rules_version: string;
+}
+
 export interface NewsCenterItem {
   revision: ArchivedNewsRevision;
   user_state: NewsUserState;
@@ -495,6 +525,7 @@ export interface NewsCenterItem {
   verification_name: string;
   event: NewsCenterEventMeta | null;
   entity_links: DocumentEntityLink[];
+  effective_session: EffectiveNewsSession;
 }
 
 export interface NewsCenterSourceFacet {
