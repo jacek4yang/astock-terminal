@@ -468,6 +468,77 @@ export interface ArchivedNewsRevision {
   raw_snapshot_hash: string | null;
 }
 
+export interface NewsUserState {
+  document_id: string;
+  is_read: boolean;
+  pinned: boolean;
+  favorite: boolean;
+  ignored: boolean;
+  updated_at: number;
+}
+
+export interface NewsCenterEventMeta {
+  cluster_id: string;
+  independent_sources: number;
+  old_republication: boolean;
+  conflict_fields: string[];
+  status: string;
+}
+
+export interface NewsCenterItem {
+  revision: ArchivedNewsRevision;
+  user_state: NewsUserState;
+  important: boolean;
+  importance_reason: string;
+  event_type: string;
+  verification: string;
+  verification_name: string;
+  event: NewsCenterEventMeta | null;
+  entity_links: DocumentEntityLink[];
+}
+
+export interface NewsCenterSourceFacet {
+  source_id: string;
+  source_name: string;
+  count: number;
+}
+
+export interface NewsCenterPage {
+  items: NewsCenterItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  has_more: boolean;
+  generated_at: number;
+  newest_first_seen: number | null;
+  newest_observed_at: number | null;
+  archive_age_secs: number | null;
+  source_facets: NewsCenterSourceFacet[];
+}
+
+export interface NewsCenterQuery {
+  keyword: string;
+  category: string;
+  source_id: string;
+  importance: string;
+  entity_keywords: string[];
+  event_type: string;
+  language: string;
+  verification: string;
+  user_state: string;
+  from_utc: number | null;
+  to_utc: number | null;
+  page: number;
+  page_size: number;
+}
+
+export interface NewsRefreshResult {
+  items: unknown[];
+  successful_sources: string[];
+  stale_sources: string[];
+  errors: string[];
+}
+
 export interface NewsIngestObservation {
   observation_id: number;
   document_id: string | null;
@@ -742,6 +813,26 @@ export const getNewsIngestObservations = (providerId: string, limit = 10) =>
     provider_id: providerId,
     limit,
   });
+
+export const queryNewsCenter = (query: NewsCenterQuery) =>
+  cmd<NewsCenterPage>("query_news_center", { query });
+
+export const refreshNewsCenter = (
+  sources: string[] = [],
+  keyword: string | null = null,
+  symbol: string | null = null,
+  limit = 100,
+) => cmd<NewsRefreshResult>("refresh_news_center", { sources, keyword, symbol, limit });
+
+export const setNewsItemState = (
+  documentId: string,
+  action: "read" | "pinned" | "favorite" | "ignored",
+  value: boolean,
+) => cmd<NewsUserState>("set_news_item_state", {
+  document_id: documentId,
+  action,
+  value,
+});
 
 export const getNewsEventClusters = (limit = 50) =>
   cmd<NewsEventCluster[]>("get_news_event_clusters", { limit });

@@ -685,6 +685,23 @@ pub(crate) const MIGRATIONS: &[(u32, &str)] = &[
         ON data_reconciliation_results(dataset,entity_key,compared_at DESC);
     "#,
     ),
+    (
+        13,
+        r#"
+    -- Durable personal state for the professional news center. This table
+    -- stores no upstream content and remains valid across provider refreshes.
+    CREATE TABLE IF NOT EXISTS news_user_state (
+        document_id TEXT PRIMARY KEY REFERENCES source_documents(document_id) ON DELETE CASCADE,
+        is_read     INTEGER NOT NULL DEFAULT 0,
+        pinned      INTEGER NOT NULL DEFAULT 0,
+        favorite    INTEGER NOT NULL DEFAULT 0,
+        ignored     INTEGER NOT NULL DEFAULT 0,
+        updated_at  INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_news_user_state_flags
+        ON news_user_state(pinned DESC,favorite DESC,ignored,is_read,updated_at DESC);
+    "#,
+    ),
 ];
 
 /// Current unix time in seconds. All timestamps in this crate are stored as
@@ -841,6 +858,7 @@ mod tests {
             "data_quality_observations",
             "field_lineage_records",
             "data_reconciliation_results",
+            "news_user_state",
         ] {
             let count: i64 = conn
                 .query_row(

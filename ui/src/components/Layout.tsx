@@ -26,6 +26,7 @@ const AGENT_ICON = "M12 3v3m0 12v3M3 12h3m12 0h3M8 8h8v8H8zM10.5 11.5h.01M13.5 1
 
 const NAV = [
   { to: "/", label: "今日市场", icon: "M3 12h4l3-8 4 16 3-8h4" },
+  { to: "/news", label: "资讯中心", icon: "M4 5h16v14H4zM7 9h3m-3 3h10m-10 3h10M13 9h4" },
   { to: "/agent", label: "智能助手", icon: AGENT_ICON },
   { to: "/watchlist", label: "自选股", icon: "M12 2l3 7h7l-5.5 4.5L18 21l-6-4-6 4 1.5-7.5L2 9h7z" },
   { to: "/scan", label: "智能扫描", icon: "M11 4a7 7 0 1 0 4.9 12L21 21M11 8v3l2 2" },

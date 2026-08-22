@@ -3,6 +3,7 @@ import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import Layout from "./components/Layout";
 import { BrandLoader } from "./components/ui";
 import MarketPage from "./pages/MarketPage";
+import NewsPage from "./pages/NewsPage";
 import WatchlistPage from "./pages/WatchlistPage";
 import StockPage from "./pages/StockPage";
 import ScanPage from "./pages/ScanPage";
@@ -34,6 +35,7 @@ export default function App() {
           <Route element={<Layout />}>
             <Route path="/" element={<MarketPage />} />
             <Route path="/watchlist" element={<WatchlistPage />} />
+            <Route path="/news" element={<NewsPage />} />
             <Route path="/stock/:symbol" element={<StockPage />} />
             <Route path="/scan" element={<ScanPage />} />
             <Route path="/agent" element={<AgentPage />} />
