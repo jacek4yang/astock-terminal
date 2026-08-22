@@ -1,0 +1,291 @@
+{
+  "manifest": {
+    "dataset_id": "astock-p0-research-eval",
+    "version": "1.0.0",
+    "frozen_at": "2026-08-23T10:30:00+08:00",
+    "description": "AStock P0 离线端到端评测：新闻、聚类、实体、图谱、传导与 Agent",
+    "labeling_guidelines": "eval/datasets/p0-v1/labeling-guidelines.md",
+    "dispute_policy": "双人独立标注；分歧交由第三名标注者裁决；保留 dissent 与修订版本",
+    "license_policy": "只收录可再分发的合成样例、公开事实的短摘要及哈希化离线快照；不复制受限正文",
+    "train_end": "2024-12-31T23:59:59+08:00",
+    "dev_end": "2025-12-31T23:59:59+08:00",
+    "test_start": "2026-01-01T00:00:00+08:00"
+  },
+  "cases": [
+    {
+      "id": "train-news-001",
+      "split": "train",
+      "occurred_at": "2024-06-10T09:31:00+08:00",
+      "industry": "综合",
+      "regime": "震荡",
+      "difficulty": ["多来源"],
+      "source_license": "synthetic-cc0",
+      "snapshot_ref": "sha256:326cd20ffe6cd22c726d89aa8051fa9931e7e785955e0c818de2a31af8fdd811",
+      "task": "news_retrieval",
+      "expected_ids": ["tr-n1"],
+      "retrieved": [{"id":"tr-n1","canonical_group":"tr-g1","published_at":1717983000,"fetched_at":1717983060,"is_old":false,"source_available":true}]
+    },
+    {
+      "id": "dev-entity-001",
+      "split": "dev",
+      "occurred_at": "2025-09-18T14:00:00+08:00",
+      "industry": "消费电子",
+      "regime": "风险偏好上升",
+      "difficulty": ["品牌映射"],
+      "source_license": "synthetic-cc0",
+      "snapshot_ref": "sha256:7bdbef27eda83c0d6ce2505dddaa6969688b9972f435fe455f3cfd1f755058af",
+      "task": "entity_linking",
+      "mentions": [{"text":"示例品牌","entity_type":"brand","gold_id":"brand:demo","predicted_id":"brand:demo"}]
+    },
+    {
+      "id": "test-news-false-flash-001",
+      "split": "test",
+      "occurred_at": "2026-01-08T10:03:00+08:00",
+      "industry": "银行",
+      "regime": "高波动",
+      "difficulty": ["虚假快讯", "冲突来源", "分钟级时效"],
+      "source_license": "synthetic-cc0",
+      "snapshot_ref": "sha256:0fbf0c87cd584781c9d54a7ef71b3a8433603bd1bcc104df4cfb8a783ad9ce0f",
+      "task": "news_retrieval",
+      "expected_ids": ["n-bank-official", "n-bank-exchange", "n-bank-followup", "n-bank-policy"],
+      "retrieved": [
+        {"id":"n-bank-official","canonical_group":"g-bank-capital","published_at":1767837600,"fetched_at":1767837660,"is_old":false,"source_available":true},
+        {"id":"n-bank-exchange","canonical_group":"g-bank-exchange","published_at":1767837660,"fetched_at":1767837720,"is_old":false,"source_available":true},
+        {"id":"n-bank-followup","canonical_group":"g-bank-followup","published_at":1767837720,"fetched_at":1767837840,"is_old":false,"source_available":true},
+        {"id":"n-bank-policy","canonical_group":"g-bank-policy","published_at":1767837780,"fetched_at":1767837900,"is_old":false,"source_available":true}
+      ]
+    },
+    {
+      "id": "test-news-dedupe-old-002",
+      "split": "test",
+      "occurred_at": "2026-02-12T18:20:00+08:00",
+      "industry": "医药",
+      "regime": "风险偏好下降",
+      "difficulty": ["旧闻重发", "跨源重复", "来源失效"],
+      "source_license": "synthetic-cc0",
+      "snapshot_ref": "sha256:5700c93b0b0685c0f83842b7c5695748e7d18184210640139d3633671f074f55",
+      "task": "news_retrieval",
+      "expected_ids": ["n-med-a", "n-med-b", "n-med-c"],
+      "retrieved": [
+        {"id":"n-med-a","canonical_group":"g-med-a","published_at":1770891000,"fetched_at":1770891120,"is_old":false,"source_available":true},
+        {"id":"n-med-b","canonical_group":"g-med-b","published_at":1770891060,"fetched_at":1770891180,"is_old":false,"source_available":true},
+        {"id":"n-med-c","canonical_group":"g-med-c","published_at":1770891120,"fetched_at":1770891240,"is_old":false,"source_available":true},
+        {"id":"n-med-a-copy","canonical_group":"g-med-a","published_at":1763114400,"fetched_at":1770891300,"is_old":true,"source_available":false}
+      ]
+    },
+    {
+      "id": "test-cluster-correction-001",
+      "split": "test",
+      "occurred_at": "2026-03-03T11:00:00+08:00",
+      "industry": "新能源车",
+      "regime": "政策冲击",
+      "difficulty": ["更正公告", "同事件多标题"],
+      "source_license": "synthetic-cc0",
+      "snapshot_ref": "sha256:3b256a09b6a5eac91bea10383086779c5444690031558806808976daad4b2d19",
+      "task": "event_clustering",
+      "items": [
+        {"id":"c1-a","gold_cluster":"battery-recall","predicted_cluster":"battery-recall","is_correction":false,"correction_detected":false},
+        {"id":"c1-b","gold_cluster":"battery-recall","predicted_cluster":"battery-recall","is_correction":true,"correction_detected":true},
+        {"id":"c2-a","gold_cluster":"subsidy-policy","predicted_cluster":"subsidy-policy","is_correction":false,"correction_detected":false},
+        {"id":"c2-b","gold_cluster":"subsidy-policy","predicted_cluster":"subsidy-policy","is_correction":false,"correction_detected":false}
+      ]
+    },
+    {
+      "id": "test-cluster-near-duplicate-002",
+      "split": "test",
+      "occurred_at": "2026-03-19T09:45:00+08:00",
+      "industry": "半导体",
+      "regime": "风险偏好上升",
+      "difficulty": ["相似标题不同事件", "撤回"],
+      "source_license": "synthetic-cc0",
+      "snapshot_ref": "sha256:6eeed99225ae7618e19f7a10cfc09eaf2abdd94e016ef31f36790cf1c272ac06",
+      "task": "event_clustering",
+      "items": [
+        {"id":"s1-a","gold_cluster":"fab-order","predicted_cluster":"fab-order","is_correction":false,"correction_detected":false},
+        {"id":"s1-b","gold_cluster":"fab-order","predicted_cluster":"fab-order","is_correction":false,"correction_detected":false},
+        {"id":"s2-a","gold_cluster":"export-rule","predicted_cluster":"export-rule-mixed","is_correction":false,"correction_detected":false},
+        {"id":"s3-a","gold_cluster":"order-withdrawal","predicted_cluster":"export-rule-mixed","is_correction":true,"correction_detected":true}
+      ]
+    },
+    {
+      "id": "test-entity-homonym-001",
+      "split": "test",
+      "occurred_at": "2026-04-07T13:20:00+08:00",
+      "industry": "电力",
+      "regime": "震荡",
+      "difficulty": ["同名公司", "子公司", "地区消歧"],
+      "source_license": "synthetic-cc0",
+      "snapshot_ref": "sha256:f2fdc6d9ebce13ff8dd55d7521600be1bd853158cbee5e554b8f7e1e0b003efe",
+      "task": "entity_linking",
+      "mentions": [
+        {"text":"华能国际","entity_type":"security","gold_id":"security:600011","predicted_id":"security:600011"},
+        {"text":"华能国际电力江苏能源开发有限公司","entity_type":"subsidiary","gold_id":"company:hn-js-energy","predicted_id":"company:hn-js-energy"},
+        {"text":"国际电力（香港）","entity_type":"company","gold_id":"company:intl-power-hk","predicted_id":"company:intl-power-hk"}
+      ]
+    },
+    {
+      "id": "test-entity-brand-product-002",
+      "split": "test",
+      "occurred_at": "2026-04-21T15:10:00+08:00",
+      "industry": "消费电子",
+      "regime": "高波动",
+      "difficulty": ["品牌", "产品", "无链接答案"],
+      "source_license": "synthetic-cc0",
+      "snapshot_ref": "sha256:11377083488dbbe646e16da31932a3ef127fbc09674709281b68e2b52bcb5cc8",
+      "task": "entity_linking",
+      "mentions": [
+        {"text":"刀片电池","entity_type":"product","gold_id":"product:byd-blade-battery","predicted_id":"product:byd-blade-battery"},
+        {"text":"弗迪电池","entity_type":"subsidiary","gold_id":"company:fin-dreams-battery","predicted_id":"company:fin-dreams-battery"},
+        {"text":"小米（上下文仅指手机品类，不指公司）","entity_type":"company","gold_id":null,"predicted_id":"security:01810-hk"}
+      ]
+    },
+    {
+      "id": "test-graph-implicit-chain-001",
+      "split": "test",
+      "occurred_at": "2026-05-12T10:00:00+08:00",
+      "industry": "半导体",
+      "regime": "政策冲击",
+      "difficulty": ["隐含供应链", "跨段证据", "有效期"],
+      "source_license": "synthetic-derived-cc0",
+      "snapshot_ref": "sha256:ce36a30f8f83335fe8079d6dd53c2b73abc51abcabc83b7398c8e18f687b08b5",
+      "task": "graph_extraction",
+      "gold_edges": [
+        {"src":"company:equipment-a","dst":"product:etcher","relation":"produces","direction":1,"valid_from":"2025-01-01","valid_to":null,"evidence_locator":"report.pdf#page=42,lines=3-8"},
+        {"src":"product:etcher","dst":"company:fab-b","relation":"supplies","direction":1,"valid_from":"2025-06-01","valid_to":null,"evidence_locator":"report.pdf#page=76,table=12"}
+      ],
+      "predicted_edges": [
+        {"src":"company:equipment-a","dst":"product:etcher","relation":"produces","direction":1,"valid_from":"2025-01-01","valid_to":null,"evidence_locator":"report.pdf#page=42,lines=3-8"},
+        {"src":"product:etcher","dst":"company:fab-b","relation":"supplies","direction":1,"valid_from":"2025-06-01","valid_to":null,"evidence_locator":"report.pdf#page=75,table=12"}
+      ]
+    },
+    {
+      "id": "test-graph-direction-validity-002",
+      "split": "test",
+      "occurred_at": "2026-05-28T17:30:00+08:00",
+      "industry": "化工",
+      "regime": "风险偏好下降",
+      "difficulty": ["关系方向", "已终止合同", "冲突来源"],
+      "source_license": "synthetic-derived-cc0",
+      "snapshot_ref": "sha256:e00eaf5a36c8752969b11491b683367d7625c77b846f80b334586b3c1db0efd8",
+      "task": "graph_extraction",
+      "gold_edges": [
+        {"src":"company:chemical-c","dst":"company:tire-d","relation":"supplies","direction":1,"valid_from":"2024-03-01","valid_to":"2026-05-01","evidence_locator":"announcement.html#paragraph=9"},
+        {"src":"commodity:rubber","dst":"company:tire-d","relation":"cost_exposure","direction":-1,"valid_from":"2025-01-01","valid_to":null,"evidence_locator":"report.pdf#page=19,table=4"}
+      ],
+      "predicted_edges": [
+        {"src":"company:chemical-c","dst":"company:tire-d","relation":"supplies","direction":1,"valid_from":"2024-03-01","valid_to":"2026-05-01","evidence_locator":"announcement.html#paragraph=9"},
+        {"src":"company:tire-d","dst":"commodity:rubber","relation":"cost_exposure","direction":-1,"valid_from":"2025-01-01","valid_to":null,"evidence_locator":"report.pdf#page=19,table=4"}
+      ]
+    },
+    {
+      "id": "test-propagation-commodity-001",
+      "split": "test",
+      "occurred_at": "2026-06-09T08:50:00+08:00",
+      "industry": "新能源车",
+      "regime": "风险偏好上升",
+      "difficulty": ["多跳路径", "滞后", "区间校准"],
+      "source_license": "synthetic-derived-cc0",
+      "snapshot_ref": "sha256:521ec213fc586ae1629e74f242ce0e41c9150bb403d1cae5f2c7436628b31a3f",
+      "task": "propagation",
+      "expected_paths": [
+        {"nodes":["commodity:lithium","product:cathode","company:battery-e"],"direction":-1,"lag_days":12.0,"interval_low":-0.08,"interval_high":0.01,"realized_impact":-0.04},
+        {"nodes":["commodity:lithium","company:miner-f"],"direction":1,"lag_days":5.0,"interval_low":0.01,"interval_high":0.12,"realized_impact":0.06}
+      ],
+      "predicted_paths": [
+        {"nodes":["commodity:lithium","product:cathode","company:battery-e"],"direction":-1,"lag_days":11.0,"interval_low":-0.09,"interval_high":0.00,"realized_impact":-0.04},
+        {"nodes":["commodity:lithium","company:miner-f"],"direction":1,"lag_days":6.0,"interval_low":0.00,"interval_high":0.10,"realized_impact":0.06}
+      ]
+    },
+    {
+      "id": "test-propagation-policy-002",
+      "split": "test",
+      "occurred_at": "2026-06-25T20:00:00+08:00",
+      "industry": "光伏",
+      "regime": "政策冲击",
+      "difficulty": ["政策间接传导", "竞争替代", "路径歧义"],
+      "source_license": "synthetic-derived-cc0",
+      "snapshot_ref": "sha256:2f11690148fd83d8c0f19f9c4a040d2495e2fc84d26059713ba8751ec15a3946",
+      "task": "propagation",
+      "expected_paths": [
+        {"nodes":["policy:export-rebate","product:module","company:pv-g"],"direction":-1,"lag_days":8.0,"interval_low":-0.10,"interval_high":0.02,"realized_impact":-0.05}
+      ],
+      "predicted_paths": [
+        {"nodes":["policy:export-rebate","industry:solar-glass","company:glass-h"],"direction":-1,"lag_days":10.0,"interval_low":-0.12,"interval_high":0.01,"realized_impact":-0.03}
+      ]
+    },
+    {
+      "id": "test-agent-conflict-001",
+      "split": "test",
+      "occurred_at": "2026-07-07T16:00:00+08:00",
+      "industry": "白酒",
+      "regime": "震荡",
+      "difficulty": ["冲突来源", "数值核对", "证据覆盖"],
+      "source_license": "synthetic-derived-cc0",
+      "snapshot_ref": "sha256:efc3483ba45aecac5ce9b6bf23f2eb99ea325ced4975078dcaedc78f6a966a93",
+      "task": "agent_answer",
+      "claims": [
+        {"text":"公司公告口径优先于转载快讯","supported":true,"citation_correct":true,"evidence_present":true},
+        {"text":"渠道库存口径存在来源差异","supported":true,"citation_correct":true,"evidence_present":true}
+      ],
+      "numeric_checks": [
+        {"name":"收入同比","expected":0.126,"predicted":0.126,"tolerance":0.001},
+        {"name":"毛利率","expected":0.912,"predicted":0.9115,"tolerance":0.001}
+      ],
+      "conflicts_expected": 2,
+      "conflicts_handled": 2,
+      "should_abstain": false,
+      "did_abstain": false,
+      "task_success": true,
+      "latency_ms": 18400,
+      "tokens": 11200,
+      "api_cost_microunits": 8400
+    },
+    {
+      "id": "test-agent-no-answer-002",
+      "split": "test",
+      "occurred_at": "2026-07-18T12:00:00+08:00",
+      "industry": "综合",
+      "regime": "高波动",
+      "difficulty": ["无答案", "拒绝编造", "信息缺失"],
+      "source_license": "synthetic-cc0",
+      "snapshot_ref": "sha256:f865e0201a2890621dcf7070fe859b681e7815174993816e915175233df55610",
+      "task": "agent_answer",
+      "claims": [],
+      "numeric_checks": [],
+      "conflicts_expected": 0,
+      "conflicts_handled": 0,
+      "should_abstain": true,
+      "did_abstain": true,
+      "task_success": true,
+      "latency_ms": 6200,
+      "tokens": 2800,
+      "api_cost_microunits": 1900
+    },
+    {
+      "id": "test-agent-systematic-003",
+      "split": "test",
+      "occurred_at": "2026-07-30T18:30:00+08:00",
+      "industry": "券商",
+      "regime": "风险偏好下降",
+      "difficulty": ["系统性分析", "多来源", "图表数值一致"],
+      "source_license": "synthetic-derived-cc0",
+      "snapshot_ref": "sha256:a69135eb5f790ff541253eb70cba65c17429c30ff0d4005e92e5ce895744c266",
+      "task": "agent_answer",
+      "claims": [
+        {"text":"成交额收缩与行业相对强度下降同时出现","supported":true,"citation_correct":true,"evidence_present":true},
+        {"text":"政策事件的影响方向仍有不确定性","supported":true,"citation_correct":false,"evidence_present":true}
+      ],
+      "numeric_checks": [
+        {"name":"行业相对收益","expected":-0.037,"predicted":-0.0374,"tolerance":0.001}
+      ],
+      "conflicts_expected": 1,
+      "conflicts_handled": 1,
+      "should_abstain": false,
+      "did_abstain": false,
+      "task_success": false,
+      "latency_ms": 41600,
+      "tokens": 24800,
+      "api_cost_microunits": 17600
+    }
+  ]
+}

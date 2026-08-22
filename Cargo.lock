@@ -391,6 +391,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "astock-evaluation"
+version = "5.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "astock-fundamental"
 version = "5.0.1"
 dependencies = [

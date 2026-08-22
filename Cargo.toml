@@ -19,6 +19,7 @@ members = [
     "src-tauri",
     "crates/joinquant",
     "crates/security",
+    "crates/evaluation",
 ]
 
 [workspace.package]
