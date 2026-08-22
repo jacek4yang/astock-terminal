@@ -6,8 +6,8 @@
 //! `{task_id, event}` until the stream ends (Completed / Failed /
 //! Suspended), at which point the forwarder handle is dropped from
 //! [`AppState::agent_handles`]. `agent_cancel` marks the task `cancelled`
-//! in storage (the engine notices at the next round) and aborts the
-//! forwarder.
+//! in storage (in-flight tools notice on their next heartbeat and drop their
+//! futures) and aborts the UI forwarder.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -585,9 +585,9 @@ pub async fn agent_tasks(state: State<'_, AppState>) -> Result<Vec<AgentTaskSumm
         .collect())
 }
 
-/// Mark a task cancelled. A running engine loop notices at the next round;
-/// the event forwarder is aborted immediately. `cancelled: false` when the
-/// task does not exist.
+/// Mark a task cancelled. In-flight tool futures are dropped on the engine's
+/// next heartbeat; the event forwarder is aborted immediately.
+/// `cancelled: false` when the task does not exist.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn agent_cancel(
     state: State<'_, AppState>,

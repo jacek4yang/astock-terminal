@@ -48,7 +48,8 @@ export interface ToolCallItem {
   total?: number;
   success?: boolean;
   error?: string;
-  timeoutMs?: number;
+  /** Typical duration for display only; never a cancellation deadline. */
+  estimatedMs?: number;
   stage?: string;
   lastProgressAt?: number;
 }
@@ -252,7 +253,7 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
             startedAt: Date.now(),
             position: event.position,
             total: event.total,
-            timeoutMs: event.timeout_ms,
+            estimatedMs: event.estimated_ms,
             stage: "检查本地缓存并选择可用数据源",
           },
         ],
@@ -266,7 +267,7 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
             ? {
                 ...tool,
                 elapsedMs: event.elapsed_ms,
-                timeoutMs: event.timeout_ms,
+                estimatedMs: event.estimated_ms,
                 stage: event.stage,
                 lastProgressAt: Date.now(),
               }

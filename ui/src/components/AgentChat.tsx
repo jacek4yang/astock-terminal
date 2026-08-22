@@ -183,10 +183,13 @@ function ToolCard({ tool }: { tool: ToolCallItem }) {
       : now - tool.startedAt;
   const toolPercent = tool.done
     ? 100
-    : tool.timeoutMs && elapsedMs != null
-      ? Math.min(96, Math.max(3, (elapsedMs / tool.timeoutMs) * 100))
+    : tool.estimatedMs && elapsedMs != null
+      ? Math.min(94, Math.max(3, (94 * elapsedMs) / (elapsedMs + tool.estimatedMs * 0.6)))
       : 18;
-  const timeoutSeconds = tool.timeoutMs ? Math.round(tool.timeoutMs / 1000) : null;
+  const estimatedSeconds = tool.estimatedMs ? Math.round(tool.estimatedMs / 1000) : null;
+  const overEstimate = Boolean(
+    !tool.done && tool.estimatedMs && elapsedMs != null && elapsedMs > tool.estimatedMs,
+  );
   return (
     <div className="rounded border border-slate-200 bg-slate-50 px-2.5 py-1.5 dark:border-slate-800 dark:bg-slate-900/60">
       <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -221,10 +224,10 @@ function ToolCard({ tool }: { tool: ToolCallItem }) {
           style={{ width: `${toolPercent}%` }}
         />
       </div>
-      {!tool.done && timeoutSeconds != null && (
+      {!tool.done && estimatedSeconds != null && (
         <div className="muted mt-1 flex flex-wrap justify-between gap-2 text-[10px]">
-          <span>本步骤最长等待 {timeoutSeconds} 秒</span>
-          <span>超时后自动跳过慢源，继续使用其他证据</span>
+          <span>预计约 {estimatedSeconds} 秒</span>
+          <span>{overEstimate ? "已超过预估，仍在后台继续，可随时取消" : "预估仅供参考，不会自动超时"}</span>
         </div>
       )}
       {open && argumentsToShow.length > 0 && (
@@ -245,7 +248,7 @@ function ToolCard({ tool }: { tool: ToolCallItem }) {
       )}
       {tool.done && tool.success === false && tool.error && (
         <div className="mt-1 rounded bg-red-50 px-2 py-1 text-xs text-red-700 dark:bg-red-950/40 dark:text-red-300">
-          本步骤未在时限内取得可靠结果，已自动降级，不影响其他分析继续完成。
+          本步骤未成功：{tool.error}
         </div>
       )}
     </div>
@@ -303,7 +306,7 @@ function ResearchProgress({ progress }: { progress: AgentProgress }) {
         <div className="muted mt-1 grid gap-1 text-[11px] sm:grid-cols-2">
           <span>· 相同数据自动复用缓存，避免重复访问上游</span>
           <span>· 独立分析最多 6 项并行，完成一项更新一项</span>
-          <span>· 普通步骤 45–60 秒自动降级，长计算单独限时</span>
+          <span>· 工具无固定超时，显示预估与已耗时，可由用户随时取消</span>
           <span>· 对话、证据与任务状态持续保存，切换页面不中断</span>
           <span>· 深度任务可由独立专家并行复核，主分析师统一综合</span>
         </div>

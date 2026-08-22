@@ -22,7 +22,7 @@ describe("persistent Agent session channel", () => {
         args: { symbol: "300308" },
         position: 1,
         total: 2,
-        timeout_ms: 45_000,
+        estimated_ms: 45_000,
       },
     });
     handleAgentEnvelope({
@@ -36,7 +36,7 @@ describe("persistent Agent session channel", () => {
         args: { symbol: "000001" },
         position: 2,
         total: 2,
-        timeout_ms: 45_000,
+        estimated_ms: 45_000,
       },
     });
     handleAgentEnvelope({
@@ -48,7 +48,7 @@ describe("persistent Agent session channel", () => {
         call_id: "call-b",
         name: "get_quote",
         elapsed_ms: 2_000,
-        timeout_ms: 45_000,
+        estimated_ms: 45_000,
         stage: "等待数据源返回并执行确定性计算",
       },
     });
@@ -79,7 +79,7 @@ describe("persistent Agent session channel", () => {
       callId: "call-b",
       done: false,
       elapsedMs: 2_000,
-      timeoutMs: 45_000,
+      estimatedMs: 45_000,
       stage: "等待数据源返回并执行确定性计算",
     });
   });

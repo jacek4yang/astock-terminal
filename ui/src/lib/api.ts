@@ -909,14 +909,14 @@ export type AgentEvent =
       args: unknown;
       position: number;
       total: number;
-      timeout_ms: number;
+      estimated_ms: number;
     }
   | {
       type: "tool_call_progress";
       call_id: string;
       name: string;
       elapsed_ms: number;
-      timeout_ms: number;
+      estimated_ms: number;
       stage: string;
     }
   | {

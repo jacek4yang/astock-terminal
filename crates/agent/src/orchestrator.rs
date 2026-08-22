@@ -9,12 +9,12 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Instant;
 
 use futures::channel::mpsc;
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio::time::Instant;
 
 use astock_minimax::{ChatMessage, ChatRequest, MinimaxError, ToolCall};
 use astock_storage::{AgentTask, Storage};
@@ -221,8 +221,10 @@ pub enum AgentEvent {
         position: usize,
         /// Total tool calls in the current batch.
         total: usize,
-        /// Tool-level fail-soft deadline shown to the UI.
-        timeout_ms: u64,
+        /// Expected duration used only for UI guidance. It is never a
+        /// cancellation deadline; the tool runs until completion or an
+        /// explicit user cancellation.
+        estimated_ms: u64,
     },
     /// Heartbeat while a tool is still running. This exposes truthful coarse
     /// stages without leaking provider/model internals or private reasoning.
@@ -230,7 +232,8 @@ pub enum AgentEvent {
         call_id: String,
         name: String,
         elapsed_ms: u64,
-        timeout_ms: u64,
+        /// Expected duration used only for UI guidance.
+        estimated_ms: u64,
         stage: String,
     },
     /// A tool call finished.
@@ -394,7 +397,8 @@ impl AgentEngine {
         Ok(self.ctx.storage.agent_task_list().await?)
     }
 
-    /// Mark a task cancelled; a running loop notices at the next round.
+    /// Mark a task cancelled; running tools notice on their next heartbeat and
+    /// their futures are dropped together with the rest of the active batch.
     /// Returns `false` when the task does not exist.
     pub async fn cancel_task(&self, task_id: &str) -> Result<bool> {
         let Some(record) = self.ctx.storage.agent_task_get(task_id).await? else {
@@ -567,7 +571,16 @@ impl AgentEngine {
                     },
                 );
             }
-            let mut request_messages = compacted;
+            // Treat the provider boundary as a final protocol firewall. Even
+            // histories produced by older builds are repaired before every
+            // request, and an invariant check prevents an invalid transcript
+            // from ever reaching MiniMax.
+            let mut request_messages = reconcile_tool_history(compacted);
+            if let Err(problem) = validate_tool_history(&request_messages) {
+                self.finish_with_error(&state, &tx, format!("工具调用历史无法安全恢复：{problem}"))
+                    .await;
+                return;
+            }
             // A transient system control keeps the stored user message clean
             // while applying changed controls on every turn and after resume.
             let directive = state.spec.runtime_directive();
@@ -669,6 +682,14 @@ impl AgentEngine {
                     }
                 }
             }
+
+            // MiniMax requires every tool-call id to be unique. Providers can
+            // occasionally reuse an id in a later round (or emit duplicate ids
+            // at different streaming indexes), so normalize before persisting,
+            // executing, or echoing any result. Unique valid provider ids stay
+            // untouched; only invalid or globally repeated ids are rewritten.
+            sanitize_streamed_tool_calls(&mut calls);
+            normalize_new_tool_calls(&mut calls, &messages, state.round + 1);
 
             let (_, mut clean_text) = astock_minimax::split_reasoning(&text);
             let mut assistant = ChatMessage {
@@ -898,15 +919,51 @@ impl AgentEngine {
                     total: Some(calls.len()),
                 },
             );
-            let executed = self
+            let executed = match self
                 .execute_round(
                     &calls,
                     &tx,
                     state.round + 1,
                     max_rounds,
                     state.spec.enabled_tools.as_deref(),
+                    &task_id,
                 )
-                .await;
+                .await
+            {
+                Ok(executed) => executed,
+                Err(AgentError::Cancelled(_)) => {
+                    // `agent_cancel` has already persisted the cancelled
+                    // status. Dropping the round future cancels every other
+                    // in-flight tool in the batch.
+                    send(
+                        &tx,
+                        AgentEvent::Failed {
+                            error: "任务已取消".to_string(),
+                        },
+                    );
+                    return;
+                }
+                Err(error) => {
+                    self.finish_with_error(&state, &tx, error.to_string()).await;
+                    return;
+                }
+            };
+            if let Err(error) = self.check_cancelled(&task_id).await {
+                match error {
+                    AgentError::Cancelled(_) => {
+                        send(
+                            &tx,
+                            AgentEvent::Failed {
+                                error: "任务已取消".to_string(),
+                            },
+                        );
+                    }
+                    other => {
+                        self.finish_with_error(&state, &tx, other.to_string()).await;
+                    }
+                }
+                return;
+            }
             for exec in executed {
                 if exec.ok {
                     state.evidence.push(Evidence {
@@ -1110,20 +1167,21 @@ impl AgentEngine {
         round: u32,
         max_rounds: u32,
         enabled_tools: Option<&[String]>,
-    ) -> Vec<ToolExec> {
+        task_id: &str,
+    ) -> Result<Vec<ToolExec>> {
         let total = calls.len();
         let mut pending = futures::stream::iter(calls.iter().cloned().enumerate())
             .map(|(idx, call)| async move {
-                (
+                Ok::<_, AgentError>((
                     idx,
-                    self.execute_one(call, idx + 1, total, tx, enabled_tools)
-                        .await,
-                )
+                    self.execute_one(call, idx + 1, total, tx, enabled_tools, task_id)
+                        .await?,
+                ))
             })
             .buffer_unordered(self.config.max_parallel_tools.max(1));
         let mut indexed: Vec<(usize, ToolExec)> = Vec::with_capacity(total);
         while let Some(item) = pending.next().await {
-            indexed.push(item);
+            indexed.push(item?);
             send(
                 tx,
                 AgentEvent::Progress {
@@ -1137,7 +1195,7 @@ impl AgentEngine {
             );
         }
         indexed.sort_by_key(|(idx, _)| *idx);
-        indexed.into_iter().map(|(_, r)| r).collect()
+        Ok(indexed.into_iter().map(|(_, r)| r).collect())
     }
 
     /// Execute a single tool call; tool failures become error payloads fed
@@ -1149,7 +1207,8 @@ impl AgentEngine {
         total: usize,
         tx: &mpsc::UnboundedSender<AgentEvent>,
         enabled_tools: Option<&[String]>,
-    ) -> ToolExec {
+        task_id: &str,
+    ) -> Result<ToolExec> {
         let call_id = call.id.clone().unwrap_or_else(|| "call_0".to_string());
         let name = call
             .function
@@ -1176,7 +1235,7 @@ impl AgentEngine {
                             args: json!({ "raw": raw_args }),
                             position,
                             total,
-                            timeout_ms: tool_timeout_secs(&name) * 1000,
+                            estimated_ms: tool_estimated_secs(&name) * 1000,
                         },
                     );
                     send(
@@ -1192,7 +1251,7 @@ impl AgentEngine {
                             error: Some(error.clone()),
                         },
                     );
-                    return ToolExec {
+                    return Ok(ToolExec {
                         ok: false,
                         call_id,
                         name: name.clone(),
@@ -1204,7 +1263,7 @@ impl AgentEngine {
                             "error": error,
                         })
                         .to_string(),
-                    };
+                    });
                 }
             }
         };
@@ -1217,7 +1276,7 @@ impl AgentEngine {
                 args: args.clone(),
                 position,
                 total,
-                timeout_ms: tool_timeout_secs(&name) * 1000,
+                estimated_ms: tool_estimated_secs(&name) * 1000,
             },
         );
         if enabled_tools.is_some_and(|allowed| !allowed.iter().any(|item| item == &name)) {
@@ -1235,7 +1294,7 @@ impl AgentEngine {
                     error: Some(error.clone()),
                 },
             );
-            return ToolExec {
+            return Ok(ToolExec {
                 ok: false,
                 call_id,
                 name: name.clone(),
@@ -1243,18 +1302,16 @@ impl AgentEngine {
                 source: String::new(),
                 fetched_at: String::new(),
                 message_content: json!({ "tool": name, "error": error }).to_string(),
-            };
+            });
         }
         let started = Instant::now();
-        // A provider or a deterministic engine must not hold the whole model
-        // round hostage indefinitely. Timeout is applied at the orchestration
-        // boundary, so a slow tool becomes a normal evidence gap and the
-        // model can still synthesize from the tools that did finish.
-        let timeout_secs = tool_timeout_secs(&name);
+        // Tools have no orchestration deadline. They run asynchronously until
+        // they finish, fail at their own provider boundary, or the user
+        // explicitly cancels the durable task. The estimate is UI guidance
+        // only and never participates in control flow.
+        let estimated_ms = tool_estimated_secs(&name) * 1000;
         let dispatch = self.tools.dispatch(&name, args, &self.ctx);
         tokio::pin!(dispatch);
-        let deadline = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs));
-        tokio::pin!(deadline);
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(2));
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Consume the immediate first tick: ToolCallStarted already describes it.
@@ -1262,20 +1319,15 @@ impl AgentEngine {
         let outcome = loop {
             tokio::select! {
                 result = &mut dispatch => break result,
-                _ = &mut deadline => {
-                    break Err(AgentError::Tool {
-                        tool: name.clone(),
-                        msg: format!("超过 {timeout_secs} 秒，已自动降级并继续综合其他证据"),
-                    });
-                }
                 _ = heartbeat.tick() => {
                     let elapsed_ms = started.elapsed().as_millis() as u64;
+                    self.check_cancelled(task_id).await?;
                     send(tx, AgentEvent::ToolCallProgress {
                         call_id: call_id.clone(),
                         name: name.clone(),
                         elapsed_ms,
-                        timeout_ms: timeout_secs * 1000,
-                        stage: tool_progress_stage(&name, elapsed_ms, timeout_secs * 1000).to_string(),
+                        estimated_ms,
+                        stage: tool_progress_stage(&name, elapsed_ms, estimated_ms).to_string(),
                     });
                 }
             }
@@ -1297,7 +1349,7 @@ impl AgentEngine {
                         error: None,
                     },
                 );
-                ToolExec {
+                Ok(ToolExec {
                     ok: true,
                     call_id,
                     name: name.clone(),
@@ -1312,7 +1364,7 @@ impl AgentEngine {
                         "summary": result.summary_json,
                     })
                     .to_string(),
-                }
+                })
             }
             Err(e) => {
                 let error = e.to_string();
@@ -1329,7 +1381,7 @@ impl AgentEngine {
                         error: Some(error.clone()),
                     },
                 );
-                ToolExec {
+                Ok(ToolExec {
                     ok: false,
                     call_id,
                     name: name.clone(),
@@ -1341,7 +1393,7 @@ impl AgentEngine {
                         "error": error,
                     })
                     .to_string(),
-                }
+                })
             }
         }
     }
@@ -1362,6 +1414,18 @@ impl AgentEngine {
     }
 
     async fn save_state(&self, state: &TaskState, status: &str) -> Result<()> {
+        // Never resurrect a task after an external cancellation races with a
+        // round completion. The storage status is the durable source of truth.
+        if status != "cancelled"
+            && self
+                .ctx
+                .storage
+                .agent_task_get(&state.spec.id)
+                .await?
+                .is_some_and(|task| task.status == "cancelled")
+        {
+            return Err(AgentError::Cancelled(state.spec.id.clone()));
+        }
         let now = now_secs();
         self.ctx
             .storage
@@ -1436,9 +1500,10 @@ fn explicitly_requests_chart(prompt: &str) -> bool {
         .any(|needle| prompt.contains(needle))
 }
 
-/// Total wall-clock ceiling per tool. Large bounded experiments get a longer
-/// background allowance; ordinary research tools fail soft within one minute.
-fn tool_timeout_secs(name: &str) -> u64 {
+/// Typical duration shown to the user. This value is deliberately not used as
+/// a deadline: every tool keeps running until it completes or the user cancels
+/// the durable task.
+fn tool_estimated_secs(name: &str) -> u64 {
     match name {
         "scan_market" | "run_backtest" | "iterate_strategy" | "run_joinquant_research" => 180,
         "get_fundamentals" | "run_valuation" | "compare_stocks" | "research_news"
@@ -1447,9 +1512,9 @@ fn tool_timeout_secs(name: &str) -> u64 {
     }
 }
 
-fn tool_progress_stage(name: &str, elapsed_ms: u64, timeout_ms: u64) -> &'static str {
-    if timeout_ms.saturating_sub(elapsed_ms) <= 8_000 {
-        return "数据源响应较慢，接近自动降级时限";
+fn tool_progress_stage(name: &str, elapsed_ms: u64, estimated_ms: u64) -> &'static str {
+    if elapsed_ms > estimated_ms {
+        return "已超过预估时间，仍在后台继续，可随时取消";
     }
     if elapsed_ms < 2_500 {
         return "检查本地缓存并选择可用数据源";
@@ -1486,10 +1551,18 @@ fn send(tx: &mpsc::UnboundedSender<AgentEvent>, event: AgentEvent) {
 
 /// Merge a streamed tool-call fragment into the accumulator, by index.
 fn merge_tool_call(acc: &mut Vec<ToolCall>, delta: &ToolCall) {
-    let idx = delta
-        .index
-        .map(|i| i as usize)
-        .unwrap_or_else(|| acc.len().saturating_sub(1));
+    let idx = if let Some(index) = delta.index {
+        index as usize
+    } else if let Some(id) = delta.id.as_deref() {
+        // Some compatible streaming providers omit `index`. A fragment with
+        // an existing id continues that call; a new id starts a new slot.
+        acc.iter()
+            .position(|call| call.id.as_deref() == Some(id))
+            .unwrap_or(acc.len())
+    } else {
+        // Argument-only continuation chunks belong to the most recent call.
+        acc.len().saturating_sub(1)
+    };
     if acc.len() <= idx {
         acc.resize(idx + 1, ToolCall::default());
     }
@@ -1510,6 +1583,93 @@ fn merge_tool_call(acc: &mut Vec<ToolCall>, delta: &ToolCall) {
                 .arguments
                 .get_or_insert_with(String::new)
                 .push_str(args);
+        }
+    }
+}
+
+const MAX_TOOL_CALL_ID_BYTES: usize = 128;
+
+/// Normalize a provider id without inventing additional restrictions beyond
+/// what is required for a safe JSON/OpenAI-compatible transcript.
+fn valid_tool_call_id(raw: Option<&str>) -> Option<String> {
+    let id = raw?.trim();
+    if id.is_empty() || id.len() > MAX_TOOL_CALL_ID_BYTES || id.chars().any(char::is_control) {
+        return None;
+    }
+    Some(id.to_string())
+}
+
+fn next_recovered_call_id(prefix: &str, seen: &mut std::collections::HashSet<String>) -> String {
+    let mut attempt = 0_u32;
+    loop {
+        let candidate = if attempt == 0 {
+            prefix.to_string()
+        } else {
+            format!("{prefix}_{attempt}")
+        };
+        if seen.insert(candidate.clone()) {
+            return candidate;
+        }
+        attempt = attempt.saturating_add(1);
+    }
+}
+
+fn used_tool_call_ids(messages: &[ChatMessage]) -> std::collections::HashSet<String> {
+    messages
+        .iter()
+        .flat_map(|message| message.tool_calls.as_deref().unwrap_or(&[]))
+        .filter_map(|call| valid_tool_call_id(call.id.as_deref()))
+        .collect()
+}
+
+/// Remove empty slots created by sparse/malformed streaming indexes and fill
+/// the only optional payload that can be safely defaulted. This prevents an
+/// incomplete provider delta from becoming a malformed assistant tool call in
+/// the next request.
+fn sanitize_streamed_tool_calls(calls: &mut Vec<ToolCall>) {
+    calls.retain_mut(|call| {
+        let Some(function) = call.function.as_mut() else {
+            return false;
+        };
+        let Some(name) = function.name.as_deref().map(str::trim) else {
+            return false;
+        };
+        if name.is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
+            return false;
+        }
+        function.name = Some(name.to_string());
+        if function
+            .arguments
+            .as_deref()
+            .is_none_or(|arguments| arguments.trim().is_empty())
+        {
+            function.arguments = Some("{}".to_string());
+        }
+        true
+    });
+}
+
+/// Make a newly streamed batch globally unique against the complete durable
+/// history before the assistant message is persisted. Rewriting happens only
+/// for missing, invalid, or repeated ids; all valid unique provider ids stay
+/// byte-for-byte unchanged.
+fn normalize_new_tool_calls(calls: &mut [ToolCall], messages: &[ChatMessage], round: u32) {
+    let mut seen = used_tool_call_ids(messages);
+    for (index, call) in calls.iter_mut().enumerate() {
+        let provider_id = valid_tool_call_id(call.id.as_deref());
+        let unique = provider_id
+            .as_ref()
+            .is_some_and(|id| seen.insert(id.clone()));
+        if unique {
+            call.id = provider_id;
+        } else {
+            call.id = Some(next_recovered_call_id(
+                &format!("astock_call_r{round}_i{index}"),
+                &mut seen,
+            ));
+        }
+        if call.kind.as_deref().is_none_or(str::is_empty) {
+            call.kind = Some("function".to_string());
         }
     }
 }
@@ -1566,14 +1726,21 @@ async fn load_messages(storage: &Storage, conversation_id: &str) -> Result<Vec<C
 
 /// Repair an OpenAI tool-use transcript after a process interruption.
 ///
-/// MiniMax rejects a request with code 2013 when an assistant `tool_calls`
-/// entry is not followed by exactly one `tool` result for every call id. A
-/// desktop process can exit after the assistant message was persisted but
-/// before all background tools returned. Completed results are preserved;
-/// deterministic interruption results are inserted for missing calls, while
-/// orphan and duplicate tool rows are dropped.
+/// MiniMax rejects a request with code 2013 when tool-call ids are duplicated
+/// anywhere in the submitted history, or when an assistant `tool_calls` entry
+/// is not followed by exactly one `tool` result for every id. A desktop process
+/// can also exit after the assistant message was persisted but before all
+/// background tools returned.
+///
+/// This repair is global, deterministic, and order preserving. Valid unique
+/// provider ids remain unchanged. Later duplicates (including duplicates in a
+/// different round) are renamed together with their matching result. Missing
+/// results receive an explicit interruption payload; orphan/excess results are
+/// dropped.
 fn reconcile_tool_history(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     let mut out = Vec::with_capacity(messages.len());
+    let mut globally_seen = std::collections::HashSet::<String>::new();
+    let mut assistant_batch = 0usize;
     let mut index = 0usize;
     while index < messages.len() {
         let mut message = messages[index].clone();
@@ -1591,44 +1758,79 @@ fn reconcile_tool_history(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
             index += 1;
             continue;
         };
-        if message.role != "assistant" || calls.is_empty() {
+        if message.role != "assistant" {
+            tracing::warn!(role = %message.role, "dropping tool_calls from non-assistant message");
+            message.tool_calls = None;
+            out.push(message);
+            index += 1;
+            continue;
+        }
+        if calls.is_empty() {
+            message.tool_calls = None;
             out.push(message);
             index += 1;
             continue;
         }
 
-        // Normalize missing/duplicate call ids before matching results.
-        let mut seen_ids = std::collections::HashSet::new();
+        // Remember the provider ids so contiguous results can be paired by
+        // occurrence even if two broken calls used the same id.
+        let mut source_ids = Vec::with_capacity(calls.len());
+        let mut expected = Vec::with_capacity(calls.len());
         for (call_index, call) in calls.iter_mut().enumerate() {
-            let valid = call
+            let source_id = call
                 .id
                 .as_deref()
-                .is_some_and(|id| !id.trim().is_empty() && seen_ids.insert(id.to_string()));
-            if !valid {
-                let recovered = format!("recovered_call_{index}_{call_index}");
-                seen_ids.insert(recovered.clone());
-                call.id = Some(recovered);
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string);
+            let provider_id = valid_tool_call_id(call.id.as_deref());
+            let unique = provider_id
+                .as_ref()
+                .is_some_and(|id| globally_seen.insert(id.clone()));
+            let assigned = if unique {
+                provider_id.expect("checked Some above")
+            } else {
+                next_recovered_call_id(
+                    &format!("astock_recovered_b{assistant_batch}_i{call_index}"),
+                    &mut globally_seen,
+                )
+            };
+            call.id = Some(assigned.clone());
+            if call.kind.as_deref().is_none_or(str::is_empty) {
+                call.kind = Some("function".to_string());
             }
+            source_ids.push(source_id);
+            expected.push(assigned);
         }
-        let expected: Vec<String> = calls.iter().filter_map(|call| call.id.clone()).collect();
+        assistant_batch += 1;
         out.push(message);
 
         let mut cursor = index + 1;
-        let mut results = std::collections::HashMap::<String, ChatMessage>::new();
+        let mut results = Vec::<ChatMessage>::new();
         while cursor < messages.len() && messages[cursor].role == "tool" {
-            let result = messages[cursor].clone();
-            if let Some(call_id) = result.tool_call_id.clone() {
-                if expected.contains(&call_id) {
-                    results.entry(call_id).or_insert(result);
-                } else {
-                    tracing::warn!(%call_id, "dropping unmatched Agent tool result");
-                }
-            }
+            results.push(messages[cursor].clone());
             cursor += 1;
         }
 
-        for call_id in expected {
-            if let Some(result) = results.remove(&call_id) {
+        let mut consumed = vec![false; results.len()];
+        for (call_index, call_id) in expected.into_iter().enumerate() {
+            let result_index = source_ids[call_index].as_deref().and_then(|source_id| {
+                results
+                    .iter()
+                    .enumerate()
+                    .position(|(result_index, result)| {
+                        !consumed[result_index]
+                            && result
+                                .tool_call_id
+                                .as_deref()
+                                .map(str::trim)
+                                .is_some_and(|result_id| result_id == source_id)
+                    })
+            });
+            if let Some(result_index) = result_index {
+                consumed[result_index] = true;
+                let mut result = results[result_index].clone();
+                result.tool_call_id = Some(call_id);
                 out.push(result);
             } else {
                 tracing::warn!(%call_id, "repairing interrupted Agent tool call without a result");
@@ -1642,9 +1844,55 @@ fn reconcile_tool_history(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
                 ));
             }
         }
+        for (result_index, result) in results.iter().enumerate() {
+            if !consumed[result_index] {
+                tracing::warn!(
+                    tool_call_id = ?result.tool_call_id,
+                    "dropping unmatched or duplicate Agent tool result"
+                );
+            }
+        }
         index = cursor;
     }
     out
+}
+
+/// Validate the exact provider transcript shape after reconciliation. This is
+/// intentionally strict: a malformed history is stopped locally instead of
+/// spending quota on a request MiniMax must reject with code 2013.
+fn validate_tool_history(messages: &[ChatMessage]) -> std::result::Result<(), String> {
+    let mut globally_seen = std::collections::HashSet::<String>::new();
+    let mut index = 0usize;
+    while index < messages.len() {
+        let message = &messages[index];
+        if message.role == "tool" {
+            return Err(format!("第 {index} 条消息是孤立工具结果"));
+        }
+        let calls = message.tool_calls.as_deref().unwrap_or(&[]);
+        if calls.is_empty() {
+            index += 1;
+            continue;
+        }
+        if message.role != "assistant" {
+            return Err(format!("第 {index} 条非助手消息包含工具调用"));
+        }
+        for (offset, call) in calls.iter().enumerate() {
+            let call_id = valid_tool_call_id(call.id.as_deref())
+                .ok_or_else(|| format!("第 {index} 条消息的第 {offset} 个调用 ID 非法"))?;
+            if !globally_seen.insert(call_id.clone()) {
+                return Err(format!("工具调用 ID {call_id} 在历史中重复"));
+            }
+            let result_index = index + 1 + offset;
+            let result = messages
+                .get(result_index)
+                .ok_or_else(|| format!("工具调用 {call_id} 缺少结果"))?;
+            if result.role != "tool" || result.tool_call_id.as_deref() != Some(call_id.as_str()) {
+                return Err(format!("工具调用 {call_id} 的结果顺序或 ID 不匹配"));
+            }
+        }
+        index += 1 + calls.len();
+    }
+    Ok(())
 }
 
 /// Marker prefix of the synthetic snapshot message produced by
@@ -1947,14 +2195,123 @@ fn extract_section(body: &str, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
+    use async_trait::async_trait;
     use serde_json::json;
 
+    use astock_minimax::{ChatChoice, ChatChunk, ToolCallFunction};
     use astock_storage::StorageConfig;
 
-    use crate::testing::{EchoTool, NoopMarket, ScriptedChat};
-    use crate::tools::AgentTool;
+    use crate::testing::{EchoTool, NoopMarket, ScriptedChat, ScriptedReply};
+    use crate::tools::{AgentTool, ToolResult};
+
+    struct SlowTool;
+
+    #[async_trait]
+    impl AgentTool for SlowTool {
+        fn name(&self) -> &'static str {
+            "slow_tool"
+        }
+
+        fn description(&self) -> &'static str {
+            "用于验证无固定超时的异步测试工具"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        fn cacheable(&self) -> bool {
+            false
+        }
+
+        async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolResult> {
+            tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+            Ok(ToolResult {
+                summary_json: json!({"completed": true}),
+                full_json: None,
+                cache_key: String::new(),
+                source: "test".to_string(),
+                fetched_at: "2026-01-01T00:00:00Z".to_string(),
+            })
+        }
+    }
+
+    struct BarrierTool {
+        barrier: Arc<tokio::sync::Barrier>,
+        started: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl AgentTool for BarrierTool {
+        fn name(&self) -> &'static str {
+            "barrier_tool"
+        }
+
+        fn description(&self) -> &'static str {
+            "用于验证工具批次并发启动的异步测试工具"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        fn cacheable(&self) -> bool {
+            false
+        }
+
+        async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolResult> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            self.barrier.wait().await;
+            Ok(ToolResult {
+                summary_json: args,
+                full_json: None,
+                cache_key: String::new(),
+                source: "test".to_string(),
+                fetched_at: "2026-01-01T00:00:00Z".to_string(),
+            })
+        }
+    }
+
+    struct DropSignal(Arc<AtomicBool>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    struct NeverTool {
+        started: Arc<AtomicBool>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl AgentTool for NeverTool {
+        fn name(&self) -> &'static str {
+            "never_tool"
+        }
+
+        fn description(&self) -> &'static str {
+            "用于验证主动取消的异步测试工具"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        fn cacheable(&self) -> bool {
+            false
+        }
+
+        async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolResult> {
+            self.started.store(true, Ordering::SeqCst);
+            let _drop_signal = DropSignal(Arc::clone(&self.dropped));
+            futures::future::pending::<()>().await;
+            unreachable!("pending test tool only exits when its future is dropped")
+        }
+    }
 
     fn build_engine(storage: Storage, chat: Arc<ScriptedChat>, echo: Arc<EchoTool>) -> AgentEngine {
         let ctx = ToolContext {
@@ -1986,12 +2343,208 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_tools_have_short_deadlines_and_bounded_experiments_have_room() {
-        assert_eq!(tool_timeout_secs("run_full_analysis"), 45);
-        assert_eq!(tool_timeout_secs("compare_stocks"), 60);
-        assert_eq!(tool_timeout_secs("iterate_strategy"), 180);
+    fn tool_estimates_are_guidance_instead_of_deadlines() {
+        assert_eq!(tool_estimated_secs("run_full_analysis"), 45);
+        assert_eq!(tool_estimated_secs("compare_stocks"), 60);
+        assert_eq!(tool_estimated_secs("iterate_strategy"), 180);
         assert!(tool_progress_stage("compare_stocks", 5_000, 60_000).contains("并行获取"));
-        assert!(tool_progress_stage("compare_stocks", 55_000, 60_000).contains("自动降级"));
+        assert!(tool_progress_stage("compare_stocks", 61_000, 60_000).contains("仍在后台继续"));
+    }
+
+    #[test]
+    fn tool_event_contract_exposes_estimate_without_deadline() {
+        let event = AgentEvent::ToolCallStarted {
+            call_id: "c1".to_string(),
+            name: "echo".to_string(),
+            args: json!({}),
+            position: 1,
+            total: 1,
+            estimated_ms: 45_000,
+        };
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["estimated_ms"], 45_000);
+        assert!(value.get("timeout_ms").is_none());
+    }
+
+    #[tokio::test]
+    async fn every_tool_in_batch_is_polled_asynchronously() {
+        let (_dir, storage) = test_storage();
+        let chat = Arc::new(ScriptedChat::new("test-model"));
+        let calls = [0_u32, 1_u32]
+            .into_iter()
+            .map(|index| ToolCall {
+                id: Some(format!("parallel-{index}")),
+                kind: Some("function".to_string()),
+                index: Some(index),
+                function: Some(ToolCallFunction {
+                    name: Some("barrier_tool".to_string()),
+                    arguments: Some(json!({"index": index}).to_string()),
+                }),
+            })
+            .collect();
+        chat.push(ScriptedReply::Chunks(vec![ChatChunk {
+            choices: vec![ChatChoice {
+                index: Some(0),
+                delta: Some(ChatMessage {
+                    role: "assistant".to_string(),
+                    tool_calls: Some(calls),
+                    ..Default::default()
+                }),
+                finish_reason: Some("tool_calls".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }]));
+        chat.push_text("并行工具均已完成");
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ctx = ToolContext {
+            market: Arc::new(NoopMarket),
+            storage,
+            graph: None,
+            fundamental: None,
+            joinquant: None,
+            minimax_search: None,
+            finance_news: None,
+            iwencai: None,
+        };
+        let engine = AgentEngine::new(
+            chat,
+            ToolRegistry::new(vec![Arc::new(BarrierTool {
+                barrier: Arc::clone(&barrier),
+                started: Arc::clone(&started),
+            }) as Arc<dyn AgentTool>]),
+            ctx,
+            EngineConfig::default(),
+        );
+        let stream = engine.run_task(spec("parallel-tools"));
+        tokio::time::timeout(std::time::Duration::from_secs(2), barrier.wait())
+            .await
+            .expect("both tools must reach the barrier concurrently");
+        let events = collect(stream).await;
+        assert_eq!(started.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ToolCallFinished { success: true, .. }))
+                .count(),
+            2
+        );
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Completed { .. })));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tool_runs_past_estimate_until_success() {
+        let (_dir, storage) = test_storage();
+        let chat = Arc::new(ScriptedChat::new("test-model"));
+        chat.push_tool_call("slow-id", "slow_tool", json!({}));
+        chat.push_text("长任务已经完成");
+        let ctx = ToolContext {
+            market: Arc::new(NoopMarket),
+            storage,
+            graph: None,
+            fundamental: None,
+            joinquant: None,
+            minimax_search: None,
+            finance_news: None,
+            iwencai: None,
+        };
+        let engine = AgentEngine::new(
+            chat,
+            ToolRegistry::new(vec![Arc::new(SlowTool) as Arc<dyn AgentTool>]),
+            ctx,
+            EngineConfig::default(),
+        );
+        let mut stream = engine.run_task(spec("slow-past-estimate"));
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            let started = matches!(
+                event,
+                AgentEvent::ToolCallStarted {
+                    estimated_ms: 45_000,
+                    ..
+                }
+            );
+            events.push(event);
+            if started {
+                break;
+            }
+        }
+        tokio::time::advance(std::time::Duration::from_secs(130)).await;
+        tokio::task::yield_now().await;
+        events.extend(stream.collect::<Vec<_>>().await);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolCallFinished {
+                success: true,
+                elapsed_ms,
+                ..
+            } if *elapsed_ms >= 120_000
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Completed { .. })));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolCallFinished {
+                error: Some(error),
+                ..
+            } if error.contains("超时") || error.contains("自动降级")
+        )));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_task_drops_in_flight_tool_future() {
+        let (_dir, storage) = test_storage();
+        let chat = Arc::new(ScriptedChat::new("test-model"));
+        chat.push_tool_call("never-id", "never_tool", json!({}));
+        let started = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let ctx = ToolContext {
+            market: Arc::new(NoopMarket),
+            storage,
+            graph: None,
+            fundamental: None,
+            joinquant: None,
+            minimax_search: None,
+            finance_news: None,
+            iwencai: None,
+        };
+        let engine = AgentEngine::new(
+            chat,
+            ToolRegistry::new(vec![Arc::new(NeverTool {
+                started: Arc::clone(&started),
+                dropped: Arc::clone(&dropped),
+            }) as Arc<dyn AgentTool>]),
+            ctx,
+            EngineConfig::default(),
+        );
+        let mut stream = engine.run_task(spec("cancel-in-flight"));
+        while let Some(event) = stream.next().await {
+            if matches!(event, AgentEvent::ToolCallStarted { .. }) {
+                break;
+            }
+        }
+        tokio::task::yield_now().await;
+        assert!(started.load(Ordering::SeqCst));
+        assert!(engine.cancel_task("cancel-in-flight").await.unwrap());
+        tokio::time::advance(std::time::Duration::from_secs(3)).await;
+        tokio::task::yield_now().await;
+        let remaining = stream.collect::<Vec<_>>().await;
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(remaining
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Failed { error } if error == "任务已取消")));
+        let record = engine
+            .ctx
+            .storage
+            .agent_task_get("cancel-in-flight")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.status, "cancelled");
     }
 
     #[tokio::test]
@@ -2414,6 +2967,16 @@ mod tests {
         assert!(engine.cancel_task("t4").await.unwrap());
         let record = storage.agent_task_get("t4").await.unwrap().unwrap();
         assert_eq!(record.status, "cancelled");
+        let cancelled_state: TaskState = serde_json::from_str(&record.state_json).unwrap();
+        assert!(matches!(
+            engine.save_state(&cancelled_state, "running").await,
+            Err(AgentError::Cancelled(task_id)) if task_id == "t4"
+        ));
+        assert_eq!(
+            storage.agent_task_get("t4").await.unwrap().unwrap().status,
+            "cancelled",
+            "a late tool completion must not resurrect a cancelled task"
+        );
 
         let err = match engine.resume_task("t4").await {
             Err(e) => e,
@@ -2543,6 +3106,187 @@ mod tests {
         assert_pair_integrity(&repaired);
     }
 
+    #[test]
+    fn duplicate_tool_call_ids_across_rounds_are_rewritten_with_results() {
+        let messages = vec![
+            ChatMessage::system("system"),
+            ChatMessage::user("分析"),
+            assistant_call("same-id", "get_quote", json!({"symbol": "600519"})),
+            ChatMessage::tool_result("same-id", "first round"),
+            assistant_call("same-id", "get_kline", json!({"symbol": "600519"})),
+            ChatMessage::tool_result("same-id", "second round"),
+        ];
+        assert!(validate_tool_history(&messages)
+            .unwrap_err()
+            .contains("历史中重复"));
+
+        let repaired = reconcile_tool_history(messages);
+        let first_id = repaired[2].tool_calls.as_ref().unwrap()[0]
+            .id
+            .clone()
+            .unwrap();
+        let second_id = repaired[4].tool_calls.as_ref().unwrap()[0]
+            .id
+            .clone()
+            .unwrap();
+        assert_eq!(
+            first_id, "same-id",
+            "first valid provider id stays unchanged"
+        );
+        assert_ne!(first_id, second_id, "later round receives a fresh id");
+        assert_eq!(repaired[3].tool_call_id.as_deref(), Some(first_id.as_str()));
+        assert_eq!(
+            repaired[5].tool_call_id.as_deref(),
+            Some(second_id.as_str())
+        );
+        assert_eq!(repaired[3].content_text().as_deref(), Some("first round"));
+        assert_eq!(repaired[5].content_text().as_deref(), Some("second round"));
+        assert_pair_integrity(&repaired);
+    }
+
+    #[test]
+    fn duplicate_ids_inside_parallel_batch_are_rewritten_by_occurrence() {
+        let first = assistant_call("duplicate", "get_quote", json!({}))
+            .tool_calls
+            .unwrap()
+            .remove(0);
+        let second = assistant_call("duplicate", "get_kline", json!({}))
+            .tool_calls
+            .unwrap()
+            .remove(0);
+        let messages = vec![
+            ChatMessage::system("system"),
+            ChatMessage {
+                role: "assistant".to_string(),
+                tool_calls: Some(vec![first, second]),
+                ..Default::default()
+            },
+            ChatMessage::tool_result("duplicate", "first result"),
+            ChatMessage::tool_result("duplicate", "second result"),
+        ];
+
+        let repaired = reconcile_tool_history(messages);
+        let calls = repaired[1].tool_calls.as_ref().unwrap();
+        let first_id = calls[0].id.as_deref().unwrap();
+        let second_id = calls[1].id.as_deref().unwrap();
+        assert_eq!(first_id, "duplicate");
+        assert_ne!(first_id, second_id);
+        assert_eq!(repaired[2].tool_call_id.as_deref(), Some(first_id));
+        assert_eq!(repaired[3].tool_call_id.as_deref(), Some(second_id));
+        assert_eq!(repaired[2].content_text().as_deref(), Some("first result"));
+        assert_eq!(repaired[3].content_text().as_deref(), Some("second result"));
+        assert_pair_integrity(&repaired);
+    }
+
+    #[test]
+    fn missing_invalid_and_colliding_ids_are_recovered_deterministically() {
+        let mut missing = assistant_call("placeholder", "get_quote", json!({}));
+        missing.tool_calls.as_mut().unwrap()[0].id = None;
+        let invalid_id = "x".repeat(MAX_TOOL_CALL_ID_BYTES + 1);
+        let messages = vec![
+            ChatMessage::system("system"),
+            missing,
+            assistant_call(&invalid_id, "get_kline", json!({})),
+            ChatMessage::tool_result(&invalid_id, "invalid but matched"),
+            assistant_call("astock_recovered_b0_i0", "get_quote", json!({})),
+            ChatMessage::tool_result("astock_recovered_b0_i0", "colliding provider id"),
+        ];
+        let first = reconcile_tool_history(messages.clone());
+        let second = reconcile_tool_history(messages);
+        assert_eq!(dump(&first), dump(&second));
+        assert_pair_integrity(&first);
+    }
+
+    #[tokio::test]
+    async fn provider_reused_id_is_normalized_before_next_request_and_persistence() {
+        let (_dir, storage) = test_storage();
+        let chat = Arc::new(ScriptedChat::new("test-model"));
+        chat.push_tool_call("provider-reused", "echo", json!({"text": "one"}));
+        chat.push_tool_call("provider-reused", "echo", json!({"text": "two"}));
+        chat.push_text("两轮工具均已完成");
+        let echo = Arc::new(EchoTool::new());
+        let engine = build_engine(storage.clone(), chat.clone(), echo);
+
+        let events = collect(engine.run_task(spec("provider-reused-id"))).await;
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Completed { .. })));
+        {
+            let requests = chat.requests.lock().unwrap();
+            assert_eq!(requests.len(), 3);
+            for request in requests.iter() {
+                validate_tool_history(&request.messages).unwrap();
+            }
+            let ids: Vec<_> = requests[2]
+                .messages
+                .iter()
+                .flat_map(|message| message.tool_calls.as_deref().unwrap_or(&[]))
+                .filter_map(|call| call.id.as_deref())
+                .collect();
+            assert_eq!(ids.len(), 2);
+            assert_eq!(ids[0], "provider-reused");
+            assert_ne!(ids[0], ids[1]);
+        }
+        let persisted = load_messages(&storage, "provider-reused-id").await.unwrap();
+        validate_tool_history(&persisted).unwrap();
+        assert_pair_integrity(&persisted);
+    }
+
+    #[test]
+    fn streaming_calls_without_indexes_keep_distinct_ids() {
+        let mut calls = Vec::new();
+        for (id, name) in [("one", "get_quote"), ("two", "get_kline")] {
+            merge_tool_call(
+                &mut calls,
+                &ToolCall {
+                    id: Some(id.to_string()),
+                    kind: Some("function".to_string()),
+                    index: None,
+                    function: Some(astock_minimax::ToolCallFunction {
+                        name: Some(name.to_string()),
+                        arguments: Some("{}".to_string()),
+                    }),
+                },
+            );
+        }
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id.as_deref(), Some("one"));
+        assert_eq!(calls[1].id.as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn sparse_stream_indexes_cannot_create_empty_tool_calls() {
+        let mut calls = Vec::new();
+        merge_tool_call(
+            &mut calls,
+            &ToolCall {
+                id: None,
+                kind: Some("function".to_string()),
+                index: Some(2),
+                function: Some(ToolCallFunction {
+                    name: Some("get_quote".to_string()),
+                    arguments: None,
+                }),
+            },
+        );
+        assert_eq!(
+            calls.len(),
+            3,
+            "stream accumulator contains sparse placeholders"
+        );
+        sanitize_streamed_tool_calls(&mut calls);
+        normalize_new_tool_calls(&mut calls, &[], 1);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id.as_deref(), Some("astock_call_r1_i0"));
+        assert_eq!(
+            calls[0]
+                .function
+                .as_ref()
+                .and_then(|function| function.arguments.as_deref()),
+            Some("{}")
+        );
+    }
+
     /// A fat multi-round history: system + user + `rounds` tool pairs + a
     /// trailing assistant note.
     fn fat_history(rounds: usize) -> Vec<ChatMessage> {
@@ -2570,11 +3314,14 @@ mod tests {
     /// left unanswered: the sequence is a valid provider message list.
     fn assert_pair_integrity(messages: &[ChatMessage]) {
         let mut pending: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for m in messages {
             match m.role.as_str() {
                 "assistant" => {
                     for c in m.tool_calls.as_deref().unwrap_or(&[]) {
-                        pending.push(c.id.clone().unwrap_or_default());
+                        let id = c.id.clone().unwrap_or_default();
+                        assert!(seen.insert(id.clone()), "duplicate tool call id: {id}");
+                        pending.push(id);
                     }
                 }
                 "tool" => {
@@ -2592,6 +3339,7 @@ mod tests {
             pending.is_empty(),
             "tool calls without results: {pending:?}"
         );
+        validate_tool_history(messages).unwrap();
     }
 
     fn snapshot_count(messages: &[ChatMessage]) -> usize {
