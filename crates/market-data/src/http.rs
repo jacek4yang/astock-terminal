@@ -406,6 +406,66 @@ impl HttpClient {
         }
     }
 
+    /// POST an `application/x-www-form-urlencoded` body and decode JSON.
+    /// Used by public disclosure indexes such as CNInfo. It shares the same
+    /// per-host adaptive limiter and failure bookkeeping as every market
+    /// request, so a disclosure refresh cannot bypass global rate controls.
+    pub async fn post_form_json(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        form: &[(String, String)],
+    ) -> Result<serde_json::Value, DataError> {
+        let host = Self::host_key(url);
+        self.throttle(&host).await;
+        let mut request = self
+            .client_for(url)
+            .post(url)
+            .header(reqwest::header::USER_AGENT, self.current_ua())
+            .form(form);
+        for (key, value) in headers {
+            request = request.header(key, value);
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                self.on_failure(&host);
+                if error.is_timeout() {
+                    return Err(DataError::Timeout(host));
+                }
+                return Err(DataError::Network {
+                    host,
+                    message: error.to_string(),
+                });
+            }
+        };
+        let status = response.status();
+        if status.as_u16() == 429 {
+            self.on_failure(&host);
+            return Err(DataError::RateLimited(host));
+        }
+        if !status.is_success() {
+            self.on_failure(&host);
+            return Err(DataError::Network {
+                host,
+                message: format!("HTTP {status}"),
+            });
+        }
+        match response.json::<serde_json::Value>().await {
+            Ok(value) => {
+                self.on_success(&host);
+                Ok(value)
+            }
+            Err(error) => {
+                self.on_failure(&host);
+                Err(DataError::Parse {
+                    upstream: host,
+                    message: error.to_string(),
+                })
+            }
+        }
+    }
+
     /// Try each host in `hosts` in order until one yields a usable payload.
     ///
     /// A payload is usable when `data` is non-null and — for endpoints

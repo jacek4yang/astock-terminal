@@ -303,6 +303,7 @@ dependencies = [
  "astock-backtest",
  "astock-chanlun",
  "astock-core",
+ "astock-disclosure",
  "astock-fundamental",
  "astock-graph",
  "astock-market-data",
@@ -334,6 +335,7 @@ dependencies = [
  "astock-backtest",
  "astock-chanlun",
  "astock-core",
+ "astock-disclosure",
  "astock-entity-linking",
  "astock-fundamental",
  "astock-graph",
@@ -404,6 +406,22 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "astock-disclosure"
+version = "5.0.1"
+dependencies = [
+ "astock-storage",
+ "chrono",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]

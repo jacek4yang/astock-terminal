@@ -102,6 +102,7 @@ const TOOL_GROUPS = [
     label: "外部研究数据",
     tools: [
       "research_news",
+      "research_disclosures",
       "search_web",
       "fetch_source_document",
       "read_document",

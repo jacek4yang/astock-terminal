@@ -702,6 +702,122 @@ pub(crate) const MIGRATIONS: &[(u32, &str)] = &[
         ON news_user_state(pinned DESC,favorite DESC,ignored,is_read,updated_at DESC);
     "#,
     ),
+    (
+        14,
+        r#"
+    -- Canonical formal-disclosure data plane. Upstream entry points are kept
+    -- separately so a mirror can never silently impersonate an official URL.
+    CREATE TABLE IF NOT EXISTS disclosures (
+        disclosure_id       TEXT PRIMARY KEY,
+        stable_key          TEXT NOT NULL,
+        title               TEXT NOT NULL,
+        normalized_title    TEXT NOT NULL,
+        category            TEXT NOT NULL,
+        status              TEXT NOT NULL,
+        published_at        INTEGER,
+        publication_precision TEXT NOT NULL,
+        first_seen_at       INTEGER NOT NULL,
+        last_seen_at        INTEGER NOT NULL,
+        revision_of         TEXT REFERENCES disclosures(disclosure_id),
+        cancelled_by        TEXT REFERENCES disclosures(disclosure_id),
+        source_version_id   TEXT,
+        parser_version      TEXT NOT NULL,
+        extraction_status   TEXT NOT NULL,
+        review_reason       TEXT,
+        created_at          INTEGER NOT NULL,
+        updated_at          INTEGER NOT NULL,
+        UNIQUE(stable_key,status)
+    );
+    CREATE INDEX IF NOT EXISTS idx_disclosures_timeline
+        ON disclosures(published_at DESC,first_seen_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_disclosures_category
+        ON disclosures(category,status,published_at DESC);
+
+    CREATE TABLE IF NOT EXISTS disclosure_securities (
+        disclosure_id TEXT NOT NULL REFERENCES disclosures(disclosure_id) ON DELETE CASCADE,
+        security_code TEXT NOT NULL,
+        security_name TEXT NOT NULL DEFAULT '',
+        market        TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY(disclosure_id,security_code)
+    );
+    CREATE INDEX IF NOT EXISTS idx_disclosure_security_timeline
+        ON disclosure_securities(security_code,disclosure_id);
+
+    CREATE TABLE IF NOT EXISTS disclosure_sources (
+        source_id       TEXT PRIMARY KEY,
+        disclosure_id   TEXT NOT NULL REFERENCES disclosures(disclosure_id) ON DELETE CASCADE,
+        provider_id     TEXT NOT NULL,
+        provider_name   TEXT NOT NULL,
+        authority       TEXT NOT NULL,
+        entry_kind      TEXT NOT NULL,
+        upstream_id     TEXT,
+        original_url    TEXT NOT NULL,
+        discovered_at   INTEGER NOT NULL,
+        last_success_at INTEGER,
+        latency_ms      INTEGER,
+        is_primary      INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(provider_id,original_url)
+    );
+    CREATE INDEX IF NOT EXISTS idx_disclosure_sources_document
+        ON disclosure_sources(disclosure_id,is_primary DESC,discovered_at);
+
+    CREATE TABLE IF NOT EXISTS disclosure_attachments (
+        attachment_id    TEXT PRIMARY KEY,
+        disclosure_id    TEXT NOT NULL REFERENCES disclosures(disclosure_id) ON DELETE CASCADE,
+        parent_attachment_id TEXT REFERENCES disclosure_attachments(attachment_id),
+        name             TEXT NOT NULL,
+        original_url     TEXT NOT NULL,
+        media_type       TEXT NOT NULL,
+        byte_size        INTEGER,
+        content_hash     TEXT,
+        source_version_id TEXT,
+        extraction_status TEXT NOT NULL,
+        page_count       INTEGER,
+        parser_version   TEXT NOT NULL,
+        review_reason    TEXT,
+        UNIQUE(disclosure_id,original_url)
+    );
+
+    CREATE TABLE IF NOT EXISTS disclosure_events (
+        event_id          TEXT PRIMARY KEY,
+        disclosure_id     TEXT NOT NULL REFERENCES disclosures(disclosure_id) ON DELETE CASCADE,
+        event_type        TEXT NOT NULL,
+        fields_json       TEXT NOT NULL,
+        evidence_json     TEXT NOT NULL,
+        parser_version    TEXT NOT NULL,
+        created_at        INTEGER NOT NULL,
+        UNIQUE(disclosure_id,event_type,fields_json)
+    );
+    CREATE INDEX IF NOT EXISTS idx_disclosure_events_type
+        ON disclosure_events(event_type,created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS disclosure_provider_state (
+        provider_id       TEXT PRIMARY KEY,
+        provider_name     TEXT NOT NULL,
+        authority         TEXT NOT NULL,
+        enabled           INTEGER NOT NULL DEFAULT 1,
+        cursor_json       TEXT NOT NULL DEFAULT '{}',
+        last_attempt_at   INTEGER,
+        last_success_at   INTEGER,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        retry_after       INTEGER,
+        target_latency_secs INTEGER NOT NULL,
+        last_error        TEXT,
+        updated_at        INTEGER NOT NULL
+    );
+
+    -- Evidence coordinates are nullable because many HTML and legacy PDFs
+    -- expose only spans. A scan with no reliable text is explicitly reviewed.
+    ALTER TABLE source_document_segments ADD COLUMN attachment_id TEXT;
+    ALTER TABLE source_document_segments ADD COLUMN page_x REAL;
+    ALTER TABLE source_document_segments ADD COLUMN page_y REAL;
+    ALTER TABLE source_document_segments ADD COLUMN page_width REAL;
+    ALTER TABLE source_document_segments ADD COLUMN page_height REAL;
+    ALTER TABLE source_document_segments ADD COLUMN table_index INTEGER;
+    ALTER TABLE source_document_segments ADD COLUMN row_index INTEGER;
+    ALTER TABLE source_document_segments ADD COLUMN column_index INTEGER;
+    "#,
+    ),
 ];
 
 /// Current unix time in seconds. All timestamps in this crate are stored as
@@ -859,6 +975,12 @@ mod tests {
             "field_lineage_records",
             "data_reconciliation_results",
             "news_user_state",
+            "disclosures",
+            "disclosure_securities",
+            "disclosure_sources",
+            "disclosure_attachments",
+            "disclosure_events",
+            "disclosure_provider_state",
         ] {
             let count: i64 = conn
                 .query_row(

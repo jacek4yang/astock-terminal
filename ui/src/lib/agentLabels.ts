@@ -27,6 +27,7 @@ const TOOL_NAMES: Record<string, string> = {
   read_document: "读取原文证据位置",
   compare_source_evidence: "多来源字段对账",
   research_news: "财经新闻与公告研究",
+  research_disclosures: "正式披露与修订核验",
   get_market_regime: "市场环境识别",
   market_regime: "市场环境识别",
   industry_chain: "产业链位置分析",

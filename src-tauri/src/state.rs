@@ -72,6 +72,71 @@ pub struct BacktestState {
     pub cancel: Mutex<Option<CancellationToken>>,
 }
 
+/// Detailed, pollable formal-disclosure synchronization state. It survives
+/// page switches and exposes enough information to diagnose slow providers.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DisclosureSyncSnapshot {
+    pub job_id: Option<String>,
+    pub running: bool,
+    pub status: String,
+    pub phase: String,
+    pub progress: u8,
+    pub current_provider: String,
+    pub current_item: String,
+    pub discovered: u32,
+    pub normalized: u32,
+    pub inserted: u32,
+    pub deduplicated: u32,
+    pub primary_verified: u32,
+    pub needs_review: u32,
+    pub failures: u32,
+    pub estimated_remaining_seconds: Option<u32>,
+    pub recent_logs: Vec<String>,
+    pub started_at: Option<i64>,
+    pub updated_at: i64,
+    pub error: Option<String>,
+}
+
+impl Default for DisclosureSyncSnapshot {
+    fn default() -> Self {
+        Self {
+            job_id: None,
+            running: false,
+            status: "idle".into(),
+            phase: "尚未同步".into(),
+            progress: 0,
+            current_provider: String::new(),
+            current_item: String::new(),
+            discovered: 0,
+            normalized: 0,
+            inserted: 0,
+            deduplicated: 0,
+            primary_verified: 0,
+            needs_review: 0,
+            failures: 0,
+            estimated_remaining_seconds: None,
+            recent_logs: Vec::new(),
+            started_at: None,
+            updated_at: 0,
+            error: None,
+        }
+    }
+}
+
+pub struct DisclosureSyncState {
+    pub snapshot: Mutex<DisclosureSyncSnapshot>,
+    pub cancel: Mutex<Option<CancellationToken>>,
+}
+
+impl Default for DisclosureSyncState {
+    fn default() -> Self {
+        Self {
+            snapshot: Mutex::new(DisclosureSyncSnapshot::default()),
+            cancel: Mutex::new(None),
+        }
+    }
+}
+
 impl Default for BacktestState {
     fn default() -> Self {
         Self {
@@ -126,6 +191,8 @@ pub struct AppState {
     pub scan: Arc<ScanState>,
     /// Background backtest coordination state.
     pub backtest: Arc<BacktestState>,
+    /// Background formal-disclosure synchronization and diagnostics.
+    pub disclosure_sync: Arc<DisclosureSyncState>,
     /// Live agent event-forwarder tasks, keyed by task id. Entries are
     /// removed when the event stream ends (Completed / Failed / Suspended)
     /// or on `agent_cancel`.
@@ -217,6 +284,7 @@ impl AppState {
             minimax: RwLock::new(None),
             scan: Arc::new(ScanState::default()),
             backtest: Arc::new(BacktestState::default()),
+            disclosure_sync: Arc::new(DisclosureSyncState::default()),
             agent_handles: Arc::new(Mutex::new(HashMap::new())),
         })
     }

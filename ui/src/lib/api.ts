@@ -2071,3 +2071,62 @@ export const getLiftStage = (start: string, end: string) =>
   cmd<DcResult<LiftStageRow>>("get_lift_stage", { start, end });
 export const getNotices = (code: string, days?: number) =>
   cmd<DcResult<NoticeRow>>("get_notices", days != null ? { code, days } : { code });
+
+// ==================== 正式披露中心 ====================
+
+export interface DisclosureSecurity { code: string; name: string; market: string }
+export interface DisclosureSource {
+  source_id: string; provider_id: string; provider_name: string; authority: string;
+  authority_name: string; entry_kind: string; upstream_id: string | null;
+  original_url: string; discovered_at: number; latency_ms: number | null; is_primary: boolean;
+}
+export interface DisclosureAttachment {
+  attachment_id: string; parent_attachment_id: string | null; name: string; original_url: string;
+  media_type: string; byte_size: number | null; content_hash: string | null;
+  source_version_id: string | null; extraction_status: string; page_count: number | null;
+  parser_version: string; review_reason: string | null;
+}
+export interface DisclosureEvent {
+  event_id: string; event_type: string; fields: Record<string, unknown>;
+  evidence: Record<string, unknown>; parser_version: string;
+}
+export interface DisclosureListItem {
+  disclosure_id: string; title: string; category: string; category_name: string;
+  status: string; status_name: string; published_at: number | null;
+  publication_precision: string; first_seen_at: number; discovery_latency_secs: number | null;
+  revision_of: string | null; cancelled_by: string | null; source_version_id: string | null;
+  extraction_status: string; review_reason: string | null; securities: DisclosureSecurity[];
+  sources: DisclosureSource[]; primary_verified: boolean;
+}
+export interface DisclosureDetail extends DisclosureListItem {
+  attachments: DisclosureAttachment[]; events: DisclosureEvent[];
+  revisions: DisclosureListItem[]; verification_note: string;
+}
+export interface DisclosureQuery {
+  security_code?: string | null; keyword?: string | null; category?: string | null;
+  status?: string | null; primary_only?: boolean; from_utc?: number | null; to_utc?: number | null;
+  page: number; page_size: number;
+}
+export interface DisclosurePage {
+  items: DisclosureListItem[]; total: number; page: number; page_size: number; total_pages: number;
+}
+export interface DisclosureSyncSnapshot {
+  job_id: string | null; running: boolean; status: string; phase: string; progress: number;
+  current_provider: string; current_item: string; discovered: number; normalized: number;
+  inserted: number; deduplicated: number; primary_verified: number; needs_review: number;
+  failures: number; estimated_remaining_seconds: number | null; recent_logs: string[];
+  started_at: number | null; updated_at: number; error: string | null;
+}
+export interface DisclosureProviderHealth {
+  provider_id: string; provider_name: string; authority: string; authority_name: string;
+  enabled: boolean; public_index_url: string; target_latency_secs: number;
+  rate_limit_per_minute: number; last_attempt_at: number | null; last_success_at: number | null;
+  consecutive_failures: number; retry_after: number | null; last_error: string | null; note: string;
+}
+export const queryDisclosures = (query: DisclosureQuery) => cmd<DisclosurePage>("query_disclosures", { query });
+export const getDisclosureDetail = (disclosureId: string) => cmd<DisclosureDetail>("get_disclosure_detail", { disclosure_id: disclosureId });
+export const disclosureSyncStart = (request: { security_code?: string; days?: number; max_pages?: number }) =>
+  cmd<{ started: boolean; job_id: string; estimated_seconds: number; note: string }>("disclosure_sync_start", { request });
+export const disclosureSyncStatus = () => cmd<DisclosureSyncSnapshot>("disclosure_sync_status");
+export const disclosureSyncCancel = () => cmd<{ cancelled: boolean }>("disclosure_sync_cancel");
+export const getDisclosureProviderHealth = () => cmd<DisclosureProviderHealth[]>("get_disclosure_provider_health");

@@ -6,6 +6,7 @@ pub mod bundle;
 pub mod data_quality;
 pub mod datacenter;
 pub mod deep;
+pub mod disclosure;
 pub mod entities;
 pub mod fundamental;
 pub mod market;

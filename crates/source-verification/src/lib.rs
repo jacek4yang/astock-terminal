@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 
-pub const SOURCE_PARSER_VERSION: &str = "source-evidence-v1";
+pub const SOURCE_PARSER_VERSION: &str = "source-evidence-v2";
 const MAX_EXTRACTED_CHARS: usize = 400_000;
 
 static MONEY: Lazy<Regex> = Lazy::new(|| {
@@ -179,6 +179,17 @@ pub struct SourceSegment {
     pub page_number: Option<u32>,
     pub paragraph_index: usize,
     pub selector: Option<String>,
+    pub attachment_id: Option<String>,
+    /// Optional PDF page coordinates. They remain `None` when the parser
+    /// cannot prove coordinates; callers must never invent a location.
+    pub page_x: Option<f64>,
+    pub page_y: Option<f64>,
+    pub page_width: Option<f64>,
+    pub page_height: Option<f64>,
+    /// Deterministic table coordinates for HTML/PDF tables when available.
+    pub table_index: Option<u32>,
+    pub row_index: Option<u32>,
+    pub column_index: Option<u32>,
     pub span_start: usize,
     pub span_end: usize,
     pub text: String,
@@ -227,6 +238,10 @@ pub struct ParsedDocument {
     pub facts: Vec<FactEvidence>,
     pub extracted_text: String,
     pub dynamic_shell: bool,
+    /// `parsed` or `ocr_review_required`. A scan is never treated as empty
+    /// verified text and OCR output is never accepted silently.
+    pub extraction_status: String,
+    pub review_reason: Option<String>,
     pub access_wall: bool,
     pub prompt_injection_detected: bool,
 }
@@ -374,6 +389,20 @@ impl SourceVerifier {
             &fetched.body,
             fetched_at,
         )?;
+        if parsed.extraction_status == "ocr_review_required" {
+            return self
+                .persist_unverified(
+                    &canonical_url,
+                    authority,
+                    "ocr_review_required",
+                    parsed
+                        .review_reason
+                        .as_deref()
+                        .unwrap_or("扫描型 PDF 无可靠文本层，需要受控 OCR 与人工复核"),
+                    fetched_at,
+                )
+                .await;
+        }
         if parsed.access_wall || parsed.dynamic_shell {
             let kind = if parsed.access_wall {
                 "access_wall"
@@ -488,8 +517,9 @@ impl SourceVerifier {
                     tx.execute(
                         "INSERT OR IGNORE INTO source_document_segments
                          (segment_id,source_version_id,page_number,paragraph_index,
-                          selector,span_start,span_end,text,text_hash)
-                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                          selector,span_start,span_end,text,text_hash,attachment_id,
+                          page_x,page_y,page_width,page_height,table_index,row_index,column_index)
+                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
                         rusqlite::params![
                             segment.segment_id,
                             segment.source_version_id,
@@ -500,6 +530,14 @@ impl SourceVerifier {
                             segment.span_end as i64,
                             segment.text,
                             segment.text_hash,
+                            segment.attachment_id,
+                            segment.page_x,
+                            segment.page_y,
+                            segment.page_width,
+                            segment.page_height,
+                            segment.table_index.map(i64::from),
+                            segment.row_index.map(i64::from),
+                            segment.column_index.map(i64::from),
                         ],
                     )?;
                 }
@@ -666,6 +704,14 @@ pub fn parse_source_bytes(
             page_number: raw.page_number,
             paragraph_index: index,
             selector: raw.selector,
+            attachment_id: None,
+            page_x: raw.page_x,
+            page_y: raw.page_y,
+            page_width: raw.page_width,
+            page_height: raw.page_height,
+            table_index: raw.table_index,
+            row_index: raw.row_index,
+            column_index: raw.column_index,
             span_start: start,
             span_end: end,
             text,
@@ -678,7 +724,8 @@ pub fn parse_source_bytes(
     let access_wall = ACCESS_WALL.is_match(&extracted_text);
     let inspected =
         inspect_external_text(source_url, media_type, &extracted_text, MAX_EXTRACTED_CHARS);
-    let dynamic_shell = dynamic_shell || (segments.is_empty() && !bytes.is_empty());
+    let scanned_pdf = media_type == "application/pdf" && segments.is_empty() && !bytes.is_empty();
+    let dynamic_shell = dynamic_shell || (!scanned_pdf && segments.is_empty() && !bytes.is_empty());
     let mut parsed = ParsedDocument {
         title,
         published_at,
@@ -686,6 +733,14 @@ pub fn parse_source_bytes(
         facts: Vec::new(),
         extracted_text,
         dynamic_shell,
+        extraction_status: if scanned_pdf {
+            "ocr_review_required"
+        } else {
+            "parsed"
+        }
+        .into(),
+        review_reason: scanned_pdf
+            .then(|| "PDF 没有可验证文本层；已暂停结构化抽取，等待受控 OCR 与人工复核".into()),
         access_wall,
         prompt_injection_detected: inspected.prompt_injection_detected,
     };
@@ -704,6 +759,13 @@ pub fn parse_source_bytes(
 struct RawSegment {
     page_number: Option<u32>,
     selector: Option<String>,
+    page_x: Option<f64>,
+    page_y: Option<f64>,
+    page_width: Option<f64>,
+    page_height: Option<f64>,
+    table_index: Option<u32>,
+    row_index: Option<u32>,
+    column_index: Option<u32>,
     text: String,
 }
 
@@ -712,7 +774,7 @@ type ParsedParts = (Option<String>, Option<i64>, Vec<RawSegment>, bool);
 fn parse_html(bytes: &[u8]) -> (Option<String>, Option<i64>, Vec<RawSegment>, bool) {
     let source = String::from_utf8_lossy(bytes);
     let document = Html::parse_document(&source);
-    let content_selector = Selector::parse("h1,h2,h3,p,li,td,th").unwrap();
+    let content_selector = Selector::parse("h1,h2,h3,p,li").unwrap();
     let title_selector = Selector::parse("title,h1").unwrap();
     let meta_selector = Selector::parse("meta").unwrap();
     let title = document.select(&title_selector).find_map(|node| {
@@ -736,7 +798,7 @@ fn parse_html(bytes: &[u8]) -> (Option<String>, Option<i64>, Vec<RawSegment>, bo
         }
     });
     let mut seen = BTreeSet::new();
-    let segments = document
+    let mut segments = document
         .select(&content_selector)
         .filter_map(|node| {
             let text = normalize_text(&node.text().collect::<Vec<_>>().join(" "));
@@ -746,10 +808,50 @@ fn parse_html(bytes: &[u8]) -> (Option<String>, Option<i64>, Vec<RawSegment>, bo
             Some(RawSegment {
                 page_number: None,
                 selector: Some(node.value().name().into()),
+                page_x: None,
+                page_y: None,
+                page_width: None,
+                page_height: None,
+                table_index: None,
+                row_index: None,
+                column_index: None,
                 text,
             })
         })
         .collect::<Vec<_>>();
+    // Preserve exact table cell coordinates instead of flattening every cell
+    // into an indistinguishable paragraph.
+    let table_selector = Selector::parse("table").unwrap();
+    let row_selector = Selector::parse("tr").unwrap();
+    let cell_selector = Selector::parse("th,td").unwrap();
+    for (table_index, table) in document.select(&table_selector).enumerate() {
+        for (row_index, row) in table.select(&row_selector).enumerate() {
+            for (column_index, cell) in row.select(&cell_selector).enumerate() {
+                let text = normalize_text(&cell.text().collect::<Vec<_>>().join(" "));
+                if text.is_empty() {
+                    continue;
+                }
+                segments.push(RawSegment {
+                    page_number: None,
+                    selector: Some(format!(
+                        "table:nth-of-type({}) tr:nth-of-type({}) {}:nth-of-type({})",
+                        table_index + 1,
+                        row_index + 1,
+                        cell.value().name(),
+                        column_index + 1
+                    )),
+                    page_x: None,
+                    page_y: None,
+                    page_width: None,
+                    page_height: None,
+                    table_index: Some(table_index as u32),
+                    row_index: Some(row_index as u32),
+                    column_index: Some(column_index as u32),
+                    text,
+                });
+            }
+        }
+    }
     let script_selector = Selector::parse("script").unwrap();
     let dynamic_shell = segments.is_empty() && document.select(&script_selector).count() > 0;
     (title, published_at, segments, dynamic_shell)
@@ -790,6 +892,13 @@ fn flatten_json(path: &str, value: &serde_json::Value, output: &mut Vec<RawSegme
         primitive => output.push(RawSegment {
             page_number: None,
             selector: Some(path.into()),
+            page_x: None,
+            page_y: None,
+            page_width: None,
+            page_height: None,
+            table_index: None,
+            row_index: None,
+            column_index: None,
             text: primitive
                 .as_str()
                 .map(str::to_string)
@@ -818,6 +927,13 @@ fn text_segments(text: &str, page_number: Option<u32>) -> Vec<RawSegment> {
         .map(|text| RawSegment {
             page_number,
             selector: None,
+            page_x: None,
+            page_y: None,
+            page_width: None,
+            page_height: None,
+            table_index: None,
+            row_index: None,
+            column_index: None,
             text,
         })
         .collect()
@@ -1055,7 +1171,8 @@ fn read_detail(
     )?;
     let mut segment_stmt = conn.prepare(
         "SELECT segment_id,source_version_id,page_number,paragraph_index,
-                selector,span_start,span_end,text,text_hash
+                selector,span_start,span_end,text,text_hash,attachment_id,
+                page_x,page_y,page_width,page_height,table_index,row_index,column_index
          FROM source_document_segments WHERE source_version_id=?1 ORDER BY paragraph_index",
     )?;
     let segments = segment_stmt
@@ -1066,6 +1183,14 @@ fn read_detail(
                 page_number: row.get::<_, Option<i64>>(2)?.map(|value| value as u32),
                 paragraph_index: row.get::<_, i64>(3)? as usize,
                 selector: row.get(4)?,
+                attachment_id: row.get(9)?,
+                page_x: row.get(10)?,
+                page_y: row.get(11)?,
+                page_width: row.get(12)?,
+                page_height: row.get(13)?,
+                table_index: row.get::<_, Option<i64>>(14)?.map(|value| value as u32),
+                row_index: row.get::<_, Option<i64>>(15)?.map(|value| value as u32),
+                column_index: row.get::<_, Option<i64>>(16)?.map(|value| value as u32),
                 span_start: row.get::<_, i64>(5)? as usize,
                 span_end: row.get::<_, i64>(6)? as usize,
                 text: row.get(7)?,
@@ -1260,6 +1385,12 @@ mod tests {
             .facts
             .iter()
             .all(|fact| fact.span_end > fact.span_start));
+        assert!(parsed.segments.iter().any(|segment| {
+            segment.table_index == Some(0)
+                && segment.row_index == Some(1)
+                && segment.column_index == Some(1)
+                && segment.text == "20万吨"
+        }));
 
         let json = include_str!("../tests/fixtures/source.json");
         let parsed = parse_source_bytes(
@@ -1348,6 +1479,38 @@ mod tests {
                 && fact.page_number == Some(1)
                 && fact.original_unit.as_deref() == Some("GW")
         }));
+    }
+
+    #[test]
+    fn image_only_pdf_is_stopped_for_controlled_ocr_review() {
+        let mut document = lopdf::Document::with_version("1.5");
+        let pages_id = document.new_object_id();
+        let page_id = document.add_object(lopdf::dictionary! {
+            "Type" => "Page", "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()]
+        });
+        document.objects.insert(
+            pages_id,
+            lopdf::Object::Dictionary(lopdf::dictionary! {
+                "Type" => "Pages", "Kids" => vec![page_id.into()], "Count" => 1
+            }),
+        );
+        let catalog_id =
+            document.add_object(lopdf::dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        document.trailer.set("Root", catalog_id);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).unwrap();
+        let parsed = parse_source_bytes(
+            "https://www.cninfo.com.cn/scan.pdf",
+            "application/pdf",
+            &bytes,
+            1,
+        )
+        .unwrap();
+        assert_eq!(parsed.extraction_status, "ocr_review_required");
+        assert!(parsed.review_reason.is_some());
+        assert!(parsed.segments.is_empty());
+        assert!(!parsed.dynamic_shell);
     }
 
     #[test]

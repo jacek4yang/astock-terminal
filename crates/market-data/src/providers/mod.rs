@@ -3,6 +3,7 @@
 //! (kline/quote fallback over the TCP quote protocol), plus the optional
 //! credential-gated explicit-call sources (Tushare, iwencai, JoinQuant).
 
+pub mod cninfo_disclosure;
 pub mod eastmoney;
 pub mod eastmoney_f10;
 pub mod em_datacenter;
@@ -15,6 +16,7 @@ pub mod tdx_adapter;
 pub mod tencent;
 pub mod tushare;
 
+pub use cninfo_disclosure::{CninfoAnnouncement, CninfoDisclosureProvider, CninfoPage};
 pub use eastmoney::{EastMoney, IndustryClassified};
 pub use eastmoney_f10::{EastMoneyF10, F10Report};
 pub use em_datacenter::{

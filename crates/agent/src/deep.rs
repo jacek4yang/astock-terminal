@@ -25,6 +25,7 @@ use astock_backtest::metrics::MetricsConfig;
 use astock_backtest::strategies::{FormulaStrategy, FormulaStrategySpec};
 use astock_backtest::strategy::{BuyHold, MaCross, Strategy, TurtleBreakout};
 use astock_core::{Adjust, Bar, KlinePeriod, Symbol};
+use astock_disclosure::{DisclosureQuery, DisclosureStore};
 use astock_fundamental::model::{
     BalanceSheet, CashFlowStatement, FundamentalBundle, IncomeStatement, PeriodMeta, ReportType,
     ValuationPoint,
@@ -104,6 +105,123 @@ fn bounded_text(value: Option<&Value>, max_chars: usize) -> String {
         .chars()
         .take(max_chars)
         .collect()
+}
+
+// ---------------------------------------------------------------------
+// research_disclosures
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ResearchDisclosuresArgs {
+    /// 6 位证券代码；重大公司事件应尽量提供
+    security_code: Option<String>,
+    /// 公告标题关键词
+    keyword: Option<String>,
+    /// 公告类型，如 periodic_report / inquiry_reply / contract / buyback
+    category: Option<String>,
+    /// 只保留已关联正式入口的记录；默认 false，以便同时暴露待核验线索
+    primary_only: Option<bool>,
+    /// 返回数量，默认 30，最大 100
+    limit: Option<u32>,
+}
+
+/// Query the canonical formal-disclosure timeline before using media news.
+pub struct ResearchDisclosures;
+
+#[async_trait]
+impl AgentTool for ResearchDisclosures {
+    fn name(&self) -> &'static str {
+        "research_disclosures"
+    }
+
+    fn description(&self) -> &'static str {
+        "优先查询交易所、巨潮、证监会和公司 IR 的规范化正式披露时间线，返回修订/撤回关系、正式来源状态、原文版本与结构化事件。镜像发现记录会明确降级，绝不冒充一级来源"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        schema_value::<ResearchDisclosuresArgs>()
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
+        let args: ResearchDisclosuresArgs = parse_args(self.name(), args)?;
+        if let Some(code) = args.security_code.as_deref() {
+            let _ = parse_symbol(self.name(), code)?;
+        }
+        ctx.report_progress(crate::tools::ToolProgressDetail {
+            completed: 0,
+            total: 1,
+            succeeded: 0,
+            failed: 0,
+            cache_hits: 0,
+            records: 0,
+            active: vec![crate::tools::ToolWorkItem {
+                label: args
+                    .security_code
+                    .clone()
+                    .unwrap_or_else(|| "全部证券".into()),
+                stage: "查询正式披露、修订链与来源核验状态".into(),
+            }],
+            recent_errors: Vec::new(),
+        });
+        let limit = args.limit.unwrap_or(30).clamp(1, 100);
+        let page = DisclosureStore::new(ctx.storage.clone())
+            .query(DisclosureQuery {
+                security_code: args.security_code.clone(),
+                keyword: args.keyword.clone(),
+                category: args.category.clone(),
+                status: None,
+                primary_only: args.primary_only.unwrap_or(false),
+                from_utc: None,
+                to_utc: None,
+                page: 1,
+                page_size: limit,
+            })
+            .await
+            .map_err(|error| tool_err(self.name(), error.to_string()))?;
+        let primary_count = page
+            .items
+            .iter()
+            .filter(|item| item.primary_verified)
+            .count();
+        let discovery_only = page.items.len().saturating_sub(primary_count);
+        let returned = page.items.len();
+        ctx.report_progress(crate::tools::ToolProgressDetail {
+            completed: 1,
+            total: 1,
+            succeeded: 1,
+            failed: 0,
+            cache_hits: 0,
+            records: returned,
+            active: Vec::new(),
+            recent_errors: Vec::new(),
+        });
+        let summary = json!({
+            "security_code": args.security_code,
+            "total_matches": page.total,
+            "returned": page.items.len(),
+            "primary_verified": primary_count,
+            "discovery_only": discovery_only,
+            "items": page.items,
+            "usage_contract": {
+                "priority": "正式披露优先于媒体转述",
+                "primary_verified": "仅当 primary_verified=true 且 source_version_id 非空，才可把原文内容标为【事实】",
+                "discovery_only": "只有镜像发现入口时必须写“原文未核验”，不得提高结论置信度",
+                "revisions": "修订版或撤回版必须沿 revision_of/cancelled_by 链解释，不得混用旧版数字"
+            }
+        });
+        Ok(ToolResult {
+            summary_json: summary.clone(),
+            full_json: Some(summary),
+            cache_key: format!(
+                "research_disclosures:{}:{}:{}",
+                args.security_code.unwrap_or_default(),
+                args.keyword.unwrap_or_default(),
+                limit
+            ),
+            source: "formal_disclosure_store".into(),
+            fetched_at: now_rfc3339(),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------

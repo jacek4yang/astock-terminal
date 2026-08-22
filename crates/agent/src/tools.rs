@@ -363,6 +363,7 @@ fn dataset_for_tool(name: &str, args: &Value) -> DatasetKind {
         "get_fundamentals" | "run_joinquant_research" => DatasetKind::Fundamentals,
         "run_valuation" => DatasetKind::Valuation,
         "research_news" => DatasetKind::News,
+        "research_disclosures" => DatasetKind::Announcement,
         "search_web" => DatasetKind::SearchDiscovery,
         "fetch_source_document" | "read_document" | "compare_source_evidence" => {
             DatasetKind::Announcement

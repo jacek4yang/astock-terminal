@@ -23,6 +23,7 @@ members = [
     "crates/news-intelligence",
     "crates/entity-linking",
     "crates/source-verification",
+    "crates/disclosure",
 ]
 
 [workspace.package]
