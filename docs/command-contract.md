@@ -25,6 +25,10 @@
 - `get_news_entity_links(revision_ids) -> [DocumentEntityLink]` — 批量查询资讯原文 span、候选实体、消歧理由、关系链、规则版本、置信度和 Agent 可用状态。
 - `get_entity_link_reviews(limit) -> [EntityLinkReview]` — 查询低置信、歧义或模型提议的待审核实体映射。
 - `resolve_entity_link_review(link_id, entity_id?, accept, reason) -> bool` — 在候选列表中人工确认或拒绝映射；理由不能为空，接受时仍要求精确修订证据。
+- `fetch_source_document(url) -> SourceDocumentDetail` — 受控读取 HTML/JSON/PDF/正式附件，保存不可变来源版本，并返回原值、原单位、页码/段落/span；访问失败仍持久化 `unverified` 诊断。
+- `get_source_documents(limit) -> [SourceDocumentSummary]` — 查询最近来源、来源层级、一级来源标记、读取状态与失败原因，不发起网络请求。
+- `get_source_document(source_version_id) -> SourceDocumentDetail` — 按 `srcver:...` 读取不可变版本、原文分段和字段证据。
+- `compare_source_evidence(source_version_ids) -> [EvidenceConflict]` — 对 2–10 个版本逐字段展示冲突值及精确证据，不自动裁决。
 - `get_minute(symbol) -> { points: {time,price,avg_price,volume}[], pre_close, name }`
 - `search_stocks(keyword) -> {code,name,classify}[]`
 - `get_market_breadth() -> {up,down,flat,total,breadth_ratio}`

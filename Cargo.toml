@@ -22,6 +22,7 @@ members = [
     "crates/evaluation",
     "crates/news-intelligence",
     "crates/entity-linking",
+    "crates/source-verification",
 ]
 
 [workspace.package]

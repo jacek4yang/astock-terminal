@@ -518,6 +518,105 @@ pub(crate) const MIGRATIONS: &[(u32, &str)] = &[
     );
     "#,
     ),
+    (
+        11,
+        r#"
+    -- Controlled source-document reads and field-level evidence.
+    CREATE TABLE IF NOT EXISTS research_source_documents (
+        source_document_id TEXT PRIMARY KEY,
+        canonical_url      TEXT NOT NULL UNIQUE,
+        current_version_id TEXT,
+        authority_tier     TEXT NOT NULL,
+        authority_name     TEXT NOT NULL,
+        access_status      TEXT NOT NULL,
+        failure_kind       TEXT,
+        failure_message    TEXT,
+        first_fetched_at   INTEGER NOT NULL,
+        last_fetched_at    INTEGER NOT NULL,
+        created_at         INTEGER NOT NULL,
+        updated_at         INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS research_source_versions (
+        source_version_id  TEXT PRIMARY KEY,
+        source_document_id TEXT NOT NULL REFERENCES research_source_documents(source_document_id),
+        content_hash       TEXT NOT NULL,
+        extracted_hash     TEXT NOT NULL,
+        media_type         TEXT NOT NULL,
+        title              TEXT,
+        published_at       INTEGER,
+        fetched_at         INTEGER NOT NULL,
+        parser_version     TEXT NOT NULL,
+        supersedes_version_id TEXT,
+        raw_snapshot_gzip  BLOB,
+        raw_snapshot_hash  TEXT,
+        reliability_score REAL NOT NULL,
+        independence_score REAL NOT NULL,
+        freshness_score   REAL NOT NULL,
+        prompt_injection_detected INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(source_document_id,content_hash,parser_version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_research_source_versions_fetched
+        ON research_source_versions(fetched_at DESC);
+
+    CREATE TABLE IF NOT EXISTS source_document_segments (
+        segment_id        TEXT PRIMARY KEY,
+        source_version_id TEXT NOT NULL REFERENCES research_source_versions(source_version_id),
+        page_number       INTEGER,
+        paragraph_index   INTEGER NOT NULL,
+        selector          TEXT,
+        span_start        INTEGER NOT NULL,
+        span_end          INTEGER NOT NULL,
+        text              TEXT NOT NULL,
+        text_hash         TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_source_segments_version
+        ON source_document_segments(source_version_id,paragraph_index);
+
+    CREATE TABLE IF NOT EXISTS source_fact_evidence (
+        fact_id           TEXT PRIMARY KEY,
+        source_version_id TEXT NOT NULL REFERENCES research_source_versions(source_version_id),
+        segment_id        TEXT NOT NULL REFERENCES source_document_segments(segment_id),
+        fact_type         TEXT NOT NULL,
+        field_name        TEXT NOT NULL,
+        subject           TEXT,
+        raw_value         TEXT NOT NULL,
+        normalized_value  REAL,
+        original_unit     TEXT,
+        normalized_unit   TEXT,
+        page_number       INTEGER,
+        paragraph_index   INTEGER NOT NULL,
+        span_start        INTEGER NOT NULL,
+        span_end          INTEGER NOT NULL,
+        created_at        INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_source_facts_version
+        ON source_fact_evidence(source_version_id,field_name);
+
+    CREATE TABLE IF NOT EXISTS source_fetch_observations (
+        observation_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_document_id TEXT NOT NULL REFERENCES research_source_documents(source_document_id),
+        source_version_id TEXT,
+        requested_url     TEXT NOT NULL,
+        final_url         TEXT,
+        media_type        TEXT,
+        status            TEXT NOT NULL,
+        failure_kind      TEXT,
+        failure_message   TEXT,
+        redirects_json    TEXT NOT NULL DEFAULT '[]',
+        fetched_at        INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_source_evidence_refs (
+        task_id           TEXT NOT NULL,
+        conclusion_key    TEXT NOT NULL,
+        source_version_id TEXT NOT NULL REFERENCES research_source_versions(source_version_id),
+        fact_id           TEXT NOT NULL DEFAULT '',
+        created_at        INTEGER NOT NULL,
+        PRIMARY KEY(task_id,conclusion_key,source_version_id,fact_id)
+    );
+    "#,
+    ),
 ];
 
 /// Current unix time in seconds. All timestamps in this crate are stored as
@@ -665,6 +764,12 @@ mod tests {
             "research_entity_relations",
             "document_entity_links",
             "entity_link_reviews",
+            "research_source_documents",
+            "research_source_versions",
+            "source_document_segments",
+            "source_fact_evidence",
+            "source_fetch_observations",
+            "agent_source_evidence_refs",
         ] {
             let count: i64 = conn
                 .query_row(

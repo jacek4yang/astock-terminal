@@ -36,6 +36,9 @@ export const DEFAULT_AGENT_TOOLS = [
   "iterate_strategy",
   "run_joinquant_research",
   "search_web",
+  "fetch_source_document",
+  "read_document",
+  "compare_source_evidence",
   "research_news",
 ] as const;
 

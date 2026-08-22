@@ -11,4 +11,5 @@ pub mod market;
 pub mod news;
 pub mod scan;
 pub mod settings;
+pub mod source_evidence;
 pub mod watchlist;

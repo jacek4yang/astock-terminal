@@ -447,6 +447,97 @@ export interface EntityLinkReview {
   created_at: number;
 }
 
+export type SourceAuthority =
+  | "regulatory_exchange_government"
+  | "company_disclosure"
+  | "licensed_media"
+  | "aggregator"
+  | "social_lead"
+  | "unknown";
+
+export interface SourceDocumentSummary {
+  source_document_id: string;
+  canonical_url: string;
+  current_version_id: string | null;
+  authority: SourceAuthority;
+  authority_name: string;
+  is_primary_source: boolean;
+  access_status: string;
+  failure_kind: string | null;
+  failure_message: string | null;
+  first_fetched_at: number;
+  last_fetched_at: number;
+}
+
+export interface SourceScores {
+  reliability: number;
+  independence: number;
+  freshness: number;
+  note: string;
+}
+
+export interface SourceVersion {
+  source_version_id: string;
+  source_document_id: string;
+  canonical_url: string;
+  content_hash: string;
+  extracted_hash: string;
+  media_type: string;
+  title: string | null;
+  published_at: number | null;
+  fetched_at: number;
+  parser_version: string;
+  supersedes_version_id: string | null;
+  scores: SourceScores;
+  authority: SourceAuthority;
+  authority_name: string;
+  is_primary_source: boolean;
+  prompt_injection_detected: boolean;
+}
+
+export interface SourceSegment {
+  segment_id: string;
+  source_version_id: string;
+  page_number: number | null;
+  paragraph_index: number;
+  selector: string | null;
+  span_start: number;
+  span_end: number;
+  text: string;
+  text_hash: string;
+}
+
+export interface FactEvidence {
+  fact_id: string;
+  source_version_id: string;
+  segment_id: string;
+  fact_type: string;
+  field_name: string;
+  subject: string | null;
+  raw_value: string;
+  normalized_value: number | null;
+  original_unit: string | null;
+  normalized_unit: string | null;
+  page_number: number | null;
+  paragraph_index: number;
+  span_start: number;
+  span_end: number;
+}
+
+export interface SourceDocumentDetail {
+  document: SourceDocumentSummary;
+  version: SourceVersion | null;
+  segments: SourceSegment[];
+  facts: FactEvidence[];
+  verification_note: string;
+}
+
+export interface EvidenceConflict {
+  field_name: string;
+  values: FactEvidence[];
+  note: string;
+}
+
 export const getNewsProviderHealth = () =>
   cmd<NewsProviderHealthItem[]>("get_news_provider_health");
 
@@ -513,6 +604,18 @@ export const resolveEntityLinkReview = (
   accept,
   reason,
 });
+
+export const fetchSourceDocument = (url: string) =>
+  cmd<SourceDocumentDetail>("fetch_source_document", { url });
+
+export const getSourceDocuments = (limit = 100) =>
+  cmd<SourceDocumentSummary[]>("get_source_documents", { limit });
+
+export const getSourceDocument = (sourceVersionId: string) =>
+  cmd<SourceDocumentDetail>("get_source_document", { source_version_id: sourceVersionId });
+
+export const compareSourceEvidence = (sourceVersionIds: string[]) =>
+  cmd<EvidenceConflict[]>("compare_source_evidence", { source_version_ids: sourceVersionIds });
 
 // ==================== 分析引擎 ====================
 

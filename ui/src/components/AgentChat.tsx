@@ -98,7 +98,14 @@ const TOOL_GROUPS = [
   },
   {
     label: "外部研究数据",
-    tools: ["research_news", "search_web", "run_joinquant_research"],
+    tools: [
+      "research_news",
+      "search_web",
+      "fetch_source_document",
+      "read_document",
+      "compare_source_evidence",
+      "run_joinquant_research",
+    ],
   },
 ] as const;
 

@@ -778,6 +778,26 @@ impl AgentEngine {
                 && !awaiting_user_input
                 && !state.multi_agent_reviewed
                 && !state.spec.specialists.is_empty();
+            // Search snippets are URL-discovery hints, never evidence. Add the
+            // disclosure only to a durable final answer: not to a structured
+            // clarification and not to an internal draft awaiting review.
+            if calls.is_empty()
+                && !awaiting_user_input
+                && !awaiting_specialist_review
+                && contains_discovery_only(&messages)
+                && !contains_primary_source_evidence(&messages)
+                && !clean_text.contains("原文未核验")
+            {
+                let disclosure = "\n\n**核验状态：** 一级来源原文未核验。本轮搜索标题与摘要仅作为发现线索，不标记为【事实】，也不据此确认重大新闻结论。";
+                clean_text.push_str(disclosure);
+                assistant.content = Some(Value::String(clean_text.clone()));
+                send(
+                    &tx,
+                    AgentEvent::TextDelta {
+                        text: disclosure.to_string(),
+                    },
+                );
+            }
             // A first draft awaiting specialist review is internal working
             // material, not a durable user-facing answer. Persist tool-call
             // messages and final/single-agent answers normally; the reviewed
@@ -1038,6 +1058,20 @@ impl AgentEngine {
                 .await
             {
                 tracing::warn!(task_id, revision_id, %error, "agent news evidence link failed");
+            }
+        }
+        let verifier = astock_source_verification::SourceVerifier::new(self.ctx.storage.clone());
+        for (source_version_id, fact_id) in source_evidence_pairs(messages) {
+            if let Err(error) = verifier
+                .link_agent_evidence(
+                    task_id,
+                    "final_answer",
+                    &source_version_id,
+                    (!fact_id.is_empty()).then_some(fact_id.as_str()),
+                )
+                .await
+            {
+                tracing::warn!(task_id, source_version_id, fact_id, %error, "agent source evidence link failed");
             }
         }
     }
@@ -1770,14 +1804,107 @@ fn news_revision_ids(messages: &[ChatMessage]) -> BTreeSet<String> {
     output
 }
 
+fn source_evidence_pairs(messages: &[ChatMessage]) -> BTreeSet<(String, String)> {
+    fn collect(value: &Value, output: &mut BTreeSet<(String, String)>) {
+        match value {
+            Value::Object(fields) => {
+                if let Some(version) = fields.get("source_version_id").and_then(Value::as_str) {
+                    if version.starts_with("srcver:") {
+                        let fact = fields
+                            .get("fact_id")
+                            .and_then(Value::as_str)
+                            .filter(|fact| fact.starts_with("fact:"))
+                            .unwrap_or_default();
+                        output.insert((version.to_string(), fact.to_string()));
+                    }
+                }
+                for value in fields.values() {
+                    collect(value, output);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    collect(value, output);
+                }
+            }
+            Value::String(text) => {
+                if let Ok(decoded) = serde_json::from_str::<Value>(text) {
+                    collect(&decoded, output);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut output = BTreeSet::new();
+    for message in messages {
+        if let Some(content) = &message.content {
+            collect(content, &mut output);
+        }
+    }
+    output
+}
+
+fn contains_discovery_only(messages: &[ChatMessage]) -> bool {
+    messages.iter().any(|message| {
+        message
+            .content
+            .as_ref()
+            .is_some_and(|content| content.to_string().contains("discovery_only"))
+    })
+}
+
+fn contains_primary_source_evidence(messages: &[ChatMessage]) -> bool {
+    fn inspect(value: &Value, has_primary: &mut bool, has_version: &mut bool) {
+        match value {
+            Value::Object(fields) => {
+                *has_primary |= fields
+                    .get("is_primary_source")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                *has_version |= fields
+                    .get("source_version_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|version| version.starts_with("srcver:"));
+                for value in fields.values() {
+                    inspect(value, has_primary, has_version);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    inspect(value, has_primary, has_version);
+                }
+            }
+            Value::String(text) => {
+                if let Ok(decoded) = serde_json::from_str::<Value>(text) {
+                    inspect(&decoded, has_primary, has_version);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    messages.iter().any(|message| {
+        let mut has_primary = false;
+        let mut has_version = false;
+        if let Some(content) = &message.content {
+            inspect(content, &mut has_primary, &mut has_version);
+        }
+        has_primary && has_version
+    })
+}
+
 /// Typical duration shown to the user. This value is deliberately not used as
 /// a deadline: every tool keeps running until it completes or the user cancels
 /// the durable task.
 fn tool_estimated_secs(name: &str) -> u64 {
     match name {
         "scan_market" | "run_backtest" | "iterate_strategy" | "run_joinquant_research" => 180,
-        "get_fundamentals" | "run_valuation" | "compare_stocks" | "research_news"
-        | "search_web" => 60,
+        "get_fundamentals"
+        | "run_valuation"
+        | "compare_stocks"
+        | "research_news"
+        | "search_web"
+        | "fetch_source_document" => 60,
         _ => 45,
     }
 }
@@ -1797,6 +1924,9 @@ fn tool_progress_stage(name: &str, elapsed_ms: u64, estimated_ms: u64) -> &'stat
         "run_joinquant_research" => "等待聚宽研究环境并执行受限数据模板",
         "research_news" => "并行读取多家财经快讯并核验可用的个股事件",
         "search_web" => "通过 MiniMax 联网检索权威来源并保留原始链接",
+        "fetch_source_document" => "正在安全打开原始页面并提取页码、段落、原值与单位",
+        "read_document" => "读取不可变文档版本与字段级证据",
+        "compare_source_evidence" => "逐字段比较来源原值、时点与证据位置",
         "scan_market" => "并行分析候选股票并更新排名",
         _ => "等待数据源返回并执行确定性计算",
     }
@@ -2498,6 +2628,34 @@ mod tests {
             news_revision_ids(&messages),
             ["rev:abc123".to_string()].into_iter().collect()
         );
+    }
+
+    #[test]
+    fn search_snippets_are_discovery_only_and_source_facts_keep_exact_ids() {
+        let discovery = ChatMessage::tool_result(
+            "search",
+            json!({"verification_status":"discovery_only","fact_eligible":false}).to_string(),
+        );
+        assert!(contains_discovery_only(std::slice::from_ref(&discovery)));
+        assert!(source_evidence_pairs(std::slice::from_ref(&discovery)).is_empty());
+
+        let verified = ChatMessage::tool_result(
+            "source",
+            json!({
+                "source_version_id":"srcver:abc123",
+                "source":{"is_primary_source":true},
+                "facts":[
+                    {"source_version_id":"srcver:abc123","fact_id":"fact:amount","raw_value":"10亿元"},
+                    {"source_version_id":"invalid","fact_id":"fact:ignored"}
+                ]
+            })
+            .to_string(),
+        );
+        let pairs = source_evidence_pairs(std::slice::from_ref(&verified));
+        assert!(pairs.contains(&("srcver:abc123".into(), "".into())));
+        assert!(pairs.contains(&("srcver:abc123".into(), "fact:amount".into())));
+        assert_eq!(pairs.len(), 2);
+        assert!(contains_primary_source_evidence(&[verified]));
     }
 
     use crate::testing::{EchoTool, NoopMarket, ScriptedChat, ScriptedReply};

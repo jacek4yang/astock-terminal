@@ -34,7 +34,8 @@ use astock_graph::{
     Engine as GraphEngine, Event, GraphStore, ImpactEntry, ImpactReport, Node, Relation,
 };
 use astock_market_data::{DataProvider, JoinQuantProvider, FINANCE_NEWS_SOURCES};
-use astock_security::{inspect_external_text, UrlSecurityPolicy};
+use astock_security::{inspect_external_text, ToolPermissionDomain, UrlSecurityPolicy};
+use astock_source_verification::SourceVerifier;
 use astock_technical as tech;
 use astock_trading_rules::{RuleSet, TradeSide};
 use chrono::NaiveDate;
@@ -317,7 +318,7 @@ impl AgentTool for SearchWeb {
     }
 
     fn description(&self) -> &'static str {
-        "通过 MiniMax Coding Plan 官方联网搜索获取实时外部资料，返回标题、链接、摘要和日期。政策与重大新闻优先检索监管机构、交易所和公司官网，并与行情/公告工具交叉验证"
+        "通过 MiniMax Coding Plan 官方联网搜索发现实时外部资料 URL。标题和摘要永远只是未核验线索；重大事实必须继续调用原始来源读取工具"
     }
 
     fn parameters_schema(&self) -> Value {
@@ -386,6 +387,9 @@ impl AgentTool for SearchWeb {
                         "can_authorize_tools": false,
                         "prompt_injection_detected": inspected.prompt_injection_detected,
                         "injection_signal_kinds": inspected.findings.iter().map(|finding| finding.kind.as_str()).collect::<Vec<_>>(),
+                        "verification_status": "discovery_only",
+                        "fact_eligible": false,
+                        "required_next_tool": "fetch_source_document",
                     }))
                 }
             })
@@ -419,6 +423,212 @@ impl AgentTool for SearchWeb {
             full_json: Some(payload),
             cache_key: String::new(),
             source: "minimax_web_search".to_string(),
+            fetched_at: now_rfc3339(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------
+// fetch_source_document / read_document / compare_source_evidence
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct FetchSourceDocumentArgs {
+    /// search_web 或资讯工具发现的公开 HTTP/HTTPS 原始页面、JSON、PDF 或正式附件 URL
+    url: String,
+}
+
+pub struct FetchSourceDocument;
+
+#[async_trait]
+impl AgentTool for FetchSourceDocument {
+    fn name(&self) -> &'static str {
+        "fetch_source_document"
+    }
+
+    fn description(&self) -> &'static str {
+        "安全打开原始 HTML、JSON、PDF 或正式附件，保存不可变版本，并提取金额、日期、主体、比例、产能、订单与处罚的页码/段落/span 证据；登录墙、付费墙、动态壳或访问失败明确返回未核验"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        schema_value::<FetchSourceDocumentArgs>()
+    }
+
+    fn cacheable(&self) -> bool {
+        false
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
+        let args: FetchSourceDocumentArgs = parse_args(self.name(), args)?;
+        if args.url.chars().count() > 2_048 {
+            return Err(invalid_args(self.name(), "URL 不能超过 2048 个字符"));
+        }
+        let detail = SourceVerifier::new(ctx.storage.clone())
+            .fetch_source_document(&args.url)
+            .await
+            .map_err(|error| tool_err(self.name(), error.to_string()))?;
+        let facts = detail.facts.iter().take(40).cloned().collect::<Vec<_>>();
+        let summary = json!({
+            "document": detail.document,
+            "source_version_id": detail.version.as_ref().map(|version| &version.source_version_id),
+            "source": detail.version.as_ref().map(|version| json!({
+                "authority": version.authority,
+                "authority_name": version.authority_name,
+                "is_primary_source": version.is_primary_source,
+                "media_type": version.media_type,
+                "published_at": version.published_at,
+                "fetched_at": version.fetched_at,
+                "scores": version.scores,
+                "prompt_injection_detected": version.prompt_injection_detected,
+            })),
+            "facts": facts,
+            "fact_count": detail.facts.len(),
+            "verification_note": detail.verification_note,
+            "fact_rule": "只有 access_status=verified 的原文及其 source_version_id/fact_id/位置可标为事实；评分不能替代证据",
+        });
+        Ok(ToolResult {
+            summary_json: summary,
+            full_json: Some(serde_json::to_value(&detail)?),
+            cache_key: String::new(),
+            source: "controlled_source_fetch".into(),
+            fetched_at: now_rfc3339(),
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ReadDocumentArgs {
+    /// fetch_source_document 返回的 srcver:... 不可变版本号
+    source_version_id: String,
+    /// 可选 PDF 页码；留空返回前 40 个段落和全部字段证据摘要
+    page_number: Option<u32>,
+    /// 可选段落序号；与页码均留空时返回摘要
+    paragraph_index: Option<usize>,
+}
+
+pub struct ReadDocument;
+
+#[async_trait]
+impl AgentTool for ReadDocument {
+    fn name(&self) -> &'static str {
+        "read_document"
+    }
+
+    fn description(&self) -> &'static str {
+        "按不可变来源版本读取原文段落和字段级证据，可精确下钻 PDF 页码或段落序号；不访问网络、不根据摘要补全文字"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        schema_value::<ReadDocumentArgs>()
+    }
+
+    fn permission_domain(&self) -> ToolPermissionDomain {
+        ToolPermissionDomain::ReadOnlyLocal
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
+        let args: ReadDocumentArgs = parse_args(self.name(), args)?;
+        if !args.source_version_id.starts_with("srcver:") {
+            return Err(invalid_args(self.name(), "source_version_id 格式无效"));
+        }
+        let detail = SourceVerifier::new(ctx.storage.clone())
+            .read_document(&args.source_version_id)
+            .await
+            .map_err(|error| tool_err(self.name(), error.to_string()))?;
+        let segments = detail
+            .segments
+            .iter()
+            .filter(|segment| {
+                args.page_number
+                    .is_none_or(|page| segment.page_number == Some(page))
+                    && args
+                        .paragraph_index
+                        .is_none_or(|paragraph| segment.paragraph_index == paragraph)
+            })
+            .take(40)
+            .cloned()
+            .collect::<Vec<_>>();
+        let segment_ids = segments
+            .iter()
+            .map(|segment| segment.segment_id.as_str())
+            .collect::<HashSet<_>>();
+        let facts = detail
+            .facts
+            .iter()
+            .filter(|fact| segment_ids.contains(fact.segment_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let payload = json!({
+            "document": detail.document,
+            "version": detail.version,
+            "segments": segments,
+            "facts": facts,
+            "verification_note": detail.verification_note,
+        });
+        Ok(ToolResult {
+            summary_json: payload.clone(),
+            full_json: Some(payload),
+            cache_key: String::new(),
+            source: "verified_source_archive".into(),
+            fetched_at: now_rfc3339(),
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CompareSourceEvidenceArgs {
+    /// 需要逐字段对账的 2-10 个不可变来源版本号
+    source_version_ids: Vec<String>,
+}
+
+pub struct CompareSourceEvidence;
+
+#[async_trait]
+impl AgentTool for CompareSourceEvidence {
+    fn name(&self) -> &'static str {
+        "compare_source_evidence"
+    }
+
+    fn description(&self) -> &'static str {
+        "对 2-10 份已读取原文做字段级冲突检查，逐项保留来源版本、原值、单位、页码/段落和 span，不自动挑选最有利数字"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        schema_value::<CompareSourceEvidenceArgs>()
+    }
+
+    fn permission_domain(&self) -> ToolPermissionDomain {
+        ToolPermissionDomain::ReadOnlyLocal
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
+        let args: CompareSourceEvidenceArgs = parse_args(self.name(), args)?;
+        if !(2..=10).contains(&args.source_version_ids.len())
+            || args
+                .source_version_ids
+                .iter()
+                .any(|version| !version.starts_with("srcver:"))
+        {
+            return Err(invalid_args(
+                self.name(),
+                "source_version_ids 须包含 2-10 个 srcver:... 版本号",
+            ));
+        }
+        let conflicts = SourceVerifier::new(ctx.storage.clone())
+            .compare_source_evidence(&args.source_version_ids)
+            .await
+            .map_err(|error| tool_err(self.name(), error.to_string()))?;
+        let payload = json!({
+            "source_version_ids": args.source_version_ids,
+            "conflicts": conflicts,
+            "conflict_count": conflicts.len(),
+            "rule": "冲突值全部保留；不得按转载数量、多数票或更有利结果自动覆盖一级来源",
+        });
+        Ok(ToolResult {
+            summary_json: payload.clone(),
+            full_json: Some(payload),
+            cache_key: String::new(),
+            source: "field_evidence_reconciliation".into(),
             fetched_at: now_rfc3339(),
         })
     }
