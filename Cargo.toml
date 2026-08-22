@@ -24,7 +24,7 @@ members = [
 version = "5.0.0"
 edition = "2021"
 license = "Proprietary"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [workspace.dependencies]
 # async runtime & http

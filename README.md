@@ -15,7 +15,7 @@
 
 ## 开发环境
 
-- Windows 10/11、Rust 1.85+、Node.js 20+、WebView2
+- Windows 10/11、Rust 1.88+、Node.js 20+、WebView2
 - Tauri v2 所需的 MSVC Build Tools
 
 ```powershell
