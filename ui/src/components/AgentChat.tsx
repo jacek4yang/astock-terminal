@@ -568,6 +568,7 @@ export default function AgentChat({
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const running = status === "running";
+  const waitingForInput = status === "waiting_input";
 
   // 滚动到底部
   useEffect(() => {
@@ -719,11 +720,16 @@ export default function AgentChat({
   // The user can keep talking while a long analysis runs. Follow-ups are
   // dispatched in order against the same persisted conversation.
   useEffect(() => {
-    if (status !== "completed" || hasKey === false || pendingQuestions.length === 0) return;
+    if (
+      status !== "completed" ||
+      hasKey === false ||
+      pendingQuestions.length === 0 ||
+      hasUnansweredClarification(msgs)
+    ) return;
     const [next, ...rest] = pendingQuestions;
     useAgentSession.setState({ pendingQuestions: rest });
     void send(next);
-  }, [status, hasKey, pendingQuestions]);
+  }, [status, hasKey, pendingQuestions, msgs]);
 
   const resume = async () => {
     const id = useAgentSession.getState().taskId;
@@ -1167,6 +1173,7 @@ export default function AgentChat({
               <button
                 key={c}
                 className="tag bg-slate-200 text-slate-600 transition-colors hover:bg-slate-300 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
+                disabled={waitingForInput}
                 onClick={() => setInput(c)}
               >
                 {c}
@@ -1176,9 +1183,13 @@ export default function AgentChat({
           <div className="flex items-end gap-2">
             <textarea
               className="input max-h-32 min-h-[38px] flex-1 resize-y"
-              placeholder="输入问题,Enter 发送(Shift+Enter 换行)"
+              placeholder={
+                waitingForInput
+                  ? "请先完成上方选择并点击“提交选择并继续分析”"
+                  : "输入问题,Enter 发送(Shift+Enter 换行)"
+              }
               value={input}
-              disabled={hasKey === false}
+              disabled={hasKey === false || waitingForInput}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
@@ -1187,7 +1198,11 @@ export default function AgentChat({
                 }
               }}
             />
-            {running ? (
+            {waitingForInput ? (
+              <button className="btn-primary" disabled>
+                等待提交选择
+              </button>
+            ) : running ? (
               <>
                 <button className="btn-primary" disabled={!input.trim()} onClick={() => queueFollowUp(input)}>
                   加入追问
