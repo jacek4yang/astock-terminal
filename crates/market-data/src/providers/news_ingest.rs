@@ -9,8 +9,10 @@ use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use astock_security::UrlSecurityPolicy;
-use astock_storage::Storage;
+use astock_security::{redact_text, UrlSecurityPolicy};
+use astock_storage::{
+    EvidenceTimestamp, NewsArchiveInput, NewsObservationInput, NewsProviderArchiveState, Storage,
+};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::stream::FuturesUnordered;
@@ -136,6 +138,12 @@ pub struct NewsIngestRequest {
 pub struct NewsPage {
     pub items: Vec<FinanceNewsItem>,
     pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub http_status: Option<u16>,
+    #[serde(default)]
+    pub etag: Option<String>,
+    #[serde(default)]
+    pub last_modified: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +168,10 @@ pub struct NewsProviderError {
     pub kind: NewsErrorKind,
     pub message: String,
     pub retryable: bool,
+    /// Bounded original bytes retained only for archive diagnostics. It is
+    /// never serialized into Agent/UI error payloads.
+    #[serde(skip)]
+    pub raw_evidence: Option<Vec<u8>>,
 }
 
 impl NewsProviderError {
@@ -174,7 +186,13 @@ impl NewsProviderError {
             kind,
             message: message.into(),
             retryable,
+            raw_evidence: None,
         }
+    }
+
+    pub fn with_raw_evidence(mut self, raw: &[u8]) -> Self {
+        self.raw_evidence = Some(raw[..raw.len().min(MAX_RAW_PAYLOAD_BYTES)].to_vec());
+        self
     }
 
     fn configuration(provider_id: &str, message: impl Into<String>) -> Self {
@@ -210,6 +228,10 @@ pub struct NewsProviderHealth {
     pub cursor_present: bool,
     pub cooldown_remaining_secs: Option<u64>,
     pub last_error_kind: Option<NewsErrorKind>,
+    pub archived_documents: u64,
+    pub archived_revisions: u64,
+    pub archive_last_observed_at: Option<i64>,
+    pub stale_age_secs: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -365,6 +387,7 @@ impl NewsIngestor {
         let capabilities = provider.capabilities().clone();
         let provider_id = capabilities.provider_id.clone();
         self.sync_disabled(&provider_id).await;
+        self.sync_persisted_runtime(&provider_id).await;
         let blocked = {
             let runtime = self.runtime.get(&provider_id).expect("registered provider");
             let state = runtime.lock();
@@ -404,17 +427,27 @@ impl NewsIngestor {
         let started = Instant::now();
         let mut final_error = None;
         for attempt in 0..=MAX_RETRIES {
+            let attempt_started = Instant::now();
             self.mark_attempt(&provider_id);
             match provider.fetch(request.clone()).await {
-                Ok(page) => {
+                Ok(mut page) => {
                     self.mark_success(&provider_id, started.elapsed());
-                    self.persist_success(&provider_id, &page).await;
+                    self.persist_success(&capabilities, &mut page, started.elapsed())
+                        .await;
+                    self.persist_runtime_state(&provider_id).await;
                     self.last_good.insert(provider_id.clone(), page.clone());
                     return Ok((page, false));
                 }
                 Err(error) => {
                     let retryable = error.retryable;
                     self.mark_failed_attempt(&provider_id, error.kind);
+                    self.persist_failure_observation(
+                        &capabilities,
+                        &error,
+                        attempt_started.elapsed(),
+                    )
+                    .await;
+                    self.persist_runtime_state(&provider_id).await;
                     final_error = Some(error);
                     if !retryable || attempt == MAX_RETRIES {
                         break;
@@ -432,6 +465,7 @@ impl NewsIngestor {
             )
         });
         self.mark_failure(&provider_id, error.kind);
+        self.persist_runtime_state(&provider_id).await;
         self.fallback_or_error(error).await
     }
 
@@ -488,10 +522,86 @@ impl NewsIngestor {
         cursor
     }
 
-    async fn persist_success(&self, provider_id: &str, page: &NewsPage) {
+    async fn persist_success(
+        &self,
+        capabilities: &NewsCapabilities,
+        page: &mut NewsPage,
+        elapsed: Duration,
+    ) {
         let Some(storage) = &self.storage else {
             return;
         };
+        let observed_at = now_secs();
+        for item in &mut page.items {
+            let canonical_url = if item.url.trim().is_empty() {
+                format!("urn:astock-news:{}:{}", item.provider_id, item.id)
+            } else {
+                item.url.clone()
+            };
+            let raw_snapshot = (item.trust_tier == NewsTrustTier::FirstPartyDisclosure)
+                .then(|| {
+                    item.raw_payload
+                        .as_ref()
+                        .and_then(|raw| serde_json::to_vec(raw).ok())
+                })
+                .flatten();
+            let archived = storage
+                .news_archive_upsert(NewsArchiveInput {
+                    canonical_url,
+                    source_id: item.provider_id.clone(),
+                    source_name: item.source_name.clone(),
+                    license: item.license.clone(),
+                    content_type: if item.trust_tier == NewsTrustTier::FirstPartyDisclosure {
+                        "announcement"
+                    } else {
+                        "news"
+                    }
+                    .into(),
+                    language: "zh-CN".into(),
+                    parser_version: item.parser_version.clone(),
+                    title: item.title.clone(),
+                    factual_summary: item.summary.clone(),
+                    raw_snapshot,
+                    raw_snapshot_permitted: item.trust_tier == NewsTrustTier::FirstPartyDisclosure,
+                    event_time: EvidenceTimestamp::default(),
+                    publish_time: EvidenceTimestamp {
+                        utc: item.published_at_ms.map(|value| value / 1_000),
+                        original: (!item.published_at.is_empty())
+                            .then(|| item.published_at.clone()),
+                    },
+                    first_seen_time_utc: observed_at,
+                    revision_time: EvidenceTimestamp {
+                        utc: Some(observed_at),
+                        original: None,
+                    },
+                    retention_class: "research_evidence".into(),
+                    observation: NewsObservationInput {
+                        document_id: None,
+                        revision_id: None,
+                        provider_id: capabilities.provider_id.clone(),
+                        endpoint: capabilities.endpoint.clone(),
+                        fetched_at: observed_at,
+                        http_status: page.http_status.or(Some(200)),
+                        etag: page.etag.clone(),
+                        last_modified: page.last_modified.clone(),
+                        latency_ms: Some(elapsed.as_millis().min(u128::from(u64::MAX)) as u64),
+                        parse_status: "ok".into(),
+                        parse_error: None,
+                        raw_evidence: None,
+                    },
+                })
+                .await;
+            match archived {
+                Ok(saved) => item.document_revision_id = Some(saved.revision_id),
+                Err(error) => tracing::warn!(
+                    provider = capabilities.provider_id,
+                    item = item.id,
+                    %error,
+                    "news archive write failed; live result remains available"
+                ),
+            }
+        }
+        let provider_id = &capabilities.provider_id;
         if let Some(cursor) = &page.next_cursor {
             let _ = storage.settings_set(&cursor_key(provider_id), cursor).await;
             if let Some(runtime) = self.runtime.get(provider_id) {
@@ -500,6 +610,96 @@ impl NewsIngestor {
         }
         if let Ok(raw) = serde_json::to_string(page) {
             let _ = storage.settings_set(&snapshot_key(provider_id), &raw).await;
+        }
+    }
+
+    async fn persist_failure_observation(
+        &self,
+        capabilities: &NewsCapabilities,
+        error: &NewsProviderError,
+        elapsed: Duration,
+    ) {
+        let Some(storage) = &self.storage else {
+            return;
+        };
+        let result = storage
+            .news_observation_record(NewsObservationInput {
+                document_id: None,
+                revision_id: None,
+                provider_id: capabilities.provider_id.clone(),
+                endpoint: capabilities.endpoint.clone(),
+                fetched_at: now_secs(),
+                http_status: None,
+                etag: None,
+                last_modified: None,
+                latency_ms: Some(elapsed.as_millis().min(u128::from(u64::MAX)) as u64),
+                parse_status: if error.kind == NewsErrorKind::Parse {
+                    "parse_error"
+                } else {
+                    "request_error"
+                }
+                .into(),
+                parse_error: Some(redact_text(&error.message).chars().take(2_000).collect()),
+                raw_evidence: error.raw_evidence.clone(),
+            })
+            .await;
+        if let Err(storage_error) = result {
+            tracing::warn!(
+                provider = capabilities.provider_id,
+                %storage_error,
+                "failed news observation could not be archived"
+            );
+        }
+    }
+
+    async fn sync_persisted_runtime(&self, provider_id: &str) {
+        let Some(storage) = &self.storage else {
+            return;
+        };
+        let should_load = self.runtime.get(provider_id).is_some_and(|runtime| {
+            let state = runtime.lock();
+            state.attempts == 0 && state.last_success_at.is_none()
+        });
+        if !should_load {
+            return;
+        }
+        let Ok(Some(saved)) = storage.news_provider_state_get(provider_id).await else {
+            return;
+        };
+        if let Some(runtime) = self.runtime.get(provider_id) {
+            let mut state = runtime.lock();
+            if state.attempts == 0 && state.last_success_at.is_none() {
+                state.last_success_at = saved.last_success_at;
+                state.last_latency_ms = saved.last_latency_ms;
+                state.attempts = saved.attempts;
+                state.failures = saved.failures;
+                state.last_error_kind = saved.last_error_kind.as_deref().and_then(parse_error_kind);
+            }
+        }
+    }
+
+    async fn persist_runtime_state(&self, provider_id: &str) {
+        let Some(storage) = &self.storage else {
+            return;
+        };
+        let Some(runtime) = self.runtime.get(provider_id) else {
+            return;
+        };
+        let saved = {
+            let state = runtime.lock();
+            NewsProviderArchiveState {
+                provider_id: provider_id.to_string(),
+                last_success_at: state.last_success_at,
+                last_observation_at: Some(now_secs()),
+                last_latency_ms: state.last_latency_ms,
+                attempts: state.attempts,
+                failures: state.failures,
+                last_error_kind: state.last_error_kind.map(error_kind_token),
+                updated_at: now_secs(),
+            }
+        };
+        if let Err(error) = storage.news_provider_state_put(saved).await {
+            tracing::warn!(provider = provider_id, %error, "news provider state persistence failed");
         }
     }
 
@@ -615,8 +815,12 @@ impl NewsIngestor {
                 "该来源未声明推送/流式能力",
             ));
         }
+        let capabilities = provider.capabilities().clone();
         self.mark_success(provider_id, Duration::ZERO);
-        self.persist_success(provider_id, &page).await;
+        let mut page = page;
+        self.persist_success(&capabilities, &mut page, Duration::ZERO)
+            .await;
+        self.persist_runtime_state(provider_id).await;
         self.last_good.insert(provider_id.to_string(), page);
         Ok(())
     }
@@ -627,6 +831,14 @@ impl NewsIngestor {
         for provider in &self.providers {
             let capabilities = provider.capabilities();
             self.sync_disabled(&capabilities.provider_id).await;
+            self.sync_persisted_runtime(&capabilities.provider_id).await;
+            let archive = match &self.storage {
+                Some(storage) => storage
+                    .news_archive_source_stats(&capabilities.provider_id)
+                    .await
+                    .unwrap_or_default(),
+                None => Default::default(),
+            };
             let runtime = self
                 .runtime
                 .get(&capabilities.provider_id)
@@ -670,6 +882,12 @@ impl NewsIngestor {
                 cursor_present: state.cursor_present,
                 cooldown_remaining_secs: remaining,
                 last_error_kind: state.last_error_kind,
+                archived_documents: archive.documents,
+                archived_revisions: archive.revisions,
+                archive_last_observed_at: archive.last_observed_at,
+                stale_age_secs: state
+                    .last_success_at
+                    .map(|last| now.saturating_sub(last).max(0) as u64),
             });
         }
         rows.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
@@ -695,6 +913,17 @@ fn public_endpoint(endpoint: &str) -> String {
         .next()
         .unwrap_or(endpoint)
         .to_string()
+}
+
+fn error_kind_token(kind: NewsErrorKind) -> String {
+    serde_json::to_string(&kind)
+        .unwrap_or_else(|_| "\"storage\"".into())
+        .trim_matches('"')
+        .to_string()
+}
+
+fn parse_error_kind(value: &str) -> Option<NewsErrorKind> {
+    serde_json::from_str(&format!("\"{value}\"")).ok()
 }
 
 fn now_secs() -> i64 {
@@ -807,8 +1036,13 @@ impl NewsProvider for ConfiguredJsonNewsProvider {
                 "响应不是有效 JSON",
                 false,
             )
+            .with_raw_evidence(response.body.as_bytes())
         })?;
-        let page = parse_generic_page(&self.capabilities, &request, &value)?;
+        let mut page = parse_generic_page(&self.capabilities, &request, &value)
+            .map_err(|error| error.with_raw_evidence(response.body.as_bytes()))?;
+        page.http_status = Some(response.status);
+        page.etag = response.etag;
+        page.last_modified = response.last_modified;
         self.cache.set(&key, &page);
         Ok(page)
     }
@@ -848,7 +1082,11 @@ fn parse_generic_page(
         .and_then(Value::as_str)
         .map(ToString::to_string)
         .or_else(|| items.last().map(|item| item.id.clone()));
-    Ok(NewsPage { items, next_cursor })
+    Ok(NewsPage {
+        items,
+        next_cursor,
+        ..Default::default()
+    })
 }
 
 fn normalize_generic_item(
@@ -907,6 +1145,7 @@ fn normalize_generic_item(
         trust_tier_name: capabilities.trust_tier.chinese_name().to_string(),
         license: capabilities.license.clone(),
         parser_version: capabilities.parser_version.clone(),
+        document_revision_id: None,
         raw_payload: bounded_raw(raw),
     })
 }
@@ -1003,6 +1242,9 @@ mod tests {
             Ok(NewsPage {
                 items: vec![FinanceNewsItem::fixture(&self.capabilities, &self.title)],
                 next_cursor: Some("cursor-2".into()),
+                http_status: Some(200),
+                etag: Some("fixture-etag".into()),
+                last_modified: None,
             })
         }
     }

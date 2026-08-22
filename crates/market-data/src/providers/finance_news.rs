@@ -62,6 +62,9 @@ pub struct FinanceNewsItem {
     pub trust_tier_name: String,
     pub license: String,
     pub parser_version: String,
+    /// Immutable archive revision backing this normalized item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_revision_id: Option<String>,
     /// Bounded original provider row for offline re-parsing/audit. Agent strips
     /// this field before model context to avoid needless prompt expansion.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,6 +82,12 @@ pub struct FinanceNewsBatch {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SourceSnapshot {
     items: Vec<FinanceNewsItem>,
+    #[serde(default)]
+    http_status: Option<u16>,
+    #[serde(default)]
+    etag: Option<String>,
+    #[serde(default)]
+    last_modified: Option<String>,
 }
 
 /// Stable facade used by Agent/UI. Provider additions do not change callers.
@@ -335,7 +344,8 @@ impl NewsNowProvider {
                 super::news_ingest::NewsErrorKind::Parse,
                 "响应超过 2 MiB",
                 false,
-            ));
+            )
+            .with_raw_evidence(response.body.as_bytes()));
         }
         if response
             .content_type
@@ -347,7 +357,8 @@ impl NewsNowProvider {
                 super::news_ingest::NewsErrorKind::Parse,
                 "响应不是 JSON",
                 false,
-            ));
+            )
+            .with_raw_evidence(response.body.as_bytes()));
         }
         let value: Value = serde_json::from_str(&response.body).map_err(|_| {
             NewsProviderError::new(
@@ -356,6 +367,7 @@ impl NewsNowProvider {
                 "响应 JSON 无法解析",
                 false,
             )
+            .with_raw_evidence(response.body.as_bytes())
         })?;
         let status = value
             .get("status")
@@ -369,7 +381,8 @@ impl NewsNowProvider {
                 super::news_ingest::NewsErrorKind::Parse,
                 "缺少有效 status/items",
                 false,
-            ));
+            )
+            .with_raw_evidence(response.body.as_bytes()));
         }
         let items = rows
             .into_iter()
@@ -378,7 +391,12 @@ impl NewsNowProvider {
             .enumerate()
             .filter_map(|(index, row)| normalize_item(&self.capabilities, source, row, index + 1))
             .collect::<Vec<_>>();
-        let snapshot = SourceSnapshot { items };
+        let snapshot = SourceSnapshot {
+            items,
+            http_status: Some(response.status),
+            etag: response.etag,
+            last_modified: response.last_modified,
+        };
         self.cache.set(&key, &snapshot);
         Ok(snapshot)
     }
@@ -408,9 +426,17 @@ impl NewsProvider for NewsNowProvider {
         .await;
         let mut items = Vec::new();
         let mut last_error = None;
+        let mut http_status = None;
+        let mut etag = None;
+        let mut last_modified = None;
         for outcome in outcomes {
             match outcome {
-                Ok(snapshot) => items.extend(snapshot.items),
+                Ok(snapshot) => {
+                    items.extend(snapshot.items);
+                    http_status = http_status.or(snapshot.http_status);
+                    etag = etag.or(snapshot.etag);
+                    last_modified = last_modified.or(snapshot.last_modified);
+                }
                 Err(error) => last_error = Some(error),
             }
         }
@@ -425,7 +451,13 @@ impl NewsProvider for NewsNowProvider {
             }));
         }
         let next_cursor = items.first().map(|item| item.id.clone());
-        Ok(NewsPage { items, next_cursor })
+        Ok(NewsPage {
+            items,
+            next_cursor,
+            http_status,
+            etag,
+            last_modified,
+        })
     }
 }
 
@@ -500,6 +532,7 @@ impl NewsProvider for OfficialAnnouncementProvider {
                 trust_tier_name: self.capabilities.trust_tier.chinese_name().to_string(),
                 license: self.capabilities.license.clone(),
                 parser_version: self.capabilities.parser_version.clone(),
+                document_revision_id: None,
                 raw_payload: serde_json::to_value(&row)
                     .ok()
                     .as_ref()
@@ -509,6 +542,9 @@ impl NewsProvider for OfficialAnnouncementProvider {
         Ok(NewsPage {
             next_cursor: items.first().map(|item| item.id.clone()),
             items,
+            http_status: Some(200),
+            etag: None,
+            last_modified: None,
         })
     }
 }
@@ -580,6 +616,7 @@ fn normalize_item(
         trust_tier_name: capabilities.trust_tier.chinese_name().to_string(),
         license: capabilities.license.clone(),
         parser_version: capabilities.parser_version.clone(),
+        document_revision_id: None,
         raw_payload: bounded_raw(raw),
     })
 }
@@ -603,6 +640,7 @@ impl FinanceNewsItem {
             trust_tier_name: capabilities.trust_tier.chinese_name().to_string(),
             license: capabilities.license.clone(),
             parser_version: capabilities.parser_version.clone(),
+            document_revision_id: None,
             raw_payload: None,
         }
     }

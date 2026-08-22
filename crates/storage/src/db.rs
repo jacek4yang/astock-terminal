@@ -240,6 +240,112 @@ pub(crate) const MIGRATIONS: &[(u32, &str)] = &[
         ON agent_tool_audit(call_id, id);
     "#,
     ),
+    (
+        8,
+        r#"
+    -- Durable, revisioned research evidence archive. Documents identify a
+    -- source URL while immutable revisions preserve every observed content
+    -- change. Four independent clocks prevent publish/event-time leakage.
+    CREATE TABLE IF NOT EXISTS source_documents (
+        document_id          TEXT PRIMARY KEY,
+        canonical_url        TEXT NOT NULL,
+        source_id            TEXT NOT NULL,
+        source_name          TEXT NOT NULL,
+        license              TEXT NOT NULL,
+        content_type         TEXT NOT NULL,
+        language             TEXT NOT NULL,
+        parser_version       TEXT NOT NULL,
+        content_hash         TEXT NOT NULL,
+        current_revision_id  TEXT,
+        first_seen_time_utc  INTEGER NOT NULL,
+        last_observed_at     INTEGER NOT NULL,
+        retention_class      TEXT NOT NULL DEFAULT 'research_evidence',
+        created_at           INTEGER NOT NULL,
+        updated_at           INTEGER NOT NULL,
+        UNIQUE(source_id, canonical_url)
+    );
+    CREATE INDEX IF NOT EXISTS idx_source_documents_seen
+        ON source_documents(first_seen_time_utc DESC);
+    CREATE INDEX IF NOT EXISTS idx_source_documents_source
+        ON source_documents(source_id, last_observed_at DESC);
+
+    CREATE TABLE IF NOT EXISTS document_revisions (
+        revision_id              TEXT PRIMARY KEY,
+        document_id              TEXT NOT NULL REFERENCES source_documents(document_id),
+        revision_hash            TEXT NOT NULL,
+        title                    TEXT NOT NULL,
+        factual_summary          TEXT NOT NULL,
+        raw_snapshot_gzip        BLOB,
+        raw_snapshot_hash        TEXT,
+        supersedes_revision_id   TEXT,
+        event_time_utc           INTEGER,
+        event_time_original      TEXT,
+        publish_time_utc         INTEGER,
+        publish_time_original    TEXT,
+        first_seen_time_utc      INTEGER NOT NULL,
+        revision_time_utc        INTEGER NOT NULL,
+        revision_time_original   TEXT,
+        created_at               INTEGER NOT NULL,
+        UNIQUE(document_id, revision_hash)
+    );
+    CREATE INDEX IF NOT EXISTS idx_document_revisions_document
+        ON document_revisions(document_id, revision_time_utc DESC);
+    CREATE INDEX IF NOT EXISTS idx_document_revisions_event
+        ON document_revisions(event_time_utc, first_seen_time_utc);
+    CREATE INDEX IF NOT EXISTS idx_document_revisions_publish
+        ON document_revisions(publish_time_utc, first_seen_time_utc);
+
+    CREATE TABLE IF NOT EXISTS ingest_observations (
+        observation_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        document_id          TEXT,
+        revision_id          TEXT,
+        provider_id          TEXT NOT NULL,
+        endpoint             TEXT NOT NULL DEFAULT '',
+        fetched_at           INTEGER NOT NULL,
+        http_status          INTEGER,
+        etag                 TEXT,
+        last_modified        TEXT,
+        latency_ms           INTEGER,
+        parse_status         TEXT NOT NULL,
+        parse_error          TEXT,
+        raw_evidence_gzip    BLOB,
+        raw_evidence_hash    TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_ingest_observations_provider
+        ON ingest_observations(provider_id, fetched_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_ingest_observations_revision
+        ON ingest_observations(revision_id, fetched_at DESC);
+
+    CREATE TABLE IF NOT EXISTS document_event_evidence (
+        event_id        TEXT NOT NULL,
+        revision_id     TEXT NOT NULL REFERENCES document_revisions(revision_id),
+        relation        TEXT NOT NULL DEFAULT 'supports',
+        created_at      INTEGER NOT NULL,
+        PRIMARY KEY(event_id, revision_id, relation)
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_evidence_refs (
+        task_id         TEXT NOT NULL,
+        conclusion_key  TEXT NOT NULL,
+        revision_id     TEXT NOT NULL REFERENCES document_revisions(revision_id),
+        created_at      INTEGER NOT NULL,
+        PRIMARY KEY(task_id, conclusion_key, revision_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_evidence_refs_task
+        ON agent_evidence_refs(task_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS news_provider_state (
+        provider_id         TEXT PRIMARY KEY,
+        last_success_at     INTEGER,
+        last_observation_at INTEGER,
+        last_latency_ms     INTEGER,
+        attempts            INTEGER NOT NULL DEFAULT 0,
+        failures            INTEGER NOT NULL DEFAULT 0,
+        last_error_kind     TEXT,
+        updated_at          INTEGER NOT NULL
+    );
+    "#,
+    ),
 ];
 
 /// Current unix time in seconds. All timestamps in this crate are stored as
@@ -267,6 +373,9 @@ impl Db {
             std::fs::create_dir_all(parent)?;
         }
         let mut conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
         migrate(&mut conn)?;
         let (tx, rx) = mpsc::channel::<Job>();
         let handle = std::thread::Builder::new()
@@ -368,6 +477,12 @@ mod tests {
             "graph_edges",
             "events",
             "corporate_actions",
+            "source_documents",
+            "document_revisions",
+            "ingest_observations",
+            "document_event_evidence",
+            "agent_evidence_refs",
+            "news_provider_state",
         ] {
             let count: i64 = conn
                 .query_row(

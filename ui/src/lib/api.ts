@@ -246,6 +246,58 @@ export interface NewsProviderHealthItem {
   cursor_present: boolean;
   cooldown_remaining_secs: number | null;
   last_error_kind: string | null;
+  archived_documents: number;
+  archived_revisions: number;
+  archive_last_observed_at: number | null;
+  stale_age_secs: number | null;
+}
+
+export interface EvidenceTimestamp {
+  utc: number | null;
+  original: string | null;
+}
+
+export interface ArchivedNewsRevision {
+  document_id: string;
+  canonical_url: string;
+  source_id: string;
+  source_name: string;
+  license: string;
+  content_type: string;
+  language: string;
+  parser_version: string;
+  content_hash: string;
+  current_revision_id: string | null;
+  document_first_seen_time_utc: number;
+  last_observed_at: number;
+  retention_class: string;
+  revision_id: string;
+  revision_hash: string;
+  title: string;
+  factual_summary: string;
+  supersedes_revision_id: string | null;
+  event_time: EvidenceTimestamp;
+  publish_time: EvidenceTimestamp;
+  first_seen_time_utc: number;
+  revision_time: EvidenceTimestamp;
+  raw_snapshot_hash: string | null;
+}
+
+export interface NewsIngestObservation {
+  observation_id: number;
+  document_id: string | null;
+  revision_id: string | null;
+  provider_id: string;
+  endpoint: string;
+  fetched_at: number;
+  http_status: number | null;
+  etag: string | null;
+  last_modified: string | null;
+  latency_ms: number | null;
+  parse_status: string;
+  parse_error: string | null;
+  raw_evidence_hash: string | null;
+  raw_evidence_present: boolean;
 }
 
 export const getNewsProviderHealth = () =>
@@ -253,6 +305,20 @@ export const getNewsProviderHealth = () =>
 
 export const setNewsProviderEnabled = (providerId: string, enabled: boolean) =>
   cmd<void>("set_news_provider_enabled", { provider_id: providerId, enabled });
+
+export const getNewsArchiveRecent = (limit = 100) =>
+  cmd<ArchivedNewsRevision[]>("get_news_archive_recent", { limit });
+
+export const getNewsArchiveRevisions = (documentId: string) =>
+  cmd<ArchivedNewsRevision[]>("get_news_archive_revisions", { document_id: documentId });
+
+export const checkNewsArchiveIntegrity = () => cmd<string>("check_news_archive_integrity");
+
+export const getNewsIngestObservations = (providerId: string, limit = 10) =>
+  cmd<NewsIngestObservation[]>("get_news_ingest_observations", {
+    provider_id: providerId,
+    limit,
+  });
 
 // ==================== 分析引擎 ====================
 

@@ -60,6 +60,11 @@ pub struct TextResponse {
     pub body: String,
     /// Raw Content-Type header value, if present.
     pub content_type: Option<String>,
+    /// Successful HTTP status retained for ingestion provenance.
+    pub status: u16,
+    /// Cache validators retained for incremental document archives.
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
 }
 
 /// Shared HTTP client with adaptive throttling and host failover.
@@ -288,12 +293,25 @@ impl HttpClient {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
+        let etag = resp
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let last_modified = resp
+            .headers()
+            .get(reqwest::header::LAST_MODIFIED)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         match resp.bytes().await {
             Ok(bytes) => {
                 self.on_success(&host);
                 Ok(TextResponse {
                     body: String::from_utf8_lossy(&bytes).into_owned(),
                     content_type,
+                    status: status.as_u16(),
+                    etag,
+                    last_modified,
                 })
             }
             Err(e) => {

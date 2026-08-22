@@ -23,12 +23,14 @@ mod db;
 mod error;
 mod maintenance;
 mod memcache;
+mod news_archive;
 mod timeseries;
 
 pub use config::StorageConfig;
 pub use error::{Error, Result};
 pub use maintenance::{disk_free_bytes, CacheStats, CleanupPolicy, CleanupReport};
 pub use memcache::MemCache;
+pub use news_archive::*;
 pub use timeseries::{BarRow, FundFlowRow};
 
 use std::path::PathBuf;

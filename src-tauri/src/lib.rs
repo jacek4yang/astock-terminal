@@ -52,6 +52,10 @@ pub fn run() {
             commands::market::get_provider_health,
             commands::market::get_news_provider_health,
             commands::market::set_news_provider_enabled,
+            commands::market::get_news_archive_recent,
+            commands::market::get_news_archive_revisions,
+            commands::market::check_news_archive_integrity,
+            commands::market::get_news_ingest_observations,
             commands::bundle::get_stock_bundle,
             // 分析引擎
             commands::analysis::analyze,

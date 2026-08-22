@@ -7,6 +7,7 @@
 //! completed tool results come back as conversation messages and cached
 //! payloads, never re-executed.
 
+use std::collections::BTreeSet;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -890,6 +891,9 @@ impl AgentEngine {
                         }
                     }
                 }
+                if !awaiting_user_input {
+                    self.link_news_evidence(&task_id, &messages).await;
+                }
                 let report =
                     assemble_report(&task_id, &clean_text, state.evidence.clone(), now_secs());
                 let _ = self.save_state(&state, "completed").await;
@@ -1018,6 +1022,22 @@ impl AgentEngine {
                     },
                 );
                 return;
+            }
+        }
+    }
+
+    /// Link every immutable news revision present in successful tool results
+    /// to the final report. Archive diagnostics are best-effort and cannot
+    /// discard an otherwise valid analysis.
+    async fn link_news_evidence(&self, task_id: &str, messages: &[ChatMessage]) {
+        for revision_id in news_revision_ids(messages) {
+            if let Err(error) = self
+                .ctx
+                .storage
+                .news_agent_evidence_link(task_id, "final_answer", &revision_id)
+                .await
+            {
+                tracing::warn!(task_id, revision_id, %error, "agent news evidence link failed");
             }
         }
     }
@@ -1712,6 +1732,42 @@ fn is_clarification_request(answer: &str) -> bool {
         }
     }
     (1..=3).contains(&question_count) && option_count >= question_count * 2
+}
+
+fn news_revision_ids(messages: &[ChatMessage]) -> BTreeSet<String> {
+    fn collect(value: &Value, output: &mut BTreeSet<String>) {
+        match value {
+            Value::Object(fields) => {
+                if let Some(id) = fields.get("document_revision_id").and_then(Value::as_str) {
+                    if id.starts_with("rev:") {
+                        output.insert(id.to_string());
+                    }
+                }
+                for value in fields.values() {
+                    collect(value, output);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    collect(value, output);
+                }
+            }
+            Value::String(text) => {
+                if let Ok(decoded) = serde_json::from_str::<Value>(text) {
+                    collect(&decoded, output);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut output = BTreeSet::new();
+    for message in messages {
+        if let Some(content) = &message.content {
+            collect(content, &mut output);
+        }
+    }
+    output
 }
 
 /// Typical duration shown to the user. This value is deliberately not used as
@@ -2424,6 +2480,25 @@ mod tests {
 
     use astock_minimax::{ChatChoice, ChatChunk, ToolCallFunction};
     use astock_storage::StorageConfig;
+
+    #[test]
+    fn extracts_exact_news_revision_ids_from_tool_payloads() {
+        let messages = vec![ChatMessage::tool_result(
+            "call-news".to_string(),
+            json!({
+                "items": [
+                    {"document_revision_id": "rev:abc123", "title": "公告"},
+                    {"document_revision_id": null},
+                    {"document_revision_id": "not-a-revision"}
+                ]
+            })
+            .to_string(),
+        )];
+        assert_eq!(
+            news_revision_ids(&messages),
+            ["rev:abc123".to_string()].into_iter().collect()
+        );
+    }
 
     use crate::testing::{EchoTool, NoopMarket, ScriptedChat, ScriptedReply};
     use crate::tools::{AgentTool, ToolResult};

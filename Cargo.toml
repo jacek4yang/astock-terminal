@@ -60,6 +60,7 @@ regex = "1"
 once_cell = "1"
 url = "2"
 sha2 = "0.10"
+flate2 = "1"
 # tests
 proptest = "1"
 

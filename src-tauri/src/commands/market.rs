@@ -390,6 +390,43 @@ pub async fn set_news_provider_enabled(
         })
 }
 
+/// Query latest durable news revisions after an application restart.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_news_archive_recent(
+    state: State<'_, AppState>,
+    limit: usize,
+) -> Result<Vec<astock_storage::ArchivedNewsRevision>, CmdError> {
+    Ok(state.storage.news_archive_recent(limit).await?)
+}
+
+/// Query the immutable revision chain for one source document.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_news_archive_revisions(
+    state: State<'_, AppState>,
+    document_id: String,
+) -> Result<Vec<astock_storage::ArchivedNewsRevision>, CmdError> {
+    Ok(state.storage.news_archive_revisions(&document_id).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn check_news_archive_integrity(state: State<'_, AppState>) -> Result<String, CmdError> {
+    Ok(state.storage.news_archive_integrity_check().await?)
+}
+
+/// Recent provider fetch/parse observations for drill-down diagnostics.
+/// Raw evidence bodies are never returned through this command.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_news_ingest_observations(
+    state: State<'_, AppState>,
+    provider_id: Option<String>,
+    limit: usize,
+) -> Result<Vec<astock_storage::NewsIngestObservation>, CmdError> {
+    Ok(state
+        .storage
+        .news_ingest_observations(provider_id.as_deref(), limit)
+        .await?)
+}
+
 /// Intraday minute (分时) series for the current session.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_minute(

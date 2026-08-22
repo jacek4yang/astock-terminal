@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  getNewsIngestObservations,
   getNewsProviderHealth,
   getProviderHealth,
   setNewsProviderEnabled,
   errMsg,
   type NewsDeliveryMode,
+  type NewsIngestObservation,
   type NewsProviderHealthItem,
   type ProviderHealthItem,
 } from "../lib/api";
@@ -55,6 +57,8 @@ export default function ProviderHealth() {
   const [news, setNews] = useState<NewsProviderHealthItem[] | null>(null);
   const [newsErr, setNewsErr] = useState<string | null>(null);
   const [changing, setChanging] = useState<string | null>(null);
+  const [observations, setObservations] = useState<Record<string, NewsIngestObservation[]>>({});
+  const [observationLoading, setObservationLoading] = useState<string | null>(null);
 
   const loadNews = useCallback(() => {
     getNewsProviderHealth()
@@ -98,6 +102,18 @@ export default function ProviderHealth() {
       setNewsErr(errMsg(error));
     } finally {
       setChanging(null);
+    }
+  };
+
+  const loadObservations = async (providerId: string) => {
+    setObservationLoading(providerId);
+    try {
+      const rows = await getNewsIngestObservations(providerId, 10);
+      setObservations((current) => ({ ...current, [providerId]: rows }));
+    } catch (error) {
+      setNewsErr(errMsg(error));
+    } finally {
+      setObservationLoading(null);
     }
   };
 
@@ -176,12 +192,54 @@ export default function ProviderHealth() {
                       <div><span className="muted">请求/失败：</span><span className="num">{item.attempts} / {item.failures}（{pct(item.failure_rate)}）</span></div>
                       <div><span className="muted">增量游标：</span>{item.cursor_present ? "已持久保存" : "尚未建立"}</div>
                       <div><span className="muted">最近错误：</span>{item.last_error_kind ? (ERROR_LABELS[item.last_error_kind] ?? item.last_error_kind) : "无"}</div>
+                      <div><span className="muted">持久档案：</span><span className="num">{item.archived_documents} 篇文档 / {item.archived_revisions} 个修订</span></div>
+                      <div><span className="muted">陈旧年龄：</span><span className="num">{item.stale_age_secs == null ? "尚无成功记录" : `${item.stale_age_secs} 秒`}</span></div>
                       <div className="sm:col-span-2"><span className="muted">许可策略：</span>{item.license}</div>
                       <div className="sm:col-span-2 break-all"><span className="muted">访问端点：</span><span className="num">{item.endpoint}</span></div>
                     </div>
                     {item.cooldown_remaining_secs != null && item.cooldown_remaining_secs > 0 && (
                       <div className="rounded bg-red-50 px-2 py-1.5 text-up dark:bg-red-950/30">还需冷却 {item.cooldown_remaining_secs} 秒，期间会自动使用其他来源或最后成功副本。</div>
                     )}
+                    <div className="rounded border border-slate-200 p-2 dark:border-slate-800">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium">最近抓取记录</span>
+                        <button
+                          className="btn !px-2 !py-0.5"
+                          disabled={observationLoading === item.provider_id}
+                          onClick={() => loadObservations(item.provider_id)}
+                        >
+                          {observationLoading === item.provider_id ? "读取中…" : "查看最近 10 条"}
+                        </button>
+                      </div>
+                      {observations[item.provider_id] && (
+                        <div className="mt-2 space-y-1.5">
+                          {observations[item.provider_id].length === 0 ? (
+                            <div className="muted">尚无抓取记录</div>
+                          ) : observations[item.provider_id].map((row) => (
+                            <div key={row.observation_id} className="rounded bg-slate-50 p-2 dark:bg-slate-900/70">
+                              <div className="flex flex-wrap gap-x-3 gap-y-1">
+                                <span className="num">{dateTime(row.fetched_at)}</span>
+                                <span className={row.parse_status === "ok" ? "text-down" : "text-up"}>
+                                  {row.parse_status === "ok" ? "解析成功" : "抓取/解析异常"}
+                                </span>
+                                <span className="num muted">HTTP {row.http_status ?? "未知"}</span>
+                                <span className="num muted">{row.latency_ms == null ? "耗时未知" : `${row.latency_ms} 毫秒`}</span>
+                                {row.revision_id && <span className="num break-all">修订 {row.revision_id}</span>}
+                              </div>
+                              {row.parse_error && (
+                                <div className="mt-1 flex items-start gap-2 rounded bg-red-50 px-2 py-1 text-up dark:bg-red-950/30">
+                                  <span className="min-w-0 flex-1 break-all">{row.parse_error}</span>
+                                  <button className="btn !px-1.5 !py-0.5" onClick={() => navigator.clipboard.writeText(row.parse_error ?? "")}>复制错误</button>
+                                </div>
+                              )}
+                              {row.raw_evidence_present && (
+                                <div className="muted mt-1">已保留受限原始证据，校验值：<span className="num break-all">{row.raw_evidence_hash}</span></div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                     <div className="flex items-center justify-between gap-3">
                       <span className="muted">停用后，该来源及其旧缓存都不会参与 Agent 研究。</span>
                       <button
