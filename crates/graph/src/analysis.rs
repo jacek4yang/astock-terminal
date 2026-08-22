@@ -196,8 +196,10 @@ pub fn label_propagation(
             .or_default()
             .push(edge.src.as_str());
     }
-    let mut labels: HashMap<&str, &str> =
-        nodes.iter().map(|n| (n.id.as_str(), n.id.as_str())).collect();
+    let mut labels: HashMap<&str, &str> = nodes
+        .iter()
+        .map(|n| (n.id.as_str(), n.id.as_str()))
+        .collect();
     let mut order: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
     order.sort_unstable();
 
@@ -294,7 +296,12 @@ mod tests {
         let edges = vec![edge("a", "b"), edge("b", "c"), edge("c", "a")];
         let ranks = pagerank(&nodes, &edges, 0.85, 1e-12, 1000);
         for id in ["a", "b", "c"] {
-            assert!((ranks[id] - 1.0 / 3.0).abs() < 1e-6, "{}: {}", id, ranks[id]);
+            assert!(
+                (ranks[id] - 1.0 / 3.0).abs() < 1e-6,
+                "{}: {}",
+                id,
+                ranks[id]
+            );
         }
     }
 
@@ -305,7 +312,12 @@ mod tests {
         //   y = 0.15/3 + 0.85 * (x/1 + x/1)  →  1 - 2x = 0.05 + 1.7x
         //   → x = 0.95 / 3.7 ≈ 0.256757, y ≈ 0.486486.
         let nodes = vec![node("a"), node("b"), node("c")];
-        let edges = vec![edge("a", "b"), edge("b", "a"), edge("b", "c"), edge("c", "b")];
+        let edges = vec![
+            edge("a", "b"),
+            edge("b", "a"),
+            edge("b", "c"),
+            edge("c", "b"),
+        ];
         let ranks = pagerank(&nodes, &edges, 0.85, 1e-12, 1000);
         let x = 0.95 / 3.7;
         let y = 1.0 - 2.0 * x;
@@ -331,7 +343,10 @@ mod tests {
 
     #[test]
     fn connected_components_two_triangles() {
-        let nodes: Vec<Node> = ["a", "b", "c", "x", "y", "z"].into_iter().map(node).collect();
+        let nodes: Vec<Node> = ["a", "b", "c", "x", "y", "z"]
+            .into_iter()
+            .map(node)
+            .collect();
         let edges = vec![
             edge("a", "b"),
             edge("b", "c"),
@@ -348,7 +363,10 @@ mod tests {
     fn label_propagation_finds_two_communities() {
         // Two disjoint triangles: each must converge to a single shared
         // label, and the two communities keep distinct labels.
-        let nodes: Vec<Node> = ["a", "b", "c", "x", "y", "z"].into_iter().map(node).collect();
+        let nodes: Vec<Node> = ["a", "b", "c", "x", "y", "z"]
+            .into_iter()
+            .map(node)
+            .collect();
         let edges = vec![
             edge("a", "b"),
             edge("b", "c"),

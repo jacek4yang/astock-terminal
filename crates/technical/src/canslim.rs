@@ -270,15 +270,18 @@ fn calc_m_score(index_klines: Option<&[Kline]>, stock_klines: &[Kline]) -> (i64,
     } else {
         stock_klines
     };
-    let src_name = if use_index { "大盘指数" } else { "个股均线(近似)" };
+    let src_name = if use_index {
+        "大盘指数"
+    } else {
+        "个股均线(近似)"
+    };
     if src.len() < 30 {
         return (50, String::new());
     }
     let closes: Vec<f64> = src.iter().map(|k| k.close).collect();
     let ma20 = sma_series(&closes, 20);
     let ma60 = sma_series(&closes, 60);
-    let (Some(ma20_val), Some(ma60_val)) = (ma20[ma20.len() - 1], ma60[ma60.len() - 1])
-    else {
+    let (Some(ma20_val), Some(ma60_val)) = (ma20[ma20.len() - 1], ma60[ma60.len() - 1]) else {
         return (50, String::new());
     };
 

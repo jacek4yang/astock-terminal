@@ -171,7 +171,11 @@ pub fn scenarios(inputs: &DcfInputs, spread: f64) -> Option<ScenarioSet> {
 /// Sensitivity table of per-share values over WACC × terminal-growth grids.
 /// Rows follow `waccs`, columns follow `terminal_growths`; incoherent cells
 /// (wacc ≤ g) are `None`, never interpolated.
-pub fn sensitivity(inputs: &DcfInputs, waccs: &[f64], terminal_growths: &[f64]) -> Vec<Vec<Option<f64>>> {
+pub fn sensitivity(
+    inputs: &DcfInputs,
+    waccs: &[f64],
+    terminal_growths: &[f64],
+) -> Vec<Vec<Option<f64>>> {
     waccs
         .iter()
         .map(|w| {
@@ -195,7 +199,10 @@ mod tests {
     #[test]
     fn percentile_golden() {
         // [10,20,30,40,50], current 30 → 3 of 5 values ≤ 30 → 60%.
-        assert_eq!(percentile(&[10.0, 20.0, 30.0, 40.0, 50.0], 30.0), Some(60.0));
+        assert_eq!(
+            percentile(&[10.0, 20.0, 30.0, 40.0, 50.0], 30.0),
+            Some(60.0)
+        );
         assert_eq!(percentile(&[10.0, 20.0], 5.0), Some(0.0));
         assert_eq!(percentile(&[10.0, 20.0], 25.0), Some(100.0));
         assert_eq!(percentile(&[], 10.0), None);

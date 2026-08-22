@@ -8,7 +8,11 @@ use serde_json::Value;
 
 fn rows(fixture: &str) -> Vec<Value> {
     let v: Value = serde_json::from_str(fixture).unwrap();
-    v.pointer("/result/data").unwrap().as_array().unwrap().clone()
+    v.pointer("/result/data")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .clone()
 }
 
 fn d(y: i32, m: u32, day: u32) -> NaiveDate {
@@ -17,7 +21,8 @@ fn d(y: i32, m: u32, day: u32) -> NaiveDate {
 
 #[test]
 fn income_fixture_parses_with_point_in_time_date() {
-    let parsed = parse::parse_income(rows(include_str!("fixtures/em_f10_income_600519.json")).as_slice());
+    let parsed =
+        parse::parse_income(rows(include_str!("fixtures/em_f10_income_600519.json")).as_slice());
     assert_eq!(parsed.len(), 2);
     // Rows are sorted ascending; the newest is 2026 H1.
     let latest = parsed.last().unwrap();
@@ -84,9 +89,8 @@ fn survey_fixture_parses_profile() {
 
 #[test]
 fn sharebonus_fixture_parses_dividends() {
-    let parsed = parse::parse_dividends(
-        rows(include_str!("fixtures/em_sharebonus_600519.json")).as_slice(),
-    );
+    let parsed =
+        parse::parse_dividends(rows(include_str!("fixtures/em_sharebonus_600519.json")).as_slice());
     assert!(!parsed.is_empty());
     let latest = parsed.last().unwrap();
     assert_eq!(latest.pretax_cash_per_10, Some(280.2423));
@@ -110,8 +114,7 @@ fn valueanalysis_fixture_parses_history() {
 
 #[test]
 fn quote_ext_fixture_parses_snapshot() {
-    let v: Value =
-        serde_json::from_str(include_str!("fixtures/em_quote_ext_600519.json")).unwrap();
+    let v: Value = serde_json::from_str(include_str!("fixtures/em_quote_ext_600519.json")).unwrap();
     let snap = parse::parse_snapshot(v.get("data").unwrap());
     assert_eq!(snap.price, 1272.83);
     assert_eq!(snap.name, "贵州茅台");

@@ -3,9 +3,7 @@
 
 use astock_quant::dimred::kmeans;
 use astock_quant::leadlag::leadlag_bootstrap_pvalue;
-use astock_quant::simulation::{
-    block_bootstrap, gbm_paths, mc_var_es, stationary_bootstrap,
-};
+use astock_quant::simulation::{block_bootstrap, gbm_paths, mc_var_es, stationary_bootstrap};
 
 #[test]
 fn gbm_paths_reproduce_exactly() {

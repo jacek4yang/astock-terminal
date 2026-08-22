@@ -42,6 +42,7 @@ pub mod hub;
 pub mod provider;
 pub mod providers;
 pub mod proxy;
+mod security_master;
 pub mod validate;
 
 pub use breaker::{BreakerConfig, CircuitBreaker, CircuitState, ProviderHealth};
@@ -54,4 +55,5 @@ pub use providers::{
     JoinQuantProvider, SinaKline, TdxProvider, TencentKline, TushareProvider,
 };
 pub use proxy::{ProxyConfig, ProxyRoute};
+pub use security_master::SecurityMaster;
 pub use validate::filter_valid_bars;

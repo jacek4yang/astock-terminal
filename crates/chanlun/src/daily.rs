@@ -291,7 +291,11 @@ pub fn find_daily_strokes(fractals: &[DailyFractal]) -> Vec<DailyStroke> {
     }
     let mut start = fractals[0].clone();
     let mut start_pos = 0usize;
-    let mut direction = if start.fractal_type == "top" { "down" } else { "up" };
+    let mut direction = if start.fractal_type == "top" {
+        "down"
+    } else {
+        "up"
+    };
     let mut end: Option<DailyFractal> = None;
     let mut end_pos = 0usize;
     let mut j = 1;
@@ -359,8 +363,14 @@ pub fn find_zhongshus(strokes: &[DailyStroke]) -> Vec<Zhongshu> {
     while i + 2 < n {
         let (a, b) = (&strokes[i], &strokes[i + 1]);
         // The four endpoints form two intervals; the overlap is the zhongshu.
-        let zd = a.start_price.min(a.end_price).max(b.start_price.min(b.end_price));
-        let zg = a.start_price.max(a.end_price).min(b.start_price.max(b.end_price));
+        let zd = a
+            .start_price
+            .min(a.end_price)
+            .max(b.start_price.min(b.end_price));
+        let zg = a
+            .start_price
+            .max(a.end_price)
+            .min(b.start_price.max(b.end_price));
         if zd < zg {
             zhongshus.push(Zhongshu {
                 start_date: a.start_date.clone(),
@@ -411,7 +421,10 @@ pub fn detect_daily_divergence(strokes: &mut [DailyStroke], macd_bar: &[f64], da
         .collect();
     let mut areas = Vec::with_capacity(strokes.len());
     for st in strokes.iter() {
-        match (date_to_idx.get(st.start_date.as_str()), date_to_idx.get(st.end_date.as_str())) {
+        match (
+            date_to_idx.get(st.start_date.as_str()),
+            date_to_idx.get(st.end_date.as_str()),
+        ) {
             (Some(&si), Some(&ei)) => {
                 areas.push(macd_bar[si..=ei].iter().map(|x| x.abs()).sum());
             }
@@ -421,7 +434,10 @@ pub fn detect_daily_divergence(strokes: &mut [DailyStroke], macd_bar: &[f64], da
     let mut flags = vec![false; strokes.len()];
     for i in 0..strokes.len() {
         // Previous stroke in the same direction (nearest one wins).
-        let prev = match (0..i).rev().find(|&j| strokes[j].direction == strokes[i].direction) {
+        let prev = match (0..i)
+            .rev()
+            .find(|&j| strokes[j].direction == strokes[i].direction)
+        {
             Some(p) => p,
             None => continue,
         };
@@ -645,7 +661,10 @@ fn describe_state(
     };
 
     let latest = signals.last();
-    let mut state = format!("处于{}笔中，{}延续，最近中枢{}", direction_cn, bull_cn, zs_text);
+    let mut state = format!(
+        "处于{}笔中，{}延续，最近中枢{}",
+        direction_cn, bull_cn, zs_text
+    );
     let summary;
     if let Some(latest) = latest {
         let type_cn = get_signal_type_name(&latest.signal_type);
@@ -752,7 +771,12 @@ fn build_chart_overlay(
         })
         .collect();
 
-    (chart_signals, chart_fractals, chart_zhongshus, chart_strokes)
+    (
+        chart_signals,
+        chart_fractals,
+        chart_zhongshus,
+        chart_strokes,
+    )
 }
 
 /// Run the full daily Chan theory analysis pipeline.

@@ -136,12 +136,7 @@ fn to_minutes(t: &str) -> i64 {
 }
 
 /// Aggregate a group of minute indices into one 5-minute kline.
-fn make_kline(
-    times: &[String],
-    prices: &[f64],
-    volumes: &[f64],
-    group: &[usize],
-) -> MinuteKline {
+fn make_kline(times: &[String], prices: &[f64], volumes: &[f64], group: &[usize]) -> MinuteKline {
     let first = group[0];
     let last = group[group.len() - 1];
     let mut high = f64::NEG_INFINITY;
@@ -315,7 +310,11 @@ pub fn find_strokes(fractals: &[Fractal]) -> Vec<Stroke> {
     }
     let mut start = fractals[0].clone();
     let mut start_pos = 0usize;
-    let mut direction = if start.fractal_type == "top" { "down" } else { "up" };
+    let mut direction = if start.fractal_type == "top" {
+        "down"
+    } else {
+        "up"
+    };
     let mut end: Option<Fractal> = None;
     let mut end_pos = 0usize;
     let mut j = 1;
@@ -382,7 +381,10 @@ pub fn detect_divergence(strokes: &mut [Stroke], macd_bar: &[f64], klines: &[Min
         .collect();
     let mut areas = Vec::with_capacity(strokes.len());
     for st in strokes.iter() {
-        match (time_to_idx.get(st.start_time.as_str()), time_to_idx.get(st.end_time.as_str())) {
+        match (
+            time_to_idx.get(st.start_time.as_str()),
+            time_to_idx.get(st.end_time.as_str()),
+        ) {
             (Some(&si), Some(&ei)) => {
                 areas.push(macd_bar[si..=ei].iter().map(|x| x.abs()).sum());
             }
@@ -391,7 +393,10 @@ pub fn detect_divergence(strokes: &mut [Stroke], macd_bar: &[f64], klines: &[Min
     }
     let mut flags = vec![false; strokes.len()];
     for i in 0..strokes.len() {
-        let prev = match (0..i).rev().find(|&j| strokes[j].direction == strokes[i].direction) {
+        let prev = match (0..i)
+            .rev()
+            .find(|&j| strokes[j].direction == strokes[i].direction)
+        {
             Some(p) => p,
             None => continue,
         };

@@ -42,9 +42,9 @@ pub(crate) fn ols(y: &[f64], x: &DMatrix<f64>) -> Result<OlsFit, QuantError> {
     let xmat = x;
     let xt = xmat.transpose();
     let xtx = &xt * xmat;
-    let xtx_inv = xtx
-        .try_inverse()
-        .ok_or_else(|| QuantError::NumericalIssue("ols: XᵀX is singular (collinear regressors)".into()))?;
+    let xtx_inv = xtx.try_inverse().ok_or_else(|| {
+        QuantError::NumericalIssue("ols: XᵀX is singular (collinear regressors)".into())
+    })?;
     let xty = &xt * DMatrix::from_column_slice(n, 1, y);
     let beta = &xtx_inv * xty;
     let fitted = xmat * &beta;

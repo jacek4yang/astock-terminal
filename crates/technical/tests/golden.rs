@@ -9,8 +9,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 fn fixtures_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures/golden")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/golden")
 }
 
 #[derive(serde::Deserialize)]
@@ -103,8 +102,8 @@ fn golden_signal_matches_legacy() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let raw = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("cannot read {}: {}", path.display(), e));
-        let fixture: Fixture = serde_json::from_str(&raw)
-            .unwrap_or_else(|e| panic!("cannot parse {}: {}", name, e));
+        let fixture: Fixture =
+            serde_json::from_str(&raw).unwrap_or_else(|e| panic!("cannot parse {}: {}", name, e));
 
         let actual = astock_technical::analyze(
             &fixture.inputs.klines,
@@ -126,10 +125,10 @@ fn golden_signal_matches_legacy() {
 
         // Surface the headline fields in the test log for the report.
         let score = actual.get("score").and_then(Value::as_i64).unwrap_or(-1);
-        let action = actual
-            .get("action")
-            .and_then(Value::as_str)
-            .unwrap_or("?");
-        eprintln!("golden {:<20} score={:<3} action={} MATCHED", name, score, action);
+        let action = actual.get("action").and_then(Value::as_str).unwrap_or("?");
+        eprintln!(
+            "golden {:<20} score={:<3} action={} MATCHED",
+            name, score, action
+        );
     }
 }

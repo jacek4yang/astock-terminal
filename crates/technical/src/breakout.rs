@@ -166,16 +166,17 @@ fn analyze_system(klines: &[Kline], period: usize, system_name: &str) -> Breakou
         next_add = None;
         // Short cover: only the last bar. System 1 uses the 10-day high,
         // system 2 the 20-day high; channel breakout beats the 2N stop.
-        let exit_window = if system_name.contains("系统一") { 10 } else { 20 };
+        let exit_window = if system_name.contains("系统一") {
+            10
+        } else {
+            20
+        };
         let high_exit_level = calc_donchian_channel(klines, exit_window).0;
         let last = &klines[klines.len() - 1];
         if last.high >= high_exit_level {
             signal = "空头平仓";
             exit_price = Some(high_exit_level);
-            sig_text = format!(
-                "突破{}日高点{:.2}，空头平仓",
-                exit_window, high_exit_level
-            );
+            sig_text = format!("突破{}日高点{:.2}，空头平仓", exit_window, high_exit_level);
         } else if last.close >= stop {
             signal = "空头平仓";
             exit_price = Some(stop);
@@ -187,9 +188,7 @@ fn analyze_system(klines: &[Kline], period: usize, system_name: &str) -> Breakou
         }
     }
 
-    let short_system_name = system_name
-        .replace("(20日)", "")
-        .replace("(55日)", "");
+    let short_system_name = system_name.replace("(20日)", "").replace("(55日)", "");
     BreakoutResult {
         system: system_name.to_string(),
         signal: signal.to_string(),
@@ -222,5 +221,8 @@ pub fn analyze_breakout_system2(klines: &[Kline]) -> BreakoutResult {
 
 /// Combined breakout analysis: both systems, in order.
 pub fn analyze_breakout(klines: &[Kline]) -> Vec<BreakoutResult> {
-    vec![analyze_breakout_system1(klines), analyze_breakout_system2(klines)]
+    vec![
+        analyze_breakout_system1(klines),
+        analyze_breakout_system2(klines),
+    ]
 }

@@ -75,7 +75,7 @@ async fn live_kline_quote_search_breadth() {
     );
     let numeric = md.search("600519").await.expect("numeric search failed");
     assert_eq!(numeric.data[0].code, "600519");
-    assert_eq!(numeric.data[0].classify, "SH");
+    assert_eq!(numeric.data[0].name, "贵州茅台");
 
     // --- Market breadth ---
     let breadth = md.market_breadth().await.expect("breadth fetch failed");
@@ -99,10 +99,21 @@ async fn live_kline_quote_search_breadth() {
         .await
         .expect("index kline fetch failed");
     println!(
-        "index kline(1.000001): source={} bars={} last_close={}",
+        "index kline(1.000001): source={} bars={} last_close={} last_pct={:?}",
         index.source,
         index.data.len(),
-        index.data.last().unwrap().close
+        index.data.last().unwrap().close,
+        index.data.last().unwrap().pct,
+    );
+    println!(
+        "index tail={:?}",
+        index
+            .data
+            .iter()
+            .rev()
+            .take(3)
+            .map(|bar| (bar.date, bar.close, bar.pct))
+            .collect::<Vec<_>>()
     );
     assert!(index.data.len() >= 10);
     assert!(index.data.last().unwrap().close > 1000.0);

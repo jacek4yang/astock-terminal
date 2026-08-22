@@ -165,10 +165,7 @@ fn kmeanspp(points: &[Vec<f64>], k: usize, rng: &mut StdRng) -> Vec<Vec<f64>> {
     let mut centroids: Vec<Vec<f64>> = Vec::with_capacity(k);
     let first = rng.random_range(0..n);
     centroids.push(points[first].clone());
-    let mut d2: Vec<f64> = points
-        .iter()
-        .map(|p| sq_dist(p, &centroids[0]))
-        .collect();
+    let mut d2: Vec<f64> = points.iter().map(|p| sq_dist(p, &centroids[0])).collect();
     while centroids.len() < k {
         let total: f64 = d2.iter().sum();
         if total <= 0.0 {

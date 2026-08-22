@@ -251,9 +251,7 @@ impl Engine {
                 visited.insert(other_id.clone(), next_hop);
 
                 let impact = match next_st {
-                    State::Prosperity { sign, .. } if next.kind == NodeKind::Company => {
-                        Some(sign)
-                    }
+                    State::Prosperity { sign, .. } if next.kind == NodeKind::Company => Some(sign),
                     _ => None,
                 };
                 let step = Step {
@@ -292,9 +290,7 @@ impl Engine {
                             provenance: next_frontier
                                 .steps
                                 .iter()
-                                .map(|s| {
-                                    (s.edge.source_name.clone(), s.edge.source_url.clone())
-                                })
+                                .map(|s| (s.edge.source_name.clone(), s.edge.source_url.clone()))
                                 .collect(),
                         });
                     }
@@ -384,10 +380,9 @@ fn transition(
                         pass: Some(d),
                     },
                 )),
-                (Relation::Substitutes, true) => Some((
-                    format!("{}的替代品，需求转移", node.name),
-                    State::Price(d),
-                )),
+                (Relation::Substitutes, true) => {
+                    Some((format!("{}的替代品，需求转移", node.name), State::Price(d)))
+                }
                 (Relation::ExposedTo, true) => Some((
                     format!("对{}有风险敞口", node.name),
                     State::Prosperity {
@@ -415,7 +410,11 @@ fn transition(
             // output price in the same direction as its input.
             (Relation::Produces, false, true) if pass.is_some() => {
                 let d = pass.unwrap();
-                let note = if d > 0 { "成本传导提价" } else { "成本传导降价" };
+                let note = if d > 0 {
+                    "成本传导提价"
+                } else {
+                    "成本传导降价"
+                };
                 Some((note.to_string(), State::Price(d)))
             }
             // Non-price-driven harm (accident etc.): supply disruption
@@ -505,8 +504,18 @@ mod tests {
             ("material:al", NodeKind::Material, "铝", None),
             ("product:cable", NodeKind::Product, "线缆", None),
             ("company:600362", NodeKind::Company, "江铜", Some("600362")),
-            ("company:600869", NodeKind::Company, "线缆厂", Some("600869")),
-            ("company:000651", NodeKind::Company, "家电厂", Some("000651")),
+            (
+                "company:600869",
+                NodeKind::Company,
+                "线缆厂",
+                Some("600869"),
+            ),
+            (
+                "company:000651",
+                NodeKind::Company,
+                "家电厂",
+                Some("000651"),
+            ),
             ("company:601600", NodeKind::Company, "铝厂", Some("601600")),
         ];
         for (id, kind, name, code) in nodes {
@@ -533,22 +542,93 @@ mod tests {
             valid_from: 0,
             valid_to: None,
         };
-        store.upsert_edge(&edge("company:600362", "commodity:cu", Relation::Produces, 0.9, 0.9)).await.unwrap();
-        store.upsert_edge(&edge("company:600869", "commodity:cu", Relation::Consumes, 0.8, 0.8)).await.unwrap();
-        store.upsert_edge(&edge("company:600869", "product:cable", Relation::Produces, 0.9, 0.9)).await.unwrap();
-        store.upsert_edge(&edge("company:000651", "product:cable", Relation::Consumes, 0.7, 0.7)).await.unwrap();
-        store.upsert_edge(&edge("material:al", "commodity:cu", Relation::Substitutes, 0.5, 0.6)).await.unwrap();
-        store.upsert_edge(&edge("company:601600", "material:al", Relation::Produces, 0.8, 0.8)).await.unwrap();
+        store
+            .upsert_edge(&edge(
+                "company:600362",
+                "commodity:cu",
+                Relation::Produces,
+                0.9,
+                0.9,
+            ))
+            .await
+            .unwrap();
+        store
+            .upsert_edge(&edge(
+                "company:600869",
+                "commodity:cu",
+                Relation::Consumes,
+                0.8,
+                0.8,
+            ))
+            .await
+            .unwrap();
+        store
+            .upsert_edge(&edge(
+                "company:600869",
+                "product:cable",
+                Relation::Produces,
+                0.9,
+                0.9,
+            ))
+            .await
+            .unwrap();
+        store
+            .upsert_edge(&edge(
+                "company:000651",
+                "product:cable",
+                Relation::Consumes,
+                0.7,
+                0.7,
+            ))
+            .await
+            .unwrap();
+        store
+            .upsert_edge(&edge(
+                "material:al",
+                "commodity:cu",
+                Relation::Substitutes,
+                0.5,
+                0.6,
+            ))
+            .await
+            .unwrap();
+        store
+            .upsert_edge(&edge(
+                "company:601600",
+                "material:al",
+                Relation::Produces,
+                0.8,
+                0.8,
+            ))
+            .await
+            .unwrap();
         // Back edge forming a cycle; `competes` is never traversed for
         // commodity-subject events, so the BFS must rely on the guard.
-        store.upsert_edge(&edge("company:000651", "company:600869", Relation::Competes, 0.5, 0.6)).await.unwrap();
+        store
+            .upsert_edge(&edge(
+                "company:000651",
+                "company:600869",
+                Relation::Competes,
+                0.5,
+                0.6,
+            ))
+            .await
+            .unwrap();
         (dir, Engine::new(store))
     }
 
     #[tokio::test]
     async fn propagation_direction_rules_and_hop_decay() {
         let (_dir, engine) = synthetic().await;
-        let event = Event::new("e1", "commodity_price", "铜价上涨10%", "铜", Some(0.10), 1, 0);
+        let event = Event::new(
+            "e1",
+            "commodity_price",
+            "铜价上涨10%",
+            "铜",
+            Some(0.10),
+            1,
+            0,
+        );
         let report = engine.propagate(&event).await.unwrap();
 
         // 一级受益: producer of 铜.
@@ -606,7 +686,15 @@ mod tests {
     #[tokio::test]
     async fn direction_down_flips_benefit_and_harm() {
         let (_dir, engine) = synthetic().await;
-        let event = Event::new("e2", "commodity_price", "铜价下跌10%", "铜", Some(0.10), -1, 0);
+        let event = Event::new(
+            "e2",
+            "commodity_price",
+            "铜价下跌10%",
+            "铜",
+            Some(0.10),
+            -1,
+            0,
+        );
         let report = engine.propagate(&event).await.unwrap();
         // Falling copper hurts the producer, helps the consumer.
         assert_eq!(report.primary_harm[0].name, "江铜");

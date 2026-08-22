@@ -12,6 +12,7 @@ pub mod period;
 pub mod provenance;
 pub mod quote;
 pub mod search;
+pub mod security;
 pub mod symbol;
 pub mod time;
 
@@ -23,7 +24,8 @@ pub use bar::{Bar, VolumeUnit};
 pub use error::DataError;
 pub use flow::FundFlowPoint;
 pub use period::{Adjust, KlinePeriod};
-pub use provenance::{Fetched, Source};
+pub use provenance::{DataQuality, Fetched, FieldProvenance, Source};
 pub use quote::{MinuteData, MinutePoint, Quote};
 pub use search::{MarketBreadth, SearchResult, StockListItem};
+pub use security::{board_for, AssetType, Board, SecurityMasterRecord};
 pub use symbol::{Market, Symbol};

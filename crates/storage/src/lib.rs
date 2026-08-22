@@ -37,8 +37,27 @@ use std::sync::Arc;
 use chrono::NaiveDate;
 use rusqlite::{params, Connection};
 
+use astock_core::{Market, SecurityMasterRecord};
+
 use db::{now_secs, Db};
 use timeseries::TimeSeriesStore;
+
+fn enum_token(value: &impl serde::Serialize) -> Result<String> {
+    Ok(serde_json::to_string(value)?.trim_matches('"').to_string())
+}
+
+fn parse_enum<T: serde::de::DeserializeOwned>(token: &str) -> Result<T> {
+    Ok(serde_json::from_str(&format!("\"{token}\""))?)
+}
+
+fn parse_market(token: &str) -> Result<Market> {
+    match token.to_ascii_uppercase().as_str() {
+        "SH" => Ok(Market::SH),
+        "SZ" => Ok(Market::SZ),
+        "BJ" => Ok(Market::BJ),
+        _ => Err(Error::Invalid(format!("unknown security market {token}"))),
+    }
+}
 
 /// A row of the `tool_cache` table.
 #[derive(Debug, Clone, PartialEq)]
@@ -366,6 +385,127 @@ impl Storage {
     /// In-memory LRU cache for hot tool results.
     pub fn tool_mem_cache(&self) -> &MemCache<ToolCacheEntry> {
         &self.inner.tool_mem
+    }
+
+    // ------------------------------------------------------------------
+    // canonical security master (migration v6)
+    // ------------------------------------------------------------------
+
+    /// Upsert a provider refresh as one transaction.
+    pub async fn securities_upsert(&self, records: Vec<SecurityMasterRecord>) -> Result<()> {
+        self.run(move |conn| {
+            let tx = conn.transaction()?;
+            {
+                let mut stmt = tx.prepare(
+                    "INSERT INTO securities
+                     (code,name,market,classify,updated_at,board,asset_type,
+                      aliases_json,industry,concepts_json,region,source,source_url,
+                      valid_from,valid_to,refreshed_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+                     ON CONFLICT(code) DO UPDATE SET
+                       name=excluded.name, market=excluded.market,
+                       classify=excluded.classify, updated_at=excluded.updated_at,
+                       board=excluded.board, asset_type=excluded.asset_type,
+                       aliases_json=excluded.aliases_json, industry=excluded.industry,
+                       concepts_json=excluded.concepts_json, region=excluded.region,
+                       source=excluded.source, source_url=excluded.source_url,
+                       valid_from=excluded.valid_from, valid_to=excluded.valid_to,
+                       refreshed_at=excluded.refreshed_at",
+                )?;
+                for record in records {
+                    let refreshed_at = record.refreshed_at.timestamp();
+                    stmt.execute(params![
+                        record.code,
+                        record.canonical_name,
+                        record.market.to_string(),
+                        enum_token(&record.board)?,
+                        refreshed_at,
+                        enum_token(&record.board)?,
+                        enum_token(&record.asset_type)?,
+                        serde_json::to_string(&record.aliases)?,
+                        record.industry,
+                        serde_json::to_string(&record.concepts)?,
+                        record.region,
+                        record.source,
+                        record.source_url,
+                        record.valid_from.map(|d| d.timestamp()),
+                        record.valid_to.map(|d| d.timestamp()),
+                        refreshed_at,
+                    ])?;
+                }
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Load the complete locally cached security master.
+    pub async fn securities_list(&self) -> Result<Vec<SecurityMasterRecord>> {
+        self.run(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT code,name,market,board,asset_type,aliases_json,industry,
+                        concepts_json,region,source,source_url,valid_from,valid_to,
+                        refreshed_at
+                 FROM securities ORDER BY code",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<i64>>(11)?,
+                    row.get::<_, Option<i64>>(12)?,
+                    row.get::<_, i64>(13)?,
+                ))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (
+                    code,
+                    canonical_name,
+                    market,
+                    board,
+                    asset_type,
+                    aliases_json,
+                    industry,
+                    concepts_json,
+                    region,
+                    source,
+                    source_url,
+                    valid_from,
+                    valid_to,
+                    refreshed_at,
+                ) = row?;
+                out.push(SecurityMasterRecord {
+                    code,
+                    canonical_name,
+                    market: parse_market(&market)?,
+                    board: parse_enum(&board)?,
+                    asset_type: parse_enum(&asset_type)?,
+                    aliases: serde_json::from_str(&aliases_json)?,
+                    industry,
+                    concepts: serde_json::from_str(&concepts_json)?,
+                    region,
+                    source,
+                    source_url,
+                    valid_from: valid_from.and_then(|ts| chrono::DateTime::from_timestamp(ts, 0)),
+                    valid_to: valid_to.and_then(|ts| chrono::DateTime::from_timestamp(ts, 0)),
+                    refreshed_at: chrono::DateTime::from_timestamp(refreshed_at, 0)
+                        .unwrap_or(chrono::DateTime::UNIX_EPOCH),
+                });
+            }
+            Ok(out)
+        })
+        .await
     }
 
     // ------------------------------------------------------------------
@@ -1557,6 +1697,26 @@ mod tests {
             ttl_seconds: ttl,
             accessed_at: now_secs(),
         }
+    }
+
+    #[tokio::test]
+    async fn security_master_roundtrip_preserves_identity_and_lineage() {
+        let (_dir, storage) = test_storage();
+        let mut record = SecurityMasterRecord::listed_stock("300308", "中际旭创", "tdx");
+        record.refreshed_at =
+            chrono::DateTime::from_timestamp(record.refreshed_at.timestamp(), 0).unwrap();
+        record.aliases = vec!["中际旭创股份".into()];
+        record.industry = Some("通信设备".into());
+        record.concepts = vec!["光模块".into(), "CPO".into()];
+        record.region = Some("山东".into());
+        storage
+            .securities_upsert(vec![record.clone()])
+            .await
+            .unwrap();
+
+        let rows = storage.securities_list().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], record);
     }
 
     #[tokio::test]

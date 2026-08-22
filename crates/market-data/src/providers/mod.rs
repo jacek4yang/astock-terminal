@@ -18,8 +18,8 @@ pub use eastmoney_f10::{EastMoneyF10, F10Report};
 pub use em_datacenter::{
     BillboardRow, BlockTradeRow, BoardConsRow, BoardKind, BoardRow, BrokenPoolRow, DtPoolRow,
     EarningsPredictRow, EmDataCenter, HolderNumRow, LiftStageRow, LimitStat, MarginDailyRow,
-    NoticeNode, NoticeRow, OrgSurveyRow, PrevZtPoolRow, StrongPoolRow, StrongReason,
-    SubNewPoolRow, SuspendRow, ZtPoolRow,
+    NoticeNode, NoticeRow, OrgSurveyRow, PrevZtPoolRow, StrongPoolRow, StrongReason, SubNewPoolRow,
+    SuspendRow, ZtPoolRow,
 };
 pub use iwencai_openapi::{IwencaiOpenApi, StockEvents, WencaiRows};
 pub use joinquant::JoinQuantProvider;

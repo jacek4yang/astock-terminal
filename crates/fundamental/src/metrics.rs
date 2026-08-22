@@ -444,10 +444,7 @@ pub fn quick_ratio(
 }
 
 /// Debt-to-assets ratio = total liabilities / total assets.
-pub fn debt_to_assets(
-    total_liabilities: Option<f64>,
-    total_assets: Option<f64>,
-) -> Option<f64> {
+pub fn debt_to_assets(total_liabilities: Option<f64>, total_assets: Option<f64>) -> Option<f64> {
     let a = total_assets?;
     if a <= 0.0 {
         return None;
@@ -503,9 +500,18 @@ mod tests {
     #[test]
     fn yoy_matches_same_period_last_year() {
         let series = vec![
-            PeriodValue { period_end: d(2024, 12, 31), value: 100.0 },
-            PeriodValue { period_end: d(2025, 6, 30), value: 50.0 },
-            PeriodValue { period_end: d(2025, 12, 31), value: 120.0 },
+            PeriodValue {
+                period_end: d(2024, 12, 31),
+                value: 100.0,
+            },
+            PeriodValue {
+                period_end: d(2025, 6, 30),
+                value: 50.0,
+            },
+            PeriodValue {
+                period_end: d(2025, 12, 31),
+                value: 120.0,
+            },
         ];
         let yoy = yoy_growth(&series);
         assert_eq!(yoy, vec![(d(2025, 12, 31), 0.2)]);
@@ -514,9 +520,18 @@ mod tests {
     #[test]
     fn qoq_uses_consecutive_periods() {
         let series = vec![
-            PeriodValue { period_end: d(2025, 3, 31), value: 100.0 },
-            PeriodValue { period_end: d(2025, 6, 30), value: 110.0 },
-            PeriodValue { period_end: d(2025, 9, 30), value: 99.0 },
+            PeriodValue {
+                period_end: d(2025, 3, 31),
+                value: 100.0,
+            },
+            PeriodValue {
+                period_end: d(2025, 6, 30),
+                value: 110.0,
+            },
+            PeriodValue {
+                period_end: d(2025, 9, 30),
+                value: 99.0,
+            },
         ];
         let qoq = qoq_growth(&series);
         assert_eq!(qoq.len(), 2);
@@ -528,20 +543,42 @@ mod tests {
     fn single_quarter_differencing() {
         let meta = |m: u32, rt: ReportType| {
             Some(PeriodMeta {
-                period_end: d(2025, m, if m == 3 { 31 } else if m == 6 { 30 } else { 31 }),
+                period_end: d(
+                    2025,
+                    m,
+                    if m == 3 {
+                        31
+                    } else if m == 6 {
+                        30
+                    } else {
+                        31
+                    },
+                ),
                 report_type: rt,
                 announced: None,
             })
         };
         let cumulative = vec![
-            IncomeStatement { meta: meta(3, ReportType::Q1), net_profit: Some(10.0), ..Default::default() },
-            IncomeStatement { meta: meta(6, ReportType::H1), net_profit: Some(25.0), ..Default::default() },
-            IncomeStatement { meta: meta(12, ReportType::Annual), net_profit: Some(60.0), ..Default::default() },
+            IncomeStatement {
+                meta: meta(3, ReportType::Q1),
+                net_profit: Some(10.0),
+                ..Default::default()
+            },
+            IncomeStatement {
+                meta: meta(6, ReportType::H1),
+                net_profit: Some(25.0),
+                ..Default::default()
+            },
+            IncomeStatement {
+                meta: meta(12, ReportType::Annual),
+                net_profit: Some(60.0),
+                ..Default::default()
+            },
         ];
         let sq = to_single_quarters(&cumulative);
         assert_eq!(sq[0].net_profit, Some(10.0)); // Q1 as-is
         assert_eq!(sq[1].net_profit, Some(15.0)); // H1 − Q1
-        // Q4 = Annual − Q3; no Q3 row → documented fallback keeps YTD.
+                                                  // Q4 = Annual − Q3; no Q3 row → documented fallback keeps YTD.
         assert_eq!(sq[2].net_profit, Some(35.0)); // 60 − 25 (prev = H1)
     }
 

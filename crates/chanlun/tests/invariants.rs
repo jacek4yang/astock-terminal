@@ -8,9 +8,7 @@
 //!   list;
 //! - 5-minute aggregation conserves volume and price envelopes.
 
-use astock_chanlun::daily::{
-    find_daily_fractals, find_daily_strokes, merge_daily_klines,
-};
+use astock_chanlun::daily::{find_daily_fractals, find_daily_strokes, merge_daily_klines};
 use astock_chanlun::minute::{construct_5min_klines, merge_klines, MinuteKline};
 use proptest::prelude::*;
 

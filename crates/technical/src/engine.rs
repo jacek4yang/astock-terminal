@@ -345,14 +345,10 @@ pub fn run_analysis(
     };
 
     // confidence = max(10, int(score*0.8) + 12*n - 40), n = #modules >= 60
-    let qualified_count = module_scores
-        .iter()
-        .filter(|(_, s)| *s >= 60)
-        .count() as i64;
+    let qualified_count = module_scores.iter().filter(|(_, s)| *s >= 60).count() as i64;
     let confidence = (py_int(score as f64 * 0.8) + 12 * qualified_count - 40).max(10);
 
-    let (risk_level, signal_strength) =
-        calc_risk_level(score, &trend, &vp, &canslim, &breakouts);
+    let (risk_level, signal_strength) = calc_risk_level(score, &trend, &vp, &canslim, &breakouts);
 
     // ---- Signal aggregation ----
     let mut buy_signals: Vec<String> = Vec::new();
@@ -473,8 +469,7 @@ pub fn run_analysis(
     }
     let description = desc_parts.join(" | ");
 
-    let plain_summary =
-        build_plain_summary(action, &trend, &patterns, &vp, &canslim, &trade_plan);
+    let plain_summary = build_plain_summary(action, &trend, &patterns, &vp, &canslim, &trade_plan);
 
     SignalEngineResult {
         action: action.to_string(),

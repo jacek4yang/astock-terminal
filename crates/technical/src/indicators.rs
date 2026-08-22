@@ -165,7 +165,11 @@ pub fn macd_series(
         .iter()
         .map(|d| d.unwrap_or(0.0))
         .collect();
-    let bar: Vec<f64> = dif.iter().zip(dea.iter()).map(|(d, e)| 2.0 * (d - e)).collect();
+    let bar: Vec<f64> = dif
+        .iter()
+        .zip(dea.iter())
+        .map(|(d, e)| 2.0 * (d - e))
+        .collect();
     (dif, dea, bar)
 }
 

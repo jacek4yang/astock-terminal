@@ -23,19 +23,31 @@ async fn full_pipeline_600519() {
     // --- coverage assertions ---
     assert!(b.income.len() >= 8, "income periods: {}", b.income.len());
     assert!(b.balance.len() >= 8, "balance periods: {}", b.balance.len());
-    assert!(b.cashflow.len() >= 8, "cashflow periods: {}", b.cashflow.len());
+    assert!(
+        b.cashflow.len() >= 8,
+        "cashflow periods: {}",
+        b.cashflow.len()
+    );
     let profile = b.profile.as_ref().expect("profile");
     let snapshot = b.snapshot.as_ref().expect("snapshot");
     assert!(!b.valuation_history.is_empty(), "valuation history");
 
     println!(
         "profile: {} ({}) industry={:?} listed={:?} shares={:?}",
-        profile.name, profile.short_name, profile.industry, profile.listing_date, profile.total_shares
+        profile.name,
+        profile.short_name,
+        profile.industry,
+        profile.listing_date,
+        profile.total_shares
     );
     println!(
         "statements: income={} balance={} cashflow={} indicators={} dividends={} valuation_days={}",
-        b.income.len(), b.balance.len(), b.cashflow.len(), b.indicators.len(),
-        b.dividends.len(), b.valuation_history.len()
+        b.income.len(),
+        b.balance.len(),
+        b.cashflow.len(),
+        b.indicators.len(),
+        b.dividends.len(),
+        b.valuation_history.len()
     );
     println!(
         "snapshot: price={} pe_ttm={:?} pe_static={:?} pb={:?} mcap={:?}",
@@ -67,13 +79,20 @@ async fn full_pipeline_600519() {
     let cf = annual_cf[annual_cf.len() - 1];
 
     let gm = metrics::gross_margin(inc.operating_revenue, inc.operating_cost);
-    let roe_v = metrics::roe(inc.net_profit_parent, bs_prev.total_parent_equity, bs.total_parent_equity);
+    let roe_v = metrics::roe(
+        inc.net_profit_parent,
+        bs_prev.total_parent_equity,
+        bs.total_parent_equity,
+    );
     let fcf_v = metrics::fcf(cf.net_cfo, cf.capex);
     let dup = metrics::dupont(inc, bs_prev, bs);
     println!(
         "FY{:?}: gross_margin={:?} roe={:?} fcf={:?} dupont={:?}",
         inc.meta.map(|m| m.period_end),
-        gm, roe_v, fcf_v, dup.map(|d| d.roe)
+        gm,
+        roe_v,
+        fcf_v,
+        dup.map(|d| d.roe)
     );
     assert!(gm.is_some() && roe_v.is_some() && fcf_v.is_some());
 
@@ -88,7 +107,10 @@ async fn full_pipeline_600519() {
     println!("piotroski: {}/9 ({} available)", f.score, f.available);
 
     let altman_in = scores::AltmanInput {
-        working_capital: metrics::working_capital(bs.total_current_assets, bs.total_current_liabilities),
+        working_capital: metrics::working_capital(
+            bs.total_current_assets,
+            bs.total_current_liabilities,
+        ),
         retained_earnings: bs.retained_earnings,
         ebit: scores::altman_ebit(inc),
         market_cap: snapshot.total_market_cap,
@@ -98,13 +120,25 @@ async fn full_pipeline_600519() {
         revenue: inc.total_operating_revenue,
     };
     let z = scores::altman(&altman_in);
-    println!("altman: classic={:?} ({:?}) z''={:?} ({:?})", z.classic, z.classic_zone, z.z_emerging, z.emerging_zone);
+    println!(
+        "altman: classic={:?} ({:?}) z''={:?} ({:?})",
+        z.classic, z.classic_zone, z.z_emerging, z.emerging_zone
+    );
 
     // --- valuation ---
-    let pe_hist: Vec<f64> = b.valuation_history.iter().filter_map(|p| p.pe_ttm).collect();
+    let pe_hist: Vec<f64> = b
+        .valuation_history
+        .iter()
+        .filter_map(|p| p.pe_ttm)
+        .collect();
     let pe_now = snapshot.pe_ttm;
     let pct = pe_now.and_then(|c| valuation::percentile(&pe_hist, c));
-    println!("valuation: pe_ttm={:?} percentile={:?} ({} days)", pe_now, pct, pe_hist.len());
+    println!(
+        "valuation: pe_ttm={:?} percentile={:?} ({} days)",
+        pe_now,
+        pct,
+        pe_hist.len()
+    );
 
     let net_debt = bs
         .interest_bearing_debt()
@@ -139,7 +173,9 @@ async fn full_pipeline_600519() {
             PeriodObservation {
                 revenue: inc_i.total_operating_revenue,
                 cfo: cf_i.net_cfo,
-                receivables: bs_i.notes_and_accounts_receivable.or(bs_i.accounts_receivable),
+                receivables: bs_i
+                    .notes_and_accounts_receivable
+                    .or(bs_i.accounts_receivable),
                 inventory: bs_i.inventory,
                 operating_cost: inc_i.operating_cost,
                 goodwill: bs_i.goodwill,
@@ -158,5 +194,9 @@ async fn full_pipeline_600519() {
         println!("  [{:?}] {:?}: {}", f.severity, f.kind, f.explanation);
     }
 
-    assert!(outcome.failures.is_empty(), "sections failed: {:?}", outcome.failures);
+    assert!(
+        outcome.failures.is_empty(),
+        "sections failed: {:?}",
+        outcome.failures
+    );
 }

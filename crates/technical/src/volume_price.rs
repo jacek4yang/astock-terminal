@@ -199,8 +199,7 @@ pub fn analyze_volume_price(
     let volume_ratio = if let Some(q) = quote {
         if klines.len() >= 6 {
             let prev = &klines[klines.len() - 6..klines.len() - 1];
-            let avg5 = prev.iter().map(|k| k.volume).sum::<f64>()
-                / prev.len().max(1) as f64;
+            let avg5 = prev.iter().map(|k| k.volume).sum::<f64>() / prev.len().max(1) as f64;
             if avg5 != 0.0 {
                 py_round(q.volume / avg5, 2)
             } else {

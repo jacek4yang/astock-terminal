@@ -131,11 +131,7 @@ pub fn kendall_tau_b(x: &[f64], y: &[f64]) -> Result<f64, QuantError> {
 /// `n ≥ window`. A zero-variance window yields an error for the whole call
 /// (rolling correlations over price series with flat segments should use
 /// return series instead).
-pub fn rolling_correlation(
-    x: &[f64],
-    y: &[f64],
-    window: usize,
-) -> Result<Vec<f64>, QuantError> {
+pub fn rolling_correlation(x: &[f64], y: &[f64], window: usize) -> Result<Vec<f64>, QuantError> {
     if window < 2 {
         return Err(QuantError::InvalidInput(format!(
             "rolling_correlation: window must be >= 2, got {window}"
@@ -197,11 +193,7 @@ pub fn ewm_correlation(x: &[f64], y: &[f64], lambda: f64) -> Result<f64, QuantEr
 ///
 /// Requires more observations than `controls.len() + 1` and non-collinear
 /// controls (enforced by the OLS helper).
-pub fn partial_correlation(
-    x: &[f64],
-    y: &[f64],
-    controls: &[&[f64]],
-) -> Result<f64, QuantError> {
+pub fn partial_correlation(x: &[f64], y: &[f64], controls: &[&[f64]]) -> Result<f64, QuantError> {
     validate_pair(x, y, 3, "partial_correlation")?;
     let n = x.len();
     let k = controls.len() + 1; // + intercept
@@ -214,13 +206,7 @@ pub fn partial_correlation(
             )));
         }
     }
-    let design = DMatrix::from_fn(n, k, |r, c| {
-        if c == 0 {
-            1.0
-        } else {
-            controls[c - 1][r]
-        }
-    });
+    let design = DMatrix::from_fn(n, k, |r, c| if c == 0 { 1.0 } else { controls[c - 1][r] });
     let rx = crate::ols::ols(x, &design)?.residuals;
     let ry = crate::ols::ols(y, &design)?.residuals;
     pearson(&rx, &ry)
@@ -322,18 +308,15 @@ pub fn distance_correlation(x: &[f64], y: &[f64]) -> Result<f64, QuantError> {
     let a = double_centered_distances(x);
     let b = double_centered_distances(y);
     let n2 = (x.len() * x.len()) as f64;
-    let dcov2: f64 = a
-        .iter()
-        .zip(b.iter())
-        .map(|(u, v)| u * v)
-        .sum::<f64>()
-        / n2;
+    let dcov2: f64 = a.iter().zip(b.iter()).map(|(u, v)| u * v).sum::<f64>() / n2;
     let dvar_x: f64 = a.iter().map(|u| u * u).sum::<f64>() / n2;
     let dvar_y: f64 = b.iter().map(|u| u * u).sum::<f64>() / n2;
     if dvar_x <= 0.0 || dvar_y <= 0.0 {
         return Ok(0.0);
     }
-    Ok((dcov2.max(0.0) / (dvar_x * dvar_y).sqrt()).sqrt().clamp(0.0, 1.0))
+    Ok((dcov2.max(0.0) / (dvar_x * dvar_y).sqrt())
+        .sqrt()
+        .clamp(0.0, 1.0))
 }
 
 /// Double-centered pairwise distance matrix (row-major flattened).

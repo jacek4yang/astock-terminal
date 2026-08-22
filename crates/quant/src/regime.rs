@@ -159,7 +159,10 @@ pub fn gaussian_hmm2(y: &[f64]) -> Result<GaussianHmm2, QuantError> {
             iterations: 0,
         };
         let fit = baum_welch(y, init, 200, 1e-6);
-        if best.as_ref().is_none_or(|b| fit.log_likelihood > b.log_likelihood) {
+        if best
+            .as_ref()
+            .is_none_or(|b| fit.log_likelihood > b.log_likelihood)
+        {
             best = Some(fit);
         }
     }
@@ -348,7 +351,11 @@ mod tests {
         let mut y = Vec::with_capacity(800);
         for _ in 0..800 {
             let u: f64 = rng.random();
-            state = if u < trans[state][state] { state } else { 1 - state };
+            state = if u < trans[state][state] {
+                state
+            } else {
+                1 - state
+            };
             let (m, s) = if state == 0 { (0.0, 0.5) } else { (3.0, 0.8) };
             y.push(m + s * standard_normal(&mut rng));
         }

@@ -112,10 +112,7 @@ pub fn detect(history: &[PeriodObservation]) -> Vec<Flag> {
                 flags.push(Flag {
                     kind: FlagKind::RevenueUpCfoDown,
                     severity: Severity::High,
-                    evidence: vec![
-                        ("revenue_yoy".into(), rev_g),
-                        ("cfo_yoy".into(), cfo_g),
-                    ],
+                    evidence: vec![("revenue_yoy".into(), rev_g), ("cfo_yoy".into(), cfo_g)],
                     explanation: format!(
                         "Revenue grew {:.1}% while operating cash flow fell {:.1}% — \
                          earnings may not be converting to cash.",
@@ -144,7 +141,11 @@ pub fn detect(history: &[PeriodObservation]) -> Vec<Flag> {
                 let worst = last_two.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 flags.push(Flag {
                     kind: FlagKind::ReceivablesOutpaceRevenue,
-                    severity: if worst > 0.20 { Severity::High } else { Severity::Warn },
+                    severity: if worst > 0.20 {
+                        Severity::High
+                    } else {
+                        Severity::Warn
+                    },
                     evidence: vec![
                         ("recv_growth_minus_rev_growth_t".into(), last_two[1]),
                         ("recv_growth_minus_rev_growth_t-1".into(), last_two[0]),
@@ -170,10 +171,7 @@ pub fn detect(history: &[PeriodObservation]) -> Vec<Flag> {
                 flags.push(Flag {
                     kind: FlagKind::InventorySpike,
                     severity: Severity::Warn,
-                    evidence: vec![
-                        ("inventory_yoy".into(), inv_g),
-                        ("cogs_yoy".into(), cogs_g),
-                    ],
+                    evidence: vec![("inventory_yoy".into(), inv_g), ("cogs_yoy".into(), cogs_g)],
                     explanation: format!(
                         "Inventory grew {:.1}% vs COGS {:.1}% — stockpiling beyond \
                          what sales cost trends justify.",
@@ -193,7 +191,11 @@ pub fn detect(history: &[PeriodObservation]) -> Vec<Flag> {
             if ratio > GOODWILL_EQUITY_THRESHOLD {
                 flags.push(Flag {
                     kind: FlagKind::GoodwillHeavy,
-                    severity: if ratio > 0.5 { Severity::High } else { Severity::Warn },
+                    severity: if ratio > 0.5 {
+                        Severity::High
+                    } else {
+                        Severity::Warn
+                    },
                     evidence: vec![
                         ("goodwill".into(), gw),
                         ("equity".into(), eq),
@@ -212,8 +214,16 @@ pub fn detect(history: &[PeriodObservation]) -> Vec<Flag> {
 
     // 5. Margin outliers vs own history (z-score, needs MARGIN_MIN_HISTORY).
     for (label, series_full, current) in [
-        ("gross_margin", margin_series(history, |o| o.gross_margin), curr.gross_margin),
-        ("net_margin", margin_series(history, |o| o.net_margin), curr.net_margin),
+        (
+            "gross_margin",
+            margin_series(history, |o| o.gross_margin),
+            curr.gross_margin,
+        ),
+        (
+            "net_margin",
+            margin_series(history, |o| o.net_margin),
+            curr.net_margin,
+        ),
     ] {
         if series_full.len() > MARGIN_MIN_HISTORY {
             let hist = &series_full[..series_full.len() - 1];
@@ -240,9 +250,11 @@ pub fn detect(history: &[PeriodObservation]) -> Vec<Flag> {
     }
 
     // 6. 存贷双高: cash AND interest-bearing debt both large vs assets.
-    if let (Some(cash), Some(debt), Some(assets)) =
-        (curr.monetary_funds, curr.interest_bearing_debt, curr.total_assets)
-    {
+    if let (Some(cash), Some(debt), Some(assets)) = (
+        curr.monetary_funds,
+        curr.interest_bearing_debt,
+        curr.total_assets,
+    ) {
         if assets > 0.0 {
             let cash_ratio = cash / assets;
             let debt_ratio = debt / assets;
@@ -315,7 +327,10 @@ mod tests {
         let h = vec![obs(100.0, 50.0), obs(120.0, 40.0)];
         let flags = detect(&h);
         assert!(flags.iter().any(|f| f.kind == FlagKind::RevenueUpCfoDown));
-        let f = flags.iter().find(|f| f.kind == FlagKind::RevenueUpCfoDown).unwrap();
+        let f = flags
+            .iter()
+            .find(|f| f.kind == FlagKind::RevenueUpCfoDown)
+            .unwrap();
         assert_eq!(f.severity, Severity::High);
     }
 
@@ -333,12 +348,12 @@ mod tests {
             ..Default::default()
         };
         let p1 = PeriodObservation {
-            revenue: Some(110.0), // +10%
+            revenue: Some(110.0),    // +10%
             receivables: Some(12.0), // +20%
             ..Default::default()
         };
         let p2 = PeriodObservation {
-            revenue: Some(121.0), // +10%
+            revenue: Some(121.0),    // +10%
             receivables: Some(14.4), // +20%
             ..Default::default()
         };
@@ -360,7 +375,7 @@ mod tests {
             ..Default::default()
         };
         let p1 = PeriodObservation {
-            inventory: Some(150.0), // +50%
+            inventory: Some(150.0),      // +50%
             operating_cost: Some(220.0), // +10% → gap 40pp > 20pp
             ..Default::default()
         };
@@ -376,7 +391,10 @@ mod tests {
             ..Default::default()
         };
         let flags = detect(&[p]);
-        let f = flags.iter().find(|f| f.kind == FlagKind::GoodwillHeavy).unwrap();
+        let f = flags
+            .iter()
+            .find(|f| f.kind == FlagKind::GoodwillHeavy)
+            .unwrap();
         assert_eq!(f.severity, Severity::Warn);
         p.goodwill = Some(60.0); // 60% > 50% → High
         let flags = detect(&[p]);

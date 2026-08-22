@@ -157,10 +157,10 @@ fn merge_single_kline() {
 fn fractals_skip_boundary_klines() {
     let merged = merge_klines(&[
         mk("m0", 5.0, 1.0),
-        mk("m1", 8.0, 2.0),   // top (high above both neighbours)
-        mk("m2", 6.0, 1.5),   // bottom (low below both neighbours)
-        mk("m3", 7.0, 1.6),   // top
-        mk("m4", 6.5, 1.55),  // boundary: never a fractal
+        mk("m1", 8.0, 2.0),  // top (high above both neighbours)
+        mk("m2", 6.0, 1.5),  // bottom (low below both neighbours)
+        mk("m3", 7.0, 1.6),  // top
+        mk("m4", 6.5, 1.55), // boundary: never a fractal
     ]);
     // Sanity: these are all mutually non-containing, so nothing merges.
     assert_eq!(merged.len(), 5);
@@ -219,13 +219,13 @@ fn fractal_doubly_qualified_kline_is_top() {
 #[test]
 fn strokes_require_merged_index_gap_of_four() {
     let fractals = vec![
-        fractal(0, "top", 10.0),    // start (down stroke)
-        fractal(2, "bottom", 9.0),  // gap 2 < 4: ignored
-        fractal(3, "bottom", 8.0),  // gap 3 < 4: ignored
-        fractal(4, "bottom", 8.5),  // gap 4 >= 4: endpoint candidate
-        fractal(6, "top", 11.0),    // same type as start with endpoint set -> close
-        fractal(8, "top", 12.0),    // gap 8-4 = 4: endpoint of the up stroke
-        fractal(9, "bottom", 7.0),  // same type as start (bottom) -> close
+        fractal(0, "top", 10.0),   // start (down stroke)
+        fractal(2, "bottom", 9.0), // gap 2 < 4: ignored
+        fractal(3, "bottom", 8.0), // gap 3 < 4: ignored
+        fractal(4, "bottom", 8.5), // gap 4 >= 4: endpoint candidate
+        fractal(6, "top", 11.0),   // same type as start with endpoint set -> close
+        fractal(8, "top", 12.0),   // gap 8-4 = 4: endpoint of the up stroke
+        fractal(9, "bottom", 7.0), // same type as start (bottom) -> close
     ];
     let strokes = find_strokes(&fractals);
     assert_eq!(strokes.len(), 2);
@@ -300,7 +300,11 @@ fn minute_synthetic_matches_legacy() {
 
     let mut errors = Vec::new();
     common::compare_values("minute", &fixture["expected"], &actual, &mut errors);
-    assert!(errors.is_empty(), "minute mismatches:\n{}", errors.join("\n"));
+    assert!(
+        errors.is_empty(),
+        "minute mismatches:\n{}",
+        errors.join("\n")
+    );
 
     // The synthetic series produces 48 5-minute klines, 14 fractals,
     // 4 strokes and exactly one sell1 signal.

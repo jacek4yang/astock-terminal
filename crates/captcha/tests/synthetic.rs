@@ -81,7 +81,13 @@ struct Notch<'a> {
 /// Stamp the notch into the background: flat fill (darker or lighter) with
 /// light noise, then a 1px bright border like real providers.
 fn apply_notch(bg: &mut RgbaImage, rng: &mut StdRng, n: &Notch<'_>, darken: Option<f32>) {
-    let &Notch { mask, mw, mh, x0, y0 } = n;
+    let &Notch {
+        mask,
+        mw,
+        mh,
+        x0,
+        y0,
+    } = n;
     for my in 0..mh {
         for mx in 0..mw {
             if !mask[(my * mw + mx) as usize] {
@@ -99,12 +105,19 @@ fn apply_notch(bg: &mut RgbaImage, rng: &mut StdRng, n: &Notch<'_>, darken: Opti
     }
     // 1px bright border on mask boundary pixels.
     let inside = |x: i64, y: i64| {
-        x >= 0 && y >= 0 && x < mw as i64 && y < mh as i64 && mask[(y as u32 * mw + x as u32) as usize]
+        x >= 0
+            && y >= 0
+            && x < mw as i64
+            && y < mh as i64
+            && mask[(y as u32 * mw + x as u32) as usize]
     };
     for my in 0..mh as i64 {
         for mx in 0..mw as i64 {
             if inside(mx, my)
-                && !(inside(mx - 1, my) && inside(mx + 1, my) && inside(mx, my - 1) && inside(mx, my + 1))
+                && !(inside(mx - 1, my)
+                    && inside(mx + 1, my)
+                    && inside(mx, my - 1)
+                    && inside(mx, my + 1))
             {
                 let p = bg.get_pixel_mut(x0 + mx as u32, y0 + my as u32);
                 *p = Rgba([232, 230, 226, 255]);
@@ -132,7 +145,18 @@ fn synth_case(rng: &mut StdRng) -> (DynamicImage, u32) {
     } else {
         None
     };
-    apply_notch(&mut bg, rng, &Notch { mask: &mask, mw, mh, x0, y0 }, darken);
+    apply_notch(
+        &mut bg,
+        rng,
+        &Notch {
+            mask: &mask,
+            mw,
+            mh,
+            x0,
+            y0,
+        },
+        darken,
+    );
     (DynamicImage::ImageRgba8(bg), x0)
 }
 
@@ -186,7 +210,10 @@ fn notch_free_image_yields_low_confidence_error() {
     // Textured background with no notch at all.
     let bg = DynamicImage::ImageRgba8(synth_background(&mut rng, 300, 150, 20));
     match detect_gap(&bg) {
-        Err(CaptchaError::LowConfidence { confidence, threshold }) => {
+        Err(CaptchaError::LowConfidence {
+            confidence,
+            threshold,
+        }) => {
             assert!(confidence < threshold);
         }
         other => panic!("expected LowConfidence, got {other:?}"),
@@ -215,7 +242,18 @@ fn template_match_recovers_x() {
 
         let piece = synth_piece(&clean, &mask, mw, mh, x0, y0);
         let mut bg = clean.clone();
-        apply_notch(&mut bg, &mut rng, &Notch { mask: &mask, mw, mh, x0, y0 }, Some(0.45));
+        apply_notch(
+            &mut bg,
+            &mut rng,
+            &Notch {
+                mask: &mask,
+                mw,
+                mh,
+                x0,
+                y0,
+            },
+            Some(0.45),
+        );
         let bg = DynamicImage::ImageRgba8(bg);
 
         let det = detect_gap_with_template(&bg, &piece, &GapConfig::default())
@@ -252,7 +290,10 @@ fn trajectory_reaches_distance_with_overshoot() {
         );
         // Overshoot: at some point we went past the target, then came back.
         let peak = cum.iter().cloned().fold(f64::MIN, f64::max);
-        assert!(peak > f64::from(distance) + 1.0, "distance {distance}: peak {peak}");
+        assert!(
+            peak > f64::from(distance) + 1.0,
+            "distance {distance}: peak {peak}"
+        );
         // Monotonic-ish: nondecreasing up to the peak (the correction phase
         // after the overshoot is intentionally backward).
         let peak_idx = cum
@@ -262,11 +303,17 @@ fn trajectory_reaches_distance_with_overshoot() {
             .unwrap()
             .0;
         for w in cum[..=peak_idx].windows(2) {
-            assert!(w[1] >= w[0] - 1e-9, "distance {distance}: regression in main phase");
+            assert!(
+                w[1] >= w[0] - 1e-9,
+                "distance {distance}: regression in main phase"
+            );
         }
         // Vertical jitter stays within ±2px cumulative.
         let y: f64 = traj.iter().map(|p| p.dy).sum();
-        assert!(y.abs() <= 2.0 + 1e-9, "distance {distance}: cumulative dy {y}");
+        assert!(
+            y.abs() <= 2.0 + 1e-9,
+            "distance {distance}: cumulative dy {y}"
+        );
     }
 }
 
@@ -319,7 +366,18 @@ fn solve_slider_with_piece() {
     let y0 = 30u32;
     let piece = synth_piece(&clean, &mask, mw, mh, x0, y0);
     let mut bg = clean.clone();
-    apply_notch(&mut bg, &mut rng, &Notch { mask: &mask, mw, mh, x0, y0 }, Some(0.5));
+    apply_notch(
+        &mut bg,
+        &mut rng,
+        &Notch {
+            mask: &mask,
+            mw,
+            mh,
+            x0,
+            y0,
+        },
+        Some(0.5),
+    );
     let bg = DynamicImage::ImageRgba8(bg);
 
     let sol = solve_slider(&bg, Some(&piece)).expect("solve with piece");

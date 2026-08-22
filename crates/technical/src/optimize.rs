@@ -111,10 +111,7 @@ pub fn apply_signal_optimization(signal: &mut Value, veto: &VetoInputs) {
         .to_string();
     let score = get_i64(signal, "score", 0);
     let confidence = get_i64(signal, "confidence", 0);
-    let module_scores = signal
-        .get("module_scores")
-        .cloned()
-        .unwrap_or(Value::Null);
+    let module_scores = signal.get("module_scores").cloned().unwrap_or(Value::Null);
     let mut risk_warnings: Vec<String> = signal
         .get("risk_warnings")
         .and_then(Value::as_array)

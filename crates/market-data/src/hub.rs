@@ -29,6 +29,7 @@ use crate::providers::{
     EastMoney, EmDataCenter, IwencaiOpenApi, JoinQuantProvider, SinaKline, TdxProvider,
     TencentKline, TushareProvider,
 };
+use crate::security_master::SecurityMaster;
 use crate::validate::{filter_valid_bars, filter_valid_index_bars};
 use astock_core::{
     Adjust, Bar, DataError, Fetched, FundFlowPoint, KlinePeriod, MarketBreadth, MinuteData, Quote,
@@ -88,6 +89,8 @@ struct Inner {
     breakers: CircuitBreaker,
     cache: Arc<TtlCache>,
     eastmoney: Arc<EastMoney>,
+    tdx: Arc<TdxProvider>,
+    security_master: Arc<SecurityMaster>,
     kline_inflight: DashMap<String, SharedKline>,
     quote_inflight: DashMap<String, SharedQuote>,
 }
@@ -97,6 +100,8 @@ impl Inner {
         chain: Vec<Arc<dyn DataProvider>>,
         cache: Arc<TtlCache>,
         eastmoney: Arc<EastMoney>,
+        tdx: Arc<TdxProvider>,
+        security_master: Arc<SecurityMaster>,
         breaker_config: BreakerConfig,
     ) -> Arc<Self> {
         let breakers = CircuitBreaker::new(breaker_config);
@@ -109,6 +114,8 @@ impl Inner {
             breakers,
             cache,
             eastmoney,
+            tdx,
+            security_master,
             kline_inflight: DashMap::new(),
             quote_inflight: DashMap::new(),
         })
@@ -223,6 +230,7 @@ impl Inner {
     /// are skipped (Tencent/Sina), so this is effectively TDX → EastMoney.
     async fn fetch_quote(&self, symbol: &Symbol) -> QuoteOutcome {
         let mut failures = Vec::new();
+        let mut base = None;
         for provider in &self.chain {
             let name = provider.name();
             if !self.breakers.allow_request(name) {
@@ -243,7 +251,8 @@ impl Inner {
                         outcome = "ok",
                         "quote upstream attempt"
                     );
-                    return Ok(f);
+                    base = Some(f);
+                    break;
                 }
                 Err(DataError::NoProvider(_)) => {
                     debug!(
@@ -261,10 +270,75 @@ impl Inner {
                 }
             }
         }
-        Err(DataError::AllFailed {
+        let mut out = base.ok_or_else(|| DataError::AllFailed {
             op: "quote",
             details: failures.join("; "),
-        })
+        })?;
+
+        // Identity is reference data, not a property of a particular quote
+        // response. Lazily hydrate the complete TDX exchange list when this
+        // process has not seen the code yet.
+        if self.security_master.get(symbol.code()).is_none() {
+            if let Ok(list) = self.tdx.all_a_shares().await {
+                self.security_master
+                    .merge_stock_list(&list.data, &list.source.to_string());
+            }
+        }
+
+        // TDX owns the fast price/order snapshot, while EastMoney can fill
+        // fields TDX does not publish. A supplementary provider failure does
+        // not discard the valid TDX snapshot.
+        if out.source != Source::EastMoney
+            && (out.data.turnover.is_none() || out.data.name.is_empty())
+        {
+            let start = Instant::now();
+            match self.eastmoney.quote(symbol).await {
+                Ok(supplement) => {
+                    self.breakers.on_success("eastmoney");
+                    if !supplement.data.name.trim().is_empty() {
+                        self.security_master.upsert(
+                            astock_core::SecurityMasterRecord::listed_stock(
+                                symbol.code(),
+                                supplement.data.name.clone(),
+                                "eastmoney_quote",
+                            ),
+                        );
+                    }
+                    if out.data.turnover.is_none() {
+                        out.data.turnover = supplement.data.turnover;
+                        if let Some(provenance) = supplement.data.field_provenance.get("turnover") {
+                            out.data
+                                .field_provenance
+                                .insert("turnover".to_string(), provenance.clone());
+                        }
+                    }
+                    debug!(
+                        provider = "eastmoney",
+                        elapsed_ms = start.elapsed().as_millis() as u64,
+                        outcome = "supplemented",
+                        "quote field supplement"
+                    );
+                }
+                Err(error) => {
+                    self.breakers.on_failure("eastmoney", &error);
+                    debug!(
+                        provider = "eastmoney",
+                        elapsed_ms = start.elapsed().as_millis() as u64,
+                        outcome = %error,
+                        "quote field supplement unavailable"
+                    );
+                }
+            }
+        }
+
+        if let Some(record) = self.security_master.get(symbol.code()) {
+            out.data.name = record.canonical_name;
+            out.data.field_provenance.insert(
+                "name".to_string(),
+                astock_core::FieldProvenance::reference(record.source, record.refreshed_at),
+            );
+        }
+        Ok(out)
     }
 }
 
@@ -299,6 +373,8 @@ pub struct MarketData {
     pub tushare: Arc<TushareProvider>,
     /// Optional iwencai OpenAPI adapter (key from `IWENCAI_KEY`).
     pub iwencai: Arc<IwencaiOpenApi>,
+    /// Canonical security identity and classification index.
+    pub security_master: Arc<SecurityMaster>,
     inner: Arc<Inner>,
 }
 
@@ -344,6 +420,7 @@ impl MarketData {
         let eastmoney = Arc::new(EastMoney::new(http.clone(), cache.clone()));
         let em_datacenter = Arc::new(EmDataCenter::new(http.clone(), cache.clone()));
         let tdx = Arc::new(TdxProvider::new());
+        let security_master = Arc::new(SecurityMaster::default());
         let joinquant = Arc::new(JoinQuantProvider::from_env());
         let tushare = Arc::new(TushareProvider::from_env(http.clone(), cache.clone()));
         let iwencai = Arc::new(IwencaiOpenApi::from_env(http.clone(), cache.clone()));
@@ -355,7 +432,14 @@ impl MarketData {
                 eastmoney.clone() as Arc<dyn DataProvider>,
             ]
         });
-        let inner = Inner::new(chain, cache.clone(), eastmoney.clone(), breaker_config);
+        let inner = Inner::new(
+            chain,
+            cache.clone(),
+            eastmoney.clone(),
+            tdx.clone(),
+            security_master.clone(),
+            breaker_config,
+        );
         // Optional token-gated providers: always on the health panel, marked
         // unavailable (and refused traffic) when their token/key is missing.
         for (name, available) in [
@@ -378,6 +462,7 @@ impl MarketData {
             joinquant,
             tushare,
             iwencai,
+            security_master,
         }
     }
 
@@ -448,7 +533,34 @@ impl DataProvider for MarketData {
     }
 
     async fn search(&self, keyword: &str) -> Result<Fetched<Vec<SearchResult>>, DataError> {
-        self.eastmoney.search(keyword).await
+        let local = self.security_master.search(keyword, 10);
+        match self.eastmoney.search(keyword).await {
+            Ok(mut fetched) => {
+                for hit in &mut fetched.data {
+                    if let Some(record) = self.security_master.get(&hit.code) {
+                        hit.name = record.canonical_name;
+                    } else if !hit.name.trim().is_empty() {
+                        self.security_master.upsert(
+                            astock_core::SecurityMasterRecord::listed_stock(
+                                hit.code.clone(),
+                                hit.name.clone(),
+                                "eastmoney_search",
+                            ),
+                        );
+                    }
+                }
+                if fetched.data.is_empty() && !local.is_empty() {
+                    Ok(Fetched::now(local, Source::Tdx))
+                } else {
+                    Ok(fetched)
+                }
+            }
+            Err(error) if !local.is_empty() => {
+                debug!(%error, "remote search unavailable; using security master");
+                Ok(Fetched::now(local, Source::Tdx))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn fund_flow_daily(
@@ -471,7 +583,16 @@ impl DataProvider for MarketData {
     }
 
     async fn all_a_shares(&self) -> Result<Fetched<Vec<StockListItem>>, DataError> {
-        self.eastmoney.all_a_shares().await
+        let fetched = match self.eastmoney.all_a_shares().await {
+            Ok(fetched) => fetched,
+            Err(error) => {
+                debug!(%error, "EastMoney A-share list unavailable; using TDX security list");
+                self.tdx.all_a_shares().await?
+            }
+        };
+        self.security_master
+            .merge_stock_list(&fetched.data, &fetched.source.to_string());
+        Ok(fetched)
     }
 
     async fn market_breadth(&self) -> Result<Fetched<MarketBreadth>, DataError> {

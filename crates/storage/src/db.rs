@@ -196,6 +196,26 @@ pub(crate) const MIGRATIONS: &[(u32, &str)] = &[
     ALTER TABLE kv ADD COLUMN fetched_at INTEGER NOT NULL DEFAULT 0;
     "#,
     ),
+    (
+        6,
+        r#"
+    -- SecurityMaster v2: canonical identity, classification, aliases,
+    -- source lineage and validity windows. Existing v1 rows remain valid.
+    ALTER TABLE securities ADD COLUMN board TEXT NOT NULL DEFAULT 'other';
+    ALTER TABLE securities ADD COLUMN asset_type TEXT NOT NULL DEFAULT 'unknown';
+    ALTER TABLE securities ADD COLUMN aliases_json TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE securities ADD COLUMN industry TEXT;
+    ALTER TABLE securities ADD COLUMN concepts_json TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE securities ADD COLUMN region TEXT;
+    ALTER TABLE securities ADD COLUMN source TEXT NOT NULL DEFAULT '';
+    ALTER TABLE securities ADD COLUMN source_url TEXT;
+    ALTER TABLE securities ADD COLUMN valid_from INTEGER;
+    ALTER TABLE securities ADD COLUMN valid_to INTEGER;
+    ALTER TABLE securities ADD COLUMN refreshed_at INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX IF NOT EXISTS idx_securities_name ON securities(name);
+    CREATE INDEX IF NOT EXISTS idx_securities_board ON securities(board);
+    "#,
+    ),
 ];
 
 /// Current unix time in seconds. All timestamps in this crate are stored as
@@ -355,14 +375,14 @@ mod tests {
             )
             .unwrap();
         }
-        // Reopening applies migration v5 only.
+        // Reopening applies every migration after v4.
         let db = Db::open(&path).unwrap();
         drop(db);
         let conn = Connection::open(&path).unwrap();
         let version: u32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, MIGRATIONS.last().unwrap().0);
         // Pre-existing rows keep fetched_at = 0 (unknown write time).
         let fetched_at: i64 = conn
             .query_row(

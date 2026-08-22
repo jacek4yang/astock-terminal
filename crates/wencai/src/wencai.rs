@@ -150,7 +150,10 @@ impl WencaiClient {
             // Browser-like hygiene headers; the THS WAF scores header sets.
             .header(reqwest::header::ACCEPT, "application/json, text/plain, */*")
             .header(reqwest::header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
-            .header("sec-ch-ua", "\"Chromium\";v=\"126\", \"Google Chrome\";v=\"126\", \"Not-A.Brand\";v=\"99\"")
+            .header(
+                "sec-ch-ua",
+                "\"Chromium\";v=\"126\", \"Google Chrome\";v=\"126\", \"Not-A.Brand\";v=\"99\"",
+            )
             .header("sec-ch-ua-mobile", "?0")
             .header("sec-ch-ua-platform", "\"Windows\"")
             .header("Sec-Fetch-Site", "same-origin")
@@ -205,7 +208,10 @@ impl WencaiClient {
             let body = self.robot_data(question).await?;
             match classify(&body)? {
                 RobotResponse::Rows(result) => return Ok(result),
-                RobotResponse::NeedDataList { url_params, condition } => {
+                RobotResponse::NeedDataList {
+                    url_params,
+                    condition,
+                } => {
                     return self.data_list(&url_params, &condition).await;
                 }
                 RobotResponse::Captcha { captcha_url } => {
@@ -244,7 +250,10 @@ impl WencaiClient {
             .send(
                 self.http
                     .post(ROBOT_DATA_URL)
-                    .header(reqwest::header::REFERER, "http://www.iwencai.com/unifiedwap/result")
+                    .header(
+                        reqwest::header::REFERER,
+                        "http://www.iwencai.com/unifiedwap/result",
+                    )
                     .json(&payload),
             )
             .await?;
@@ -254,13 +263,21 @@ impl WencaiClient {
             // with an "<h1>Nginx forbidden.</h1>" body. Treat as throttling.
             return Err(WencaiError::RateLimited { status: 200 });
         }
-        serde_json::from_str(&text)
-            .map_err(|e| WencaiError::Parse(format!("robot-data not JSON: {e}; body: {}", truncate(&text))))
+        serde_json::from_str(&text).map_err(|e| {
+            WencaiError::Parse(format!(
+                "robot-data not JSON: {e}; body: {}",
+                truncate(&text)
+            ))
+        })
     }
 
     #[cfg(feature = "captcha")]
     async fn solve_captcha(&self, captcha_url: &str, attempt: u32) -> Result<(), WencaiError> {
-        tracing::warn!(attempt, captcha_url, "iwencai challenged with captcha; solving slider");
+        tracing::warn!(
+            attempt,
+            captcha_url,
+            "iwencai challenged with captcha; solving slider"
+        );
         crate::captcha::solve_slider(self).await
     }
 
@@ -283,12 +300,18 @@ impl WencaiClient {
         form.push(("query_type".into(), "stock".into()));
         form.push(("condition".into(), condition.to_string()));
         let text = self.post_form(DATA_LIST_URL, &form).await?;
-        let body: Value = serde_json::from_str(&text)
-            .map_err(|e| WencaiError::Parse(format!("getDataList not JSON: {e}; body: {}", truncate(&text))))?;
+        let body: Value = serde_json::from_str(&text).map_err(|e| {
+            WencaiError::Parse(format!(
+                "getDataList not JSON: {e}; body: {}",
+                truncate(&text)
+            ))
+        })?;
         let datas = body
             .pointer("/answer/components/0/data/datas")
             .and_then(Value::as_array)
-            .ok_or_else(|| WencaiError::Parse(format!("getDataList has no datas: {}", truncate(&text))))?;
+            .ok_or_else(|| {
+                WencaiError::Parse(format!("getDataList has no datas: {}", truncate(&text)))
+            })?;
         let total = body
             .pointer("/answer/components/0/data/meta/extra/row_count")
             .and_then(Value::as_u64);
@@ -322,9 +345,8 @@ fn classify(body: &Value) -> Result<RobotResponse, WencaiError> {
 
     // Normal answer: data.answer[0].txt[0].content (object or JSON string).
     let content = match body.pointer("/data/answer/0/txt/0/content") {
-        Some(Value::String(s)) => serde_json::from_str::<Value>(s).map_err(|e| {
-            WencaiError::Parse(format!("content string is not JSON: {e}"))
-        })?,
+        Some(Value::String(s)) => serde_json::from_str::<Value>(s)
+            .map_err(|e| WencaiError::Parse(format!("content string is not JSON: {e}")))?,
         Some(v) => v.clone(),
         None => {
             return Err(WencaiError::Parse(format!(
@@ -364,7 +386,10 @@ fn classify(body: &Value) -> Result<RobotResponse, WencaiError> {
                 .cloned()
                 .unwrap_or(Value::Null);
             debug!(?url_params, "rows require getDataList follow-up");
-            return Ok(RobotResponse::NeedDataList { url_params, condition });
+            return Ok(RobotResponse::NeedDataList {
+                url_params,
+                condition,
+            });
         }
     }
 
@@ -393,13 +418,19 @@ fn parse_query(url: &str) -> Vec<(String, String)> {
 fn row_from_value(v: &Value) -> Option<WencaiRow> {
     let obj = v.as_object()?;
     let find = |preds: &[&str]| -> Option<(&String, &Value)> {
-        obj.iter().find(|(k, _)| preds.iter().any(|p| k.contains(p)))
+        obj.iter()
+            .find(|(k, _)| preds.iter().any(|p| k.contains(p)))
     };
     let code = find(&["股票代码", "code"])
         .and_then(|(_, v)| v.as_str().map(str::to_string))
-        .or_else(|| find(&["股票代码", "code"]).and_then(|(_, v)| v.as_u64().map(|n| n.to_string())))?;
+        .or_else(|| {
+            find(&["股票代码", "code"]).and_then(|(_, v)| v.as_u64().map(|n| n.to_string()))
+        })?;
     // iwencai codes sometimes look like "600519.SH" or "600519"; keep the digits.
-    let code: String = code.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+    let code: String = code
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect();
     let name = find(&["股票简称", "名称"])
         .and_then(|(_, v)| v.as_str())
         .unwrap_or_default()
@@ -410,7 +441,15 @@ fn row_from_value(v: &Value) -> Option<WencaiRow> {
     };
     let price = number(&["最新价", "现价"]);
     let pct = number(&["涨跌幅"]);
-    let known = ["股票代码", "code", "股票简称", "名称", "最新价", "现价", "涨跌幅"];
+    let known = [
+        "股票代码",
+        "code",
+        "股票简称",
+        "名称",
+        "最新价",
+        "现价",
+        "涨跌幅",
+    ];
     let extra: Map<String, Value> = obj
         .iter()
         .filter(|(k, _)| !known.iter().any(|p| k.contains(p)))
@@ -446,7 +485,8 @@ mod tests {
 
     #[test]
     fn classify_rows_direct() {
-        let body: Value = serde_json::from_str(include_str!("../tests/fixtures/robot_data_rows.json")).unwrap();
+        let body: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/robot_data_rows.json")).unwrap();
         match classify(&body).unwrap() {
             RobotResponse::Rows(result) => {
                 assert_eq!(result.total, Some(2));
@@ -464,9 +504,13 @@ mod tests {
 
     #[test]
     fn classify_xuangu_table_v1() {
-        let body: Value = serde_json::from_str(include_str!("../tests/fixtures/robot_data_xuangu.json")).unwrap();
+        let body: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/robot_data_xuangu.json")).unwrap();
         match classify(&body).unwrap() {
-            RobotResponse::NeedDataList { url_params, condition } => {
+            RobotResponse::NeedDataList {
+                url_params,
+                condition,
+            } => {
                 assert!(url_params.iter().any(|(k, _)| k == "urp_sort_way"));
                 assert!(condition.is_array());
             }

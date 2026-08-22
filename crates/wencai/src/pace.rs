@@ -36,7 +36,8 @@ impl Pacer {
             let sleep_for = {
                 let mut st = self.state.lock().expect("pacer poisoned");
                 let now = Instant::now();
-                let earned = now.duration_since(st.last_refill).as_secs_f64() / self.interval.as_secs_f64();
+                let earned =
+                    now.duration_since(st.last_refill).as_secs_f64() / self.interval.as_secs_f64();
                 if earned > 0.0 {
                     st.tokens = (st.tokens + earned).min(self.capacity);
                     st.last_refill = now;
@@ -66,7 +67,11 @@ mod tests {
         pacer.wait().await;
         assert_eq!(t0.elapsed(), Duration::ZERO, "burst of 3 should be instant");
         pacer.wait().await;
-        assert_eq!(t0.elapsed(), Duration::from_secs(2), "4th request waits one interval");
+        assert_eq!(
+            t0.elapsed(),
+            Duration::from_secs(2),
+            "4th request waits one interval"
+        );
         pacer.wait().await;
         assert_eq!(t0.elapsed(), Duration::from_secs(4));
     }
