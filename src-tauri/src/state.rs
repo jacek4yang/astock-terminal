@@ -128,6 +128,74 @@ pub struct DisclosureSyncState {
     pub cancel: Mutex<Option<CancellationToken>>,
 }
 
+/// Detailed overseas-primary-source synchronization state. Provider gaps are
+/// counted separately from hard task failure so one unavailable jurisdiction
+/// never hides data successfully collected from another.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GlobalSyncSnapshot {
+    pub job_id: Option<String>,
+    pub running: bool,
+    pub status: String,
+    pub phase: String,
+    pub progress: u8,
+    pub current_provider: String,
+    pub current_item: String,
+    pub sources_total: u32,
+    pub sources_ready: u32,
+    pub source_gaps: u32,
+    pub documents_discovered: u32,
+    pub documents_archived: u32,
+    pub observations_saved: u32,
+    pub mapping_paths: u32,
+    pub failures: u32,
+    pub estimated_remaining_seconds: Option<u32>,
+    pub recent_logs: Vec<String>,
+    pub started_at: Option<i64>,
+    pub updated_at: i64,
+    pub error: Option<String>,
+}
+
+impl Default for GlobalSyncSnapshot {
+    fn default() -> Self {
+        Self {
+            job_id: None,
+            running: false,
+            status: "idle".into(),
+            phase: "尚未同步海外一级来源".into(),
+            progress: 0,
+            current_provider: String::new(),
+            current_item: String::new(),
+            sources_total: 0,
+            sources_ready: 0,
+            source_gaps: 0,
+            documents_discovered: 0,
+            documents_archived: 0,
+            observations_saved: 0,
+            mapping_paths: 0,
+            failures: 0,
+            estimated_remaining_seconds: None,
+            recent_logs: Vec::new(),
+            started_at: None,
+            updated_at: 0,
+            error: None,
+        }
+    }
+}
+
+pub struct GlobalSyncState {
+    pub snapshot: Mutex<GlobalSyncSnapshot>,
+    pub cancel: Mutex<Option<CancellationToken>>,
+}
+
+impl Default for GlobalSyncState {
+    fn default() -> Self {
+        Self {
+            snapshot: Mutex::new(GlobalSyncSnapshot::default()),
+            cancel: Mutex::new(None),
+        }
+    }
+}
+
 impl Default for DisclosureSyncState {
     fn default() -> Self {
         Self {
@@ -193,6 +261,8 @@ pub struct AppState {
     pub backtest: Arc<BacktestState>,
     /// Background formal-disclosure synchronization and diagnostics.
     pub disclosure_sync: Arc<DisclosureSyncState>,
+    /// Overseas primary-source collection and Global -> A-share mapping.
+    pub global_sync: Arc<GlobalSyncState>,
     /// Live agent event-forwarder tasks, keyed by task id. Entries are
     /// removed when the event stream ends (Completed / Failed / Suspended)
     /// or on `agent_cancel`.
@@ -285,6 +355,7 @@ impl AppState {
             scan: Arc::new(ScanState::default()),
             backtest: Arc::new(BacktestState::default()),
             disclosure_sync: Arc::new(DisclosureSyncState::default()),
+            global_sync: Arc::new(GlobalSyncState::default()),
             agent_handles: Arc::new(Mutex::new(HashMap::new())),
         })
     }

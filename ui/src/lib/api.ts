@@ -2130,3 +2130,64 @@ export const disclosureSyncStart = (request: { security_code?: string; days?: nu
 export const disclosureSyncStatus = () => cmd<DisclosureSyncSnapshot>("disclosure_sync_status");
 export const disclosureSyncCancel = () => cmd<{ cancelled: boolean }>("disclosure_sync_cancel");
 export const getDisclosureProviderHealth = () => cmd<DisclosureProviderHealth[]>("get_disclosure_provider_health");
+
+// ==================== 全球一级来源与 A 股传导 ====================
+
+export interface GlobalSyncSnapshot {
+  job_id: string | null; running: boolean; status: string; phase: string; progress: number;
+  current_provider: string; current_item: string; sources_total: number; sources_ready: number;
+  source_gaps: number; documents_discovered: number; documents_archived: number;
+  observations_saved: number; mapping_paths: number; failures: number;
+  estimated_remaining_seconds: number | null; recent_logs: string[];
+  started_at: number | null; updated_at: number; error: string | null;
+}
+export interface GlobalProviderRuntime {
+  provider_id: string; provider_name: string; region: string; category: string;
+  official_url: string; original_timezone: string; license_policy: string;
+  credential_env: string | null; enabled: boolean; target_latency_secs: number;
+  rate_limit_per_minute: number; last_attempt_at: number | null; last_success_at: number | null;
+  consecutive_failures: number; retry_after: number | null; last_error: string | null;
+}
+export interface GlobalDocumentListItem {
+  document_id: string; provider_id: string; provider_name: string; document_type: string;
+  title_original: string; title_zh: string | null; original_language: string; original_url: string;
+  source_version_id: string | null; published_at_utc: number; published_local: string;
+  published_timezone: string; revision_no: number; primary_verified: boolean;
+  translation_status: string; gap_reason: string | null; license_policy: string;
+}
+export interface GlobalDocumentQuery {
+  provider_id?: string | null; keyword?: string | null; primary_only: boolean;
+  page: number; page_size: number;
+}
+export interface GlobalDocumentPage {
+  items: GlobalDocumentListItem[]; total: number; page: number; page_size: number; total_pages: number;
+}
+export interface GlobalGoldenChain {
+  chain_id: string; name: string; global_sources: string[]; nodes: string[];
+  activation_requirement: string;
+}
+export interface GlobalEntity {
+  entity_id: string; entity_type: string; legal_name: string; name_zh: string | null;
+  jurisdiction: string; identifiers: Record<string, unknown>; aliases: string[];
+  translation_status: string;
+}
+export interface GlobalRelation {
+  relation_id: string; src_entity_id: string; dst_entity_id: string; relation_type: string;
+  direction: string; confidence_bps: number; evidence_document_id: string;
+  evidence_source_version_id: string; evidence_quote_original: string;
+  evidence_quote_zh: string | null; evidence_location: Record<string, unknown>;
+  observed_at: number; valid_from: number; valid_to: number | null;
+}
+export interface GlobalTransmissionPath {
+  path_id: string; entities: GlobalEntity[]; relations: GlobalRelation[];
+  path_confidence_bps: number; target_a_share_code: string;
+}
+export const globalSyncStart = (request: { sec_cik?: string; include_world_bank?: boolean; max_sec_filings?: number }) =>
+  cmd<{ started: boolean; job_id: string; estimated_seconds: number; note: string }>("global_sync_start", { request });
+export const globalSyncStatus = () => cmd<GlobalSyncSnapshot>("global_sync_status");
+export const globalSyncCancel = () => cmd<{ cancelled: boolean }>("global_sync_cancel");
+export const getGlobalProviderHealth = () => cmd<GlobalProviderRuntime[]>("get_global_provider_health");
+export const queryGlobalDocuments = (query: GlobalDocumentQuery) => cmd<GlobalDocumentPage>("query_global_documents", { query });
+export const getGlobalGoldenChains = () => cmd<GlobalGoldenChain[]>("get_global_golden_chains");
+export const getGlobalTransmissionPaths = (rootEntityId: string, asOf?: number, maxDepth?: number) =>
+  cmd<GlobalTransmissionPath[]>("get_global_transmission_paths", { root_entity_id: rootEntityId, as_of: asOf, max_depth: maxDepth });

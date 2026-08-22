@@ -818,6 +818,134 @@ pub(crate) const MIGRATIONS: &[(u32, &str)] = &[
     ALTER TABLE source_document_segments ADD COLUMN column_index INTEGER;
     "#,
     ),
+    (
+        15,
+        r#"
+    -- Overseas primary-source documents and deterministic Global -> A-share
+    -- transmission mappings. Original clocks, units and currencies are
+    -- immutable; translations are stored beside, never over, source text.
+    CREATE TABLE IF NOT EXISTS global_provider_state (
+        provider_id       TEXT PRIMARY KEY,
+        provider_name     TEXT NOT NULL,
+        region            TEXT NOT NULL,
+        category          TEXT NOT NULL,
+        official_url      TEXT NOT NULL,
+        original_timezone TEXT NOT NULL,
+        license_policy    TEXT NOT NULL,
+        credential_env    TEXT,
+        enabled           INTEGER NOT NULL DEFAULT 1,
+        target_latency_secs INTEGER NOT NULL,
+        rate_limit_per_minute INTEGER NOT NULL,
+        cursor_json       TEXT NOT NULL DEFAULT '{}',
+        last_attempt_at   INTEGER,
+        last_success_at   INTEGER,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        retry_after       INTEGER,
+        last_error        TEXT,
+        updated_at        INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS global_documents (
+        document_id       TEXT PRIMARY KEY,
+        provider_id       TEXT NOT NULL REFERENCES global_provider_state(provider_id),
+        upstream_id       TEXT NOT NULL,
+        document_type     TEXT NOT NULL,
+        title_original    TEXT NOT NULL,
+        title_zh          TEXT,
+        original_language TEXT NOT NULL,
+        original_url      TEXT NOT NULL,
+        source_version_id TEXT,
+        content_hash      TEXT,
+        published_at_utc  INTEGER NOT NULL,
+        published_local   TEXT NOT NULL,
+        published_timezone TEXT NOT NULL,
+        utc_offset_seconds INTEGER NOT NULL,
+        first_seen_at     INTEGER NOT NULL,
+        revision_no       INTEGER NOT NULL DEFAULT 1,
+        revision_of       TEXT REFERENCES global_documents(document_id),
+        primary_verified  INTEGER NOT NULL DEFAULT 0,
+        translation_status TEXT NOT NULL,
+        gap_reason        TEXT,
+        license_policy    TEXT NOT NULL,
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL,
+        UNIQUE(provider_id,upstream_id,revision_no)
+    );
+    CREATE INDEX IF NOT EXISTS idx_global_documents_timeline
+        ON global_documents(published_at_utc DESC,first_seen_at DESC);
+
+    CREATE TABLE IF NOT EXISTS global_entities (
+        entity_id         TEXT PRIMARY KEY,
+        entity_type       TEXT NOT NULL,
+        legal_name        TEXT NOT NULL,
+        name_zh           TEXT,
+        jurisdiction      TEXT NOT NULL,
+        identifiers_json  TEXT NOT NULL DEFAULT '{}',
+        aliases_json      TEXT NOT NULL DEFAULT '[]',
+        translation_status TEXT NOT NULL,
+        updated_at        INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS global_relations (
+        relation_id       TEXT PRIMARY KEY,
+        src_entity_id     TEXT NOT NULL REFERENCES global_entities(entity_id),
+        dst_entity_id     TEXT NOT NULL REFERENCES global_entities(entity_id),
+        relation_type     TEXT NOT NULL,
+        direction         TEXT NOT NULL,
+        confidence_bps    INTEGER NOT NULL CHECK(confidence_bps BETWEEN 0 AND 10000),
+        evidence_document_id TEXT NOT NULL REFERENCES global_documents(document_id),
+        evidence_source_version_id TEXT NOT NULL,
+        evidence_quote_original TEXT NOT NULL,
+        evidence_quote_zh TEXT,
+        evidence_location_json TEXT NOT NULL,
+        observed_at       INTEGER NOT NULL,
+        valid_from        INTEGER NOT NULL,
+        valid_to          INTEGER,
+        status            TEXT NOT NULL,
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL,
+        UNIQUE(src_entity_id,dst_entity_id,relation_type,evidence_source_version_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_global_relations_src
+        ON global_relations(src_entity_id,status,valid_from);
+    CREATE INDEX IF NOT EXISTS idx_global_relations_dst
+        ON global_relations(dst_entity_id,status,valid_from);
+
+    CREATE TABLE IF NOT EXISTS global_observations (
+        observation_id    TEXT PRIMARY KEY,
+        document_id       TEXT NOT NULL REFERENCES global_documents(document_id),
+        entity_id         TEXT REFERENCES global_entities(entity_id),
+        indicator_code    TEXT NOT NULL,
+        period            TEXT NOT NULL,
+        value_scaled      INTEGER,
+        scale             INTEGER NOT NULL DEFAULT 1,
+        value_text        TEXT,
+        unit_original     TEXT NOT NULL,
+        currency_original TEXT,
+        released_at_utc   INTEGER NOT NULL,
+        revision_no       INTEGER NOT NULL DEFAULT 1,
+        replaces_observation_id TEXT REFERENCES global_observations(observation_id),
+        source_version_id TEXT NOT NULL,
+        created_at        INTEGER NOT NULL,
+        UNIQUE(document_id,indicator_code,period,revision_no)
+    );
+    CREATE INDEX IF NOT EXISTS idx_global_observations_pit
+        ON global_observations(indicator_code,period,released_at_utc,revision_no);
+
+    CREATE TABLE IF NOT EXISTS global_fx_rates (
+        rate_id            TEXT PRIMARY KEY,
+        base_currency      TEXT NOT NULL,
+        quote_currency     TEXT NOT NULL,
+        rate_scaled        INTEGER NOT NULL,
+        scale              INTEGER NOT NULL,
+        effective_at_utc   INTEGER NOT NULL,
+        released_at_utc    INTEGER NOT NULL,
+        revision_no        INTEGER NOT NULL DEFAULT 1,
+        source_version_id  TEXT NOT NULL,
+        UNIQUE(base_currency,quote_currency,effective_at_utc,revision_no)
+    );
+    "#,
+    ),
 ];
 
 /// Current unix time in seconds. All timestamps in this crate are stored as
@@ -981,6 +1109,12 @@ mod tests {
             "disclosure_attachments",
             "disclosure_events",
             "disclosure_provider_state",
+            "global_provider_state",
+            "global_documents",
+            "global_entities",
+            "global_relations",
+            "global_observations",
+            "global_fx_rates",
         ] {
             let count: i64 = conn
                 .query_row(

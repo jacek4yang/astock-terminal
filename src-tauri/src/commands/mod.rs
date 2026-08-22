@@ -9,6 +9,7 @@ pub mod deep;
 pub mod disclosure;
 pub mod entities;
 pub mod fundamental;
+pub mod global;
 pub mod market;
 pub mod news;
 pub mod scan;

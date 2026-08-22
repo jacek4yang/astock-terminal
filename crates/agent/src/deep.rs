@@ -31,6 +31,7 @@ use astock_fundamental::model::{
     ValuationPoint,
 };
 use astock_fundamental::{anomaly, metrics, scores, valuation, FundamentalClient};
+use astock_global_intelligence::{global_a_share_golden_chains, GlobalDocumentQuery, GlobalStore};
 use astock_graph::{
     Engine as GraphEngine, Event, GraphStore, ImpactEntry, ImpactReport, Node, Relation,
 };
@@ -46,7 +47,10 @@ use chrono::NaiveDate;
 
 use crate::builtin::{parse_symbol, r2, r4, tool_err};
 use crate::error::{AgentError, Result};
-use crate::tools::{now_secs, parse_args, schema_value, AgentTool, ToolContext, ToolResult};
+use crate::tools::{
+    now_secs, parse_args, schema_value, AgentTool, ToolContext, ToolProgressDetail, ToolResult,
+    ToolWorkItem,
+};
 
 /// The supply-chain graph, or a clean capability-unavailable error.
 fn require_graph<'a>(ctx: &'a ToolContext, tool: &str) -> Result<&'a GraphStore> {
@@ -105,6 +109,164 @@ fn bounded_text(value: Option<&Value>, max_chars: usize) -> String {
         .chars()
         .take(max_chars)
         .collect()
+}
+
+// ---------------------------------------------------------------------
+// research_global_transmission
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ResearchGlobalTransmissionArgs {
+    /// 海外法定实体 ID；提供后沿已存证关系查询具体 A 股路径
+    root_entity_id: Option<String>,
+    /// 官方来源 ID，如 sec_edgar / world_bank / eia / bis_export
+    provider_id: Option<String>,
+    /// 海外原文标题关键词
+    keyword: Option<String>,
+    /// 只返回已形成不可变 source_version_id 的一级原文
+    primary_only: Option<bool>,
+    /// 历史截面 UTC 秒；省略时使用当前时点
+    as_of_utc: Option<i64>,
+    /// 最大传导层级，默认 6、最大 8
+    max_depth: Option<usize>,
+    /// 原文返回数量，默认 30、最大 100
+    limit: Option<u32>,
+}
+
+/// Query auditable overseas documents and evidence-backed A-share paths.
+pub struct ResearchGlobalTransmission;
+
+#[async_trait]
+impl AgentTool for ResearchGlobalTransmission {
+    fn name(&self) -> &'static str {
+        "research_global_transmission"
+    }
+
+    fn description(&self) -> &'static str {
+        "查询 SEC、World Bank、BIS、EIA 等海外一级来源及其原时区/修订/币种，并仅沿带 source_version_id、原文位置和置信度的关系回答全球事件如何影响具体 A 股；缺口会显式返回，禁止用中文转载或常识补边"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        schema_value::<ResearchGlobalTransmissionArgs>()
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
+        let args: ResearchGlobalTransmissionArgs = parse_args(self.name(), args)?;
+        let limit = args.limit.unwrap_or(30).clamp(1, 100);
+        let max_depth = args.max_depth.unwrap_or(6).clamp(1, 8);
+        ctx.report_progress(ToolProgressDetail {
+            completed: 0,
+            total: 2,
+            succeeded: 0,
+            failed: 0,
+            cache_hits: 0,
+            records: 0,
+            active: vec![ToolWorkItem {
+                label: args
+                    .root_entity_id
+                    .clone()
+                    .unwrap_or_else(|| "海外一级来源".into()),
+                stage: "读取原始时区、修订、单位/币种与来源缺口".into(),
+            }],
+            recent_errors: Vec::new(),
+        });
+        let store = GlobalStore::new(ctx.storage.clone());
+        let documents = store
+            .query_documents(GlobalDocumentQuery {
+                provider_id: args.provider_id.clone(),
+                keyword: args.keyword.clone(),
+                primary_only: args.primary_only.unwrap_or(false),
+                page: 1,
+                page_size: limit,
+            })
+            .await
+            .map_err(|error| tool_err(self.name(), error.to_string()))?;
+        let providers = store
+            .provider_health()
+            .await
+            .map_err(|error| tool_err(self.name(), error.to_string()))?;
+        ctx.report_progress(ToolProgressDetail {
+            completed: 1,
+            total: 2,
+            succeeded: 1,
+            failed: 0,
+            cache_hits: 0,
+            records: documents.items.len(),
+            active: vec![ToolWorkItem {
+                label: args
+                    .root_entity_id
+                    .clone()
+                    .unwrap_or_else(|| "尚未指定海外实体".into()),
+                stage: "沿逐边原文证据查询 A 股传导路径".into(),
+            }],
+            recent_errors: Vec::new(),
+        });
+        let paths = if let Some(root) = args.root_entity_id.as_deref() {
+            store
+                .transmission_paths(root, args.as_of_utc.unwrap_or_else(now_secs), max_depth)
+                .await
+                .map_err(|error| tool_err(self.name(), error.to_string()))?
+        } else {
+            Vec::new()
+        };
+        let source_gaps: Vec<_> = providers
+            .iter()
+            .filter(|provider| !provider.enabled || provider.consecutive_failures > 0)
+            .map(|provider| {
+                json!({
+                    "provider_id": provider.provider_id,
+                    "provider_name": provider.provider_name,
+                    "enabled": provider.enabled,
+                    "consecutive_failures": provider.consecutive_failures,
+                    "retry_after": provider.retry_after,
+                    "gap": provider.last_error,
+                })
+            })
+            .collect();
+        ctx.report_progress(ToolProgressDetail {
+            completed: 2,
+            total: 2,
+            succeeded: 2,
+            failed: 0,
+            cache_hits: 0,
+            records: documents.items.len() + paths.len(),
+            active: Vec::new(),
+            recent_errors: Vec::new(),
+        });
+        let full = json!({
+            "documents": documents,
+            "transmission_paths": paths,
+            "source_gaps": source_gaps,
+            "golden_chain_contracts": global_a_share_golden_chains(),
+            "usage_contract": {
+                "document_fact": "只有 primary_verified=true 且 source_version_id 非空的海外原文可标为【事实】",
+                "mapping_fact": "每一条关系必须引用 evidence_source_version_id、原文片段/位置、观测时间和置信度",
+                "translation": "译文不得覆盖数字、代码、法定公司名、关键术语、原单位或原币种",
+                "time": "使用 published_at_utc 映射 A 股交易日，同时保留 published_local 与 published_timezone",
+                "gap": "没有双侧正式证据时必须写【未知】或“关系未核验”，禁止用中文二次报道/常识补全",
+            }
+        });
+        let summary = json!({
+            "total_documents": full["documents"]["total"],
+            "documents": full["documents"]["items"],
+            "transmission_paths": full["transmission_paths"],
+            "source_gaps": full["source_gaps"],
+            "usage_contract": full["usage_contract"],
+        });
+        Ok(ToolResult {
+            summary_json: summary,
+            full_json: Some(full),
+            cache_key: format!(
+                "research_global:{}:{}:{}:{}",
+                args.root_entity_id.unwrap_or_default(),
+                args.provider_id.unwrap_or_default(),
+                args.keyword.unwrap_or_default(),
+                args.as_of_utc.unwrap_or_default()
+            ),
+            source: "global_primary_source_store".into(),
+            fetched_at: now_rfc3339(),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------

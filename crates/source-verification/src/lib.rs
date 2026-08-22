@@ -264,13 +264,28 @@ impl SourceVerifier {
     }
 
     pub async fn fetch_source_document(&self, raw_url: &str) -> Result<SourceDocumentDetail> {
+        self.fetch_source_document_with_user_agent(raw_url, None)
+            .await
+    }
+
+    /// Archive through the same SSRF-safe, bounded fetcher while declaring a
+    /// policy-required application identity (for example SEC Fair Access).
+    pub async fn fetch_source_document_with_user_agent(
+        &self,
+        raw_url: &str,
+        user_agent: Option<&str>,
+    ) -> Result<SourceDocumentDetail> {
         let safe = UrlSecurityPolicy::default()
             .validate_static(raw_url)
             .map_err(|error| Error::UnsafeUrl(error.to_string()))?;
         let requested_url = safe.as_str().to_string();
         let authority = classify_source(&requested_url);
         let fetched_at = now_secs();
-        match self.fetcher.fetch(&requested_url).await {
+        match self
+            .fetcher
+            .fetch_with_user_agent(&requested_url, user_agent)
+            .await
+        {
             Ok(fetched) => {
                 self.persist_verified(&requested_url, authority, fetched, fetched_at)
                     .await
@@ -1090,6 +1105,26 @@ pub fn classify_source(raw_url: &str) -> SourceAuthority {
         "stats.gov.cn",
         "gov.cn",
         "pbc.gov.cn",
+        "sec.gov",
+        "federalreserve.gov",
+        "bls.gov",
+        "bea.gov",
+        "eia.gov",
+        "cftc.gov",
+        "bis.gov",
+        "ustr.gov",
+        "worldbank.org",
+        "imf.org",
+        "ecb.europa.eu",
+        "europa.eu",
+        "un.org",
+        "wto.org",
+        "fsa.go.jp",
+        "fss.or.kr",
+        "twse.com.tw",
+        "hkexnews.hk",
+        "opec.org",
+        "iea.org",
     ]
     .iter()
     .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
@@ -1516,6 +1551,8 @@ mod tests {
     #[test]
     fn source_priority_and_access_wall_are_explicit() {
         assert!(classify_source("https://www.sse.com.cn/a.pdf").is_primary());
+        assert!(classify_source("https://data.sec.gov/submissions/a.json").is_primary());
+        assert!(classify_source("https://api.worldbank.org/v2/a").is_primary());
         assert_eq!(
             classify_source("https://weibo.com/a"),
             SourceAuthority::SocialLead

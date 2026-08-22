@@ -11,10 +11,12 @@ pub mod finance_news;
 pub mod iwencai_openapi;
 pub mod joinquant;
 pub mod news_ingest;
+pub mod sec_edgar;
 pub mod sina;
 pub mod tdx_adapter;
 pub mod tencent;
 pub mod tushare;
+pub mod world_bank;
 
 pub use cninfo_disclosure::{CninfoAnnouncement, CninfoDisclosureProvider, CninfoPage};
 pub use eastmoney::{EastMoney, IndustryClassified};
@@ -35,6 +37,7 @@ pub use news_ingest::{
     NewsErrorKind, NewsIngestRequest, NewsProvider, NewsProviderError, NewsProviderHealth,
     NewsTrustTier,
 };
+pub use sec_edgar::{SecEdgarProvider, SecFiling};
 pub use sina::SinaKline;
 pub use tdx_adapter::TdxProvider;
 pub use tencent::TencentKline;
@@ -42,6 +45,7 @@ pub use tushare::{
     compare_qfq_golden, qfq_factor_from_adj, AdjFactorPoint, DailyBasic, QfqMismatch, TradeCalDay,
     TushareProvider, TushareTier,
 };
+pub use world_bank::{WorldBankObservation, WorldBankProvider};
 
 /// Lenient float conversion matching the legacy `_to_float`: numbers pass
 /// through, numeric strings parse, and `"-"` / `""` / null become `None`.

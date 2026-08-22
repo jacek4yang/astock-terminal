@@ -103,6 +103,7 @@ const TOOL_GROUPS = [
     tools: [
       "research_news",
       "research_disclosures",
+      "research_global_transmission",
       "search_web",
       "fetch_source_document",
       "read_document",

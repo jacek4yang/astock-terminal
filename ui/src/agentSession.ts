@@ -41,6 +41,7 @@ export const DEFAULT_AGENT_TOOLS = [
   "compare_source_evidence",
   "research_news",
   "research_disclosures",
+  "research_global_transmission",
 ] as const;
 
 export interface ToolCallItem {

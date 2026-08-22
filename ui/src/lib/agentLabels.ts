@@ -28,6 +28,7 @@ const TOOL_NAMES: Record<string, string> = {
   compare_source_evidence: "多来源字段对账",
   research_news: "财经新闻与公告研究",
   research_disclosures: "正式披露与修订核验",
+  research_global_transmission: "海外一级来源与 A 股传导核验",
   get_market_regime: "市场环境识别",
   market_regime: "市场环境识别",
   industry_chain: "产业链位置分析",
@@ -69,6 +70,9 @@ const ARG_NAMES: Record<string, string> = {
   date: "截面日期",
   index: "指数代码",
   spec: "可审计策略条件",
+  root_entity_id: "海外实体",
+  provider_id: "海外官方来源",
+  as_of_utc: "历史截面时间",
 };
 
 const VALUE_NAMES: Record<string, string> = {
