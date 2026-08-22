@@ -6,4 +6,6 @@ dist/
 **/secrets*
 src-tauri/target/
 ui/dist/
+ui/tsconfig.tsbuildinfo
 src-tauri/gen/
+artifacts/
