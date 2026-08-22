@@ -200,8 +200,8 @@ fn baum_welch(y: &[f64], init: GaussianHmm2, max_iter: usize, tol: f64) -> Gauss
             (-0.5 * (std::f64::consts::TAU.ln() + v.ln() + d * d / v)).exp()
         };
         // Scaled forward pass.
-        for i in 0..2 {
-            alpha[0][i] = pi[i] * emit(i, 0);
+        for (i, value) in alpha[0].iter_mut().enumerate() {
+            *value = pi[i] * emit(i, 0);
         }
         c[0] = alpha[0][0] + alpha[0][1];
         if c[0] <= 0.0 {
@@ -228,9 +228,9 @@ fn baum_welch(y: &[f64], init: GaussianHmm2, max_iter: usize, tol: f64) -> Gauss
         let mut beta = vec![[0.0; 2]; t_max];
         beta[t_max - 1] = [1.0, 1.0];
         for t in (0..t_max - 1).rev() {
-            for i in 0..2 {
-                beta[t][i] = (a[i][0] * emit(0, t + 1) * beta[t + 1][0]
-                    + a[i][1] * emit(1, t + 1) * beta[t + 1][1])
+            for (i, row) in a.iter().enumerate() {
+                beta[t][i] = (row[0] * emit(0, t + 1) * beta[t + 1][0]
+                    + row[1] * emit(1, t + 1) * beta[t + 1][1])
                     / c[t + 1];
             }
         }

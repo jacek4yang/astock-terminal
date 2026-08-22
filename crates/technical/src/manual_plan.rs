@@ -216,14 +216,12 @@ pub fn build_manual_trading_plan(
         "等待型策略：信号确认前不设固定持有期"
     };
 
-    let stop_basis = format!(
-        "ATR14={:.2}；20日结构支撑={:.2}；取波动止损与结构失效位的审慎组合",
-        atr14, support
-    );
+    let stop_basis =
+        format!("ATR14={atr14:.2}；20日结构支撑={support:.2}；取波动止损与结构失效位的审慎组合");
     let target_basis = if pattern_target.is_some() {
         "确定性形态测量目标，且至少覆盖 1.5R".to_string()
     } else if structural_target.is_some() {
-        format!("20日结构阻力 {:.2}，且至少覆盖 1.5R", resistance)
+        format!("20日结构阻力 {resistance:.2}，且至少覆盖 1.5R")
     } else {
         "未发现可靠上方结构位，采用 2R 风险单位作为复核目标而非收益承诺".to_string()
     };
@@ -342,8 +340,7 @@ pub fn build_manual_trading_plan(
         target_basis,
         expected_holding_period: expected_holding_period.into(),
         position_guidance: format!(
-            "按止损距离反推数量，使触发止损时账户损失不超过 {:.2}%；不把“仓位百分比”替代风险预算",
-            risk_budget_pct
+            "按止损距离反推数量，使触发止损时账户损失不超过 {risk_budget_pct:.2}%；不把“仓位百分比”替代风险预算"
         ),
         scenarios: vec![
             ManualScenario {
@@ -386,13 +383,13 @@ pub fn build_manual_trading_plan(
         evidence: vec![
             ManualEvidence {
                 label: "ATR14".into(),
-                value: format!("{:.2}", atr14),
+                value: format!("{atr14:.2}"),
                 source: source.into(),
                 as_of: last.date.clone(),
             },
             ManualEvidence {
                 label: "20日结构支撑/阻力".into(),
-                value: format!("{:.2} / {:.2}", support, resistance),
+                value: format!("{support:.2} / {resistance:.2}"),
                 source: source.into(),
                 as_of: last.date.clone(),
             },

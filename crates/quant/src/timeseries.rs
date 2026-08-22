@@ -405,8 +405,8 @@ fn nelder_mead(
                 // Shrink toward best
                 let best0 = simplex[0].clone();
                 for i in 1..=n {
-                    for d in 0..n {
-                        simplex[i][d] = best0[d] + 0.5 * (simplex[i][d] - best0[d]);
+                    for (d, best) in best0.iter().copied().enumerate().take(n) {
+                        simplex[i][d] = best + 0.5 * (simplex[i][d] - best);
                     }
                     vals[i] = f(&simplex[i]);
                 }

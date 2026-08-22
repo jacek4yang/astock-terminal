@@ -88,7 +88,7 @@ fn golden_minute() {
     assert!((bars[239].price - 1272.83).abs() < 1e-9);
     // 均价应在当日价格区间内
     for b in &bars {
-        assert!(b.price > 1200.0 && b.price < 1350.0, "bad price {:?}", b);
+        assert!(b.price > 1200.0 && b.price < 1350.0, "bad price {b:?}");
     }
 }
 

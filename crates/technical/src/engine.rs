@@ -220,7 +220,7 @@ fn build_trade_plan(
                 b.stop_loss
             );
             if let Some(next_add) = b.next_add_price {
-                note.push_str(&format!("；加仓价{:.2}", next_add));
+                note.push_str(&format!("；加仓价{next_add:.2}"));
             }
             notes.push(note);
             break;
@@ -462,10 +462,10 @@ pub fn run_analysis(
         desc_parts.push(format!("趋势={}({})", trend.direction, trend_score));
     }
     desc_parts.push(format!("量价={}({})", vp.pattern, vp_score));
-    desc_parts.push(format!("突破={}", breakout_score));
+    desc_parts.push(format!("突破={breakout_score}"));
     desc_parts.push(format!("CS={}({})", canslim.grade, canslim_score));
     if !patterns.is_empty() {
-        desc_parts.push(format!("形态={}", pattern_score));
+        desc_parts.push(format!("形态={pattern_score}"));
     }
     let description = desc_parts.join(" | ");
 

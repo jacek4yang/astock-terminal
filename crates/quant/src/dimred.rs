@@ -228,8 +228,8 @@ fn lloyd(points: &[Vec<f64>], centroids: &mut [Vec<f64>]) -> (Vec<usize>, f64) {
         let mut counts = vec![0usize; k];
         for (p, &a) in points.iter().zip(&assignments) {
             counts[a] += 1;
-            for dim in 0..d {
-                sums[a][dim] += p[dim];
+            for (dim, &value) in p.iter().enumerate().take(d) {
+                sums[a][dim] += value;
             }
         }
         for c in 0..k {

@@ -484,7 +484,7 @@ fn describe_state(
         return (
             "笔形成中".to_string(),
             "暂无买卖信号".to_string(),
-            format!("共{}个分型、0笔。笔形成中", fractal_count),
+            format!("共{fractal_count}个分型、0笔。笔形成中"),
         );
     }
 
@@ -515,7 +515,7 @@ fn describe_state(
             None => "暂无买卖信号".to_string(),
         };
     } else {
-        state = format!("处于{}笔中，{}延续", direction_cn, bull_cn);
+        state = format!("处于{direction_cn}笔中，{bull_cn}延续");
         if let Some(latest) = latest {
             state += &format!("，最近{}信号在{}", latest.signal_type, latest.time);
             summary = format!(

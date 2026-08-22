@@ -149,7 +149,7 @@ fn detect_double_top_bottom(klines: &[Kline], price: f64) -> Option<PatternResul
                             ("颈线".to_string(), py_round(neck, 2)),
                             ("顶部".to_string(), py_round(top, 2)),
                         ],
-                        description: format!("双顶颈线{:.2}，跌破后目标{:.2}", neck, target),
+                        description: format!("双顶颈线{neck:.2}，跌破后目标{target:.2}"),
                     });
                 }
             }
@@ -199,7 +199,7 @@ fn detect_head_shoulders(klines: &[Kline], price: f64) -> Option<PatternResult> 
                             ("颈线".to_string(), py_round(neck, 2)),
                             ("头部".to_string(), py_round(vm, 2)),
                         ],
-                        description: format!("底部深度{:.2}，突破颈线后目标{:.2}", depth, target),
+                        description: format!("底部深度{depth:.2}，突破颈线后目标{target:.2}"),
                     });
                 }
             }
@@ -237,7 +237,7 @@ fn detect_head_shoulders(klines: &[Kline], price: f64) -> Option<PatternResult> 
                             ("颈线".to_string(), py_round(neck, 2)),
                             ("头部".to_string(), py_round(vm, 2)),
                         ],
-                        description: format!("头部高度{:.2}，跌破颈线后目标{:.2}", height, target),
+                        description: format!("头部高度{height:.2}，跌破颈线后目标{target:.2}"),
                     });
                 }
             }
@@ -442,7 +442,7 @@ fn detect_gap(klines: &[Kline], _price: f64) -> Option<PatternResult> {
             status: "已形成".to_string(),
             target_price: None,
             key_levels: vec![("缺口上沿".to_string(), py_round(latest.low, 2))],
-            description: format!("向上跳空缺口{:.2}，回补前视为支撑", gap),
+            description: format!("向上跳空缺口{gap:.2}，回补前视为支撑"),
         });
     }
     if latest.high < prev.low {
@@ -454,7 +454,7 @@ fn detect_gap(klines: &[Kline], _price: f64) -> Option<PatternResult> {
             status: "已形成".to_string(),
             target_price: None,
             key_levels: vec![("缺口下沿".to_string(), py_round(latest.high, 2))],
-            description: format!("向下跳空缺口{:.2}，回补前视为压力", gap),
+            description: format!("向下跳空缺口{gap:.2}，回补前视为压力"),
         });
     }
     None

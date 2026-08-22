@@ -661,10 +661,7 @@ fn describe_state(
     };
 
     let latest = signals.last();
-    let mut state = format!(
-        "处于{}笔中，{}延续，最近中枢{}",
-        direction_cn, bull_cn, zs_text
-    );
+    let mut state = format!("处于{direction_cn}笔中，{bull_cn}延续，最近中枢{zs_text}");
     let summary;
     if let Some(latest) = latest {
         let type_cn = get_signal_type_name(&latest.signal_type);

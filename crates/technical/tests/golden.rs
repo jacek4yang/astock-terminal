@@ -41,8 +41,8 @@ fn diff_values(expected: &Value, actual: &Value, path: &str, diffs: &mut Vec<Str
         (Value::Object(e), Value::Object(a)) => {
             for (k, ev) in e {
                 match a.get(k) {
-                    Some(av) => diff_values(ev, av, &format!("{}.{}", path, k), diffs),
-                    None => diffs.push(format!("{}.{}: MISSING in actual", path, k)),
+                    Some(av) => diff_values(ev, av, &format!("{path}.{k}"), diffs),
+                    None => diffs.push(format!("{path}.{k}: MISSING in actual")),
                 }
             }
             for k in a.keys() {
@@ -62,26 +62,26 @@ fn diff_values(expected: &Value, actual: &Value, path: &str, diffs: &mut Vec<Str
                 return;
             }
             for (i, (ev, av)) in e.iter().zip(a.iter()).enumerate() {
-                diff_values(ev, av, &format!("{}[{}]", path, i), diffs);
+                diff_values(ev, av, &format!("{path}[{i}]"), diffs);
             }
         }
         (Value::Number(e), Value::Number(a)) => {
             if e.is_i64() || e.is_u64() {
                 // Integers must match exactly (and stay integers).
                 if !(a.is_i64() || a.is_u64()) || e.as_i64() != a.as_i64() {
-                    diffs.push(format!("{}: int expected {} got {}", path, e, a));
+                    diffs.push(format!("{path}: int expected {e} got {a}"));
                 }
             } else {
                 let (ef, af) = (e.as_f64().unwrap(), a.as_f64().unwrap());
                 let tol = 1e-4 * ef.abs().max(af.abs()).max(1.0);
                 if (ef - af).abs() > tol {
-                    diffs.push(format!("{}: float expected {} got {}", path, ef, af));
+                    diffs.push(format!("{path}: float expected {ef} got {af}"));
                 }
             }
         }
         _ => {
             if expected != actual {
-                diffs.push(format!("{}: expected {} got {}", path, expected, actual));
+                diffs.push(format!("{path}: expected {expected} got {actual}"));
             }
         }
     }
@@ -103,7 +103,7 @@ fn golden_signal_matches_legacy() {
         let raw = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("cannot read {}: {}", path.display(), e));
         let fixture: Fixture =
-            serde_json::from_str(&raw).unwrap_or_else(|e| panic!("cannot parse {}: {}", name, e));
+            serde_json::from_str(&raw).unwrap_or_else(|e| panic!("cannot parse {name}: {e}"));
 
         let actual = astock_technical::analyze(
             &fixture.inputs.klines,
@@ -126,9 +126,6 @@ fn golden_signal_matches_legacy() {
         // Surface the headline fields in the test log for the report.
         let score = actual.get("score").and_then(Value::as_i64).unwrap_or(-1);
         let action = actual.get("action").and_then(Value::as_str).unwrap_or("?");
-        eprintln!(
-            "golden {:<20} score={:<3} action={} MATCHED",
-            name, score, action
-        );
+        eprintln!("golden {name:<20} score={score:<3} action={action} MATCHED");
     }
 }
