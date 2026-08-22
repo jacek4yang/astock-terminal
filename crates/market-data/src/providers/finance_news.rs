@@ -7,6 +7,7 @@
 use crate::cache::TtlCache;
 use crate::http::HttpClient;
 use astock_core::DataError;
+use astock_news_intelligence::ClusterExplanation;
 use astock_security::UrlSecurityPolicy;
 use astock_storage::Storage;
 use async_trait::async_trait;
@@ -65,6 +66,18 @@ pub struct FinanceNewsItem {
     /// Immutable archive revision backing this normalized item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub document_revision_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_cluster_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_relationship: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_relationship_name: Option<String>,
+    #[serde(default)]
+    pub independent_source_count: usize,
+    #[serde(default)]
+    pub old_republication: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_explanation: Option<ClusterExplanation>,
     /// Bounded original provider row for offline re-parsing/audit. Agent strips
     /// this field before model context to avoid needless prompt expansion.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -533,6 +546,12 @@ impl NewsProvider for OfficialAnnouncementProvider {
                 license: self.capabilities.license.clone(),
                 parser_version: self.capabilities.parser_version.clone(),
                 document_revision_id: None,
+                event_cluster_id: None,
+                event_relationship: None,
+                event_relationship_name: None,
+                independent_source_count: 1,
+                old_republication: false,
+                cluster_explanation: None,
                 raw_payload: serde_json::to_value(&row)
                     .ok()
                     .as_ref()
@@ -617,6 +636,12 @@ fn normalize_item(
         license: capabilities.license.clone(),
         parser_version: capabilities.parser_version.clone(),
         document_revision_id: None,
+        event_cluster_id: None,
+        event_relationship: None,
+        event_relationship_name: None,
+        independent_source_count: 1,
+        old_republication: false,
+        cluster_explanation: None,
         raw_payload: bounded_raw(raw),
     })
 }
@@ -641,6 +666,12 @@ impl FinanceNewsItem {
             license: capabilities.license.clone(),
             parser_version: capabilities.parser_version.clone(),
             document_revision_id: None,
+            event_cluster_id: None,
+            event_relationship: None,
+            event_relationship_name: None,
+            independent_source_count: 1,
+            old_republication: false,
+            cluster_explanation: None,
             raw_payload: None,
         }
     }

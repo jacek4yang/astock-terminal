@@ -7,6 +7,7 @@ pub mod datacenter;
 pub mod deep;
 pub mod fundamental;
 pub mod market;
+pub mod news;
 pub mod scan;
 pub mod settings;
 pub mod watchlist;

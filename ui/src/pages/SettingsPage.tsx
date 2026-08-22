@@ -20,6 +20,7 @@ import {
 import { fmtBytes } from "../lib/format";
 import { ErrorBox, Term } from "../components/ui";
 import ProviderHealth from "../components/ProviderHealth";
+import NewsEventClusters from "../components/NewsEventClusters";
 import { applyTheme, useAppStore, type Theme, type UiMode } from "../store";
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -331,6 +332,7 @@ export default function SettingsPage() {
 
         {/* 数据源健康(5s 轮询) */}
         <ProviderHealth />
+        <NewsEventClusters />
 
       {/* MiniMax 访问密钥 */}
       <Section title="MiniMax 访问密钥">

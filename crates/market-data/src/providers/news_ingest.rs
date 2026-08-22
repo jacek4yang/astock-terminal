@@ -9,6 +9,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use astock_news_intelligence::{canonicalize_url, NewsEventClusterer};
 use astock_security::{redact_text, UrlSecurityPolicy};
 use astock_storage::{
     EvidenceTimestamp, NewsArchiveInput, NewsObservationInput, NewsProviderArchiveState, Storage,
@@ -359,7 +360,46 @@ impl NewsIngestor {
             }
         }
         let mut seen = HashSet::new();
-        outcome.items.retain(|item| seen.insert(item.id.clone()));
+        let cluster_counts = outcome
+            .items
+            .iter()
+            .filter_map(|item| {
+                item.event_cluster_id
+                    .as_ref()
+                    .map(|cluster| (cluster.clone(), item.independent_source_count))
+            })
+            .fold(
+                std::collections::HashMap::<String, usize>::new(),
+                |mut counts, (cluster, count)| {
+                    counts
+                        .entry(cluster)
+                        .and_modify(|current| *current = (*current).max(count))
+                        .or_insert(count);
+                    counts
+                },
+            );
+        for item in &mut outcome.items {
+            if let Some(cluster) = &item.event_cluster_id {
+                item.independent_source_count = cluster_counts.get(cluster).copied().unwrap_or(1);
+            }
+        }
+        outcome.items.sort_by(|left, right| {
+            trust_rank(left.trust_tier)
+                .cmp(&trust_rank(right.trust_tier))
+                .then_with(|| {
+                    right
+                        .published_at_ms
+                        .unwrap_or_default()
+                        .cmp(&left.published_at_ms.unwrap_or_default())
+                })
+        });
+        outcome.items.retain(|item| {
+            seen.insert(
+                item.event_cluster_id
+                    .clone()
+                    .unwrap_or_else(|| format!("document:{}", item.id)),
+            )
+        });
         outcome.items.sort_by(|left, right| {
             right
                 .published_at_ms
@@ -536,7 +576,7 @@ impl NewsIngestor {
             let canonical_url = if item.url.trim().is_empty() {
                 format!("urn:astock-news:{}:{}", item.provider_id, item.id)
             } else {
-                item.url.clone()
+                canonicalize_url(&item.url)
             };
             let raw_snapshot = (item.trust_tier == NewsTrustTier::FirstPartyDisclosure)
                 .then(|| {
@@ -592,7 +632,34 @@ impl NewsIngestor {
                 })
                 .await;
             match archived {
-                Ok(saved) => item.document_revision_id = Some(saved.revision_id),
+                Ok(saved) => {
+                    item.document_revision_id = Some(saved.revision_id.clone());
+                    match NewsEventClusterer::new(storage.clone())
+                        .assign_revision(&saved.revision_id)
+                        .await
+                    {
+                        Ok(assignment) => {
+                            item.event_cluster_id = Some(assignment.cluster_id);
+                            item.event_relationship = Some(
+                                serde_json::to_string(&assignment.relationship)
+                                    .unwrap_or_else(|_| "\"follow_up\"".into())
+                                    .trim_matches('"')
+                                    .to_string(),
+                            );
+                            item.event_relationship_name =
+                                Some(assignment.relationship.chinese_name().into());
+                            item.independent_source_count = assignment.independent_sources as usize;
+                            item.old_republication = assignment.old_republication;
+                            item.cluster_explanation = Some(assignment.explanation);
+                        }
+                        Err(error) => tracing::warn!(
+                            provider = capabilities.provider_id,
+                            item = item.id,
+                            %error,
+                            "news event clustering failed; archived revision remains available"
+                        ),
+                    }
+                }
                 Err(error) => tracing::warn!(
                     provider = capabilities.provider_id,
                     item = item.id,
@@ -915,6 +982,15 @@ fn public_endpoint(endpoint: &str) -> String {
         .to_string()
 }
 
+fn trust_rank(tier: NewsTrustTier) -> u8 {
+    match tier {
+        NewsTrustTier::FirstPartyDisclosure => 0,
+        NewsTrustTier::LicensedMedia => 1,
+        NewsTrustTier::PublicAggregator => 2,
+        NewsTrustTier::SearchLead => 3,
+    }
+}
+
 fn error_kind_token(kind: NewsErrorKind) -> String {
     serde_json::to_string(&kind)
         .unwrap_or_else(|_| "\"storage\"".into())
@@ -1146,6 +1222,12 @@ fn normalize_generic_item(
         license: capabilities.license.clone(),
         parser_version: capabilities.parser_version.clone(),
         document_revision_id: None,
+        event_cluster_id: None,
+        event_relationship: None,
+        event_relationship_name: None,
+        independent_source_count: 1,
+        old_republication: false,
+        cluster_explanation: None,
         raw_payload: bounded_raw(raw),
     })
 }
@@ -1294,6 +1376,40 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.provider_id == "newsnow"));
+    }
+
+    #[tokio::test]
+    async fn same_event_from_two_sources_is_counted_once_with_source_diversity() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open(StorageConfig::with_base_dir(temp.path())).unwrap();
+        let mut official =
+            FakeProvider::new("official-dedupe", 0, NewsTrustTier::FirstPartyDisclosure);
+        official.title = "紫金矿业601899拟回购股份".into();
+        let mut licensed = FakeProvider::new("licensed-dedupe", 0, NewsTrustTier::LicensedMedia);
+        licensed.title = "紫金矿业601899拟回购股份".into();
+        let ingestor =
+            NewsIngestor::new(vec![Arc::new(official), Arc::new(licensed)], Some(storage)).unwrap();
+        let outcome = ingestor
+            .ingest(
+                NewsIngestRequest {
+                    limit: 10,
+                    ..Default::default()
+                },
+                None,
+            )
+            .await;
+        assert_eq!(
+            outcome.items.len(),
+            1,
+            "same event must not be double-counted"
+        );
+        assert_eq!(outcome.items[0].independent_source_count, 2);
+        assert!(outcome.items[0].event_cluster_id.is_some());
+        assert_eq!(
+            outcome.items[0].trust_tier,
+            NewsTrustTier::FirstPartyDisclosure,
+            "representative prefers first-party evidence"
+        );
     }
 
     #[tokio::test]

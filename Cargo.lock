@@ -325,6 +325,7 @@ dependencies = [
  "astock-graph",
  "astock-market-data",
  "astock-minimax",
+ "astock-news-intelligence",
  "astock-storage",
  "astock-technical",
  "astock-trading-rules",
@@ -459,6 +460,7 @@ version = "5.0.1"
 dependencies = [
  "astock-core",
  "astock-joinquant",
+ "astock-news-intelligence",
  "astock-security",
  "astock-storage",
  "astock-tdx",
@@ -496,6 +498,25 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "astock-news-intelligence"
+version = "5.0.1"
+dependencies = [
+ "astock-storage",
+ "chrono",
+ "once_cell",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]

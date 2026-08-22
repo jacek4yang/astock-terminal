@@ -300,6 +300,92 @@ export interface NewsIngestObservation {
   raw_evidence_present: boolean;
 }
 
+export type DocumentRelationship =
+  | "first_publication"
+  | "reprint"
+  | "summary"
+  | "follow_up"
+  | "commentary"
+  | "correction"
+  | "retraction"
+  | "duplicate_fetch";
+
+export interface SimilarityFeatures {
+  same_url: boolean;
+  same_content: boolean;
+  title_exact: boolean;
+  simhash_similarity: number;
+  minhash_similarity: number;
+  semantic_similarity: number;
+  entity_overlap: number;
+  action_overlap: number;
+  time_proximity: number;
+}
+
+export interface ClusterExplanation {
+  score: number;
+  merge_threshold: number;
+  reasons: string[];
+  separation_reasons: string[];
+  features: SimilarityFeatures;
+}
+
+export interface NewsEventCluster {
+  cluster_id: string;
+  canonical_title: string;
+  event_time_utc: number | null;
+  first_seen_time_utc: number;
+  primary_revision_id: string;
+  first_source_id: string;
+  independent_sources: number;
+  evidence_diversity: number;
+  latest_revision_id: string;
+  conflict_fields: string[];
+  model_version: string;
+  status: string;
+  merged_into_cluster_id: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface NewsEventClusterMember {
+  cluster_id: string;
+  revision_id: string;
+  relationship: DocumentRelationship;
+  merge_score: number;
+  explanation: ClusterExplanation;
+  old_republication: boolean;
+  assigned_by: string;
+  model_version: string;
+  active: boolean;
+  created_at: number;
+}
+
+export interface NewsEventConflict {
+  cluster_id: string;
+  field_name: string;
+  values: string[];
+  authoritative_revision_id: string | null;
+  status: string;
+}
+
+export interface NewsEventClusterDetail {
+  cluster: NewsEventCluster;
+  members: NewsEventClusterMember[];
+  revisions: ArchivedNewsRevision[];
+  conflicts: NewsEventConflict[];
+}
+
+export interface AgentConclusionReview {
+  task_id: string;
+  conclusion_key: string;
+  triggering_revision: string;
+  trigger_relation: string;
+  status: string;
+  created_at: number;
+  reviewed_at: number | null;
+}
+
 export const getNewsProviderHealth = () =>
   cmd<NewsProviderHealthItem[]>("get_news_provider_health");
 
@@ -319,6 +405,35 @@ export const getNewsIngestObservations = (providerId: string, limit = 10) =>
     provider_id: providerId,
     limit,
   });
+
+export const getNewsEventClusters = (limit = 50) =>
+  cmd<NewsEventCluster[]>("get_news_event_clusters", { limit });
+
+export const getNewsEventClusterDetail = (clusterId: string) =>
+  cmd<NewsEventClusterDetail>("get_news_event_cluster_detail", { cluster_id: clusterId });
+
+export const mergeNewsEventClusters = (fromClusterId: string, toClusterId: string, reason: string) =>
+  cmd<NewsEventClusterDetail>("merge_news_event_clusters", {
+    from_cluster_id: fromClusterId,
+    to_cluster_id: toClusterId,
+    reason,
+  });
+
+export const splitNewsEventRevision = (revisionId: string, reason: string) =>
+  cmd<NewsEventClusterDetail>("split_news_event_revision", { revision_id: revisionId, reason });
+
+export const getPendingNewsEvidenceReviews = (limit = 50) =>
+  cmd<AgentConclusionReview[]>("get_pending_news_evidence_reviews", { limit });
+
+export const resolveNewsEvidenceReview = (
+  taskId: string,
+  conclusionKey: string,
+  triggeringRevision: string,
+) => cmd<boolean>("resolve_news_evidence_review", {
+  task_id: taskId,
+  conclusion_key: conclusionKey,
+  triggering_revision: triggeringRevision,
+});
 
 // ==================== 分析引擎 ====================
 

@@ -16,6 +16,12 @@
 - `get_news_archive_revisions(document_id) -> [ArchivedNewsRevision]` — 查询一篇来源文档的不可变修订链。
 - `check_news_archive_integrity() -> string` — 运行本地 SQLite 快速完整性诊断，正常返回 `ok`。
 - `get_news_ingest_observations(provider_id?, limit) -> [NewsIngestObservation]` — 查询来源最近的抓取/解析诊断；返回错误与证据哈希，但不返回原始正文。
+- `get_news_event_clusters(limit) -> [EventCluster]` — 查询事件簇摘要、独立来源数、证据多样性、时间、最新修订和冲突字段。
+- `get_news_event_cluster_detail(cluster_id) -> EventClusterDetail` — 查询事件全部文档修订、关系、旧闻标记、合并/分离解释及字段级冲突。
+- `merge_news_event_clusters(from_cluster_id, to_cluster_id, reason) -> EventClusterDetail` — 将事件人工合并；理由不能为空，操作追加写入审计记录。
+- `split_news_event_revision(revision_id, reason) -> EventClusterDetail` — 将单一修订人工拆为独立事件；理由不能为空，历史成员记录不覆盖。
+- `get_pending_news_evidence_reviews(limit) -> [AgentConclusionReview]` — 查询因更正或撤回而进入待复核状态的 Agent 结论。
+- `resolve_news_evidence_review(task_id, conclusion_key, triggering_revision) -> void` — 显式标记一项结论已经人工复核。
 - `get_minute(symbol) -> { points: {time,price,avg_price,volume}[], pre_close, name }`
 - `search_stocks(keyword) -> {code,name,classify}[]`
 - `get_market_breadth() -> {up,down,flat,total,breadth_ratio}`

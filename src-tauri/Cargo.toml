@@ -24,6 +24,7 @@ astock-chanlun = { path = "../crates/chanlun" }
 astock-fundamental = { path = "../crates/fundamental" }
 astock-graph = { path = "../crates/graph" }
 astock-minimax = { path = "../crates/minimax" }
+astock-news-intelligence = { path = "../crates/news-intelligence" }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-store = "2"

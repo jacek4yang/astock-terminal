@@ -346,6 +346,89 @@ pub(crate) const MIGRATIONS: &[(u32, &str)] = &[
     );
     "#,
     ),
+    (
+        9,
+        r#"
+    -- Versioned, explainable article-to-event clustering. Assignments are
+    -- append-only decisions: model upgrades and manual corrections never
+    -- silently rewrite historical membership.
+    CREATE TABLE IF NOT EXISTS event_clusters (
+        cluster_id             TEXT PRIMARY KEY,
+        canonical_title        TEXT NOT NULL,
+        event_time_utc         INTEGER,
+        first_seen_time_utc    INTEGER NOT NULL,
+        primary_revision_id    TEXT NOT NULL,
+        first_source_id        TEXT NOT NULL,
+        independent_sources    INTEGER NOT NULL DEFAULT 1,
+        evidence_diversity     REAL NOT NULL DEFAULT 1.0,
+        latest_revision_id     TEXT NOT NULL,
+        conflict_fields_json   TEXT NOT NULL DEFAULT '[]',
+        model_version          TEXT NOT NULL,
+        status                 TEXT NOT NULL DEFAULT 'active',
+        merged_into_cluster_id TEXT,
+        created_at             INTEGER NOT NULL,
+        updated_at             INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_clusters_seen
+        ON event_clusters(first_seen_time_utc DESC);
+
+    CREATE TABLE IF NOT EXISTS event_cluster_members (
+        membership_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        cluster_id          TEXT NOT NULL REFERENCES event_clusters(cluster_id),
+        revision_id         TEXT NOT NULL REFERENCES document_revisions(revision_id),
+        relationship        TEXT NOT NULL,
+        merge_score         REAL NOT NULL,
+        explanation_json    TEXT NOT NULL,
+        old_republication   INTEGER NOT NULL DEFAULT 0,
+        assigned_by         TEXT NOT NULL,
+        model_version       TEXT NOT NULL,
+        active              INTEGER NOT NULL DEFAULT 1,
+        created_at          INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_event_cluster_member_active
+        ON event_cluster_members(revision_id) WHERE active=1;
+    CREATE INDEX IF NOT EXISTS idx_event_cluster_members_cluster
+        ON event_cluster_members(cluster_id, active, created_at);
+
+    CREATE TABLE IF NOT EXISTS event_cluster_decisions (
+        decision_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        revision_id       TEXT,
+        from_cluster_id   TEXT,
+        to_cluster_id     TEXT,
+        action            TEXT NOT NULL,
+        explanation_json  TEXT NOT NULL,
+        model_version     TEXT NOT NULL,
+        actor             TEXT NOT NULL,
+        created_at        INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_cluster_decisions_revision
+        ON event_cluster_decisions(revision_id, decision_id);
+
+    CREATE TABLE IF NOT EXISTS event_fact_conflicts (
+        cluster_id                 TEXT NOT NULL REFERENCES event_clusters(cluster_id),
+        field_name                 TEXT NOT NULL,
+        values_json                TEXT NOT NULL,
+        authoritative_revision_id TEXT,
+        status                     TEXT NOT NULL DEFAULT 'open',
+        created_at                 INTEGER NOT NULL,
+        updated_at                 INTEGER NOT NULL,
+        PRIMARY KEY(cluster_id, field_name)
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_conclusion_reviews (
+        task_id             TEXT NOT NULL,
+        conclusion_key      TEXT NOT NULL,
+        triggering_revision TEXT NOT NULL,
+        trigger_relation    TEXT NOT NULL,
+        status               TEXT NOT NULL DEFAULT 'pending_review',
+        created_at           INTEGER NOT NULL,
+        reviewed_at          INTEGER,
+        PRIMARY KEY(task_id, conclusion_key, triggering_revision)
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_conclusion_reviews_status
+        ON agent_conclusion_reviews(status, created_at DESC);
+    "#,
+    ),
 ];
 
 /// Current unix time in seconds. All timestamps in this crate are stored as
@@ -483,6 +566,11 @@ mod tests {
             "document_event_evidence",
             "agent_evidence_refs",
             "news_provider_state",
+            "event_clusters",
+            "event_cluster_members",
+            "event_cluster_decisions",
+            "event_fact_conflicts",
+            "agent_conclusion_reviews",
         ] {
             let count: i64 = conn
                 .query_row(

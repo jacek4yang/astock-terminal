@@ -56,6 +56,12 @@ pub fn run() {
             commands::market::get_news_archive_revisions,
             commands::market::check_news_archive_integrity,
             commands::market::get_news_ingest_observations,
+            commands::news::get_news_event_clusters,
+            commands::news::get_news_event_cluster_detail,
+            commands::news::merge_news_event_clusters,
+            commands::news::split_news_event_revision,
+            commands::news::get_pending_news_evidence_reviews,
+            commands::news::resolve_news_evidence_review,
             commands::bundle::get_stock_bundle,
             // 分析引擎
             commands::analysis::analyze,
