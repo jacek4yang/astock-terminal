@@ -1,5 +1,5 @@
 import type { SignalJson } from "../lib/api";
-import { fmtNum, pctClass } from "../lib/format";
+import { EMPTY_DISPLAY, fmtNum, pctClass } from "../lib/format";
 import { StatCell, Term } from "./ui";
 import { useAppStore } from "../store";
 
@@ -63,7 +63,7 @@ export default function SignalCard({ signal }: { signal: SignalJson }) {
             />
             <StatCell
               label={<Term label="风报比" tip="预期盈利空间 ÷ 止损亏损空间,大于2通常才值得入场" />}
-              value={s.risk_reward != null ? fmtNum(s.risk_reward, 1) : "--"}
+              value={s.risk_reward != null ? fmtNum(s.risk_reward, 1) : EMPTY_DISPLAY}
             />
           </div>
         </div>

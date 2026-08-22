@@ -1,5 +1,5 @@
 import type { OrderBook, OrderBookLevel } from "../lib/api";
-import { fmtNum, fmtVolume } from "../lib/format";
+import { EMPTY_DISPLAY, fmtNum, fmtText, fmtVolume } from "../lib/format";
 import { sourceDisplayName } from "../lib/agentLabels";
 
 function Row({ side, row, max }: { side: "bid" | "ask"; row: OrderBookLevel; max: number }) {
@@ -14,9 +14,9 @@ function Row({ side, row, max }: { side: "bid" | "ask"; row: OrderBookLevel; max
         {side === "bid" ? "买" : "卖"}{row.level}
       </span>
       <span className={`num text-right ${side === "bid" ? "text-up" : "text-down"}`}>
-        {row.price > 0 ? fmtNum(row.price) : "--"}
+        {row.price > 0 ? fmtNum(row.price) : EMPTY_DISPLAY}
       </span>
-      <span className="num relative text-right">{row.volume > 0 ? fmtVolume(row.volume) : "--"}</span>
+      <span className="num relative text-right">{row.volume > 0 ? fmtVolume(row.volume) : EMPTY_DISPLAY}</span>
     </div>
   );
 }
@@ -27,7 +27,7 @@ export default function OrderBookPanel({ data }: { data: OrderBook }) {
     <div className="card overflow-hidden">
       <div className="card-title justify-between">
         <span>五档盘口</span>
-        <span className="muted text-[10px]">{sourceDisplayName(data.source)} · {data.server_time || "--"}</span>
+        <span className="muted text-[10px]">{sourceDisplayName(data.source)} · {fmtText(data.server_time)}</span>
       </div>
       <div className="border-b border-slate-100 py-1 dark:border-slate-800/70">
         {[...data.asks].reverse().map((row) => <Row key={`a${row.level}`} side="ask" row={row} max={max} />)}

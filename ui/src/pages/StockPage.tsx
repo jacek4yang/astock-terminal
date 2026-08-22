@@ -292,7 +292,7 @@ export default function StockPage() {
                 </span>
                 <span
                   className="chip bg-slate-500/10 text-slate-500"
-                  title={`名称刷新：${q.field_provenance?.name?.fetched_at ?? "--"}`}
+                  title={`名称刷新：${q.field_provenance?.name?.fetched_at ?? "暂无"}`}
                 >
                   股票资料：{sourceDisplayName(q.field_provenance?.name?.source)}
                 </span>
@@ -313,7 +313,7 @@ export default function StockPage() {
             <Stat label="昨收" value={fmtNum(q.pre_close)} />
             <Stat
               label={<Term label="量比" tip="当日每分钟均量 ÷ 过去5日每分钟均量,>1 说明放量" />}
-              value={signal ? fmtNum(signal.volume_price.volume_ratio) : "--"}
+              value={signal ? fmtNum(signal.volume_price.volume_ratio) : "暂无"}
             />
             <Stat
               label={<Term label="换手" tip="当日成交量占流通股的比例,反映交投活跃度" />}

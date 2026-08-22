@@ -23,7 +23,7 @@ import {
   type LiftStageRow,
   type NoticeRow,
 } from "../lib/api";
-import { fmtNum, fmtYiWan, fmtPct, pctClass, COLOR_UP } from "../lib/format";
+import { EMPTY_DISPLAY, fmtNum, fmtYiWan, fmtPct, fmtText, pctClass, COLOR_UP } from "../lib/format";
 import { Loading, ErrorBox, EmptyBox, Term } from "../components/ui";
 import Chart from "../components/Chart";
 
@@ -260,7 +260,7 @@ const MONEY_FIELDS = new Set([
 ]);
 
 function poolCell(key: string, v: unknown): ReactNode {
-  if (v == null) return "--";
+  if (v == null) return EMPTY_DISPLAY;
   if (typeof v === "number") {
     if (key === "pct") return <span className={pctClass(v)}>{fmtPct(v)}</span>;
     if (MONEY_FIELDS.has(key)) return fmtYiWan(v);
@@ -273,7 +273,7 @@ function poolCell(key: string, v: unknown): ReactNode {
     return JSON.stringify(v);
   }
   if (typeof v === "boolean") return v ? "是" : "否";
-  return String(v);
+  return fmtText(v);
 }
 
 /** 非涨停池的通用表:列由首行字段驱动 */
@@ -322,14 +322,14 @@ function ZtPoolTable({ date }: { date: string }) {
         r.limit_times != null && r.limit_times >= 2 ? (
           <span className="tag bg-up/10 text-up">{r.limit_times} 连板</span>
         ) : (
-          (r.limit_times ?? "--")
+          (r.limit_times ?? EMPTY_DISPLAY)
         ),
     },
-    { label: "首次封板", className: "num", render: (r) => r.first_lock_time || "--" },
+    { label: "首次封板", className: "num", render: (r) => fmtText(r.first_lock_time) },
     {
       label: <Term label="炸板次数" tip="盘中打开涨停的次数,越多说明分歧越大" />,
       className: "num",
-      render: (r) => r.break_times ?? "--",
+      render: (r) => r.break_times ?? EMPTY_DISPLAY,
     },
   ];
 
@@ -392,7 +392,7 @@ function BillboardTab() {
   const query = useDc<BillboardRow>(() => getBillboard(days), [days]);
 
   const cols: Col<BillboardRow>[] = [
-    { label: "日期", className: "num muted", render: (r) => r.trade_date ?? "--" },
+    { label: "日期", className: "num muted", render: (r) => fmtText(r.trade_date) },
     { label: "代码", className: "num muted", render: (r) => r.code },
     { label: "名称", render: (r) => r.name },
     {
@@ -410,7 +410,7 @@ function BillboardTab() {
     {
       label: <Term label="成交额占比" tip="龙虎榜成交额占当日该股总成交额的比例" />,
       className: "num",
-      render: (r) => (r.deal_amount_ratio == null ? "--" : r.deal_amount_ratio.toFixed(2) + "%"),
+      render: (r) => (r.deal_amount_ratio == null ? EMPTY_DISPLAY : r.deal_amount_ratio.toFixed(2) + "%"),
     },
   ];
 
@@ -443,7 +443,7 @@ function MarginTab() {
         backgroundColor: "rgba(30,41,59,0.92)",
         borderWidth: 0,
         textStyle: { fontSize: 11, color: "#e2e8f0" },
-        valueFormatter: (v: unknown) => (v == null ? "--" : `${Number(v).toFixed(1)} 亿`),
+        valueFormatter: (v: unknown) => (v == null ? EMPTY_DISPLAY : `${Number(v).toFixed(1)} 亿`),
       },
       grid: { left: 64, right: 12, top: 8, bottom: 20 },
       xAxis: {
@@ -473,7 +473,7 @@ function MarginTab() {
   }, [data]);
 
   const cols: Col<MarginDailyRow>[] = [
-    { label: "日期", className: "num muted", render: (r) => r.statistics_date ?? "--" },
+    { label: "日期", className: "num muted", render: (r) => fmtText(r.statistics_date) },
     {
       label: <Term label="融资余额(亿)" tip="投资者借钱买入尚未偿还的余额,反映杠杆做多情绪" />,
       className: "num",
@@ -532,18 +532,18 @@ function OrgSurveyTab() {
     {
       label: "调研日期",
       className: "num muted",
-      render: (r) => r.receive_start_date ?? r.notice_date ?? "--",
+      render: (r) => fmtText(r.receive_start_date ?? r.notice_date),
     },
     {
       label: "机构数量",
       className: "num",
-      render: (r) => (r.org_count == null ? "--" : r.org_count.toFixed(0)),
+      render: (r) => (r.org_count == null ? EMPTY_DISPLAY : r.org_count.toFixed(0)),
     },
-    { label: "调研方式", render: (r) => r.receive_way_explain || "--" },
+    { label: "调研方式", render: (r) => fmtText(r.receive_way_explain) },
     {
       label: <Term label="调研机构" tip="参与调研的机构名单(原始文本,可能多家拼接)" />,
       className: "max-w-[360px] truncate",
-      render: (r) => <span title={r.receive_object}>{r.receive_object || "--"}</span>,
+      render: (r) => <span title={fmtText(r.receive_object)}>{fmtText(r.receive_object)}</span>,
     },
   ];
 
@@ -568,7 +568,7 @@ function HolderPanel() {
   const cols: Col<HolderNumRow>[] = [
     { label: "代码", className: "num muted", render: (r) => r.code },
     { label: "名称", render: (r) => r.name },
-    { label: "截止日", className: "num muted", render: (r) => r.end_date ?? "--" },
+    { label: "截止日", className: "num muted", render: (r) => fmtText(r.end_date) },
     { label: "股东户数", className: "num", render: (r) => fmtYiWan(r.holder_num, 0) },
     {
       label: (
@@ -583,7 +583,7 @@ function HolderPanel() {
       render: (r) => <span className={pctClass(r.interval_change)}>{fmtPct(r.interval_change)}</span>,
     },
     { label: "户均持股市值", className: "num", render: (r) => fmtYiWan(r.avg_market_cap) },
-    { label: "公告日", className: "num muted", render: (r) => r.hold_notice_date ?? "--" },
+    { label: "公告日", className: "num muted", render: (r) => fmtText(r.hold_notice_date) },
   ];
 
   return (
@@ -622,7 +622,7 @@ function EarningsPanel() {
   const cols: Col<EarningsPredictRow>[] = [
     { label: "代码", className: "num muted", render: (r) => r.code },
     { label: "名称", render: (r) => r.name },
-    { label: "公告日", className: "num muted", render: (r) => r.notice_date ?? "--" },
+    { label: "公告日", className: "num muted", render: (r) => fmtText(r.notice_date) },
     {
       label: "预告类型",
       render: (r) => <span className={predictTypeCls(r.predict_type)}>{r.predict_type}</span>,
@@ -632,7 +632,7 @@ function EarningsPanel() {
       className: "num",
       render: (r) =>
         r.add_amp_lower == null && r.add_amp_upper == null
-          ? "--"
+          ? EMPTY_DISPLAY
           : `${fmtNum(r.add_amp_lower, 0)}% ~ ${fmtNum(r.add_amp_upper, 0)}%`,
     },
     {
@@ -640,13 +640,13 @@ function EarningsPanel() {
       className: "num",
       render: (r) =>
         r.predict_amt_lower == null && r.predict_amt_upper == null
-          ? "--"
+          ? EMPTY_DISPLAY
           : `${fmtYiWan(r.predict_amt_lower)} ~ ${fmtYiWan(r.predict_amt_upper)}`,
     },
     {
       label: "摘要",
       className: "max-w-[360px] truncate",
-      render: (r) => <span title={r.predict_content}>{r.predict_content || "--"}</span>,
+      render: (r) => <span title={fmtText(r.predict_content)}>{fmtText(r.predict_content)}</span>,
     },
   ];
 
@@ -669,13 +669,13 @@ function LiftPanel() {
   const cols: Col<LiftStageRow>[] = [
     { label: "代码", className: "num muted", render: (r) => r.code },
     { label: "名称", render: (r) => r.name },
-    { label: "解禁日期", className: "num muted", render: (r) => r.free_date ?? "--" },
+    { label: "解禁日期", className: "num muted", render: (r) => fmtText(r.free_date) },
     { label: "解禁数量", className: "num", render: (r) => fmtYiWan(r.able_free_shares) },
     { label: "解禁市值", className: "num", render: (r) => fmtYiWan(r.lift_market_cap) },
     {
       label: "占流通市值比",
       className: "num",
-      render: (r) => (r.free_ratio == null ? "--" : (r.free_ratio * 100).toFixed(2) + "%"),
+      render: (r) => (r.free_ratio == null ? EMPTY_DISPLAY : (r.free_ratio * 100).toFixed(2) + "%"),
     },
     {
       label: "解禁前20日",
@@ -685,7 +685,7 @@ function LiftPanel() {
     {
       label: "限售股类型",
       className: "max-w-[200px] truncate",
-      render: (r) => <span title={r.free_shares_type}>{r.free_shares_type || "--"}</span>,
+      render: (r) => <span title={fmtText(r.free_shares_type)}>{fmtText(r.free_shares_type)}</span>,
     },
   ];
 
@@ -726,7 +726,7 @@ function NoticePanel({ code, days }: { code: string; days: number }) {
   const query = useDc<NoticeRow>(() => getNotices(code, days), [code, days]);
 
   const cols: Col<NoticeRow>[] = [
-    { label: "日期", className: "num muted", render: (r) => r.notice_date ?? "--" },
+    { label: "日期", className: "num muted", render: (r) => fmtText(r.notice_date) },
     {
       label: "类型",
       render: (r) => (

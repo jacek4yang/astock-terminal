@@ -9,7 +9,7 @@ import {
   type Bar,
   type MarketBreadth,
 } from "../lib/api";
-import { fmtNum, fmtPct, fmtYiWan, pctClass } from "../lib/format";
+import { fmtNum, fmtPct, fmtText, fmtYiWan, pctClass } from "../lib/format";
 import { sourceDisplayName } from "../lib/agentLabels";
 import { ErrorBox, Loading, Term } from "../components/ui";
 
@@ -246,7 +246,7 @@ export default function MarketPage() {
                 仅显示有实时行情
               </label>
               <span className="muted ml-auto text-[10px]">
-                <Term label="缺失值" tip="数据源未返回时显示 --，不会伪装成 0 参与筛选或排序" />
+                <Term label="缺失值" tip="数据源未返回时显示“暂无”，不会伪装成 0 参与筛选或排序" />
               </span>
             </div>
           </div>
@@ -266,7 +266,7 @@ export default function MarketPage() {
                   {rows.map((row) => (
                     <tr key={row.code} className="cursor-pointer border-b border-slate-100 hover:bg-blue-50/70 dark:border-slate-800/60 dark:hover:bg-slate-800/70" onClick={() => navigate(`/stock/${row.code}`)}>
                       <td className="td num text-sky-600 dark:text-sky-400">{row.code}</td>
-                      <td className="td font-medium">{row.name || "--"}</td>
+                      <td className="td font-medium">{fmtText(row.name)}</td>
                       <td className="td muted">{row.market}</td>
                       <td className="td"><span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] dark:bg-slate-800">{BOARD_LABELS[row.board] ?? row.board}</span></td>
                       <td className={`td num text-right ${pctClass(row.pct)}`}>{fmtNum(row.price)}</td>
