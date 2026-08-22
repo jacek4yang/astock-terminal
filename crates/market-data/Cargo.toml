@@ -8,6 +8,7 @@ edition.workspace = true
 astock-core = { path = "../core" }
 astock-tdx = { path = "../tdx" }
 astock-joinquant = { path = "../joinquant" }
+astock-security = { path = "../security" }
 tokio.workspace = true
 reqwest.workspace = true
 futures.workspace = true

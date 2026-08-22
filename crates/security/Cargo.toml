@@ -1,0 +1,21 @@
+[package]
+name = "astock-security"
+description = "Security boundary for untrusted research documents, safe URL fetching, redaction and tool authorization"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+reqwest.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+regex.workspace = true
+once_cell.workspace = true
+url.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tokio = { version = "1", features = ["full", "test-util"] }

@@ -28,6 +28,7 @@ pub mod report;
 pub mod testing;
 pub mod tools;
 
+pub use astock_security::{InvocationOrigin, ToolPermissionDomain};
 pub use backend::{ChatBackend, ChatChunkStream};
 pub use builtin::default_registry;
 pub use error::{AgentError, Result};

@@ -7,6 +7,7 @@
 use crate::cache::TtlCache;
 use crate::http::HttpClient;
 use astock_core::DataError;
+use astock_security::UrlSecurityPolicy;
 use dashmap::DashMap;
 use futures::{stream, StreamExt};
 use once_cell::sync::Lazy;
@@ -301,16 +302,10 @@ fn safe_url(value: Option<&str>) -> String {
     let Some(value) = value else {
         return String::new();
     };
-    let Ok(parsed) = reqwest::Url::parse(value.trim()) else {
-        return String::new();
-    };
-    if !matches!(parsed.scheme(), "http" | "https")
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-    {
-        return String::new();
-    }
-    parsed.to_string().chars().take(2_048).collect()
+    UrlSecurityPolicy::default()
+        .validate_static(value)
+        .map(|url| url.as_str().chars().take(2_048).collect())
+        .unwrap_or_default()
 }
 
 fn timestamp_ms(value: Option<&Value>) -> Option<i64> {

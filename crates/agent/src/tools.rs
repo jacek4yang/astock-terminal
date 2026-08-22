@@ -21,6 +21,7 @@ use astock_graph::GraphStore;
 use astock_market_data::{DataProvider, FinanceNewsProvider, IwencaiOpenApi, JoinQuantProvider};
 use astock_minimax::MinimaxClient;
 use astock_minimax::ToolSpec;
+use astock_security::ToolPermissionDomain;
 use astock_storage::{Storage, ToolCacheEntry};
 
 use crate::error::{AgentError, Result};
@@ -173,6 +174,13 @@ pub trait AgentTool: Send + Sync {
     /// JSON Schema of the arguments object (schemars-derived).
     fn parameters_schema(&self) -> Value;
 
+    /// Side-effect domain used by the immutable Agent authorization gate and
+    /// audit log. Existing tools default to read-only network access; any
+    /// future external write tool must opt in explicitly.
+    fn permission_domain(&self) -> ToolPermissionDomain {
+        ToolPermissionDomain::ReadOnlyNetwork
+    }
+
     /// TTL for the read-through result cache, in seconds.
     fn cache_ttl_secs(&self) -> i64 {
         300
@@ -240,6 +248,10 @@ impl ToolRegistry {
     /// Look up a tool by name.
     pub fn get(&self, name: &str) -> Option<Arc<dyn AgentTool>> {
         self.tools.iter().find(|t| t.name() == name).cloned()
+    }
+
+    pub fn permission_domain(&self, name: &str) -> Option<ToolPermissionDomain> {
+        self.get(name).map(|tool| tool.permission_domain())
     }
 
     /// Number of registered tools.

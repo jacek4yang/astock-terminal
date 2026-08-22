@@ -17,7 +17,8 @@ use serde_json::{json, Value};
 use tokio::time::Instant;
 
 use astock_minimax::{ChatMessage, ChatRequest, MinimaxError, ToolCall};
-use astock_storage::{AgentTask, Storage};
+use astock_security::{authorize_tool, fingerprint_json, InvocationOrigin, ToolPermissionDomain};
+use astock_storage::{AgentTask, AgentToolAudit, Storage};
 
 use crate::backend::ChatBackend;
 use crate::error::{AgentError, Result};
@@ -1246,12 +1247,26 @@ impl AgentEngine {
                 Ok(v) => v,
                 Err(e) => {
                     let error = format!("参数不是合法JSON: {e}");
+                    let permission_domain = self
+                        .tools
+                        .permission_domain(&name)
+                        .unwrap_or(ToolPermissionDomain::ReadOnlyNetwork);
+                    let args_fingerprint = fingerprint_json(&json!({ "raw": &raw_args }));
+                    let audit = ToolAuditMeta {
+                        task_id,
+                        call_id: &call_id,
+                        tool: &name,
+                        permission_domain,
+                        args_fingerprint: &args_fingerprint,
+                    };
+                    self.append_tool_audit(&audit, "invalid_arguments", Some(0))
+                        .await;
                     send(
                         tx,
                         AgentEvent::ToolCallStarted {
                             call_id: call_id.clone(),
                             name: name.clone(),
-                            args: json!({ "raw": raw_args }),
+                            args: json!({ "raw": &raw_args }),
                             position,
                             total,
                             estimated_ms: tool_estimated_secs(&name) * 1000,
@@ -1287,6 +1302,32 @@ impl AgentEngine {
             }
         };
 
+        let enabled_by_user =
+            enabled_tools.is_none_or(|allowed| allowed.iter().any(|item| item == &name));
+        let permission_domain = self
+            .tools
+            .permission_domain(&name)
+            .unwrap_or(ToolPermissionDomain::ReadOnlyNetwork);
+        let args_fingerprint = fingerprint_json(&args);
+        let audit = ToolAuditMeta {
+            task_id,
+            call_id: &call_id,
+            tool: &name,
+            permission_domain,
+            args_fingerprint: &args_fingerprint,
+        };
+        tracing::info!(
+            target: "astock::agent_tool_audit",
+            task_id,
+            call_id,
+            tool = name,
+            permission_domain = %permission_domain,
+            origin = "model_plan",
+            args_fingerprint,
+            event = "requested",
+            "Agent tool audit"
+        );
+        self.append_tool_audit(&audit, "requested", None).await;
         send(
             tx,
             AgentEvent::ToolCallStarted {
@@ -1298,8 +1339,29 @@ impl AgentEngine {
                 estimated_ms: tool_estimated_secs(&name) * 1000,
             },
         );
-        if enabled_tools.is_some_and(|allowed| !allowed.iter().any(|item| item == &name)) {
-            let error = format!("工具 {name} 已被用户在本轮研究设置中关闭");
+        if let Err(reason) = authorize_tool(
+            permission_domain,
+            InvocationOrigin::ModelPlan,
+            enabled_by_user,
+        ) {
+            let error = if enabled_by_user {
+                format!("工具 {name} 的权限请求被安全策略拒绝：{reason}")
+            } else {
+                format!("工具 {name} 已被用户在本轮研究设置中关闭")
+            };
+            tracing::warn!(
+                target: "astock::agent_tool_audit",
+                task_id,
+                call_id,
+                tool = name,
+                permission_domain = %permission_domain,
+                origin = "model_plan",
+                args_fingerprint,
+                event = "denied",
+                reason = %reason,
+                "Agent tool audit"
+            );
+            self.append_tool_audit(&audit, "denied", Some(0)).await;
             send(
                 tx,
                 AgentEvent::ToolCallFinished {
@@ -1384,6 +1446,20 @@ impl AgentEngine {
 
         match outcome {
             Ok(result) => {
+                tracing::info!(
+                    target: "astock::agent_tool_audit",
+                    task_id,
+                    call_id,
+                    tool = name,
+                    permission_domain = %permission_domain,
+                    origin = "model_plan",
+                    args_fingerprint,
+                    event = "succeeded",
+                    elapsed_ms,
+                    "Agent tool audit"
+                );
+                self.append_tool_audit(&audit, "succeeded", Some(elapsed_ms))
+                    .await;
                 send(
                     tx,
                     AgentEvent::ToolCallFinished {
@@ -1416,6 +1492,21 @@ impl AgentEngine {
             }
             Err(e) => {
                 let error = e.to_string();
+                tracing::warn!(
+                    target: "astock::agent_tool_audit",
+                    task_id,
+                    call_id,
+                    tool = name,
+                    permission_domain = %permission_domain,
+                    origin = "model_plan",
+                    args_fingerprint,
+                    event = "failed",
+                    elapsed_ms,
+                    error_kind = %std::any::type_name_of_val(&e),
+                    "Agent tool audit"
+                );
+                self.append_tool_audit(&audit, "failed", Some(elapsed_ms))
+                    .await;
                 send(
                     tx,
                     AgentEvent::ToolCallFinished {
@@ -1443,6 +1534,45 @@ impl AgentEngine {
                     .to_string(),
                 })
             }
+        }
+    }
+
+    /// Persist only bounded metadata. Audit failure never blocks the user's
+    /// analysis, and the fallback log deliberately omits the storage error
+    /// text because it can contain machine-local paths.
+    async fn append_tool_audit(
+        &self,
+        meta: &ToolAuditMeta<'_>,
+        event: &str,
+        elapsed_ms: Option<u64>,
+    ) {
+        let audit = AgentToolAudit {
+            id: None,
+            task_id: meta.task_id.to_string(),
+            call_id: meta.call_id.to_string(),
+            tool: meta.tool.to_string(),
+            permission_domain: meta.permission_domain.to_string(),
+            origin: "model_plan".to_string(),
+            args_fingerprint: meta.args_fingerprint.to_string(),
+            event: event.to_string(),
+            elapsed_ms: elapsed_ms.map(|value| value.min(i64::MAX as u64) as i64),
+            created_at: now_secs(),
+        };
+        if self
+            .ctx
+            .storage
+            .agent_tool_audit_append(audit)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                target: "astock::agent_tool_audit",
+                task_id = meta.task_id,
+                call_id = meta.call_id,
+                tool = meta.tool,
+                event,
+                "Agent tool audit persistence failed"
+            );
         }
     }
 
@@ -1617,6 +1747,14 @@ fn tool_progress_stage(name: &str, elapsed_ms: u64, estimated_ms: u64) -> &'stat
 }
 
 /// One executed tool call, ready to become a `tool` message.
+struct ToolAuditMeta<'a> {
+    task_id: &'a str,
+    call_id: &'a str,
+    tool: &'a str,
+    permission_domain: ToolPermissionDomain,
+    args_fingerprint: &'a str,
+}
+
 struct ToolExec {
     /// Whether the tool succeeded (its evidence joins the report).
     ok: bool,
@@ -2816,7 +2954,7 @@ mod tests {
         chat.push_tool_call("c1", "echo", json!({"text": "blocked"}));
         chat.push_text("已说明工具关闭");
         let echo = Arc::new(EchoTool::new());
-        let engine = build_engine(storage, chat.clone(), echo.clone());
+        let engine = build_engine(storage.clone(), chat.clone(), echo.clone());
         let mut task = spec("t-disabled");
         task.enabled_tools = Some(Vec::new());
 
@@ -2828,6 +2966,18 @@ mod tests {
         )));
         assert_eq!(echo.calls.load(Ordering::SeqCst), 0);
         assert!(chat.requests.lock().unwrap()[0].tools.is_none());
+        let audit = storage.agent_tool_audit_list("t-disabled").await.unwrap();
+        assert_eq!(
+            audit
+                .iter()
+                .map(|row| row.event.as_str())
+                .collect::<Vec<_>>(),
+            vec!["requested", "denied"]
+        );
+        assert!(audit
+            .iter()
+            .all(|row| row.args_fingerprint.starts_with("sha256:")
+                && row.permission_domain == "read_only_network"));
     }
 
     #[tokio::test]

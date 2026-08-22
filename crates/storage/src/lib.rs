@@ -199,6 +199,35 @@ pub struct AgentTask {
     pub updated_at: i64,
 }
 
+/// One metadata-only event in the append-only Agent tool audit trail.
+///
+/// Request/response bodies, raw arguments, provider errors and credentials
+/// are intentionally absent. `args_fingerprint` is a one-way digest used to
+/// correlate retries without retaining sensitive input.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AgentToolAudit {
+    /// SQLite sequence id; `None` before insertion.
+    pub id: Option<i64>,
+    /// Durable Agent task id.
+    pub task_id: String,
+    /// Stable tool-call id within the task.
+    pub call_id: String,
+    /// Registered tool name.
+    pub tool: String,
+    /// Immutable permission domain assigned by the tool registry.
+    pub permission_domain: String,
+    /// Invocation origin, e.g. `model_plan` or `explicit_user`.
+    pub origin: String,
+    /// One-way digest of canonicalized arguments.
+    pub args_fingerprint: String,
+    /// Lifecycle event: requested|denied|succeeded|failed|invalid_arguments.
+    pub event: String,
+    /// Runtime when this is a terminal event.
+    pub elapsed_ms: Option<i64>,
+    /// Event time, unix seconds.
+    pub created_at: i64,
+}
+
 /// A supply-chain graph node row (migration v3).
 #[derive(Debug, Clone, PartialEq)]
 pub struct GraphNodeRow {
@@ -931,6 +960,59 @@ impl Storage {
                     state_json: row.get(3)?,
                     created_at: row.get(4)?,
                     updated_at: row.get(5)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+        .await
+    }
+
+    /// Append a metadata-only Agent tool audit event.
+    pub async fn agent_tool_audit_append(&self, audit: AgentToolAudit) -> Result<i64> {
+        self.run(move |conn| {
+            conn.execute(
+                "INSERT INTO agent_tool_audit
+                 (task_id, call_id, tool, permission_domain, origin,
+                  args_fingerprint, event, elapsed_ms, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    audit.task_id,
+                    audit.call_id,
+                    audit.tool,
+                    audit.permission_domain,
+                    audit.origin,
+                    audit.args_fingerprint,
+                    audit.event,
+                    audit.elapsed_ms,
+                    audit.created_at,
+                ],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+        .await
+    }
+
+    /// List a task's tool audit events in execution order.
+    pub async fn agent_tool_audit_list(&self, task_id: &str) -> Result<Vec<AgentToolAudit>> {
+        let task_id = task_id.to_string();
+        self.run(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, task_id, call_id, tool, permission_domain, origin,
+                        args_fingerprint, event, elapsed_ms, created_at
+                 FROM agent_tool_audit WHERE task_id = ?1 ORDER BY id ASC",
+            )?;
+            let rows = stmt.query_map(params![task_id], |row| {
+                Ok(AgentToolAudit {
+                    id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    call_id: row.get(2)?,
+                    tool: row.get(3)?,
+                    permission_domain: row.get(4)?,
+                    origin: row.get(5)?,
+                    args_fingerprint: row.get(6)?,
+                    event: row.get(7)?,
+                    elapsed_ms: row.get(8)?,
+                    created_at: row.get(9)?,
                 })
             })?;
             Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -1866,6 +1948,37 @@ mod tests {
         let list = storage.agent_task_list().await.unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, "t1");
+    }
+
+    #[tokio::test]
+    async fn agent_tool_audit_is_append_only_metadata() {
+        let (_dir, storage) = test_storage();
+        for event in ["requested", "succeeded"] {
+            storage
+                .agent_tool_audit_append(AgentToolAudit {
+                    id: None,
+                    task_id: "t1".into(),
+                    call_id: "call-1".into(),
+                    tool: "search_web".into(),
+                    permission_domain: "read_only_network".into(),
+                    origin: "model_plan".into(),
+                    args_fingerprint: "sha256:opaque".into(),
+                    event: event.into(),
+                    elapsed_ms: (event == "succeeded").then_some(123),
+                    created_at: now_secs(),
+                })
+                .await
+                .unwrap();
+        }
+        let rows = storage.agent_tool_audit_list("t1").await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].event, "requested");
+        assert_eq!(rows[1].elapsed_ms, Some(123));
+        assert!(storage
+            .agent_tool_audit_list("other")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use astock_core::{Bar, Fetched, FundFlowPoint, MarketBreadth, Quote, Symbol};
+use astock_security::ToolPermissionDomain;
 use astock_storage::ToolCacheEntry;
 use astock_technical as tech;
 
@@ -1343,6 +1344,9 @@ impl AgentTool for GetCachedDetail {
     fn parameters_schema(&self) -> Value {
         schema_value::<CachedDetailArgs>()
     }
+    fn permission_domain(&self) -> ToolPermissionDomain {
+        ToolPermissionDomain::ReadOnlyLocal
+    }
     fn cacheable(&self) -> bool {
         false
     }
@@ -1397,6 +1401,9 @@ impl AgentTool for GetWatchlist {
     }
     fn parameters_schema(&self) -> Value {
         schema_value::<NoArgs>()
+    }
+    fn permission_domain(&self) -> ToolPermissionDomain {
+        ToolPermissionDomain::ReadOnlyLocal
     }
     fn cache_ttl_secs(&self) -> i64 {
         60

@@ -16,6 +16,7 @@ astock-graph = { path = "../graph" }
 astock-quant = { path = "../quant" }
 astock-backtest = { path = "../backtest" }
 astock-trading-rules = { path = "../trading-rules" }
+astock-security = { path = "../security" }
 tokio.workspace = true
 futures.workspace = true
 async-trait.workspace = true

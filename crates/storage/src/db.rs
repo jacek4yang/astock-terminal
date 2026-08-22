@@ -216,6 +216,30 @@ pub(crate) const MIGRATIONS: &[(u32, &str)] = &[
     CREATE INDEX IF NOT EXISTS idx_securities_board ON securities(board);
     "#,
     ),
+    (
+        7,
+        r#"
+    -- Append-only Agent tool permission audit. Deliberately stores only
+    -- metadata and a one-way arguments fingerprint: never request/response
+    -- bodies, credentials, raw parameters or provider error text.
+    CREATE TABLE IF NOT EXISTS agent_tool_audit (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id           TEXT NOT NULL,
+        call_id           TEXT NOT NULL,
+        tool              TEXT NOT NULL,
+        permission_domain TEXT NOT NULL,
+        origin            TEXT NOT NULL,
+        args_fingerprint  TEXT NOT NULL,
+        event             TEXT NOT NULL,
+        elapsed_ms        INTEGER,
+        created_at        INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_tool_audit_task
+        ON agent_tool_audit(task_id, id);
+    CREATE INDEX IF NOT EXISTS idx_agent_tool_audit_call
+        ON agent_tool_audit(call_id, id);
+    "#,
+    ),
 ];
 
 /// Current unix time in seconds. All timestamps in this crate are stored as
@@ -339,6 +363,7 @@ mod tests {
             "predictions",
             "meta_kv",
             "agent_tasks",
+            "agent_tool_audit",
             "graph_nodes",
             "graph_edges",
             "events",

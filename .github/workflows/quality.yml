@@ -6,6 +6,16 @@ on:
   pull_request:
 
 jobs:
+  security-audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
   frontend:
     runs-on: ubuntu-latest
     defaults:

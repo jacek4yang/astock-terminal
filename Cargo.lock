@@ -297,6 +297,7 @@ dependencies = [
  "astock-market-data",
  "astock-minimax",
  "astock-quant",
+ "astock-security",
  "astock-storage",
  "astock-technical",
  "astock-trading-rules",
@@ -447,6 +448,7 @@ version = "5.0.1"
 dependencies = [
  "astock-core",
  "astock-joinquant",
+ "astock-security",
  "astock-tdx",
  "async-trait",
  "chrono",
@@ -495,6 +497,23 @@ dependencies = [
  "serde_json",
  "statrs",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "astock-security"
+version = "5.0.1"
+dependencies = [
+ "futures",
+ "once_cell",
+ "proptest",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+ "tokio",
+ "url",
 ]
 
 [[package]]
