@@ -2,11 +2,12 @@ import { createElement, useState } from "react";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { AgentMessage } from "../lib/api";
+import type { AgentMessage, AgentReport } from "../lib/api";
 import { emptyClarificationDraft, formatClarificationAnswer, type ClarificationDraft } from "../lib/agentClarification";
 import {
   buildToolDiagnostic,
   ClarificationCard,
+  ResearchVerificationPanel,
   historyToMsgs,
   hasUnansweredClarification,
   redactDiagnosticValue,
@@ -49,6 +50,7 @@ describe("Agent history safety", () => {
     expect(taskRunStatus("completed")).toBe("completed");
     expect(taskRunStatus("interrupted")).toBe("suspended");
     expect(taskRunStatus("running")).toBe("running");
+    expect(taskRunStatus("verification_failed")).toBe("failed");
     expect(taskRunStatus("unknown")).toBe("idle");
   });
 
@@ -178,5 +180,77 @@ describe("Agent history safety", () => {
     expect(submitted).toHaveBeenCalledTimes(1);
     expect(submitted.mock.calls[0][0]).toContain("资金定位？：试探性建仓");
     expect(submitted.mock.calls[0][0]).toContain("风险偏好？：平衡");
+  });
+
+  it("expands a blocked claim into copyable field-level diagnostics", () => {
+    const report: AgentReport = {
+      task_id: "run-1",
+      answer: "报告未通过证据校验",
+      conclusions: [],
+      generated_at: 1,
+      evidence: [{
+        evidence_id: "ev_1",
+        tool: "get_quote",
+        cache_key: "get_quote:300308",
+        source: "tdx",
+        fetched_at: "2026-08-23T09:00:00+08:00",
+        tool_version: "v2",
+        data_version: "data_1",
+        source_tier: "provider",
+        freshness: "stale",
+        blocking: false,
+        fields: [{
+          evidence_id: "evf_price",
+          field_path: "/price",
+          value: 12.3,
+          unit: "cny",
+          currency: "CNY",
+          as_of: "2026-08-23T09:00:00+08:00",
+          freshness: "stale",
+          source_tier: "provider",
+          blocking: false,
+          calculation_id: null,
+        }],
+      }],
+      research: {
+        schema_version: "astock-research-report/v1",
+        as_of: "2026-08-23T09:00:00+08:00",
+        confidence: "blocked",
+        claims: [{
+          claim_id: "claim_1",
+          text: "最新价为12.3元",
+          claim_type: "fact",
+          evidence_ids: ["evf_price"],
+          calculation_ids: [],
+          as_of: "2026-08-23T09:00:00+08:00",
+          confidence: "blocked",
+          assumptions: [],
+          counter_evidence: [],
+          invalidation: [],
+          unknowns: [],
+        }],
+        calculations: [],
+        assumptions: [],
+        counter_evidence: [],
+        invalidation: [],
+        unknowns: [],
+        verification: {
+          status: "failed",
+          verifier_version: "report-verifier/v1",
+          verified_at: 1,
+          findings: [{
+            code: "stale_price",
+            severity: "error",
+            claim_id: "claim_1",
+            message: "价格字段已陈旧，必须重新取行情",
+          }],
+        },
+      },
+    };
+    render(createElement(ResearchVerificationPanel, { report }));
+    expect(screen.getByText("报告已被证据校验阻断")).toBeInTheDocument();
+    expect(screen.getByText(/最新价为12.3元/)).toBeInTheDocument();
+    expect(screen.getByText(/价格字段已陈旧/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "复制完整校验记录" })).toBeInTheDocument();
   });
 });

@@ -14,7 +14,9 @@ import {
   minimaxStatus,
   NOT_TAURI_MSG,
   type AgentConversation,
+  type AgentEvidenceField,
   type AgentMessage,
+  type AgentReport,
   type AgentTask,
 } from "../lib/api";
 import Markdown from "./Markdown";
@@ -130,6 +132,8 @@ export function taskRunStatus(status: string): RunStatus {
     case "failed":
     case "cancelled":
       return status;
+    case "verification_failed":
+      return "failed";
     default:
       return "idle";
   }
@@ -168,6 +172,7 @@ const STATUS_LABEL: Record<string, { text: string; cls: string }> = {
   suspended: { text: "已挂起", cls: "bg-amber-500/10 text-amber-600 dark:text-amber-400" },
   completed: { text: "已完成", cls: "bg-down/10 text-down" },
   failed: { text: "失败", cls: "bg-up/10 text-up" },
+  verification_failed: { text: "证据校验未通过", cls: "bg-up/10 text-up" },
   cancelled: { text: "已取消", cls: "bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300" },
   queued: { text: "排队中", cls: "bg-blue-600/10 text-blue-600 dark:text-blue-400" },
   starting: { text: "启动中", cls: "bg-blue-600/10 text-blue-600 dark:text-blue-400" },
@@ -836,6 +841,143 @@ export function hasUnansweredClarification(messages: ChatMsg[]): boolean {
   return false;
 }
 
+const CLAIM_TYPE_LABEL: Record<string, string> = {
+  fact: "事实",
+  calculation: "计算",
+  external: "外部信息",
+  inference: "推断",
+  assumption: "假设",
+  unknown: "未知",
+};
+
+const CONFIDENCE_LABEL: Record<string, string> = {
+  high: "高置信",
+  medium: "中等置信",
+  low: "低置信",
+  blocked: "已阻断",
+};
+
+const FINDING_LABEL: Record<string, string> = {
+  missing_reference: "证据引用不存在",
+  missing_calculation: "计算引用不存在",
+  unsupported_claim: "结论缺少证据",
+  unsupported_number: "数字无法复现",
+  unit_mismatch: "单位或币种不一致",
+  blocked_evidence: "证据质量阻断",
+  stale_price: "价格已经陈旧",
+  discovery_is_not_evidence: "搜索摘要不能作为事实",
+  unsupported_absolute_language: "绝对化表述无依据",
+};
+
+function evidenceValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value == null) return "空值";
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/** 可逐层展开的结论—字段证据—校验错误视图。 */
+export function ResearchVerificationPanel({ report }: { report: AgentReport }) {
+  const research = report.research;
+  if (!research) return null;
+  const fields = new Map<string, { snapshot: AgentReport["evidence"][number]; field: AgentEvidenceField }>();
+  for (const snapshot of report.evidence) {
+    for (const field of snapshot.fields ?? []) {
+      fields.set(field.evidence_id, { snapshot, field });
+    }
+  }
+  const failed = research.verification.status === "failed";
+  return (
+    <details
+      className={`mt-3 rounded border ${
+        failed
+          ? "border-red-300 bg-red-50/70 dark:border-red-900 dark:bg-red-950/20"
+          : "border-emerald-200 bg-emerald-50/60 dark:border-emerald-900/70 dark:bg-emerald-950/20"
+      }`}
+      open={failed}
+    >
+      <summary className="cursor-pointer select-none px-3 py-2 text-sm font-semibold">
+        {failed ? "报告已被证据校验阻断" : "结论与证据校验已通过"}
+        <span className="muted ml-2 text-xs font-normal">
+          {research.claims.length} 条结论 · {CONFIDENCE_LABEL[research.confidence] ?? research.confidence} · {research.verification.findings.length} 项校验信息
+        </span>
+      </summary>
+      <div className="space-y-2 border-t border-current/10 p-2.5">
+        {research.claims.length === 0 && (
+          <div className="muted text-xs">本回答没有需要单独核验的数字型或分级结论。</div>
+        )}
+        {research.claims.map((claim, index) => {
+          const claimFindings = research.verification.findings.filter(
+            (finding) => finding.claim_id === claim.claim_id,
+          );
+          const referenced = claim.evidence_ids.map((id) => ({ id, found: fields.get(id) }));
+          return (
+            <details key={claim.claim_id} className="rounded border border-slate-200 bg-white/60 dark:border-slate-800 dark:bg-slate-950/30">
+              <summary className="cursor-pointer px-2.5 py-2 text-sm">
+                <span className="mr-2 font-semibold">结论 {index + 1}</span>
+                <span className="mr-2 rounded bg-slate-200/70 px-1.5 py-0.5 text-xs dark:bg-slate-800">
+                  {CLAIM_TYPE_LABEL[claim.claim_type] ?? claim.claim_type}
+                </span>
+                <span className={`mr-2 text-xs ${claim.confidence === "blocked" ? "text-red-600 dark:text-red-300" : "muted"}`}>
+                  {CONFIDENCE_LABEL[claim.confidence] ?? claim.confidence}
+                </span>
+                {claim.text}
+              </summary>
+              <div className="space-y-2 border-t border-slate-200 px-2.5 py-2 text-xs dark:border-slate-800">
+                {claimFindings.map((finding, findingIndex) => (
+                  <div key={`${finding.code}-${findingIndex}`} className="flex items-start justify-between gap-2 rounded border border-red-200 bg-red-50 px-2 py-1.5 text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
+                    <span><b>{FINDING_LABEL[finding.code] ?? finding.code}：</b>{finding.message}</span>
+                    <button type="button" className="shrink-0 underline" onClick={() => copyDiagnostic(`${finding.code}: ${finding.message}`)}>复制诊断</button>
+                  </div>
+                ))}
+                {referenced.length > 0 ? referenced.map(({ id, found }) => (
+                  <details key={id} className="rounded border border-slate-200 px-2 py-1.5 dark:border-slate-800">
+                    <summary className="cursor-pointer">
+                      {found ? `${toolDisplayName(found.snapshot.tool)} · ${found.field.field_path}` : `引用不存在 · ${id}`}
+                    </summary>
+                    {found ? (
+                      <div className="mt-1.5 grid gap-1 border-t border-slate-200 pt-1.5 dark:border-slate-800 sm:grid-cols-2">
+                        <div><span className="muted">原始值：</span><span className="num break-all">{evidenceValue(found.field.value)}</span></div>
+                        <div><span className="muted">单位/币种：</span>{found.field.unit ?? "未声明"}{found.field.currency ? ` · ${found.field.currency}` : ""}</div>
+                        <div><span className="muted">来源：</span>{sourceDisplayName(found.snapshot.source)}（{found.field.source_tier}）</div>
+                        <div><span className="muted">数据时间：</span>{fetchedAtDisplay(found.field.as_of)}</div>
+                        <div><span className="muted">新鲜度：</span>{found.field.freshness}{found.field.blocking ? " · 已阻断" : ""}</div>
+                        <div><span className="muted">字段证据：</span><button type="button" className="num break-all underline" onClick={() => copyDiagnostic(id)}>{id}</button></div>
+                        <div className="sm:col-span-2"><span className="muted">缓存定位：</span><button type="button" className="num break-all underline" onClick={() => copyDiagnostic(found.snapshot.cache_key)}>{found.snapshot.cache_key}</button></div>
+                      </div>
+                    ) : (
+                      <div className="mt-1 text-red-600 dark:text-red-300">该编号不在本报告的证据目录中。</div>
+                    )}
+                  </details>
+                )) : (
+                  <div className="muted">无字段级证据引用{claim.calculation_ids.length ? `；计算引用：${claim.calculation_ids.join("、")}` : ""}</div>
+                )}
+                {claim.counter_evidence.length > 0 && <div><b>反方证据：</b>{claim.counter_evidence.join("；")}</div>}
+                {claim.invalidation.length > 0 && <div><b>失效条件：</b>{claim.invalidation.join("；")}</div>}
+                {claim.unknowns.length > 0 && <div><b>仍未知：</b>{claim.unknowns.join("；")}</div>}
+              </div>
+            </details>
+          );
+        })}
+        {research.verification.findings
+          .filter((finding) => finding.claim_id == null)
+          .map((finding, index) => (
+            <div key={`${finding.code}-${index}`} className="rounded border border-amber-200 px-2 py-1.5 text-xs dark:border-amber-900">
+              {FINDING_LABEL[finding.code] ?? finding.code}：{finding.message}
+            </div>
+          ))}
+        <div className="muted flex flex-wrap justify-between gap-2 text-[11px]">
+          <span>报告协议：{research.schema_version} · 校验器：{research.verification.verifier_version}</span>
+          <button type="button" className="underline" onClick={() => copyDiagnostic(JSON.stringify({ report: research, evidence: report.evidence }, null, 2))}>复制完整校验记录</button>
+        </div>
+      </div>
+    </details>
+  );
+}
+
 /** 助手消息气泡 */
 function AssistantMsg({
   msg,
@@ -876,6 +1018,7 @@ function AssistantMsg({
           onSubmit={() => onClarificationSubmit(clarification.request, draft)}
         />
       )}
+      {msg.report && !clarification && <ResearchVerificationPanel report={msg.report} />}
       {msg.report && msg.report.evidence.length > 0 && (
         <div className="mt-3 rounded border border-slate-200 dark:border-slate-800">
           <div className="muted border-b border-slate-200 px-2.5 py-1.5 text-xs dark:border-slate-800">
@@ -884,10 +1027,11 @@ function AssistantMsg({
           </div>
           <ul className="divide-y divide-slate-100 dark:divide-slate-800/60">
             {msg.report.evidence.map((ev, i) => (
-              <li key={i} className="num flex flex-wrap gap-x-3 px-2.5 py-1.5 text-xs">
+              <li key={ev.evidence_id || i} className="num flex flex-wrap gap-x-3 px-2.5 py-1.5 text-xs">
                 <span className="font-medium">{toolDisplayName(ev.tool)}</span>
                 <span className="muted">数据来源：{sourceDisplayName(ev.source)}</span>
                 <span className="muted">更新时间：{fetchedAtDisplay(ev.fetched_at)}</span>
+                <span className="muted">可核验字段：{ev.fields?.length ?? 0}</span>
               </li>
             ))}
           </ul>

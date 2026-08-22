@@ -146,7 +146,7 @@ describe("persistent Agent session channel", () => {
           answer,
           conclusions: [],
           evidence: [],
-          generated_at: "2026-08-22T10:00:00+08:00",
+          generated_at: 1_777_000_000,
         },
       },
     });

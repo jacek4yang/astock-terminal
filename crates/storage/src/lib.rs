@@ -193,7 +193,8 @@ pub struct AgentTask {
     pub id: String,
     /// Task kind, e.g. "analysis".
     pub kind: String,
-    /// Lifecycle status: "running" | "suspended" | "completed" | "failed" | "cancelled".
+    /// Lifecycle status: "running" | "suspended" | "completed" |
+    /// "verification_failed" | "failed" | "cancelled".
     pub status: String,
     /// JSON-encoded workflow state (task spec, round counter, evidence).
     pub state_json: String,
@@ -1105,7 +1106,12 @@ impl Storage {
         self.run(move |conn| {
             conn.execute(
                 "INSERT INTO reports (id, kind, title, content_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(id) DO UPDATE SET
+                    kind = excluded.kind,
+                    title = excluded.title,
+                    content_json = excluded.content_json,
+                    created_at = excluded.created_at",
                 params![
                     report.id,
                     report.kind,
@@ -1115,6 +1121,29 @@ impl Storage {
                 ],
             )?;
             Ok(())
+        })
+        .await
+    }
+
+    /// Load one persisted report by its stable task id.
+    pub async fn reports_get(&self, id: &str) -> Result<Option<Report>> {
+        let id = id.to_string();
+        self.run(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, kind, title, content_json, created_at
+                 FROM reports WHERE id = ?1",
+            )?;
+            let mut rows = stmt.query(params![id])?;
+            Ok(match rows.next()? {
+                Some(row) => Some(Report {
+                    id: row.get(0)?,
+                    kind: row.get(1)?,
+                    title: row.get(2)?,
+                    content_json: row.get(3)?,
+                    created_at: row.get(4)?,
+                }),
+                None => None,
+            })
         })
         .await
     }
@@ -1893,6 +1922,35 @@ mod tests {
         assert_eq!(list[0].title, None);
         assert_eq!(list[1].id, "c1");
         assert_eq!(list[1].title.as_deref(), Some("demo"));
+    }
+
+    #[tokio::test]
+    async fn verified_report_roundtrip_and_update() {
+        let (_dir, storage) = test_storage();
+        storage
+            .reports_insert(Report {
+                id: "run-1".into(),
+                kind: "verification-blocked".into(),
+                title: "报告".into(),
+                content_json: "{\"verification\":\"failed\"}".into(),
+                created_at: 1,
+            })
+            .await
+            .unwrap();
+        storage
+            .reports_insert(Report {
+                id: "run-1".into(),
+                kind: "verified-research".into(),
+                title: "报告（修订）".into(),
+                content_json: "{\"verification\":\"passed\",\"tool_versions\":{},\"data_versions\":{}}".into(),
+                created_at: 2,
+            })
+            .await
+            .unwrap();
+        let report = storage.reports_get("run-1").await.unwrap().unwrap();
+        assert_eq!(report.kind, "verified-research");
+        assert_eq!(report.created_at, 2);
+        assert!(report.content_json.contains("tool_versions"));
     }
 
     #[tokio::test]

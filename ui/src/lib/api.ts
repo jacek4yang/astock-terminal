@@ -1470,10 +1470,84 @@ export interface AgentMessage {
 }
 
 export interface AgentEvidence {
+  evidence_id: string;
   tool: string;
   cache_key: string;
   source: string;
   fetched_at: string;
+  tool_version: string;
+  data_version: string;
+  source_tier: "primary" | "provider" | "engine" | "discovery_only" | string;
+  freshness: "fresh" | "stale" | "expired" | "unknown" | string;
+  blocking: boolean;
+  fields: AgentEvidenceField[];
+}
+
+export interface AgentEvidenceField {
+  evidence_id: string;
+  field_path: string;
+  value: unknown;
+  unit: string | null;
+  currency: string | null;
+  as_of: string;
+  freshness: string;
+  source_tier: string;
+  blocking: boolean;
+  calculation_id: string | null;
+}
+
+export type AgentClaimType =
+  | "fact"
+  | "calculation"
+  | "external"
+  | "inference"
+  | "assumption"
+  | "unknown";
+
+export interface AgentResearchClaim {
+  claim_id: string;
+  text: string;
+  claim_type: AgentClaimType;
+  evidence_ids: string[];
+  calculation_ids: string[];
+  as_of: string | null;
+  confidence: "high" | "medium" | "low" | "blocked";
+  assumptions: string[];
+  counter_evidence: string[];
+  invalidation: string[];
+  unknowns: string[];
+}
+
+export interface AgentVerificationFinding {
+  code: string;
+  severity: "error" | "warning";
+  claim_id: string | null;
+  message: string;
+}
+
+export interface AgentResearchReport {
+  schema_version: string;
+  as_of: string | null;
+  confidence: "high" | "medium" | "low" | "blocked";
+  claims: AgentResearchClaim[];
+  calculations: Array<{
+    calculation_id: string;
+    tool: string;
+    field_path: string;
+    value: unknown;
+    unit: string | null;
+    data_version: string;
+  }>;
+  assumptions: string[];
+  counter_evidence: string[];
+  invalidation: string[];
+  unknowns: string[];
+  verification: {
+    status: "passed" | "failed" | "not_applicable";
+    verifier_version: string;
+    verified_at: number;
+    findings: AgentVerificationFinding[];
+  };
 }
 
 export interface AgentReport {
@@ -1481,7 +1555,9 @@ export interface AgentReport {
   answer: string;
   conclusions: unknown;
   evidence: AgentEvidence[];
-  generated_at: string;
+  generated_at: number;
+  /** Optional only for reports saved by pre-v5.1 builds. */
+  research?: AgentResearchReport;
 }
 
 export interface AgentToolWorkItem {

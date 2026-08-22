@@ -397,7 +397,11 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
       break;
     case "completed":
       useAgentSession.setState({
-        status: hasClarification(event.report.answer) ? "waiting_input" : "completed",
+        status: hasClarification(event.report.answer)
+          ? "waiting_input"
+          : event.report.research?.verification.status === "failed"
+            ? "failed"
+            : "completed",
         progress: null,
       });
       patchLastAssistant((item) => {

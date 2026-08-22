@@ -27,6 +27,7 @@ schemars.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 chrono.workspace = true
+regex.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
