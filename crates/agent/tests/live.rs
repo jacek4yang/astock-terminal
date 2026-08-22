@@ -33,6 +33,7 @@ async fn live_one_tool_conversation() {
         minimax_search: None,
         finance_news: None,
         iwencai: None,
+        progress: None,
     };
     let registry = ToolRegistry::new(vec![Arc::new(EchoTool::new()) as Arc<dyn AgentTool>]);
     let engine = AgentEngine::new(
@@ -88,6 +89,7 @@ async fn live_market_data_tool_conversation() {
         minimax_search: None,
         finance_news: None,
         iwencai: None,
+        progress: None,
     };
     let engine = AgentEngine::new(
         Arc::new(client),

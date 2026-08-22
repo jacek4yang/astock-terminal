@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  appendToolTimeline,
   appendAgentTurn,
   handleAgentEnvelope,
   resetAgentSession,
@@ -50,6 +51,16 @@ describe("persistent Agent session channel", () => {
         elapsed_ms: 2_000,
         estimated_ms: 45_000,
         stage: "等待数据源返回并执行确定性计算",
+        detail: {
+          completed: 1,
+          total: 50,
+          succeeded: 1,
+          failed: 0,
+          cache_hits: 0,
+          records: 250,
+          active: [{ label: "300308 中际旭创", stage: "获取250根日K并计算指标" }],
+          recent_errors: [],
+        },
       },
     });
     handleAgentEnvelope({
@@ -75,13 +86,48 @@ describe("persistent Agent session channel", () => {
     const tools = [...state.msgs].reverse().find((message) => message.role === "assistant")!.tools;
     expect(tools).toHaveLength(2);
     expect(tools[0]).toMatchObject({ callId: "call-a", done: true, source: "tdx+eastmoney" });
+    expect(tools[0].timeline?.map((entry) => entry.kind)).toEqual(["started", "success"]);
     expect(tools[1]).toMatchObject({
       callId: "call-b",
       done: false,
       elapsedMs: 2_000,
       estimatedMs: 45_000,
       stage: "等待数据源返回并执行确定性计算",
+      progressDetail: {
+        completed: 1,
+        total: 50,
+        succeeded: 1,
+        failed: 0,
+        cache_hits: 0,
+        records: 250,
+        active: [{ label: "300308 中际旭创", stage: "获取250根日K并计算指标" }],
+        recent_errors: [],
+      },
     });
+    expect(tools[1].timeline?.map((entry) => entry.kind)).toEqual(["started", "progress"]);
+  });
+
+  it("compacts repeated heartbeat diagnostics while retaining the first entry", () => {
+    let timeline = appendToolTimeline(undefined, {
+      at: 1,
+      kind: "started",
+      message: "开始",
+    });
+    timeline = appendToolTimeline(timeline, {
+      at: 2,
+      kind: "progress",
+      message: "等待上游",
+      elapsedMs: 1_000,
+    });
+    timeline = appendToolTimeline(timeline, {
+      at: 3,
+      kind: "progress",
+      message: "等待上游",
+      elapsedMs: 2_000,
+    });
+    expect(timeline).toHaveLength(2);
+    expect(timeline[0]).toMatchObject({ kind: "started", message: "开始" });
+    expect(timeline[1]).toMatchObject({ at: 3, elapsedMs: 2_000 });
   });
 
   it("persists a completed clarification as waiting for user input", () => {

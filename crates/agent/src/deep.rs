@@ -2931,6 +2931,7 @@ mod tests {
             minimax_search: None,
             finance_news: None,
             iwencai: None,
+            progress: None,
         }
     }
 

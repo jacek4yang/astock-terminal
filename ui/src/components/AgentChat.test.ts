@@ -5,9 +5,11 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentMessage } from "../lib/api";
 import { emptyClarificationDraft, formatClarificationAnswer, type ClarificationDraft } from "../lib/agentClarification";
 import {
+  buildToolDiagnostic,
   ClarificationCard,
   historyToMsgs,
   hasUnansweredClarification,
+  redactDiagnosticValue,
   stripPrivateReasoning,
   taskRunStatus,
   type ChatMsg,
@@ -48,6 +50,73 @@ describe("Agent history safety", () => {
     expect(taskRunStatus("interrupted")).toBe("suspended");
     expect(taskRunStatus("running")).toBe("running");
     expect(taskRunStatus("unknown")).toBe("idle");
+  });
+
+  it("redacts credentials from nested and plain-text diagnostics", () => {
+    expect(
+      redactDiagnosticValue({
+        symbol: "300308",
+        api_key: "top-secret",
+        nested: { authorization: "Bearer abc.def" },
+      }),
+    ).toEqual({
+      symbol: "300308",
+      api_key: "[已隐藏敏感信息]",
+      nested: { authorization: "[已隐藏敏感信息]" },
+    });
+    const diagnostic = buildToolDiagnostic({
+      key: 1,
+      callId: "call-1",
+      name: "get_quote",
+      args: JSON.stringify({ symbol: "300308", token: "must-not-leak" }),
+      done: false,
+      error: "authorization=must-not-leak",
+    });
+    expect(diagnostic).toContain("300308");
+    expect(diagnostic).not.toContain("must-not-leak");
+    expect(diagnostic).toContain("[已隐藏敏感信息]");
+  });
+
+  it("pairs a persisted tool result with its call instead of duplicating the row", () => {
+    const out: ChatMsg[] = [];
+    out.push(
+      ...historyToMsgs(
+        message({
+          id: "run-1-2",
+          role: "assistant",
+          content: "",
+          created_at: 10,
+          tool_calls: [{ id: "call-1", name: "get_quote", arguments: "{\"symbol\":\"300308\"}" }],
+        }),
+        out,
+      ),
+    );
+    out.push(
+      ...historyToMsgs(
+        message({
+          id: "run-1-3",
+          role: "tool",
+          tool_call_id: "call-1",
+          created_at: 11,
+          content: JSON.stringify({
+            tool: "get_quote",
+            cache_key: "quote:300308",
+            source: "tdx",
+            fetched_at: "2026-08-23T09:00:00+08:00",
+            summary: { price: 12.3 },
+          }),
+        }),
+        out,
+      ),
+    );
+    expect(out[0].tools).toHaveLength(1);
+    expect(out[0].tools[0]).toMatchObject({
+      callId: "call-1",
+      done: true,
+      success: true,
+      source: "tdx",
+      cacheKey: "quote:300308",
+    });
   });
 
   it("keeps the last clarification waiting until a following user answer exists", () => {

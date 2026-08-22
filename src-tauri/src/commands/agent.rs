@@ -147,6 +147,32 @@ pub struct AgentTaskSummary {
     pub created_at: i64,
     /// Last update time, unix seconds.
     pub updated_at: i64,
+    /// User instruction for this run. Runtime context is deliberately omitted.
+    pub prompt: Option<String>,
+    /// User-selected research workflow.
+    pub research_mode: Option<String>,
+    /// User-selected reasoning depth.
+    pub reasoning_depth: Option<String>,
+    /// Explicit model override, when one was pinned.
+    pub model: Option<String>,
+    /// Completed model/tool rounds.
+    pub round: u32,
+    /// Configured round ceiling, if overridden by the host.
+    pub max_rounds: Option<u32>,
+    /// Per-run tool allowlist. `None` means the default full registry.
+    pub enabled_tools: Option<Vec<String>>,
+    /// Whether the durable run may continue after a quota reset.
+    pub auto_resume_on_quota: bool,
+    /// Number of independent specialist reviewers configured for the run.
+    pub specialist_count: usize,
+    /// Number of provenance records collected so far.
+    pub evidence_count: usize,
+    /// Number of deterministic context compactions performed.
+    pub context_compactions: u32,
+    /// Whether the specialist review stage completed.
+    pub multi_agent_reviewed: bool,
+    /// Persisted terminal error for copyable diagnostics.
+    pub last_error: Option<String>,
 }
 
 /// One conversation header: `{id, title, created_at}`.
@@ -207,6 +233,7 @@ fn build_engine(state: &AppState, backend: Arc<MinimaxClient>) -> AgentEngine {
         minimax_search: Some(backend.clone()),
         finance_news: Some(state.market.finance_news.clone()),
         iwencai: Some(state.market.iwencai.clone()),
+        progress: None,
     };
     AgentEngine::new(backend, default_registry(), ctx, EngineConfig::default())
 }
@@ -264,7 +291,25 @@ fn task_auto_resume_on_quota(task: &AgentTask) -> bool {
 
 /// Project a stored task row to its summary (drops `state_json`).
 fn task_summary(task: AgentTask) -> AgentTaskSummary {
-    let conversation_id = task_conversation_id(&task);
+    let state = serde_json::from_str::<Value>(&task.state_json).unwrap_or(Value::Null);
+    let string_at = |pointer: &str| {
+        state
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let conversation_id = string_at("/spec/conversation_id")
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| task.id.clone());
+    let enabled_tools = state.pointer("/spec/enabled_tools").and_then(|value| {
+        value.as_array().map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+    });
     AgentTaskSummary {
         id: task.id,
         conversation_id,
@@ -272,6 +317,37 @@ fn task_summary(task: AgentTask) -> AgentTaskSummary {
         status: task.status,
         created_at: task.created_at,
         updated_at: task.updated_at,
+        prompt: string_at("/spec/prompt"),
+        research_mode: string_at("/spec/research_mode"),
+        reasoning_depth: string_at("/spec/reasoning_depth"),
+        model: string_at("/spec/model"),
+        round: state.pointer("/round").and_then(Value::as_u64).unwrap_or(0) as u32,
+        max_rounds: state
+            .pointer("/spec/max_rounds")
+            .and_then(Value::as_u64)
+            .map(|rounds| rounds as u32),
+        enabled_tools,
+        auto_resume_on_quota: state
+            .pointer("/spec/auto_resume_on_quota")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        specialist_count: state
+            .pointer("/spec/specialists")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len),
+        evidence_count: state
+            .pointer("/evidence")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len),
+        context_compactions: state
+            .pointer("/context_compactions")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32,
+        multi_agent_reviewed: state
+            .pointer("/multi_agent_reviewed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        last_error: string_at("/last_error"),
     }
 }
 
@@ -685,15 +761,40 @@ mod tests {
             id: "t1".into(),
             kind: "chat".into(),
             status: "suspended".into(),
-            state_json: "{\"round\":1}".into(),
+            state_json: serde_json::json!({
+                "spec": {
+                    "conversation_id": "c1",
+                    "prompt": "分析 300308",
+                    "research_mode": "deep",
+                    "reasoning_depth": "maximum",
+                    "model": "MiniMax-M2.1",
+                    "max_rounds": 48,
+                    "enabled_tools": ["get_quote", "get_kline"],
+                    "auto_resume_on_quota": true,
+                    "specialists": [{"name": "风控"}]
+                },
+                "round": 3,
+                "evidence": [{"tool": "get_quote"}],
+                "context_compactions": 2,
+                "multi_agent_reviewed": true,
+                "last_error": "上游暂不可用"
+            })
+            .to_string(),
             created_at: 1_700_000_000,
             updated_at: 1_700_000_100,
         });
         let json = serde_json::to_value(&summary).unwrap();
         assert_eq!(json["id"], "t1");
-        assert_eq!(json["conversation_id"], "t1");
+        assert_eq!(json["conversation_id"], "c1");
         assert_eq!(json["status"], "suspended");
         assert_eq!(json["updated_at"], 1_700_000_100);
+        assert_eq!(json["prompt"], "分析 300308");
+        assert_eq!(json["round"], 3);
+        assert_eq!(json["enabled_tools"][1], "get_kline");
+        assert_eq!(json["specialist_count"], 1);
+        assert_eq!(json["evidence_count"], 1);
+        assert_eq!(json["context_compactions"], 2);
+        assert_eq!(json["last_error"], "上游暂不可用");
         assert!(json.get("state_json").is_none());
     }
 

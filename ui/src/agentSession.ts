@@ -5,6 +5,7 @@ import type {
   AgentReport,
   AgentResearchMode,
   AgentStreamEnvelope,
+  AgentToolProgressDetail,
 } from "./lib/api";
 import {
   emptyClarificationDraft,
@@ -57,6 +58,18 @@ export interface ToolCallItem {
   estimatedMs?: number;
   stage?: string;
   lastProgressAt?: number;
+  /** Compact, persisted lifecycle trail for transparent diagnostics. */
+  timeline?: ToolTimelineEntry[];
+  /** Latest nested counters/current work for long-running tools. */
+  progressDetail?: AgentToolProgressDetail;
+}
+
+export interface ToolTimelineEntry {
+  at: number;
+  kind: "started" | "progress" | "success" | "error";
+  message: string;
+  elapsedMs?: number;
+  detail?: AgentToolProgressDetail;
 }
 
 export interface ChatMsg {
@@ -199,6 +212,22 @@ export function patchLastAssistant(patch: (message: ChatMsg) => ChatMsg) {
   }
 }
 
+/** Keep a useful task trail without allowing heartbeat logs to grow forever. */
+export function appendToolTimeline(
+  timeline: ToolTimelineEntry[] | undefined,
+  entry: ToolTimelineEntry,
+): ToolTimelineEntry[] {
+  const next = [...(timeline ?? [])];
+  const last = next.at(-1);
+  if (entry.kind === "progress" && last?.kind === "progress" && last.message === entry.message) {
+    next[next.length - 1] = entry;
+  } else {
+    next.push(entry);
+  }
+  if (next.length <= 24) return next;
+  return [next[0], ...next.slice(-23)];
+}
+
 /** Update one persisted clarification card even while its route is unmounted. */
 export function patchClarificationDraft(
   messageKey: number,
@@ -264,6 +293,9 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
       }));
       break;
     case "tool_call_started":
+      {
+      const startedAt = Date.now();
+      const initialStage = "检查本地缓存并选择可用数据源";
       patchLastAssistant((item) => ({
         ...item,
         tools: [
@@ -279,16 +311,22 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
                   ? event.args
                   : JSON.stringify(event.args),
             done: false,
-            startedAt: Date.now(),
+            startedAt,
             position: event.position,
             total: event.total,
             estimatedMs: event.estimated_ms,
-            stage: "检查本地缓存并选择可用数据源",
+            stage: initialStage,
+            timeline: [
+              { at: startedAt, kind: "started", message: initialStage, elapsedMs: 0 },
+            ],
           },
         ],
       }));
       break;
+      }
     case "tool_call_progress":
+      {
+      const progressedAt = Date.now();
       patchLastAssistant((item) => ({
         ...item,
         tools: item.tools.map((tool) =>
@@ -298,13 +336,24 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
                 elapsedMs: event.elapsed_ms,
                 estimatedMs: event.estimated_ms,
                 stage: event.stage,
-                lastProgressAt: Date.now(),
+                lastProgressAt: progressedAt,
+                progressDetail: event.detail ?? tool.progressDetail,
+                timeline: appendToolTimeline(tool.timeline, {
+                  at: progressedAt,
+                  kind: "progress",
+                  message: event.stage,
+                  elapsedMs: event.elapsed_ms,
+                  detail: event.detail,
+                }),
               }
             : tool,
         ),
       }));
       break;
+      }
     case "tool_call_finished":
+      {
+      const finishedAt = Date.now();
       patchLastAssistant((item) => {
         const tools = [...item.tools];
         for (let index = tools.length - 1; index >= 0; index--) {
@@ -322,6 +371,12 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
               source: event.source ?? undefined,
               fetchedAt: event.fetched_at ?? undefined,
               error: event.error ?? undefined,
+              timeline: appendToolTimeline(tools[index].timeline, {
+                at: finishedAt,
+                kind: event.success ? "success" : "error",
+                message: event.success ? "工具执行完成并保存结果" : event.error ?? "工具执行失败",
+                elapsedMs: event.elapsed_ms,
+              }),
             };
             break;
           }
@@ -329,6 +384,7 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
         return { ...item, tools };
       });
       break;
+      }
     case "suspended":
       useAgentSession.setState({ status: "suspended" });
       patchLastAssistant((item) => ({

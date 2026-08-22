@@ -23,7 +23,7 @@ use crate::backend::ChatBackend;
 use crate::error::{AgentError, Result};
 use crate::prompt::initial_messages_with_context;
 use crate::report::{assemble_report, AgentReport, Evidence};
-use crate::tools::{now_secs, ToolContext, ToolRegistry};
+use crate::tools::{now_secs, ToolContext, ToolProgressDetail, ToolRegistry};
 
 /// A boxed event stream for one running task.
 pub type TaskStream = Pin<Box<dyn Stream<Item = AgentEvent> + Send>>;
@@ -235,6 +235,10 @@ pub enum AgentEvent {
         /// Expected duration used only for UI guidance.
         estimated_ms: u64,
         stage: String,
+        /// Structured counters/current items for tools that can expose
+        /// deeper deterministic progress.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<ToolProgressDetail>,
     },
     /// A tool call finished.
     ToolCallFinished {
@@ -320,6 +324,10 @@ struct TaskState {
     context_compactions: u32,
     #[serde(default)]
     multi_agent_reviewed: bool,
+    /// Last terminal error, persisted for user-visible diagnostics. Provider
+    /// credentials and private reasoning are never written here.
+    #[serde(default)]
+    last_error: Option<String>,
 }
 
 /// How many trailing messages are never compacted.
@@ -486,6 +494,7 @@ impl AgentEngine {
             evidence: Vec::new(),
             context_compactions: 0,
             multi_agent_reviewed: false,
+            last_error: None,
         };
         self.run_loop(state, messages, tx).await;
     }
@@ -1320,7 +1329,35 @@ impl AgentEngine {
         // explicitly cancels the durable task. The estimate is UI guidance
         // only and never participates in control flow.
         let estimated_ms = tool_estimated_secs(&name) * 1000;
-        let dispatch = self.tools.dispatch(&name, args, &self.ctx);
+        let progress_tx = tx.clone();
+        let progress_call_id = call_id.clone();
+        let progress_name = name.clone();
+        let progress_started = started;
+        let dispatch_context = self
+            .ctx
+            .clone()
+            .with_progress_reporter(Arc::new(move |detail| {
+                let stage = format!(
+                    "已处理 {}/{}，当前并行 {} 项，成功 {} 项，失败 {} 项",
+                    detail.completed,
+                    detail.total,
+                    detail.active.len(),
+                    detail.succeeded,
+                    detail.failed
+                );
+                send(
+                    &progress_tx,
+                    AgentEvent::ToolCallProgress {
+                        call_id: progress_call_id.clone(),
+                        name: progress_name.clone(),
+                        elapsed_ms: progress_started.elapsed().as_millis() as u64,
+                        estimated_ms,
+                        stage,
+                        detail: Some(detail),
+                    },
+                );
+            }));
+        let dispatch = self.tools.dispatch(&name, args, &dispatch_context);
         tokio::pin!(dispatch);
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(2));
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1338,6 +1375,7 @@ impl AgentEngine {
                         elapsed_ms,
                         estimated_ms,
                         stage: tool_progress_stage(&name, elapsed_ms, estimated_ms).to_string(),
+                        detail: None,
                     });
                 }
             }
@@ -1479,7 +1517,9 @@ impl AgentEngine {
         tx: &mpsc::UnboundedSender<AgentEvent>,
         error: String,
     ) {
-        let _ = self.save_state(state, "failed").await;
+        let mut failed_state = state.clone();
+        failed_state.last_error = Some(error.clone());
+        let _ = self.save_state(&failed_state, "failed").await;
         send(tx, AgentEvent::Failed { error });
     }
 }
@@ -2367,6 +2407,7 @@ mod tests {
             minimax_search: None,
             finance_news: None,
             iwencai: None,
+            progress: None,
         };
         let registry = ToolRegistry::new(vec![echo as Arc<dyn AgentTool>]);
         AgentEngine::new(chat, registry, ctx, EngineConfig::default())
@@ -2393,6 +2434,33 @@ mod tests {
         assert_eq!(tool_estimated_secs("iterate_strategy"), 180);
         assert!(tool_progress_stage("compare_stocks", 5_000, 60_000).contains("并行获取"));
         assert!(tool_progress_stage("compare_stocks", 61_000, 60_000).contains("仍在后台继续"));
+    }
+
+    #[tokio::test]
+    async fn terminal_error_is_persisted_for_user_diagnostics() {
+        let (_dir, storage) = test_storage();
+        let chat = Arc::new(ScriptedChat::new("test-model"));
+        chat.push(ScriptedReply::Error(MinimaxError::Api {
+            code: 500,
+            msg: "diagnostic failure".to_string(),
+        }));
+        let engine = build_engine(storage.clone(), chat, Arc::new(EchoTool::new()));
+        let events = collect(engine.run_task(spec("persisted-failure"))).await;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Failed { error } if error.contains("diagnostic failure")
+        )));
+        let record = storage
+            .agent_task_get("persisted-failure")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.status, "failed");
+        let state: Value = serde_json::from_str(&record.state_json).unwrap();
+        assert!(state["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("diagnostic failure"));
     }
 
     #[test]
@@ -2464,6 +2532,7 @@ mod tests {
             minimax_search: None,
             finance_news: None,
             iwencai: None,
+            progress: None,
         };
         let engine = AgentEngine::new(
             chat,
@@ -2507,6 +2576,7 @@ mod tests {
             minimax_search: None,
             finance_news: None,
             iwencai: None,
+            progress: None,
         };
         let engine = AgentEngine::new(
             chat,
@@ -2568,6 +2638,7 @@ mod tests {
             minimax_search: None,
             finance_news: None,
             iwencai: None,
+            progress: None,
         };
         let engine = AgentEngine::new(
             chat,
@@ -2982,6 +3053,7 @@ mod tests {
             evidence: Vec::new(),
             context_compactions: 0,
             multi_agent_reviewed: false,
+            last_error: None,
         };
         engine.save_state(&state, "running").await.unwrap();
 
@@ -3103,6 +3175,7 @@ mod tests {
             minimax_search: None,
             finance_news: None,
             iwencai: None,
+            progress: None,
         };
         let registry = ToolRegistry::new(vec![echo as Arc<dyn AgentTool>]);
         let engine = AgentEngine::new(
@@ -3561,6 +3634,7 @@ mod tests {
                 minimax_search: None,
                 finance_news: None,
                 iwencai: None,
+                progress: None,
             };
             let registry = ToolRegistry::new(vec![echo.clone() as Arc<dyn AgentTool>]);
             AgentEngine::new(chat, registry, ctx, config.clone())

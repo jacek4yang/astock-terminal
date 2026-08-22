@@ -36,4 +36,6 @@ pub use orchestrator::{
     TaskSpec, TaskStream, SNAPSHOT_MARKER,
 };
 pub use report::{AgentReport, Conclusion, Evidence};
-pub use tools::{AgentTool, ToolContext, ToolRegistry, ToolResult};
+pub use tools::{
+    AgentTool, ToolContext, ToolProgressDetail, ToolRegistry, ToolResult, ToolWorkItem,
+};

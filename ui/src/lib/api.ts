@@ -843,6 +843,20 @@ export interface AgentTask {
   created_at: number;
   /** unix 秒 */
   updated_at: number;
+  prompt: string | null;
+  research_mode: string | null;
+  reasoning_depth: string | null;
+  model: string | null;
+  round: number;
+  max_rounds: number | null;
+  /** null 表示使用系统默认的完整工具集。 */
+  enabled_tools: string[] | null;
+  auto_resume_on_quota: boolean;
+  specialist_count: number;
+  evidence_count: number;
+  context_compactions: number;
+  multi_agent_reviewed: boolean;
+  last_error: string | null;
 }
 
 export interface AgentConversation {
@@ -884,6 +898,22 @@ export interface AgentReport {
   generated_at: string;
 }
 
+export interface AgentToolWorkItem {
+  label: string;
+  stage: string;
+}
+
+export interface AgentToolProgressDetail {
+  completed: number;
+  total: number;
+  succeeded: number;
+  failed: number;
+  cache_hits: number;
+  records: number;
+  active: AgentToolWorkItem[];
+  recent_errors: string[];
+}
+
 export type AgentEvent =
   | {
       type: "progress";
@@ -918,6 +948,7 @@ export type AgentEvent =
       elapsed_ms: number;
       estimated_ms: number;
       stage: string;
+      detail?: AgentToolProgressDetail;
     }
   | {
       type: "tool_call_finished";

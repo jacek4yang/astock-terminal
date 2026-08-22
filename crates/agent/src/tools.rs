@@ -12,6 +12,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::Value;
 
 use astock_core::{Adjust, KlinePeriod};
@@ -23,6 +24,34 @@ use astock_minimax::ToolSpec;
 use astock_storage::{Storage, ToolCacheEntry};
 
 use crate::error::{AgentError, Result};
+
+/// One currently active unit inside a long-running tool.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ToolWorkItem {
+    /// User-facing stock/code/item label.
+    pub label: String,
+    /// Current deterministic processing stage.
+    pub stage: String,
+}
+
+/// Structured, non-sensitive progress emitted by a long-running tool.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ToolProgressDetail {
+    pub completed: usize,
+    pub total: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub cache_hits: usize,
+    /// Number of upstream data rows successfully ingested in this run.
+    pub records: usize,
+    pub active: Vec<ToolWorkItem>,
+    /// Bounded recent failures for diagnosis; never contains credentials.
+    pub recent_errors: Vec<String>,
+}
+
+/// Synchronous event sink; tools only publish compact snapshots and never
+/// wait for the UI while doing market-data work.
+pub type ToolProgressReporter = Arc<dyn Fn(ToolProgressDetail) + Send + Sync>;
 
 /// Shared context handed to every tool execution.
 ///
@@ -49,6 +78,8 @@ pub struct ToolContext {
     pub finance_news: Option<Arc<FinanceNewsProvider>>,
     /// 可选问财官方接口，用于个股公告、新闻和结构化事件补证。
     pub iwencai: Option<Arc<IwencaiOpenApi>>,
+    /// Per-invocation progress sink installed by the orchestrator.
+    pub progress: Option<ToolProgressReporter>,
 }
 
 impl ToolContext {
@@ -63,6 +94,7 @@ impl ToolContext {
             minimax_search: None,
             finance_news: None,
             iwencai: None,
+            progress: None,
         }
     }
 
@@ -98,6 +130,19 @@ impl ToolContext {
         self.finance_news = finance_news;
         self.iwencai = iwencai;
         self
+    }
+
+    /// Attach a lightweight progress sink for one tool invocation.
+    pub fn with_progress_reporter(mut self, reporter: ToolProgressReporter) -> Self {
+        self.progress = Some(reporter);
+        self
+    }
+
+    /// Publish a compact snapshot if the host requested detailed progress.
+    pub fn report_progress(&self, detail: ToolProgressDetail) {
+        if let Some(reporter) = &self.progress {
+            reporter(detail);
+        }
     }
 }
 
@@ -380,6 +425,7 @@ mod tests {
             minimax_search: None,
             finance_news: None,
             iwencai: None,
+            progress: None,
         };
         let args = json!({"text": "hi"});
         let first = registry.dispatch("echo", args.clone(), &ctx).await.unwrap();

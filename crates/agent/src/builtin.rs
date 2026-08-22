@@ -6,7 +6,8 @@
 //! `get_cached_detail`). All numbers come from the deterministic engines or
 //! upstream payloads — never from the model.
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -22,7 +23,7 @@ use crate::error::{AgentError, Result};
 use crate::indicators::{bollinger_series, kdj_series, rsi_series};
 use crate::tools::{
     now_secs, parse_adjust, parse_args, parse_period, schema_value, tool_cache_key, AgentTool,
-    CacheEnvelope, ToolContext, ToolRegistry, ToolResult,
+    CacheEnvelope, ToolContext, ToolProgressDetail, ToolRegistry, ToolResult, ToolWorkItem,
 };
 
 /// Round to 2 decimals for display summaries.
@@ -1057,6 +1058,46 @@ const SCAN_ROW_TTL: i64 = 300;
 /// Whole-market scan: rank candidates by the engine's composite score.
 struct ScanMarket;
 
+struct ScanOneOutcome {
+    row: Value,
+    cache_hit: bool,
+    records: usize,
+}
+
+#[derive(Default)]
+struct ScanProgressState {
+    total: usize,
+    completed: usize,
+    succeeded: usize,
+    failed: usize,
+    cache_hits: usize,
+    records: usize,
+    active: BTreeMap<String, String>,
+    recent_errors: Vec<String>,
+}
+
+impl ScanProgressState {
+    fn snapshot(&self) -> ToolProgressDetail {
+        ToolProgressDetail {
+            completed: self.completed,
+            total: self.total,
+            succeeded: self.succeeded,
+            failed: self.failed,
+            cache_hits: self.cache_hits,
+            records: self.records,
+            active: self
+                .active
+                .iter()
+                .map(|(label, stage)| ToolWorkItem {
+                    label: label.clone(),
+                    stage: stage.clone(),
+                })
+                .collect(),
+            recent_errors: self.recent_errors.clone(),
+        }
+    }
+}
+
 #[async_trait]
 impl AgentTool for ScanMarket {
     fn name(&self) -> &'static str {
@@ -1095,6 +1136,17 @@ impl AgentTool for ScanMarket {
         });
         pool.truncate(candidates);
 
+        let progress_state = Arc::new(Mutex::new(ScanProgressState {
+            total: pool.len(),
+            ..Default::default()
+        }));
+        ctx.report_progress(
+            progress_state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .snapshot(),
+        );
+
         let breadth = ctx
             .market
             .market_breadth()
@@ -1107,17 +1159,61 @@ impl AgentTool for ScanMarket {
             .map(|item| {
                 let ctx = ctx.clone();
                 let breadth = breadth.clone();
+                let progress_state = Arc::clone(&progress_state);
                 async move {
-                    let row = self
+                    let label = format!("{} {}", item.code, item.name);
+                    let starting = {
+                        let mut state = progress_state
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        state.active.insert(
+                            label.clone(),
+                            "检查5分钟缓存；未命中则获取250根日K并计算指标".to_string(),
+                        );
+                        state.snapshot()
+                    };
+                    ctx.report_progress(starting);
+                    let outcome = self
                         .scan_one(&ctx, &item.code, breadth.as_ref().as_ref())
-                        .await?;
-                    let mut row = row;
-                    if let Some(obj) = row.as_object_mut() {
-                        obj.insert("name".into(), json!(item.name));
-                        obj.insert("price".into(), json!(item.price));
-                        obj.insert("pct".into(), json!(item.pct));
-                    }
-                    Ok(row)
+                        .await;
+                    let result = match outcome {
+                        Ok(mut outcome) => {
+                            if let Some(obj) = outcome.row.as_object_mut() {
+                                obj.insert("name".into(), json!(item.name));
+                                obj.insert("price".into(), json!(item.price));
+                                obj.insert("pct".into(), json!(item.pct));
+                            }
+                            let mut state = progress_state
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            state.completed += 1;
+                            state.succeeded += 1;
+                            state.cache_hits += usize::from(outcome.cache_hit);
+                            state.records += outcome.records;
+                            state.active.remove(&label);
+                            Ok(outcome.row)
+                        }
+                        Err(error) => {
+                            let error_text = format!("{label}：{error}");
+                            let mut state = progress_state
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            state.completed += 1;
+                            state.failed += 1;
+                            state.active.remove(&label);
+                            state.recent_errors.push(error_text);
+                            if state.recent_errors.len() > 20 {
+                                state.recent_errors.remove(0);
+                            }
+                            Err(error)
+                        }
+                    };
+                    let updated = progress_state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .snapshot();
+                    ctx.report_progress(updated);
+                    result
                 }
             })
             .buffer_unordered(10)
@@ -1140,10 +1236,18 @@ impl AgentTool for ScanMarket {
         let scanned = scored.len();
         scored.truncate(top);
 
+        let final_progress = progress_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .snapshot();
+
         let summary = json!({
             "criteria": format!("成交额≥{}万元取前{}只候选，按综合评分排序", (SCAN_MIN_AMOUNT / 1e4) as i64, candidates),
             "scanned": scanned,
             "failed": failed,
+            "cache_hits": final_progress.cache_hits,
+            "records": final_progress.records,
+            "errors": final_progress.recent_errors,
             "top": scored,
         });
         Ok(ToolResult {
@@ -1164,11 +1268,15 @@ impl ScanMarket {
         ctx: &ToolContext,
         code: &str,
         breadth: Option<&tech::Breadth>,
-    ) -> Result<Value> {
+    ) -> Result<ScanOneOutcome> {
         let key = tool_cache_key("scan_stock", &json!({"symbol": code}));
         if let Some(entry) = ctx.storage.tool_cache_get(&key).await? {
             if let Ok(env) = serde_json::from_str::<CacheEnvelope>(&entry.result_json) {
-                return Ok(env.summary);
+                return Ok(ScanOneOutcome {
+                    row: env.summary,
+                    cache_hit: true,
+                    records: 0,
+                });
             }
         }
         let symbol = parse_symbol(self.name(), code)?;
@@ -1182,6 +1290,7 @@ impl ScanMarket {
         )
         .await?;
         let signal = run_engine(&inputs, breadth);
+        let records = inputs.klines.len();
         let row = comparison_row(code, None, None, &signal);
         let env = CacheEnvelope {
             summary: row.clone(),
@@ -1202,7 +1311,11 @@ impl ScanMarket {
                 accessed_at: now,
             })
             .await?;
-        Ok(row)
+        Ok(ScanOneOutcome {
+            row,
+            cache_hit: false,
+            records,
+        })
     }
 }
 
@@ -1577,6 +1690,7 @@ mod tests {
                 minimax_search: None,
                 finance_news: None,
                 iwencai: None,
+                progress: None,
             },
         )
     }
@@ -1835,6 +1949,14 @@ mod tests {
     #[tokio::test]
     async fn scan_market_ranks_by_score() {
         let (_dir, ctx) = test_ctx();
+        let progress = Arc::new(Mutex::new(Vec::<ToolProgressDetail>::new()));
+        let progress_sink = Arc::clone(&progress);
+        let ctx = ctx.with_progress_reporter(Arc::new(move |detail| {
+            progress_sink
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(detail);
+        }));
         let registry = default_registry();
         let r = dispatch(
             &registry,
@@ -1850,6 +1972,19 @@ mod tests {
         let first = top[0]["score"].as_i64().unwrap();
         let second = top[1]["score"].as_i64().unwrap();
         assert!(first >= second);
+        let snapshot_count = {
+            let snapshots = progress
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let final_snapshot = snapshots.last().unwrap();
+            assert_eq!(final_snapshot.total, 2);
+            assert_eq!(final_snapshot.completed, 2);
+            assert_eq!(final_snapshot.succeeded, 2);
+            assert_eq!(final_snapshot.failed, 0);
+            assert!(final_snapshot.records >= MIN_ANALYSIS_BARS * 2);
+            assert!(final_snapshot.active.is_empty());
+            snapshots.len()
+        };
 
         // Second dispatch is served from the read-through cache.
         let again = dispatch(
@@ -1860,6 +1995,14 @@ mod tests {
         )
         .await;
         assert_eq!(again.summary_json, r.summary_json);
+        assert_eq!(
+            progress
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len(),
+            snapshot_count,
+            "outer tool cache should avoid replaying internal scan work"
+        );
     }
 
     /// Quotes only for 600519; every other code fails, to exercise the
@@ -1900,6 +2043,7 @@ mod tests {
             minimax_search: None,
             finance_news: None,
             iwencai: None,
+            progress: None,
         };
         let registry = default_registry();
         let r = dispatch(&registry, &ctx, "get_watchlist", json!({})).await;

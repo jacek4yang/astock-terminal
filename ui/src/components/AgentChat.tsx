@@ -175,9 +175,93 @@ function StatusBadge({ status }: { status: string }) {
   return <span className={"chip " + s.cls}>{s.text}</span>;
 }
 
+const SENSITIVE_DIAGNOSTIC_KEY = /(?:api[-_ ]?key|token|secret|password|authorization|cookie|credential)/i;
+
+/** Remove credentials recursively before diagnostics are rendered or copied. */
+export function redactDiagnosticValue(value: unknown, key = ""): unknown {
+  if (SENSITIVE_DIAGNOSTIC_KEY.test(key)) return "[已隐藏敏感信息]";
+  if (Array.isArray(value)) return value.map((item) => redactDiagnosticValue(item));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([childKey, childValue]) => [
+        childKey,
+        redactDiagnosticValue(childValue, childKey),
+      ]),
+    );
+  }
+  if (typeof value === "string") {
+    return value
+      .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, "Bearer [已隐藏敏感信息]")
+      .replace(
+        /((?:api[-_ ]?key|token|secret|password|authorization|cookie|credential)\s*[=:]\s*)[^\s,;]+/gi,
+        "$1[已隐藏敏感信息]",
+      );
+  }
+  return value;
+}
+
+function safeArguments(args?: string): unknown {
+  if (!args) return null;
+  try {
+    return redactDiagnosticValue(JSON.parse(args));
+  } catch {
+    return redactDiagnosticValue(args);
+  }
+}
+
+export function buildToolDiagnostic(tool: ToolCallItem, elapsedMs?: number): string {
+  return JSON.stringify(
+    {
+      类型: "智能助手工具步骤诊断",
+      工具: toolDisplayName(tool.name),
+      工具标识: tool.name,
+      调用编号: tool.callId ?? null,
+      状态: tool.done ? (tool.success === false ? "失败" : "完成") : "运行中",
+      批次位置: tool.position != null && tool.total != null ? `${tool.position}/${tool.total}` : null,
+      参数: safeArguments(tool.args),
+      当前阶段: tool.stage ?? null,
+      已耗时毫秒: elapsedMs ?? tool.elapsedMs ?? null,
+      预估毫秒: tool.estimatedMs ?? null,
+      数据来源: tool.source ? sourceDisplayName(tool.source) : null,
+      数据时间: tool.fetchedAt ?? null,
+      缓存键: tool.cacheKey ?? null,
+      错误: tool.error ? redactDiagnosticValue(tool.error) : null,
+      最新详细进度: tool.progressDetail ?? null,
+      时间线: (tool.timeline ?? []).map((entry) => ({
+        时间: new Date(entry.at).toISOString(),
+        类型: entry.kind,
+        说明: redactDiagnosticValue(entry.message),
+        已耗时毫秒: entry.elapsedMs ?? null,
+        详细进度: entry.detail ?? null,
+      })),
+    },
+    null,
+    2,
+  );
+}
+
+async function copyDiagnostic(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return;
+  } catch {
+    // Tauri/WebView clipboard permissions vary. Keep a safe legacy fallback.
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("系统剪贴板不可用");
+}
+
 /** 单条工具调用时间线卡片 */
 function ToolCard({ tool }: { tool: ToolCallItem }) {
   const [open, setOpen] = useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const [now, setNow] = useState(Date.now());
   const businessName = toolDisplayName(tool.name);
   const label = tool.done ? `${businessName}已完成` : `正在${businessName}`;
@@ -192,8 +276,11 @@ function ToolCard({ tool }: { tool: ToolCallItem }) {
     : tool.startedAt == null
       ? undefined
       : now - tool.startedAt;
+  const hasDetailedTotal = Boolean(tool.progressDetail && tool.progressDetail.total > 0);
   const toolPercent = tool.done
     ? 100
+    : hasDetailedTotal
+      ? Math.min(99, Math.max(2, (tool.progressDetail!.completed / tool.progressDetail!.total) * 100))
     : tool.estimatedMs && elapsedMs != null
       ? Math.min(94, Math.max(3, (94 * elapsedMs) / (elapsedMs + tool.estimatedMs * 0.6)))
       : 18;
@@ -201,31 +288,45 @@ function ToolCard({ tool }: { tool: ToolCallItem }) {
   const overEstimate = Boolean(
     !tool.done && tool.estimatedMs && elapsedMs != null && elapsedMs > tool.estimatedMs,
   );
+  const argumentsJson = safeArguments(tool.args);
+  const copy = async (text: string) => {
+    try {
+      await copyDiagnostic(text);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+    window.setTimeout(() => setCopyState("idle"), 2400);
+  };
   return (
-    <div className="rounded border border-slate-200 bg-slate-50 px-2.5 py-1.5 dark:border-slate-800 dark:bg-slate-900/60">
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        <span
-          className={
-            "inline-block h-1.5 w-1.5 rounded-full " +
-            (tool.done
-              ? tool.success === false
-                ? "bg-up"
-                : "bg-down"
-              : "animate-pulse bg-blue-500")
-          }
-        />
-        <span className="font-medium">{label}</span>
-        {tool.position != null && tool.total != null && (
-          <span className="num muted">{tool.position}/{tool.total}</span>
-        )}
-        {elapsedMs != null && <span className="num muted">{(elapsedMs / 1000).toFixed(1)}s</span>}
-        {!tool.done && <span className="muted">{tool.stage ?? "正在后台分析，切换页面也会继续"}</span>}
-        {argumentsToShow.length > 0 && (
-          <button className="muted underline decoration-dotted underline-offset-2" onClick={() => setOpen(!open)}>
-            {open ? "收起分析条件" : "查看分析条件"}
-          </button>
-        )}
-      </div>
+    <div className="rounded border border-slate-200 bg-slate-50 px-2.5 py-1.5 transition-colors hover:border-blue-300 dark:border-slate-800 dark:bg-slate-900/60 dark:hover:border-blue-800">
+      <button
+        type="button"
+        className="flex w-full flex-wrap items-center gap-2 text-left text-xs"
+        aria-expanded={open}
+        title="点击查看调用编号、参数、时间线、数据来源和错误"
+        onClick={() => setOpen((value) => !value)}
+      >
+          <span
+            className={
+              "inline-block h-1.5 w-1.5 rounded-full " +
+              (tool.done
+                ? tool.success === false
+                  ? "bg-up"
+                  : "bg-down"
+                : "animate-pulse bg-blue-500")
+            }
+          />
+          <span className="font-medium">{label}</span>
+          {tool.position != null && tool.total != null && (
+            <span className="num muted">{tool.position}/{tool.total}</span>
+          )}
+          {elapsedMs != null && <span className="num muted">{(elapsedMs / 1000).toFixed(1)}s</span>}
+          {!tool.done && <span className="muted min-w-0 flex-1">{tool.stage ?? "正在后台分析，切换页面也会继续"}</span>}
+          <span className="muted ml-auto shrink-0 underline decoration-dotted underline-offset-2">
+            {open ? "收起任务详情" : "查看任务详情"}
+          </span>
+      </button>
       <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
         <div
           className={
@@ -235,21 +336,123 @@ function ToolCard({ tool }: { tool: ToolCallItem }) {
           style={{ width: `${toolPercent}%` }}
         />
       </div>
+      {tool.progressDetail && (
+        <div className="muted mt-1 flex flex-wrap justify-between gap-x-3 gap-y-0.5 text-[10px]">
+          <span className="num">已处理 {tool.progressDetail.completed} / {tool.progressDetail.total} 只</span>
+          <span className="num">成功 {tool.progressDetail.succeeded} · 失败 {tool.progressDetail.failed} · 缓存命中 {tool.progressDetail.cache_hits}</span>
+          <span className="num">本轮获取 {tool.progressDetail.records.toLocaleString("zh-CN")} 条上游数据</span>
+          <span className="num">当前并行 {tool.progressDetail.active.length} 只</span>
+        </div>
+      )}
       {!tool.done && estimatedSeconds != null && (
         <div className="muted mt-1 flex flex-wrap justify-between gap-2 text-[10px]">
           <span>预计约 {estimatedSeconds} 秒</span>
           <span>{overEstimate ? "已超过预估，仍在后台继续，可随时取消" : "预估仅供参考，不会自动超时"}</span>
         </div>
       )}
-      {open && argumentsToShow.length > 0 && (
-        <dl className="muted mt-1 grid gap-x-3 gap-y-0.5 text-xs sm:grid-cols-2">
-          {argumentsToShow.map((item, index) => (
-            <div key={`${item.label}-${index}`} className="flex min-w-0 gap-1">
-              <dt className="shrink-0">{item.label}：</dt>
-              <dd className="num min-w-0 break-all">{item.value}</dd>
+      {open && (
+        <div className="mt-2 space-y-2 border-t border-slate-200 pt-2 text-xs dark:border-slate-800">
+          <div className="grid gap-x-4 gap-y-1 sm:grid-cols-2">
+            <div><span className="muted">调用编号：</span><span className="num break-all">{tool.callId ?? "历史记录未保存编号"}</span></div>
+            <div><span className="muted">当前状态：</span>{tool.done ? (tool.success === false ? "执行失败" : "执行完成") : "后台运行中"}</div>
+            {tool.startedAt != null && <div><span className="muted">开始时间：</span><span className="num">{new Date(tool.startedAt).toLocaleString("zh-CN", { hour12: false })}</span></div>}
+            {tool.estimatedMs != null && <div><span className="muted">参考预估：</span><span className="num">约 {(tool.estimatedMs / 1000).toFixed(0)} 秒（不作为超时限制）</span></div>}
+            {tool.source && <div><span className="muted">数据来源：</span>{sourceDisplayName(tool.source)}</div>}
+            {tool.fetchedAt && <div><span className="muted">数据时间：</span><span className="num">{fetchedAtDisplay(tool.fetchedAt)}</span></div>}
+            {tool.cacheKey && <div className="sm:col-span-2"><span className="muted">缓存键：</span><span className="num break-all">{tool.cacheKey}</span></div>}
+          </div>
+          {argumentsToShow.length > 0 && (
+            <dl className="grid gap-x-3 gap-y-0.5 rounded bg-slate-100 p-2 dark:bg-slate-950/60 sm:grid-cols-2">
+              {argumentsToShow.map((item, index) => (
+                <div key={`${item.label}-${index}`} className="flex min-w-0 gap-1">
+                  <dt className="muted shrink-0">{item.label}：</dt>
+                  <dd className="num min-w-0 break-all">{item.value}</dd>
+                </div>
+              ))}
+            </dl>
+          )}
+          {tool.args && (
+            <details>
+              <summary className="muted cursor-pointer select-none">查看脱敏后的原始参数</summary>
+              <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-slate-950 p-2 text-[11px] text-slate-200">
+                {typeof argumentsJson === "string" ? argumentsJson : JSON.stringify(argumentsJson, null, 2)}
+              </pre>
+            </details>
+          )}
+          {tool.progressDetail && (
+            <section className="rounded border border-blue-200 bg-blue-50/70 p-2.5 dark:border-blue-900/70 dark:bg-blue-950/25">
+              <div className="mb-2 flex items-center gap-2">
+                <div className="micro-label text-blue-700 dark:text-blue-300">候选股处理明细</div>
+                <span className="num ml-auto text-blue-700 dark:text-blue-300">{tool.progressDetail.completed} / {tool.progressDetail.total}</span>
+              </div>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                {[
+                  ["成功", tool.progressDetail.succeeded],
+                  ["失败", tool.progressDetail.failed],
+                  ["缓存命中", tool.progressDetail.cache_hits],
+                  ["新获取数据", `${tool.progressDetail.records.toLocaleString("zh-CN")} 条`],
+                  ["当前并行", `${tool.progressDetail.active.length} 只`],
+                  ["剩余", `${Math.max(0, tool.progressDetail.total - tool.progressDetail.completed)} 只`],
+                ].map(([metricLabel, value]) => (
+                  <div key={metricLabel} className="rounded bg-white/80 px-2 py-1.5 dark:bg-slate-950/50">
+                    <div className="muted text-[10px]">{metricLabel}</div>
+                    <div className="num mt-0.5 font-medium">{value}</div>
+                  </div>
+                ))}
+              </div>
+              {tool.progressDetail.active.length > 0 && (
+                <details className="mt-2" open>
+                  <summary className="cursor-pointer select-none font-medium">正在处理的股票（{tool.progressDetail.active.length}）</summary>
+                  <ul className="mt-1.5 space-y-1">
+                    {tool.progressDetail.active.map((item) => (
+                      <li key={item.label} className="grid gap-1 rounded bg-white/80 px-2 py-1.5 dark:bg-slate-950/50 sm:grid-cols-[8rem_1fr]">
+                        <span className="num font-medium">{item.label}</span>
+                        <span className="muted">{item.stage}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+              {tool.progressDetail.recent_errors.length > 0 && (
+                <details className="mt-2">
+                  <summary className="cursor-pointer select-none font-medium text-red-600 dark:text-red-300">最近错误（{tool.progressDetail.recent_errors.length}）</summary>
+                  <ul className="mt-1.5 space-y-1 text-red-700 dark:text-red-300">
+                    {tool.progressDetail.recent_errors.map((error, index) => (
+                      <li key={index} className="break-all rounded bg-red-50 px-2 py-1 dark:bg-red-950/40">{String(redactDiagnosticValue(error))}</li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+            </section>
+          )}
+          {(tool.timeline?.length ?? 0) > 0 && (
+            <div>
+              <div className="micro-label mb-1">工作时间线</div>
+              <ol className="space-y-1 border-l border-slate-300 pl-3 dark:border-slate-700">
+                {tool.timeline!.map((entry, index) => (
+                  <li key={`${entry.at}-${index}`} className="grid gap-x-2 sm:grid-cols-[7.5rem_1fr_auto]">
+                    <span className="num muted">{new Date(entry.at).toLocaleTimeString("zh-CN", { hour12: false })}</span>
+                    <span className={entry.kind === "error" ? "text-red-600 dark:text-red-300" : ""}>{entry.message}</span>
+                    {entry.elapsedMs != null && <span className="num muted">{(entry.elapsedMs / 1000).toFixed(1)}s</span>}
+                  </li>
+                ))}
+              </ol>
             </div>
-          ))}
-        </dl>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" className="btn" onClick={() => void copy(buildToolDiagnostic(tool, elapsedMs))}>
+              复制完整诊断
+            </button>
+            {tool.error && (
+              <button type="button" className="btn" onClick={() => void copy(String(redactDiagnosticValue(tool.error)))}>
+                复制错误
+              </button>
+            )}
+            {copyState === "copied" && <span className="text-emerald-600 dark:text-emerald-400">已复制，可直接粘贴用于诊断</span>}
+            {copyState === "failed" && <span className="text-red-600 dark:text-red-300">剪贴板不可用，请展开参数后手动选择复制</span>}
+            <span className="muted ml-auto">密钥、令牌和认证字段会自动隐藏</span>
+          </div>
+        </div>
       )}
       {tool.done && (tool.source || tool.fetchedAt) && (
         <div className="muted mt-1 text-xs">
@@ -262,6 +465,175 @@ function ToolCard({ tool }: { tool: ToolCallItem }) {
           本步骤未成功：{tool.error}
         </div>
       )}
+    </div>
+  );
+}
+
+const RESEARCH_MODE_LABEL: Record<string, string> = {
+  quick: "快速模式",
+  deep: "深度模式",
+  plan: "计划模式",
+};
+const REASONING_DEPTH_LABEL: Record<string, string> = {
+  standard: "标准思考",
+  deep: "深入思考",
+  maximum: "极深思考",
+};
+
+export function buildTaskDiagnostic(
+  task: AgentTask,
+  tools: ToolCallItem[] = [],
+  progress: AgentProgress | null = null,
+): string {
+  return JSON.stringify(
+    redactDiagnosticValue({
+      类型: "智能助手后台任务诊断",
+      任务编号: task.id,
+      会话编号: task.conversation_id,
+      状态: STATUS_LABEL[task.status]?.text ?? task.status,
+      创建时间: new Date(task.created_at * 1000).toISOString(),
+      更新时间: new Date(task.updated_at * 1000).toISOString(),
+      用户目标: task.prompt,
+      研究模式: task.research_mode,
+      思考深度: task.reasoning_depth,
+      指定模型: task.model,
+      当前轮次: task.round,
+      轮次上限: task.max_rounds,
+      可用工具: task.enabled_tools ?? "系统默认完整工具集",
+      额度恢复后自动继续: task.auto_resume_on_quota,
+      专家数量: task.specialist_count,
+      已收集证据: task.evidence_count,
+      上下文压缩次数: task.context_compactions,
+      已完成多专家复核: task.multi_agent_reviewed,
+      当前进度: progress,
+      错误: task.last_error,
+      工具步骤: tools.map((tool) => JSON.parse(buildToolDiagnostic(tool))),
+    }),
+    null,
+    2,
+  );
+}
+
+function TaskDetailDialog({
+  task,
+  tools,
+  progress,
+  isCurrent,
+  onClose,
+  onCancel,
+  onResume,
+  onOpenConversation,
+  canOpenConversation,
+}: {
+  task: AgentTask;
+  tools: ToolCallItem[];
+  progress: AgentProgress | null;
+  isCurrent: boolean;
+  onClose: () => void;
+  onCancel: () => void;
+  onResume: () => void;
+  onOpenConversation: () => void;
+  canOpenConversation: boolean;
+}) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const duration = Math.max(0, (task.updated_at - task.created_at) * 1000);
+  const canResume = task.status === "suspended" || task.status === "interrupted" || task.status === "waiting";
+  const canCancel = task.status === "running" || task.status === "queued" || task.status === "starting";
+  const copy = async (text: string) => {
+    try {
+      await copyDiagnostic(text);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+    window.setTimeout(() => setCopyState("idle"), 2400);
+  };
+  return (
+    <div className="absolute inset-0 z-50 flex justify-end bg-slate-950/45" role="presentation" onMouseDown={onClose}>
+      <section
+        className="flex h-full w-full max-w-2xl flex-col border-l border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-950"
+        role="dialog"
+        aria-modal="true"
+        aria-label="后台任务详情"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="flex items-center gap-2 border-b border-slate-200 px-4 py-3 dark:border-slate-800">
+          <div>
+            <h2 className="font-semibold">后台任务详情</h2>
+            <div className="num muted mt-0.5 text-xs break-all">{task.id}</div>
+          </div>
+          <StatusBadge status={task.status} />
+          {isCurrent && <span className="chip bg-blue-600/10 text-blue-600 dark:text-blue-400">当前对话</span>}
+          <button type="button" className="btn ml-auto" onClick={onClose}>关闭</button>
+        </header>
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 text-sm">
+          {task.last_error && (
+            <div className="rounded border border-red-300 bg-red-50 p-3 text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
+              <div className="mb-1 font-semibold">检测到错误</div>
+              <div className="whitespace-pre-wrap break-all text-xs">{String(redactDiagnosticValue(task.last_error))}</div>
+              <button type="button" className="btn mt-2" onClick={() => void copy(String(redactDiagnosticValue(task.last_error)))}>复制错误</button>
+            </div>
+          )}
+          {progress && isCurrent && <ResearchProgress progress={progress} />}
+          <section className="rounded border border-slate-200 dark:border-slate-800">
+            <div className="card-title">任务概况</div>
+            <dl className="grid gap-x-4 gap-y-2 p-3 text-xs sm:grid-cols-2">
+              <div><dt className="muted">创建时间</dt><dd className="num mt-0.5">{fmtUnix(task.created_at)}</dd></div>
+              <div><dt className="muted">最近更新</dt><dd className="num mt-0.5">{fmtUnix(task.updated_at)}</dd></div>
+              <div><dt className="muted">已记录耗时</dt><dd className="num mt-0.5">{(duration / 1000).toFixed(1)} 秒</dd></div>
+              <div><dt className="muted">分析轮次</dt><dd className="num mt-0.5">{task.round}{task.max_rounds ? ` / ${task.max_rounds}` : ""}</dd></div>
+              <div><dt className="muted">研究模式</dt><dd className="mt-0.5">{RESEARCH_MODE_LABEL[task.research_mode ?? ""] ?? "系统默认"}</dd></div>
+              <div><dt className="muted">思考深度</dt><dd className="mt-0.5">{REASONING_DEPTH_LABEL[task.reasoning_depth ?? ""] ?? "系统默认"}</dd></div>
+              <div><dt className="muted">底层模型</dt><dd className="mt-0.5">{task.model ?? "由系统按任务难度自动选择"}</dd></div>
+              <div><dt className="muted">断点续跑</dt><dd className="mt-0.5">{task.auto_resume_on_quota ? "额度恢复后自动继续" : "未开启自动继续"}</dd></div>
+              <div><dt className="muted">证据记录</dt><dd className="num mt-0.5">{task.evidence_count} 条</dd></div>
+              <div><dt className="muted">上下文压缩</dt><dd className="num mt-0.5">{task.context_compactions} 次</dd></div>
+              <div><dt className="muted">独立专家</dt><dd className="num mt-0.5">{task.specialist_count} 位</dd></div>
+              <div><dt className="muted">专家复核</dt><dd className="mt-0.5">{task.multi_agent_reviewed ? "已完成" : task.specialist_count ? "尚未完成" : "本轮未配置"}</dd></div>
+              <div className="sm:col-span-2"><dt className="muted">所属会话</dt><dd className="num mt-0.5 break-all">{task.conversation_id}</dd></div>
+            </dl>
+          </section>
+          {task.prompt && (
+            <section className="rounded border border-slate-200 p-3 dark:border-slate-800">
+              <div className="micro-label mb-1">本轮用户目标</div>
+              <div className="whitespace-pre-wrap break-words">{task.prompt}</div>
+            </section>
+          )}
+          <section className="rounded border border-slate-200 p-3 dark:border-slate-800">
+            <div className="mb-2 flex items-center gap-2">
+              <div className="micro-label">本轮工具权限</div>
+              <span className="num muted ml-auto">{task.enabled_tools?.length ?? DEFAULT_AGENT_TOOLS.length} 项</span>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {(task.enabled_tools ?? [...DEFAULT_AGENT_TOOLS]).map((name) => (
+                <span key={name} className="chip bg-slate-100 text-slate-600 dark:bg-slate-900 dark:text-slate-300">{toolDisplayName(name)}</span>
+              ))}
+              {task.enabled_tools?.length === 0 && <span className="muted text-xs">本轮关闭了全部工具，只进行文本分析。</span>}
+            </div>
+          </section>
+          {isCurrent && tools.length > 0 && (
+            <section>
+              <div className="mb-2 flex items-center"><div className="micro-label">具体工作步骤</div><span className="num muted ml-auto">{tools.length} 项</span></div>
+              <div className="space-y-2">{tools.map((tool) => <ToolCard key={tool.key} tool={tool} />)}</div>
+            </section>
+          )}
+          {!isCurrent && (
+            <div className="rounded bg-blue-50 p-3 text-xs text-blue-700 dark:bg-blue-950/30 dark:text-blue-300">
+              点击“打开所属对话”可查看该任务保存的完整问答与工具结果。历史任务的高频心跳已限长保存，避免日志无限占用空间。
+            </div>
+          )}
+        </div>
+        <footer className="flex flex-wrap items-center gap-2 border-t border-slate-200 px-4 py-3 dark:border-slate-800">
+          <button type="button" className="btn-primary" onClick={() => void copy(buildTaskDiagnostic(task, tools, progress))}>复制完整诊断</button>
+          <button type="button" className="btn" disabled={!canOpenConversation} onClick={onOpenConversation}>
+            {isCurrent ? "当前对话已打开" : "打开所属对话"}
+          </button>
+          {canResume && <button type="button" className="btn" onClick={onResume}>选择并继续任务</button>}
+          {canCancel && <button type="button" className="btn text-red-600 dark:text-red-300" onClick={onCancel}>取消任务</button>}
+          {copyState === "copied" && <span className="text-xs text-emerald-600 dark:text-emerald-400">诊断信息已复制并自动脱敏</span>}
+          {copyState === "failed" && <span className="text-xs text-red-600 dark:text-red-300">剪贴板不可用</span>}
+        </footer>
+      </section>
     </div>
   );
 }
@@ -546,6 +918,7 @@ export default function AgentChat({
   const status = useAgentSession((s) => s.status);
   const compactionCount = useAgentSession((s) => s.compactionCount);
   const taskId = useAgentSession((s) => s.taskId);
+  const conversationId = useAgentSession((s) => s.conversationId);
   const err = useAgentSession((s) => s.err);
   const progress = useAgentSession((s) => s.progress);
   const pendingQuestions = useAgentSession((s) => s.pendingQuestions ?? []);
@@ -564,6 +937,7 @@ export default function AgentChat({
   const [convs, setConvs] = useState<AgentConversation[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [taskDetail, setTaskDetail] = useState<AgentTask | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -798,12 +1172,34 @@ export default function AgentChat({
       for (const m of history) {
         out.push(...historyToMsgs(m, out));
       }
+      const loadedAt = Date.now();
+      const normalized = out.map((message) => ({
+        ...message,
+        tools: message.tools.map((tool) =>
+          tool.done
+            ? tool
+            : {
+                ...tool,
+                done: true,
+                success: false,
+                error: "历史记录中未找到对应工具结果，可能在应用退出时被中断。",
+                timeline: [
+                  ...(tool.timeline ?? []),
+                  {
+                    at: loadedAt,
+                    kind: "error" as const,
+                    message: "加载历史时未找到对应结果",
+                  },
+                ],
+              },
+        ),
+      }));
       useAgentSession.setState({
-        msgs: out,
+        msgs: normalized,
         conversationId: c.id,
         taskId: null,
         lastSeq: 0,
-        status: hasUnansweredClarification(out) ? "waiting_input" : "idle",
+        status: hasUnansweredClarification(normalized) ? "waiting_input" : "idle",
         err: null,
         progress: null,
       });
@@ -831,6 +1227,66 @@ export default function AgentChat({
     } catch (e) {
       setErr(errMsg(e));
     }
+  };
+
+  const showCurrentTaskDetail = () => {
+    if (!taskId) return;
+    const known = tasks.find((task) => task.id === taskId);
+    if (known) {
+      setTaskDetail(known);
+      return;
+    }
+    const now = Math.floor(Date.now() / 1000);
+    const lastUser = [...msgs].reverse().find((message) => message.role === "user");
+    setTaskDetail({
+      id: taskId,
+      conversation_id: conversationId ?? taskId,
+      kind: "chat",
+      status,
+      created_at: now,
+      updated_at: now,
+      prompt: lastUser?.raw ?? null,
+      research_mode: researchMode,
+      reasoning_depth: reasoningDepth,
+      model: null,
+      round: progress?.round ?? 0,
+      max_rounds: progress?.maxRounds ?? null,
+      enabled_tools: enabledTools,
+      auto_resume_on_quota: autoResumeOnQuota,
+      specialist_count: 0,
+      evidence_count: msgs.reduce((count, message) => count + (message.report?.evidence.length ?? 0), 0),
+      context_compactions: compactionCount,
+      multi_agent_reviewed: false,
+      last_error: err,
+    });
+  };
+
+  const cancelTaskFromDetail = async () => {
+    const selected = taskDetail;
+    if (!selected) return;
+    setErr(null);
+    try {
+      await agentCancel(selected.id);
+      if (selected.id === taskId) {
+        useAgentSession.setState({ status: "cancelled", progress: null });
+        patchLastAssistant((message) => ({ ...message, failed: "已手动取消。", done: true }));
+      }
+      setTaskDetail({ ...selected, status: "cancelled", updated_at: Math.floor(Date.now() / 1000) });
+      await refreshTasks();
+    } catch (error) {
+      setErr(errMsg(error));
+    }
+  };
+
+  const openTaskConversation = async () => {
+    const selected = taskDetail;
+    if (!selected || selected.id === taskId || running) return;
+    await loadConversation({
+      id: selected.conversation_id,
+      title: selected.prompt?.slice(0, 40) ?? "智能助手任务",
+      created_at: selected.created_at,
+    });
+    setTaskDetail(null);
   };
 
   const chips = [
@@ -893,18 +1349,34 @@ export default function AgentChat({
             <div className="muted px-1 text-xs">暂无任务记录</div>
           ) : (
             tasks.map((t) => (
-              <div
+              <button
+                type="button"
                 key={t.id}
-                className="flex items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-slate-100 dark:hover:bg-slate-800"
+                className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-slate-100 dark:hover:bg-slate-800"
+                title="点击查看任务详情和诊断信息"
+                onClick={() => setTaskDetail(t)}
               >
                 <StatusBadge status={t.status} />
                 <span className="num muted truncate">{fmtUnix(t.created_at)}</span>
+                <span className="muted ml-auto shrink-0 underline decoration-dotted underline-offset-2">详情</span>
                 {(t.status === "suspended" || t.status === "interrupted") && (
-                  <button className="btn ml-auto shrink-0" onClick={() => resumeTask(t)}>
+                  <span
+                    className="btn shrink-0"
+                    role="button"
+                    tabIndex={0}
+                    onClick={(event) => { event.stopPropagation(); resumeTask(t); }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        resumeTask(t);
+                      }
+                    }}
+                  >
                     继续
-                  </button>
+                  </span>
                 )}
-              </div>
+              </button>
             ))
           )}
         </div>
@@ -915,6 +1387,19 @@ export default function AgentChat({
   return (
     <div className="relative flex h-full min-h-0 overflow-hidden">
       {historyOpen && historyPanel}
+      {taskDetail && (
+        <TaskDetailDialog
+          task={taskDetail}
+          tools={taskDetail.id === taskId ? msgs.flatMap((message) => message.tools) : []}
+          progress={taskDetail.id === taskId ? progress : null}
+          isCurrent={taskDetail.id === taskId}
+          canOpenConversation={taskDetail.id !== taskId && !running}
+          onClose={() => setTaskDetail(null)}
+          onCancel={() => void cancelTaskFromDetail()}
+          onResume={() => { resumeTask(taskDetail); setTaskDetail(null); }}
+          onOpenConversation={() => void openTaskConversation()}
+        />
+      )}
 
       {/* 对话主区 */}
       <section className="flex min-w-0 flex-1 flex-col">
@@ -941,7 +1426,12 @@ export default function AgentChat({
             {REASONING_DEPTHS.find((depth) => depth.id === reasoningDepth)?.label ?? "深入"}思考
           </span>
           {taskId && status !== "idle" && (
-            <span className="chip num bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-300" title={taskId}>
+            <button
+              type="button"
+              className="chip num bg-slate-100 text-slate-500 hover:ring-1 hover:ring-blue-400 dark:bg-slate-800 dark:text-slate-300"
+              title="点击查看当前后台任务详情"
+              onClick={showCurrentTaskDetail}
+            >
               {{
                 running: "后台任务运行中",
                 waiting_input: "等待你确认研究条件",
@@ -950,7 +1440,8 @@ export default function AgentChat({
                 failed: "本轮分析未完成",
                 cancelled: "本轮分析已取消",
               }[status] ?? "后台任务"}
-            </span>
+              <span className="ml-1 font-sans underline decoration-dotted underline-offset-2">详情</span>
+            </button>
           )}
           <div className="ml-auto flex items-center gap-2">
             <button className="btn" onClick={() => setSettingsOpen((open) => !open)}>
@@ -1240,9 +1731,19 @@ export function historyToMsgs(m: AgentMessage, out: ChatMsg[]): ChatMsg[] {
   if (m.role === "assistant") {
     const tools = m.tool_calls.map((call) => ({
       key: nextAgentKey(),
+      callId: call.id ?? undefined,
       name: call.name || "tool",
       args: call.arguments ?? undefined,
-      done: true,
+      done: false,
+      startedAt: m.created_at * 1000,
+      stage: "已从历史记录恢复工具调用",
+      timeline: [
+        {
+          at: m.created_at * 1000,
+          kind: "started" as const,
+          message: "工具调用已保存",
+        },
+      ],
     }));
     return [
       {
@@ -1260,17 +1761,72 @@ export function historyToMsgs(m: AgentMessage, out: ChatMsg[]): ChatMsg[] {
   const last = out[out.length - 1];
   if (last && last.role === "assistant") {
     let name = "tool";
+    let cacheKey: string | undefined;
+    let source: string | undefined;
+    let fetchedAt: string | undefined;
+    let error: string | undefined;
     try {
       const j = JSON.parse(m.content) as Record<string, unknown>;
       if (typeof j.name === "string") name = j.name;
       else if (typeof j.tool === "string") name = j.tool;
+      if (typeof j.cache_key === "string") cacheKey = j.cache_key;
+      if (typeof j.source === "string") source = j.source;
+      if (typeof j.fetched_at === "string") fetchedAt = j.fetched_at;
+      if (typeof j.error === "string") error = j.error;
     } catch {
       /* content 非 JSON 时保持默认名 */
     }
-    last.tools = [
-      ...last.tools,
-      { key: nextAgentKey(), name, args: m.content, done: true },
-    ];
+    const matchedIndex = last.tools.findIndex(
+      (tool) => !tool.done && m.tool_call_id != null && tool.callId === m.tool_call_id,
+    );
+    const finishedAt = m.created_at * 1000;
+    const finished = {
+      callId: m.tool_call_id ?? undefined,
+      name,
+      done: true,
+      success: error == null,
+      cacheKey,
+      source,
+      fetchedAt,
+      error,
+      stage: error == null ? "历史工具结果已加载" : "历史工具执行失败",
+    };
+    if (matchedIndex >= 0) {
+      const existing = last.tools[matchedIndex];
+      last.tools = last.tools.map((tool, index) =>
+        index === matchedIndex
+          ? {
+              ...existing,
+              ...finished,
+              name: existing.name || name,
+              timeline: [
+                ...(existing.timeline ?? []),
+                {
+                  at: finishedAt,
+                  kind: error == null ? ("success" as const) : ("error" as const),
+                  message: error ?? "工具结果已保存",
+                },
+              ],
+            }
+          : tool,
+      );
+    } else {
+      last.tools = [
+        ...last.tools,
+        {
+          key: nextAgentKey(),
+          args: m.content,
+          ...finished,
+          timeline: [
+            {
+              at: finishedAt,
+              kind: error == null ? ("success" as const) : ("error" as const),
+              message: error ?? "历史工具结果已保存",
+            },
+          ],
+        },
+      ];
+    }
     return [];
   }
   return [];
