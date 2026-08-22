@@ -1,0 +1,41 @@
+{
+  "_comment": "SYNTHETIC fixture derived from the pywencai response schema (convert.py: data.answer[0].txt[0].content.components[*].data.datas). NOT captured from the live server — the live path was captcha-walled during the spike. Field names mirror real iwencai column headers.",
+  "code": 0,
+  "msg": null,
+  "data": {
+    "answer": [
+      {
+        "txt": [
+          {
+            "content": {
+              "components": [
+                {
+                  "show_type": "common",
+                  "data": {
+                    "meta": { "extra": { "row_count": 2 } },
+                    "datas": [
+                      {
+                        "股票代码": "300750",
+                        "股票简称": "宁德时代",
+                        "最新价": 265.3,
+                        "涨跌幅": 1.87,
+                        "换手率": 6.12
+                      },
+                      {
+                        "股票代码": "002594",
+                        "股票简称": "比亚迪",
+                        "最新价": 105.42,
+                        "涨跌幅": -0.63,
+                        "换手率": 5.31
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

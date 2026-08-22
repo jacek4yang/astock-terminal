@@ -1,0 +1,21 @@
+[package]
+name = "astock-minimax"
+description = "MiniMax AI provider: endpoint/region detection, Token Plan quota, streaming chat with tool calling, secure key storage"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+reqwest.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+keyring.workspace = true
+governor.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

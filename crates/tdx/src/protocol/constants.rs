@@ -1,0 +1,49 @@
+//! 协议常量与命令码。
+//!
+//! 内化自 tdxrs `src/protocol/constants.rs`（MIT，见 crate 根文档注释）。
+
+/// 请求帧头魔数
+pub const MAGIC: u16 = 0x010C;
+/// 请求头大小（不含 payload）
+pub const REQUEST_HEADER_SIZE: usize = 12;
+/// 响应头大小
+pub const RESPONSE_HEADER_SIZE: usize = 16;
+
+// 三步握手固定字节序列（与 pytdx 一致）
+pub const SETUP_CMD1: &[u8] = &[
+    0x0c, 0x02, 0x18, 0x93, 0x00, 0x01, 0x03, 0x00, 0x03, 0x00, 0x0d, 0x00, 0x01,
+];
+pub const SETUP_CMD2: &[u8] = &[
+    0x0c, 0x02, 0x18, 0x94, 0x00, 0x01, 0x03, 0x00, 0x03, 0x00, 0x0d, 0x00, 0x02,
+];
+pub const SETUP_CMD3: &[u8] = &[
+    0x0c, 0x03, 0x18, 0x99, 0x00, 0x01, 0x20, 0x00, 0x20, 0x00, 0xdb, 0x0f, 0xd5, 0xd0, 0xc9, 0xcc,
+    0xd6, 0xa4, 0xa8, 0xaf, 0x00, 0x00, 0x00, 0x8f, 0xc2, 0x25, 0x40, 0x13, 0x00, 0x00, 0xd5, 0x00,
+    0xc9, 0xcc, 0xbd, 0xf0, 0xd7, 0xea, 0x00, 0x00, 0x00, 0x02,
+];
+
+/// 证券数量（心跳/活性探测也用它）
+pub const CMD_SECURITY_COUNT: u16 = 0x044E;
+/// 证券列表
+pub const CMD_SECURITY_LIST: u16 = 0x0450;
+/// K 线（个股 + 指数共用）
+pub const CMD_SECURITY_BARS: u16 = 0x052D;
+/// 实时五档快照（特殊头，命令码为 u32）
+pub const CMD_SECURITY_QUOTES: u32 = 0x5053E;
+/// 历史分时（当日分时也走它，绕开 0x051D 已知价格编码 bug）
+pub const CMD_HISTORY_MINUTE_TIME: u16 = 0x0FB4;
+
+/// 市场：深圳
+pub const MARKET_SZ: u8 = 0;
+/// 市场：上海
+pub const MARKET_SH: u8 = 1;
+
+/// 单次 K 线请求上限（服务端硬限制）
+pub const MAX_KLINE_COUNT: u16 = 800;
+/// 单次批量五档查询上限（服务端硬限制）
+pub const MAX_QUOTES_COUNT: usize = 60;
+/// 证券列表每页条数
+pub const SECURITY_LIST_PAGE: u16 = 1000;
+
+/// 默认端口
+pub const DEFAULT_PORT: u16 = 7709;

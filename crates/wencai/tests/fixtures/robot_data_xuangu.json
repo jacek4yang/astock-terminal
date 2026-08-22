@@ -1,0 +1,16 @@
+{
+  "_comment": "SYNTHETIC fixture derived from pywencai's xuangu_tableV1 handling (convert.py): the first page response carries no datas; rows come from gateway/urp/v7/landing/getDataList using footer_info.url query params + meta.extra.condition.",
+  "code": 0,
+  "msg": null,
+  "data": {
+    "answer": [
+      {
+        "txt": [
+          {
+            "content": "{\"components\":[{\"show_type\":\"xuangu_tableV1\",\"cid\":\"12345\",\"puuid\":\"abcde\",\"config\":{\"other_info\":{\"footer_info\":{\"url\":\"http://www.iwencai.com/gateway/urp/v7/landing/getDataList?comp_id=12345&uuid=abcde&urp_sort_way=desc&urp_sort_index=%E6%B6%A8%E8%B7%8C%E5%B9%85&page=1&perpage=100\"}}},\"data\":{\"meta\":{\"extra\":{\"row_count\":42,\"condition\":[{\"name\":\"换手率\",\"key\":\"hs\",\"value\":\">5%\",\"type\":\"range\"}]}}}}]}"
+          }
+        ]
+      }
+    ]
+  }
+}

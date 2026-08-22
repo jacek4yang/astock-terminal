@@ -1,0 +1,17 @@
+[package]
+name = "astock-quant"
+description = "Quant Lab: returns, volatility, correlations, lead-lag, cointegration, GARCH, Kalman, HMM, change-point, PCA, Monte Carlo"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+astock-core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+nalgebra = "0.33"
+statrs = "0.18"
+rand.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

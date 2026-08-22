@@ -1,0 +1,21 @@
+[package]
+name = "astock-graph"
+description = "Supply-chain knowledge graph + event propagation engine (multi-hop transmission, provenance-tracked edges)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+astock-core = { path = "../core" }
+astock-market-data = { path = "../market-data" }
+astock-storage = { path = "../storage" }
+tokio.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+tempfile = "3"

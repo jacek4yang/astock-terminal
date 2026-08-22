@@ -1,0 +1,14 @@
+[package]
+name = "astock-technical"
+description = "Deterministic technical-analysis engine: indicators, trend/volume-price/pattern/breakout/CANSLIM modules, composite signal engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+proptest.workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "astock-trading-rules"
+description = "Dynamic, versioned A-share trading rules (limit-up/down, T+1, fees, calendars)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+once_cell.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

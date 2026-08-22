@@ -1,0 +1,29 @@
+[package]
+name = "astock-market-data"
+description = "Market data provider abstraction + EastMoney/Tencent/Sina adapters, adaptive rate limiting, failover"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+astock-core = { path = "../core" }
+astock-tdx = { path = "../tdx" }
+astock-joinquant = { path = "../joinquant" }
+tokio.workspace = true
+reqwest.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+lru.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+governor.workspace = true
+rand.workspace = true
+regex.workspace = true
+once_cell.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

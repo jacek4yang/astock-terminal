@@ -1,0 +1,20 @@
+[package]
+name = "astock-fundamental"
+description = "Fundamental analysis: financial statements (EastMoney F10), ratios, DuPont, F/Z/M-scores, anomaly flags, valuation"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+astock-core = { path = "../core" }
+astock-market-data = { path = "../market-data" }
+tokio.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+proptest.workspace = true

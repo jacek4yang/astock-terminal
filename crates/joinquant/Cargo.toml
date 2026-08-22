@@ -1,0 +1,27 @@
+[package]
+name = "astock-joinquant"
+description = "JoinQuant (聚宽) research-environment channel: web login (+ slider captcha via astock-captcha) → JupyterHub relay → Jupyter kernel code execution over WebSocket, pure Rust, no browser"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+astock-captcha = { path = "../captcha" }
+reqwest = { workspace = true, features = ["cookies"] }
+tokio.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+regex.workspace = true
+rand.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }
+base64 = "0.22"
+tokio-tungstenite = { version = "0.24", default-features = false, features = [
+    "connect",
+    "handshake",
+    "rustls-tls-webpki-roots",
+] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

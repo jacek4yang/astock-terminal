@@ -1,0 +1,16 @@
+[package]
+name = "astock-chanlun"
+description = "Chan theory (缠论) engine: containment merge, fractals, strokes, zhongshu, MACD divergence, buy/sell points (daily + minute)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+# Test-only, pinned by the workspace manifest; required for the mandated
+# proptest invariant pass (no library dependency added).
+proptest.workspace = true

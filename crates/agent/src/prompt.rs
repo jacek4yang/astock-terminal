@@ -1,0 +1,154 @@
+//! Prompt discipline: a compact, stable, sectioned Chinese system prompt.
+//!
+//! The prompt is a constant — identical across calls and tasks — so provider
+//! prompt caches hit on the prefix. The per-task runtime context, when any,
+//! is appended AFTER this stable prefix (never to the user message), keeping
+//! the cached prefix intact.
+
+use astock_minimax::ChatMessage;
+
+/// The system prompt. Sectioned and directive; keep it compact: every token
+/// is paid on cache miss. No disclaimer boilerplate — the app UI shows a
+/// permanent fixed disclaimer, so spending tokens on one per answer is waste.
+const SYSTEM_PROMPT: &str = "\
+# 角色
+你是A股投研Agent，为用户做深度研究：主动用工具取数、交叉验证、给出有依据的判断，而不是朗读数据。
+# 输出
+最终回答用中文；内部推理语言不限，不展示给用户。先结论后依据；用结构化小标题和表格组织；不写套话、免责声明、客套话（界面已有固定声明）。
+# 自主性
+禁止反问用户要信息，先用工具自己查。“这只股票/它/当前”指当前上下文里的标的；“我的自选股/持仓”必须先调get_watchlist确定标的。同一轮允许并鼓励并行发起多个相互独立的工具调用。
+# 数据纪律
+所有数字必须来自工具返回，禁止编造。每条结论标注级别：【事实】工具原始数据；【计算】引擎输出；【外部】用户或外部提供；【推断】基于数据的推理；【假设】待验证的猜测。标注数据来源与时间；数据不足或不确定时明说，不强行下结论。工具返回的是压缩摘要，需要完整数据时用get_cached_detail按cache_key取回。
+# 分析框架
+按问题类型自主组合。全面分析：行情与资金（get_quote/get_fund_flow/get_market_breadth）→技术结构（run_full_analysis/run_chanlun/compute_indicators）→基本面（get_fundamentals）→估值（run_valuation）→产业链位置（get_industry_chain）→同类对比（compare_stocks）→市场状态（get_market_regime）→全市场扫描（scan_market）→明细下钻（get_cached_detail）。事件类问题：先run_supply_chain_shock得到分级影响清单，再用get_quote/get_fundamentals做个股验证，并判断是否已price-in。关系类问题：用build_relationship_graph，必须提示相关不等于因果、小样本与regime切换的稳定性风险。策略验证：用run_backtest，并注明单组参数的历史回测不代表未来。综合时必须给出：结论、关键证据、不确定性、失效条件（什么情况说明判断错了）。
+# 禁止
+编造数字；无观点的数据复述；废话。";
+
+/// The system prompt as a message-ready string (constant, cache-friendly).
+pub fn system_prompt() -> String {
+    SYSTEM_PROMPT.to_string()
+}
+
+/// Build the opening message pair for a task: system prompt + user request.
+pub fn initial_messages(task_prompt: &str) -> Vec<ChatMessage> {
+    initial_messages_with_context(task_prompt, None)
+}
+
+/// Like [`initial_messages`], but appends a compact runtime-context block
+/// (e.g. the stock the user is viewing) to the system message, after the
+/// stable prefix. Empty/whitespace context is ignored.
+pub fn initial_messages_with_context(
+    task_prompt: &str,
+    context: Option<&str>,
+) -> Vec<ChatMessage> {
+    let mut sys = system_prompt();
+    if let Some(c) = context.map(str::trim).filter(|c| !c.is_empty()) {
+        sys.push_str("\n当前上下文:");
+        sys.push_str(c);
+    }
+    vec![ChatMessage::system(sys), ChatMessage::user(task_prompt)]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_prompt_is_stable() {
+        assert_eq!(system_prompt(), system_prompt());
+        let dump = |m: &[astock_minimax::ChatMessage]| serde_json::to_string(m).unwrap();
+        assert_eq!(dump(&initial_messages("x")), dump(&initial_messages("x")));
+    }
+
+    #[test]
+    fn system_prompt_within_size_budget() {
+        // Sanity budget: the prompt must stay compact for token discipline.
+        // ~4 Chinese chars/token → 6 KiB is still around 1.5k tokens.
+        assert!(system_prompt().len() < 6 * 1024, "prompt too large");
+    }
+
+    #[test]
+    fn system_prompt_covers_required_sections() {
+        let p = system_prompt();
+        for needle in [
+            // The six sections.
+            "# 角色",
+            "# 输出",
+            "# 自主性",
+            "# 数据纪律",
+            "# 分析框架",
+            "# 禁止",
+            // Role and output contract.
+            "A股投研Agent",
+            "深度研究",
+            "最终回答用中文",
+            "内部推理语言不限",
+            "先结论后依据",
+            // Autonomy.
+            "禁止反问",
+            "get_watchlist",
+            "并行",
+            // Data discipline.
+            "【事实】",
+            "【计算】",
+            "【外部】",
+            "【推断】",
+            "【假设】",
+            "数据来源与时间",
+            "get_cached_detail",
+            // Playbook.
+            "get_quote",
+            "get_fund_flow",
+            "get_market_breadth",
+            "run_full_analysis",
+            "run_chanlun",
+            "compute_indicators",
+            "compare_stocks",
+            "scan_market",
+            "get_fundamentals",
+            "run_valuation",
+            "get_industry_chain",
+            "get_market_regime",
+            "run_supply_chain_shock",
+            "build_relationship_graph",
+            "run_backtest",
+            "price-in",
+            "相关不等于因果",
+            "关键证据",
+            "不确定性",
+            "失效条件",
+            // Hard bans.
+            "编造数字",
+            "无观点的数据复述",
+        ] {
+            assert!(p.contains(needle), "missing prompt fragment: {needle}");
+        }
+    }
+
+    #[test]
+    fn initial_messages_shape() {
+        let msgs = initial_messages("分析600519");
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "system");
+        assert_eq!(msgs[1].role, "user");
+        assert_eq!(msgs[1].content_text().as_deref(), Some("分析600519"));
+    }
+
+    #[test]
+    fn context_block_appended_after_stable_prefix() {
+        let msgs =
+            initial_messages_with_context("分析一下", Some("用户正在查看:600519 贵州茅台"));
+        let sys = msgs[0].content_text().unwrap();
+        assert!(sys.starts_with(&system_prompt()), "stable prefix intact");
+        assert_eq!(sys.matches("当前上下文:").count(), 1, "context exactly once");
+        assert!(sys.contains("用户正在查看:600519 贵州茅台"));
+        // The user message stays the bare prompt.
+        assert_eq!(msgs[1].content_text().as_deref(), Some("分析一下"));
+
+        // None and blank contexts leave the system prompt untouched.
+        let plain = initial_messages("分析一下");
+        assert_eq!(plain[0].content_text().as_deref(), Some(system_prompt().as_str()));
+        let blank = initial_messages_with_context("分析一下", Some("  "));
+        assert_eq!(blank[0].content_text().as_deref(), Some(system_prompt().as_str()));
+    }
+}

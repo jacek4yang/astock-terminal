@@ -1,0 +1,27 @@
+[package]
+name = "astock-wencai"
+description = "Optional iwencai (同花顺问财) natural-language stock screening provider: hexin-v signing via embedded QuickJS + slider-captcha solving via ddddocr-tract"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+# Slider-captcha auto-solving (getPreHandle/getImg/getTicket protocol on
+# captcha.10jqka.com.cn + boundary-continuity gap detection — pure Rust,
+# `image` crate only, no ONNX runtime / model downloads). Without this
+# feature a captcha challenge surfaces as `WencaiError::NeedCaptcha`.
+captcha = ["dep:image"]
+
+[dependencies]
+astock-core = { path = "../core" }
+reqwest.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rquickjs = "0.12"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

@@ -1,0 +1,19 @@
+[package]
+name = "astock-captcha"
+description = "Captcha solving toolkit: slider gap detection (pure-Rust image processing) + human-like trajectory generation; optional OCR glue"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+thiserror.workspace = true
+tracing.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
+
+[features]
+default = []
+# Optional OCR glue: exposes the `ocr::OcrSolver` trait only (no ONNX dep).
+ocr = []
