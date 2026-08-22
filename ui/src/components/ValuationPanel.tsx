@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { EChartsOption } from "echarts";
 import { getValuation, errMsg, type ValuationJson } from "../lib/api";
-import { COLOR_UP, COLOR_DOWN, fmtNum, fmtPct, fmtYiWan, pctClass } from "../lib/format";
+import { COLOR_UP, COLOR_DOWN, finiteNumber, fmtNum, fmtPct, fmtYiWan, pctClass } from "../lib/format";
 import { Loading, ErrorBox, EmptyBox, Term, Stat } from "./ui";
 import Chart from "./Chart";
 
@@ -10,8 +10,9 @@ interface Props {
 }
 
 /** 历史分位渐变进度条:左绿(低位)→右红(高位),白线标记当前位置 */
-function PercentileBar({ label, tip, value }: { label: string; tip: string; value: number | null }) {
-  const v = value == null || Number.isNaN(value) ? null : Math.min(100, Math.max(0, value));
+function PercentileBar({ label, tip, value }: { label: string; tip: string; value: unknown }) {
+  const parsed = finiteNumber(value);
+  const v = parsed == null ? null : Math.min(100, Math.max(0, parsed));
   const tag = v == null ? null : v <= 20 ? "历史低位" : v >= 80 ? "历史高位" : null;
   const tagCls = v == null ? "" : v <= 20 ? "text-down" : v >= 80 ? "text-up" : "";
   return (
@@ -40,8 +41,10 @@ function PercentileBar({ label, tip, value }: { label: string; tip: string; valu
 }
 
 /** wacc/growth 轴标签:小数按百分比显示(0.09 → 9.0%) */
-function fmtAxis(v: number): string {
-  return (Math.abs(v) <= 1 ? (v * 100).toFixed(1) : v.toFixed(1)) + "%";
+function fmtAxis(v: unknown): string {
+  const n = finiteNumber(v);
+  if (n == null) return "—";
+  return (Math.abs(n) <= 1 ? (n * 100).toFixed(1) : n.toFixed(1)) + "%";
 }
 
 /** 估值面板:当前倍数 / 历史分位 / 估值带 / DCF 三情景 + 敏感性热力表 */
@@ -64,7 +67,7 @@ export default function ValuationPanel({ symbol }: Props) {
   const bandOption = useMemo<EChartsOption | null>(() => {
     const hs = data?.history_series ?? [];
     if (hs.length === 0) return null;
-    const cur = data?.current?.pe_ttm;
+    const cur = finiteNumber(data?.current?.pe_ttm);
     return {
       animation: false,
       backgroundColor: "transparent",
@@ -117,8 +120,9 @@ export default function ValuationPanel({ symbol }: Props) {
     let min = Infinity;
     let max = -Infinity;
     s.values.forEach((row, i) => {
-      row?.forEach((v, j) => {
-        if (v == null || !Number.isFinite(v)) return;
+      row?.forEach((value, j) => {
+        const v = finiteNumber(value);
+        if (v == null) return;
         pts.push([j, i, v]);
         if (v < min) min = v;
         if (v > max) max = v;
@@ -134,7 +138,7 @@ export default function ValuationPanel({ symbol }: Props) {
         textStyle: { fontSize: 11, color: "#e2e8f0" },
         formatter: (p: unknown) => {
           const d = (p as { data: [number, number, number] }).data;
-          return `WACC ${fmtAxis(s.wacc![d[1]])} · 永续增长 ${fmtAxis(s.growth![d[0]])}<br/>目标价 <b>${d[2].toFixed(2)}</b>`;
+          return `WACC ${fmtAxis(s.wacc![d[1]])} · 永续增长 ${fmtAxis(s.growth![d[0]])}<br/>目标价 <b>${fmtNum(d[2])}</b>`;
         },
       },
       grid: { left: 64, right: 16, top: 28, bottom: 52 },
@@ -165,7 +169,7 @@ export default function ValuationPanel({ symbol }: Props) {
         bottom: 0,
         itemWidth: 10,
         textStyle: { fontSize: 10 },
-        formatter: (v: unknown) => (v as number).toFixed(1),
+        formatter: (v: unknown) => fmtNum(v, 1),
         inRange: { color: [COLOR_DOWN, "#475569", COLOR_UP] },
       },
       series: [
@@ -175,7 +179,7 @@ export default function ValuationPanel({ symbol }: Props) {
           label: {
             show: true,
             fontSize: 9,
-            formatter: (p: unknown) => ((p as { data: [number, number, number] }).data[2]).toFixed(2),
+            formatter: (p: unknown) => fmtNum((p as { data: [number, number, number] }).data[2]),
           },
           emphasis: { itemStyle: { shadowBlur: 6, shadowColor: "rgba(0,0,0,0.5)" } },
         },
@@ -203,11 +207,11 @@ export default function ValuationPanel({ symbol }: Props) {
   const c = data.current;
   const pct = data.percentile;
   const dcf = data.dcf;
-  const price = c?.price ?? null;
+  const price = finiteNumber(c?.price);
   const scenarios: { label: string; tip: string; value: number | null }[] = [
-    { label: "悲观", tip: "增长下调、折现率上调情形下的每股价值", value: dcf?.bear ?? null },
-    { label: "中性", tip: "基准假设下的每股价值", value: dcf?.base ?? null },
-    { label: "乐观", tip: "增长上调、折现率下调情形下的每股价值", value: dcf?.bull ?? null },
+    { label: "悲观", tip: "增长下调、折现率上调情形下的每股价值", value: finiteNumber(dcf?.bear) },
+    { label: "中性", tip: "基准假设下的每股价值", value: finiteNumber(dcf?.base) },
+    { label: "乐观", tip: "增长上调、折现率下调情形下的每股价值", value: finiteNumber(dcf?.bull) },
   ];
 
   return (

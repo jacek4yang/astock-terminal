@@ -180,7 +180,7 @@ export default function WatchlistPage() {
                         <td className={"td num " + pctClass(q?.pct)}>
                           {q ? fmtPct(q.pct) : "--"}
                         </td>
-                        <td className="td num">{q ? q.turnover.toFixed(2) + "%" : "--"}</td>
+                        <td className="td num">{fmtPct(q?.turnover, 2, false)}</td>
                         <td className="td text-right">
                           <button
                             className="btn"

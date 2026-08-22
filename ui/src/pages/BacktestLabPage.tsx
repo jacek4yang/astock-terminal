@@ -59,6 +59,17 @@ interface BacktestJson {
   note?: string;
 }
 
+interface BacktestJobSnapshot {
+  job_id: string | null;
+  status: "idle" | "running" | "completed" | "failed" | "cancelled" | string;
+  phase: string;
+  progress: number | null;
+  started_at: number | null;
+  updated_at: number;
+  result: BacktestJson | null;
+  error: string | null;
+}
+
 // ==================== 策略清单与参数定义 ====================
 
 /** 内置清单:list_strategies 命令未就绪时的降级(与 crates/backtest 注册表 + 现有 run_backtest 对齐) */
@@ -110,8 +121,8 @@ interface ParamField {
 /** 各策略的预定义参数字段;未列出的策略走通用 JSON 参数编辑 */
 const PARAM_FIELDS: Record<string, ParamField[]> = {
   ma_cross: [
-    { key: "fast", label: "快线窗口", kind: "int", def: 5, min: 1, max: 250, tip: "短期 SMA 天数,须 >= 1 且小于慢线" },
-    { key: "slow", label: "慢线窗口", kind: "int", def: 20, min: 2, max: 500, tip: "长期 SMA 天数,须大于快线" },
+    { key: "fast", label: "快线窗口", kind: "int", def: 5, min: 1, max: 250, tip: "短期简单移动平均线天数，至少 1 天且小于慢线" },
+    { key: "slow", label: "慢线窗口", kind: "int", def: 20, min: 2, max: 500, tip: "长期简单移动平均线天数，须大于快线" },
   ],
   turtle: [
     { key: "entry_n", label: "入场窗口 N", kind: "int", def: 20, min: 2, max: 250, tip: "突破最近 N 日新高买入,N >= 2" },
@@ -252,10 +263,39 @@ export default function BacktestLabPage() {
   const [pool, setPool] = useState("510300, 510500, 159915, 518880");
   const [running, setRunning] = useState(false);
   const [elapsed, setElapsed] = useState(0);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [jobPhase, setJobPhase] = useState("尚未运行");
   const [result, setResult] = useState<BacktestJson | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const seq = useRef(0);
   const startRef = useRef(0);
+
+  const applyJobSnapshot = (snapshot: BacktestJobSnapshot) => {
+    setJobId(snapshot.job_id);
+    setJobPhase(snapshot.phase);
+    setRunning(snapshot.status === "running");
+    if (snapshot.started_at != null) {
+      startRef.current = snapshot.started_at;
+      setElapsed(Math.max(0, (Date.now() - snapshot.started_at) / 1000));
+    }
+    if (snapshot.result) setResult(snapshot.result);
+    if (snapshot.status === "failed") setErr(snapshot.error || "后台回测失败");
+    if (snapshot.status === "cancelled") setErr(null);
+  };
+
+  // 回测运行于后端；离开页面再回来时恢复任务、阶段和结果。
+  useEffect(() => {
+    invoke<BacktestJobSnapshot>("backtest_status").then(applyJobSnapshot).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!running) return;
+    const timer = setInterval(() => {
+      invoke<BacktestJobSnapshot>("backtest_status")
+        .then(applyJobSnapshot)
+        .catch(() => {});
+    }, 750);
+    return () => clearInterval(timer);
+  }, [running]);
 
   // list_strategies:契约补齐后优先后端清单;失败则保持内置清单降级
   useEffect(() => {
@@ -309,9 +349,10 @@ export default function BacktestLabPage() {
     .filter(Boolean);
 
   const run = async () => {
-    const id = ++seq.current;
     setErr(null);
     setRunning(true);
+    setResult(null);
+    setJobPhase("正在创建后台回测任务");
     setElapsed(0);
     startRef.current = Date.now();
     try {
@@ -328,7 +369,7 @@ export default function BacktestLabPage() {
         try {
           params = JSON.parse(paramsJson || "{}");
         } catch {
-          throw new Error("策略参数 JSON 解析失败,请检查格式");
+          throw new Error("高级策略参数格式无法识别，请检查填写内容");
         }
       }
 
@@ -350,15 +391,25 @@ export default function BacktestLabPage() {
         params,
         pool: meta.multi_symbol ? poolList : undefined,
       };
-      const r = await invoke<BacktestJson>("run_backtest", args);
-      if (id !== seq.current) return; // 已有更新的请求
-      setResult(r);
+      const started = await invoke<{ job_id: string; started: boolean }>("backtest_start", args);
+      setJobId(started.job_id);
+      const snapshot = await invoke<BacktestJobSnapshot>("backtest_status");
+      applyJobSnapshot(snapshot);
     } catch (e) {
-      if (id !== seq.current) return;
       setErr(errMsg(e));
       setResult(null);
-    } finally {
-      if (id === seq.current) setRunning(false);
+      setRunning(false);
+    }
+  };
+
+  const cancel = async () => {
+    setErr(null);
+    try {
+      await invoke<{ cancelled: boolean }>("backtest_cancel");
+      const snapshot = await invoke<BacktestJobSnapshot>("backtest_status");
+      applyJobSnapshot(snapshot);
+    } catch (e) {
+      setErr(errMsg(e));
     }
   };
 
@@ -442,17 +493,17 @@ export default function BacktestLabPage() {
   const metrics: Array<{ label: string; tip?: string; value: string; cls?: string }> = result
     ? [
         {
-          label: "CAGR",
+          label: "复合年化收益",
           tip: "复合年化收益率",
           value: fmtPct(result.cagr),
           cls: result.cagr >= 0 ? "text-up" : "text-down",
         },
         { label: "年化波动", tip: "日收益年化标准差", value: fmtPct(result.annualized_volatility) },
-        { label: "Sharpe", tip: "夏普比率:单位总风险的超额收益", value: fmt2(result.sharpe) },
-        { label: "Sortino", tip: "索提诺比率:只计下行风险", value: fmt2(result.sortino) },
+        { label: "夏普比率", tip: "每承担一单位总风险获得的超额收益", value: fmt2(result.sharpe) },
+        { label: "索提诺比率", tip: "只计算下行风险的风险调整后收益", value: fmt2(result.sortino) },
         {
           label: "最大回撤",
-          tip: `净值自高点的最大跌幅,持续 ${result.max_drawdown_duration_bars} 根 bar`,
+          tip: `净值自高点的最大跌幅，持续 ${result.max_drawdown_duration_bars} 个交易周期`,
           value: fmtPct(-Math.abs(result.max_drawdown)),
           cls: "text-down",
         },
@@ -548,7 +599,7 @@ export default function BacktestLabPage() {
           {!fields && (
             <label className="flex flex-col gap-1">
               <span className="micro-label">
-                <Term label="策略参数 JSON" tip='该策略暂无预定义字段,直接传 JSON 对象,如 {"window": 20}' />
+                <Term label="高级策略参数" tip='该策略暂无预设输入项，可按“参数名与数值”的结构填写高级条件' />
               </span>
               <input
                 className="input w-64 text-xs"
@@ -578,13 +629,17 @@ export default function BacktestLabPage() {
             </button>
             <button
               className="btn-danger"
-              disabled
-              title="run_backtest 暂不支持取消,请等待完成"
+              disabled={!running}
+              onClick={cancel}
+              title="取消后台回测"
             >
               取消
             </button>
             {running && (
-              <span className="muted num text-xs">{elapsed.toFixed(1)}s</span>
+              <span className="muted text-xs">
+                {jobPhase} · <span className="num">{elapsed.toFixed(1)}s</span>
+                {jobId && <span className="num ml-2" title={jobId}>任务 {jobId.slice(-8)}</span>}
+              </span>
             )}
           </div>
         </div>

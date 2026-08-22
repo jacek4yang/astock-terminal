@@ -3,7 +3,7 @@ import type { EChartsOption } from "echarts";
 import Chart from "./Chart";
 import type { Bar, ChanlunDailyJson } from "../lib/api";
 import { calcMA, calcMACD, calcRSI, calcKDJ, calcBOLL } from "../lib/indicators";
-import { COLOR_UP, COLOR_DOWN, fmtVolume } from "../lib/format";
+import { COLOR_UP, COLOR_DOWN, fmtPct, fmtVolume } from "../lib/format";
 
 export type SubIndicator = "MACD" | "RSI" | "KDJ" | "BOLL";
 
@@ -222,7 +222,7 @@ export default function KlineChart({ bars, indicator, zoomStart = 0, chanlun, he
             `<b>${bar.date}</b>`,
             `开 ${bar.open.toFixed(2)}　收 ${bar.close.toFixed(2)}`,
             `高 ${bar.high.toFixed(2)}　低 ${bar.low.toFixed(2)}`,
-            `涨跌 ${bar.pct >= 0 ? "+" : ""}${bar.pct.toFixed(2)}%　换手 ${bar.turnover.toFixed(2)}%`,
+            `涨跌 ${fmtPct(bar.pct)}　换手 ${fmtPct(bar.turnover, 2, false)}`,
             `成交量 ${fmtVolume(bar.volume)}`,
           ];
           for (const p of arr) {

@@ -9,6 +9,8 @@ import {
   settingsSetProviderCredentials,
   errMsg,
   type MinimaxStatus,
+  type ModelQuotaStatus,
+  type QuotaStatus,
   type CacheStats,
   type ProviderStatus,
 } from "../lib/api";
@@ -33,8 +35,8 @@ const CRED_FIELDS: {
   secret: boolean;
   hint: string;
 }[] = [
-  { key: "tushare_token", label: "Tushare Token", secret: true, hint: "输入 Tushare Pro Token" },
-  { key: "iwencai_key", label: "问财 Key", secret: true, hint: "输入同花顺问财 OpenAPI Key" },
+  { key: "tushare_token", label: "Tushare 访问凭证", secret: true, hint: "输入 Tushare 专业版访问凭证" },
+  { key: "iwencai_key", label: "问财访问密钥", secret: true, hint: "输入同花顺问财开放接口访问密钥" },
   { key: "jq_user", label: "聚宽账号", secret: false, hint: "输入聚宽(JoinQuant)账号" },
   { key: "jq_pwd", label: "聚宽密码", secret: true, hint: "输入聚宽密码" },
   { key: "socks5", label: "SOCKS5 代理", secret: false, hint: "如 socks5://127.0.0.1:10808" },
@@ -50,34 +52,105 @@ const EMPTY_CREDS: CredValues = {
   socks5: "",
 };
 
-function QuotaBar({ quota }: { quota: Record<string, unknown> }) {
-  const used = typeof quota.used === "number" ? quota.used : null;
-  const total = typeof quota.total === "number" ? quota.total : null;
-  if (used == null || total == null || total <= 0) {
-    return (
-      <div className="muted text-xs">
-        配额:{Object.entries(quota)
-          .filter(([, v]) => typeof v === "number" || typeof v === "string")
-          .map(([k, v]) => `${k}=${String(v)}`)
-          .join(" · ") || "无数据"}
-      </div>
-    );
-  }
-  const pct = Math.min(100, Math.round((used / total) * 100));
+function quotaDate(value: number | null): string {
+  if (value == null || value <= 0) return "未知";
+  const millis = Math.abs(value) < 100_000_000_000 ? value * 1000 : value;
+  return new Date(millis).toLocaleString("zh-CN", { hour12: false });
+}
+
+function QuotaWindow({
+  label,
+  used,
+  total,
+  remainingPercent,
+  resetAt,
+}: {
+  label: string;
+  used: number | null;
+  total: number | null;
+  remainingPercent: number | null;
+  resetAt: number | null;
+}) {
+  const usedPct =
+    total != null && total > 0 && used != null
+      ? Math.min(100, Math.max(0, (used / total) * 100))
+      : remainingPercent != null
+        ? Math.min(100, Math.max(0, 100 - remainingPercent))
+        : null;
+  const remaining = remainingPercent ?? (usedPct == null ? null : 100 - usedPct);
   return (
-    <div>
-      <div className="mb-1 flex justify-between text-xs">
-        <span className="muted">配额用量</span>
-        <span className="num">
-          {used} / {total}({pct}%)
+    <div className="rounded border border-slate-200 p-2 dark:border-slate-800">
+      <div className="mb-1.5 flex flex-wrap justify-between gap-2 text-xs">
+        <span className="font-medium">{label}</span>
+        <span className="num muted">
+          {used != null && total != null ? `已用 ${used.toLocaleString()} / ${total.toLocaleString()}` : "请求数暂不可用"}
+          {remaining != null ? ` · 剩余 ${remaining.toFixed(1)}%` : ""}
         </span>
       </div>
       <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
         <div
-          className={"h-full rounded-full " + (pct >= 90 ? "bg-up" : pct >= 70 ? "bg-amber-500" : "bg-blue-600")}
-          style={{ width: `${pct}%` }}
+          className={
+            "h-full rounded-full transition-all " +
+            (usedPct != null && usedPct >= 95
+              ? "bg-up"
+              : usedPct != null && usedPct >= 80
+                ? "bg-amber-500"
+                : "bg-blue-600")
+          }
+          style={{ width: `${usedPct ?? 0}%` }}
         />
       </div>
+      <div className="num muted mt-1.5 text-[11px]">窗口重置：{quotaDate(resetAt)}</div>
+    </div>
+  );
+}
+
+function QuotaModel({ item, selected }: { item: ModelQuotaStatus; selected: boolean }) {
+  return (
+    <div className={"rounded-lg border p-2.5 " + (selected ? "border-blue-300 bg-blue-50/60 dark:border-blue-800 dark:bg-blue-950/20" : "border-slate-200 dark:border-slate-800")}>
+      <div className="mb-2 flex items-center gap-2 text-xs">
+        <span className="num font-semibold">{item.model_name || "未命名模型"}</span>
+        {selected && <span className="chip bg-blue-600/10 text-blue-600 dark:text-blue-400">当前模型</span>}
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <QuotaWindow
+          label="滚动 5 小时窗口"
+          used={item.current_interval_usage_count}
+          total={item.current_interval_total_count}
+          remainingPercent={item.current_interval_remaining_percent}
+          resetAt={item.end_time}
+        />
+        <QuotaWindow
+          label="每周窗口"
+          used={item.current_weekly_usage_count}
+          total={item.current_weekly_total_count}
+          remainingPercent={item.current_weekly_remaining_percent}
+          resetAt={item.weekly_end_time}
+        />
+      </div>
+    </div>
+  );
+}
+
+function QuotaBar({ quota, selectedModel }: { quota: QuotaStatus; selectedModel?: string }) {
+  const models = [...quota.models].sort((a, b) => {
+    if (a.model_name === selectedModel) return -1;
+    if (b.model_name === selectedModel) return 1;
+    return a.model_name.localeCompare(b.model_name);
+  });
+  if (models.length === 0) {
+    return <div className="muted text-xs">订阅额度接口已连接，但当前订阅未返回模型额度明细。</div>;
+  }
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+        <span className="font-medium">MiniMax 模型订阅额度</span>
+        <span className="num muted">快照：{quotaDate(quota.fetched_at)}</span>
+      </div>
+      {models.map((item) => (
+        <QuotaModel key={item.model_name} item={item} selected={item.model_name === selectedModel} />
+      ))}
+      <div className="muted text-[11px]">额度按 MiniMax 官方滚动窗口统计；本页只在进入、保存 Key 或手动刷新时查询，不会高频轮询。</div>
     </div>
   );
 }
@@ -173,7 +246,7 @@ export default function SettingsPage() {
     try {
       await minimaxSetKey(key.trim());
       setKey("");
-      setMmMsg("Key 已安全保存(存入 Windows 凭据管理器,不会回显)");
+      setMmMsg("访问密钥已安全保存（存入 Windows 凭据管理器，不会回显）");
       await loadMinimax();
     } catch (e) {
       setMmErr(errMsg(e));
@@ -210,14 +283,14 @@ export default function SettingsPage() {
         {/* 数据源健康(5s 轮询) */}
         <ProviderHealth />
 
-      {/* MiniMax Key */}
-      <Section title="MiniMax API Key">
+      {/* MiniMax 访问密钥 */}
+      <Section title="MiniMax 访问密钥">
         {mmErr && <ErrorBox message={mmErr} onRetry={loadMinimax} />}
         <div className="flex flex-wrap items-center gap-2">
           <input
             className="input w-80"
             type="password"
-            placeholder={mmStatus?.has_key ? "已保存(脱敏,输入新 Key 覆盖)" : "输入 API Key"}
+            placeholder={mmStatus?.has_key ? "已保存（已脱敏，输入新密钥可覆盖）" : "输入访问密钥"}
             value={key}
             onChange={(e) => setKey(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && saveKey()}
@@ -253,10 +326,45 @@ export default function SettingsPage() {
                   模型:<span className="num">{mmStatus.model}</span>
                 </span>
               )}
+              <button className="btn !px-2 !py-0.5" onClick={loadMinimax} disabled={saving}>
+                刷新服务与额度
+              </button>
             </div>
-            {mmStatus.quota && <QuotaBar quota={mmStatus.quota} />}
+            {mmStatus.quota ? (
+              <QuotaBar quota={mmStatus.quota} selectedModel={mmStatus.model} />
+            ) : mmStatus.has_key ? (
+              <div className="rounded border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-300">
+                MiniMax 访问密钥已配置，但订阅额度服务暂不可达或该账号未开通模型套餐。可稍后手动刷新；额度耗尽时分析任务会安全挂起（错误码 2056）。
+              </div>
+            ) : null}
           </div>
         )}
+      </Section>
+
+      <Section title="访问频率与重试治理">
+        <div className="grid gap-3 text-xs lg:grid-cols-2">
+          <div className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+            <div className="font-medium">MiniMax 智能助手</div>
+            <div className="muted mt-2 space-y-1 leading-relaxed">
+              <div>· 最多 4 条推理流并发；单任务的模型轮次始终串行，工具最多 6 项并行。</div>
+              <div>· 网络连接失败或访问过快时最多重试 5 次，从 1 秒起逐步延长并随机错峰，单次最多等待 60 秒；优先遵循服务器建议的等待时间。</div>
+              <div>· 已有部分输出后不盲目重放流，避免重复工具调用；任务链会持久化并支持安全恢复。</div>
+              <div>· 额度快照缓存 30 秒；滚动额度剩余 ≤20% 时跨任务间隔 2 秒，≤5% 时 10 秒，耗尽则挂起。</div>
+            </div>
+          </div>
+          <div className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+            <div className="font-medium">行情与研究数据源</div>
+            <div className="muted mt-2 space-y-1 leading-relaxed">
+              <div>· 同一上游主机的健康基线间隔 75 毫秒；所有页面、扫描与 Agent 共享调度器，不会瞬时突发。</div>
+              <div>· 超时、访问过快、服务端临时异常或防护拦截后会自动放慢请求，间隔范围为 100 毫秒至 30 秒；成功后逐步恢复。</div>
+              <div>· 单请求 8 秒超时；主机池切换间隔 300 毫秒；连续 3 次瞬态失败触发熔断。</div>
+              <div>· 熔断冷却从 10 分钟指数增长到 1 小时；实时/K线/搜索/全市场/宽度缓存分别为 2/15/15/60/120 秒。</div>
+            </div>
+          </div>
+        </div>
+        <div className="rounded border border-blue-200 bg-blue-50 px-2.5 py-2 text-xs text-blue-700 dark:border-blue-900/60 dark:bg-blue-950/30 dark:text-blue-300">
+          数据策略采用“字段级合并 + 质量校验 + 主备降级”：会利用已配置的数据源补齐名称、价格、换手、基本面与事件字段，但不会为同一已命中缓存的字段无意义地同时轰击所有上游。
+        </div>
       </Section>
 
       {/* 数据源凭证(可选 provider;状态只回布尔,凭证本体绝不回显) */}

@@ -1,6 +1,7 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ReactNode } from "react";
+import AgentChart, { splitAgentContent } from "./AgentChart";
 
 /* ==================== fixMarkdown:校验与修正预处理 ====================
  * 纯函数,负责把模型输出的“半吊子” Markdown 规整为可稳定渲染的形式:
@@ -152,7 +153,7 @@ function textOf(node: ReactNode): string {
   return "";
 }
 
-export default function Markdown({ src }: { src: string }) {
+function MarkdownBody({ src }: { src: string }) {
   return (
     <div className="md space-y-2 text-sm leading-relaxed">
       <ReactMarkdown
@@ -262,6 +263,26 @@ export default function Markdown({ src }: { src: string }) {
       >
         {fixMarkdown(src)}
       </ReactMarkdown>
+    </div>
+  );
+}
+
+/** Markdown plus a safe, declarative chart block chosen by the research agent. */
+export default function Markdown({ src }: { src: string }) {
+  const blocks = splitAgentContent(src);
+  return (
+    <div className="space-y-3">
+      {blocks.map((block, index) =>
+        block.type === "text" ? (
+          block.content.trim() ? <MarkdownBody key={index} src={block.content} /> : null
+        ) : block.spec ? (
+          <AgentChart key={index} spec={block.spec} />
+        ) : (
+          <div key={index} className="rounded border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-300">
+            智能助手生成的图表数据格式不完整，已安全跳过；文字结论不受影响。
+          </div>
+        ),
+      )}
     </div>
   );
 }

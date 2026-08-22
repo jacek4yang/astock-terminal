@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { scanStart, scanStatus, errMsg, type ScanResultItem } from "../lib/api";
+import { scanCancel, scanStart, scanStatus, errMsg, type ScanResultItem } from "../lib/api";
 import { onScanProgress, onScanResult, type ScanProgress } from "../lib/events";
 import { ErrorBox, Term } from "../components/ui";
 
@@ -11,6 +11,21 @@ export default function ScanPage() {
   const [err, setErr] = useState<string | null>(null);
   const navigate = useNavigate();
   const pollRef = useRef<ReturnType<typeof setInterval>>();
+
+  const applySnapshot = (snapshot: Awaited<ReturnType<typeof scanStatus>>) => {
+    setRunning(snapshot.running);
+    setProgress({
+      done: snapshot.done,
+      total: snapshot.total,
+      current_symbol: snapshot.current_symbol,
+    });
+    if (snapshot.results.length > 0) setResults(snapshot.results);
+  };
+
+  // 页面切回来时从后端快照恢复；扫描不依赖当前页面是否挂载。
+  useEffect(() => {
+    scanStatus().then(applySnapshot).catch(() => {});
+  }, []);
 
   // 订阅扫描事件(进度 + 增量结果)
   useEffect(() => {
@@ -35,11 +50,7 @@ export default function ScanPage() {
     pollRef.current = setInterval(async () => {
       try {
         const st = await scanStatus();
-        setProgress({ done: st.done, total: st.total, current_symbol: st.current_symbol });
-        if (!st.running) {
-          setRunning(false);
-          if (st.results.length > 0) setResults(st.results);
-        }
+        applySnapshot(st);
       } catch {
         /* 忽略轮询错误,等下一轮 */
       }
@@ -54,6 +65,18 @@ export default function ScanPage() {
     try {
       await scanStart();
       setRunning(true);
+    } catch (e) {
+      setErr(errMsg(e));
+    }
+  };
+
+  const cancel = async () => {
+    setErr(null);
+    try {
+      await scanCancel();
+      // 取消是协作式的：保留运行态，直到少量在途请求自然收敛。
+      const st = await scanStatus();
+      applySnapshot(st);
     } catch (e) {
       setErr(errMsg(e));
     }
@@ -75,8 +98,8 @@ export default function ScanPage() {
           <button
             className="btn-danger"
             disabled={!running}
-            onClick={() => setRunning(false)}
-            title="停止等待结果(后台任务完成后状态会自动同步)"
+            onClick={cancel}
+            title="取消后台扫描；少量已发出的请求会安全完成"
           >
             取消
           </button>
