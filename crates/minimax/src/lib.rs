@@ -36,7 +36,7 @@ pub use client::MinimaxClient;
 pub use error::MinimaxError;
 pub use http::{Http, HttpResponse, ReqwestHttp};
 pub use key::{mask_key, redact, KeyStore, SecretKey};
-pub use models::{ModelCatalog, DEFAULT_CHAIN};
+pub use models::{AvailableModel, ModelCatalog, DEFAULT_CHAIN};
 pub use quota::{ModelQuota, Pacing, QuotaStatus, THROTTLE_PERCENT};
 pub use rate_gate::{RateGate, RateGateConfig};
 pub use region::{Region, RegionDetector, ServiceInfo};

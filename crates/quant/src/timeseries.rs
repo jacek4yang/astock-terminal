@@ -169,7 +169,7 @@ pub fn granger_causality(x: &[f64], y: &[f64], lags: usize) -> Result<GrangerRes
     validate_pair(x, y, 2 * lags + 4, "granger_causality")?;
     let n = x.len();
     let m = n - lags; // usable rows
-    // Restricted: [1, y_{t-1..t-k}]
+                      // Restricted: [1, y_{t-1..t-k}]
     let xr = DMatrix::from_fn(m, 1 + lags, |row, col| {
         if col == 0 {
             1.0
@@ -231,13 +231,17 @@ pub fn ar_ols(x: &[f64], p: usize) -> Result<ArFit, QuantError> {
     validate_series(x, p + 3, "ar_ols")?;
     let n = x.len();
     let m = n - p;
-    let design = DMatrix::from_fn(m, p + 1, |row, col| {
-        if col == 0 {
-            1.0
-        } else {
-            x[row + p - col]
-        }
-    });
+    let design = DMatrix::from_fn(
+        m,
+        p + 1,
+        |row, col| {
+            if col == 0 {
+                1.0
+            } else {
+                x[row + p - col]
+            }
+        },
+    );
     let dep: Vec<f64> = x[p..].to_vec();
     let fit = ols(&dep, &design)?;
     Ok(ArFit {
@@ -307,10 +311,10 @@ pub fn garch11_mle(returns: &[f64]) -> Result<GarchFit, QuantError> {
     // Deterministic multi-start: (log ω vs sample var, low/high α, low/high β)
     let base = var0.ln();
     let starts: Vec<[f64; 3]> = vec![
-        [base - 2.0, -2.0, 2.0],  // ω small, α≈0.11, β≈0.86
-        [base - 1.0, -1.0, 0.5],  // moderate
-        [base, 0.0, -1.0],        // α high, β low
-        [base - 3.0, -3.0, 3.0],  // very persistent
+        [base - 2.0, -2.0, 2.0], // ω small, α≈0.11, β≈0.86
+        [base - 1.0, -1.0, 0.5], // moderate
+        [base, 0.0, -1.0],       // α high, β low
+        [base - 3.0, -3.0, 3.0], // very persistent
     ];
     let mut best: Option<(Vec<f64>, f64)> = None;
     for s in starts {
@@ -368,11 +372,15 @@ fn nelder_mead(
             .collect();
         let worst = &simplex[n];
         // Reflect
-        let xr: Vec<f64> = (0..n).map(|d| centroid[d] + (centroid[d] - worst[d])).collect();
+        let xr: Vec<f64> = (0..n)
+            .map(|d| centroid[d] + (centroid[d] - worst[d]))
+            .collect();
         let fr = f(&xr);
         if fr < vals[0] {
             // Expand
-            let xe: Vec<f64> = (0..n).map(|d| centroid[d] + 2.0 * (xr[d] - centroid[d])).collect();
+            let xe: Vec<f64> = (0..n)
+                .map(|d| centroid[d] + 2.0 * (xr[d] - centroid[d]))
+                .collect();
             let fe = f(&xe);
             if fe < fr {
                 simplex[n] = xe;
@@ -386,7 +394,9 @@ fn nelder_mead(
             vals[n] = fr;
         } else {
             // Contract
-            let xc: Vec<f64> = (0..n).map(|d| centroid[d] + 0.5 * (worst[d] - centroid[d])).collect();
+            let xc: Vec<f64> = (0..n)
+                .map(|d| centroid[d] + 0.5 * (worst[d] - centroid[d]))
+                .collect();
             let fc = f(&xc);
             if fc < vals[n] {
                 simplex[n] = xc;
@@ -395,8 +405,8 @@ fn nelder_mead(
                 // Shrink toward best
                 let best0 = simplex[0].clone();
                 for i in 1..=n {
-                    for d in 0..n {
-                        simplex[i][d] = best0[d] + 0.5 * (simplex[i][d] - best0[d]);
+                    for (d, best) in best0.iter().copied().enumerate().take(n) {
+                        simplex[i][d] = best + 0.5 * (simplex[i][d] - best);
                     }
                     vals[i] = f(&simplex[i]);
                 }
@@ -453,7 +463,7 @@ pub fn kalman_local_level(y: &[f64], q: f64, r: f64) -> Result<Vec<f64>, QuantEr
 mod tests {
     use super::*;
     use rand::rngs::StdRng;
-    use rand::{SeedableRng};
+    use rand::SeedableRng;
     use rand_distr_helpers::standard_normal;
 
     // A tiny local helper module to draw standard normals without adding
@@ -509,8 +519,16 @@ mod tests {
         let r_walk = kpss_test(&near_unit, None).unwrap();
         let r_stat = kpss_test(&stationary, None).unwrap();
         // H0 is stationarity: random walk must reject, stationary must not.
-        assert!(r_walk.reject_stationarity_5pct, "eta = {}", r_walk.statistic);
-        assert!(!r_stat.reject_stationarity_5pct, "eta = {}", r_stat.statistic);
+        assert!(
+            r_walk.reject_stationarity_5pct,
+            "eta = {}",
+            r_walk.statistic
+        );
+        assert!(
+            !r_stat.reject_stationarity_5pct,
+            "eta = {}",
+            r_stat.statistic
+        );
         assert!(r_walk.statistic > r_stat.statistic);
     }
 
@@ -536,7 +554,11 @@ mod tests {
     fn ar_ols_recovers_coefficient() {
         let series = ar1_series(0.6, 2000, 3);
         let fit = ar_ols(&series, 1).unwrap();
-        assert!((fit.coeffs[0] - 0.6).abs() < 0.05, "phi = {}", fit.coeffs[0]);
+        assert!(
+            (fit.coeffs[0] - 0.6).abs() < 0.05,
+            "phi = {}",
+            fit.coeffs[0]
+        );
         assert!(fit.intercept.abs() < 0.1);
         // Residual variance should be close to 1 (the innovation variance).
         assert!((fit.sigma2 - 1.0).abs() < 0.15, "sigma2 = {}", fit.sigma2);

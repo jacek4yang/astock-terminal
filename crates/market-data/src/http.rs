@@ -33,13 +33,25 @@ pub const RETRY_PAUSE: Duration = Duration::from_millis(300);
 
 const MIN_PENALTY: Duration = Duration::from_millis(100);
 const MAX_PENALTY: Duration = Duration::from_secs(30);
+/// Healthy per-host spacing shared by every provider and background task.
+/// 75ms keeps throughput high while preventing a 15-way market scan from
+/// issuing a same-host burst all at once.
+const BASE_INTERVAL: Duration = Duration::from_millis(75);
 
-#[derive(Default)]
 struct HostState {
     /// Current adaptive delay applied before each request to this host.
     delay: Duration,
     /// No request may start before this instant.
     next_allowed: Option<Instant>,
+}
+
+impl Default for HostState {
+    fn default() -> Self {
+        Self {
+            delay: BASE_INTERVAL,
+            next_allowed: None,
+        }
+    }
 }
 
 /// Body plus the response Content-Type (needed for Tencent WAF sniffing).
@@ -164,27 +176,29 @@ impl HttpClient {
     async fn throttle(&self, host: &str) {
         let (wait, delay) = {
             let entry = self.hosts.entry(host.to_string()).or_default();
-            let s = entry.lock();
-            (
-                s.next_allowed
-                    .map(|t| t.saturating_duration_since(Instant::now()))
-                    .unwrap_or(Duration::ZERO),
-                s.delay,
-            )
+            let mut state = entry.lock();
+            let now = Instant::now();
+            let reserved_at = state.next_allowed.map_or(now, |instant| instant.max(now));
+            let wait = reserved_at.saturating_duration_since(now);
+            let delay = state.delay;
+            // Reserve atomically while holding the host lock. Otherwise a
+            // burst of concurrent scan futures can all observe the same free
+            // slot before any one of them updates `next_allowed`.
+            state.next_allowed = Some(reserved_at + delay);
+            (wait, delay)
         };
         if !wait.is_zero() {
-            debug!(host, ?wait, "adaptive throttle sleeping");
+            debug!(host, ?wait, ?delay, "adaptive throttle sleeping");
             tokio::time::sleep(wait).await;
         }
-        let entry = self.hosts.entry(host.to_string()).or_default();
-        entry.lock().next_allowed = Some(Instant::now() + delay);
     }
 
-    /// Record a successful request: decay the penalty by 25%.
+    /// Record a successful request: decay the penalty by 25%, never below
+    /// the healthy baseline spacing.
     pub fn on_success(&self, host: &str) {
         let entry = self.hosts.entry(host.to_string()).or_default();
         let mut s = entry.lock();
-        s.delay = s.delay.mul_f64(0.75);
+        s.delay = s.delay.mul_f64(0.75).max(BASE_INTERVAL);
     }
 
     /// Record a failure (timeout, 429, 5xx, WAF): double the penalty,
@@ -196,12 +210,12 @@ impl HttpClient {
         debug!(host, delay = ?s.delay, "adaptive penalty increased");
     }
 
-    /// Current adaptive delay for a host (0 if unseen), for diagnostics.
+    /// Current adaptive delay for a host (baseline if unseen), for diagnostics.
     pub fn current_delay(&self, host: &str) -> Duration {
         self.hosts
             .get(host)
             .map(|s| s.lock().delay)
-            .unwrap_or(Duration::ZERO)
+            .unwrap_or(BASE_INTERVAL)
     }
 
     fn host_key(url: &str) -> String {
@@ -461,7 +475,7 @@ mod tests {
     fn limiter_backs_off_and_recovers() {
         let http = HttpClient::new();
         let host = "example.com";
-        assert_eq!(http.current_delay(host), Duration::ZERO);
+        assert_eq!(http.current_delay(host), BASE_INTERVAL);
         http.on_failure(host);
         let d1 = http.current_delay(host);
         assert!(d1 >= MIN_PENALTY);
@@ -471,6 +485,7 @@ mod tests {
             http.on_success(host);
         }
         assert!(http.current_delay(host) < d1);
+        assert_eq!(http.current_delay(host), BASE_INTERVAL);
     }
 
     #[test]

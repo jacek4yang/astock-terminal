@@ -124,9 +124,8 @@ fn parse_board_kind(raw: &str) -> Result<BoardKind, CmdError> {
 /// Validate a board code (`BK` + 4 digits, case-insensitive input).
 fn parse_board_code(raw: &str) -> Result<String, CmdError> {
     let code = raw.trim().to_ascii_uppercase();
-    let ok = code.len() == 6
-        && code.starts_with("BK")
-        && code[2..].bytes().all(|b| b.is_ascii_digit());
+    let ok =
+        code.len() == 6 && code.starts_with("BK") && code[2..].bytes().all(|b| b.is_ascii_digit());
     if ok {
         Ok(code)
     } else {

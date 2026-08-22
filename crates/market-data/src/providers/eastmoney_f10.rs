@@ -198,7 +198,7 @@ impl EastMoneyF10 {
         report: F10Report,
         max_pages: u32,
     ) -> Result<Fetched<Vec<serde_json::Value>>, DataError> {
-        let key = format!("f10_{:?}_{secucode}_{max_pages}", report);
+        let key = format!("f10_{report:?}_{secucode}_{max_pages}");
         if let Some(hit) = self
             .cache
             .get::<Fetched<Vec<serde_json::Value>>>(&key, F10_TTL)

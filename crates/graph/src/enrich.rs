@@ -50,10 +50,15 @@ pub async fn apply_industry_map(
 ) -> Result<EnrichSummary> {
     let mut summary = EnrichSummary::default();
     let nodes = store.all_nodes().await?;
-    let companies: Vec<&Node> = nodes.iter().filter(|n| n.kind == NodeKind::Company).collect();
+    let companies: Vec<&Node> = nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Company)
+        .collect();
 
     for item in items {
-        let Some(company) = companies.iter().find(|n| n.code.as_deref() == Some(item.code.as_str()))
+        let Some(company) = companies
+            .iter()
+            .find(|n| n.code.as_deref() == Some(item.code.as_str()))
         else {
             summary.unmatched_listings += 1;
             continue;

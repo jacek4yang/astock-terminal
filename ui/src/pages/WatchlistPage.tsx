@@ -10,7 +10,7 @@ import {
   type WatchlistItem,
   type Quote,
 } from "../lib/api";
-import { fmtPct, pctClass } from "../lib/format";
+import { EMPTY_DISPLAY, fmtNum, fmtPct, fmtText, pctClass } from "../lib/format";
 import { Loading, ErrorBox, EmptyBox, Term } from "../components/ui";
 
 export default function WatchlistPage() {
@@ -173,14 +173,14 @@ export default function WatchlistPage() {
                           </button>
                         </td>
                         <td className="td num muted">{item.code}</td>
-                        <td className="td">{q?.name ?? item.name ?? "--"}</td>
+                        <td className="td">{fmtText(q?.name ?? item.name)}</td>
                         <td className={"td num " + pctClass(q?.pct)}>
-                          {q ? q.price.toFixed(2) : "--"}
+                          {q ? fmtNum(q.price) : EMPTY_DISPLAY}
                         </td>
                         <td className={"td num " + pctClass(q?.pct)}>
-                          {q ? fmtPct(q.pct) : "--"}
+                          {q ? fmtPct(q.pct) : EMPTY_DISPLAY}
                         </td>
-                        <td className="td num">{q ? q.turnover.toFixed(2) + "%" : "--"}</td>
+                        <td className="td num">{fmtPct(q?.turnover, 2, false)}</td>
                         <td className="td text-right">
                           <button
                             className="btn"

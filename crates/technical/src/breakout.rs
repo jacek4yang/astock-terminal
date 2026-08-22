@@ -112,7 +112,7 @@ fn analyze_system(klines: &[Kline], period: usize, system_name: &str) -> Breakou
             channel_low: py_round(channel_low, 2),
             next_add_price: None,
             signals: Vec::new(),
-            description: format!("{}无突破信号", system_name),
+            description: format!("{system_name}无突破信号"),
         };
     }
 
@@ -154,11 +154,11 @@ fn analyze_system(klines: &[Kline], period: usize, system_name: &str) -> Breakou
         if klines[klines.len() - 1].close <= stop {
             signal = "卖出";
             exit_price = Some(stop);
-            sig_text = format!("触及2N止损{:.2}，卖出", stop);
+            sig_text = format!("触及2N止损{stop:.2}，卖出");
         } else {
             signal = "持仓";
             exit_price = None;
-            sig_text = format!("持有多头{}日，止损{:.2}", holding_days, stop);
+            sig_text = format!("持有多头{holding_days}日，止损{stop:.2}");
         }
     } else {
         stop = entry + 2.0 * n_val;
@@ -166,30 +166,29 @@ fn analyze_system(klines: &[Kline], period: usize, system_name: &str) -> Breakou
         next_add = None;
         // Short cover: only the last bar. System 1 uses the 10-day high,
         // system 2 the 20-day high; channel breakout beats the 2N stop.
-        let exit_window = if system_name.contains("系统一") { 10 } else { 20 };
+        let exit_window = if system_name.contains("系统一") {
+            10
+        } else {
+            20
+        };
         let high_exit_level = calc_donchian_channel(klines, exit_window).0;
         let last = &klines[klines.len() - 1];
         if last.high >= high_exit_level {
             signal = "空头平仓";
             exit_price = Some(high_exit_level);
-            sig_text = format!(
-                "突破{}日高点{:.2}，空头平仓",
-                exit_window, high_exit_level
-            );
+            sig_text = format!("突破{exit_window}日高点{high_exit_level:.2}，空头平仓");
         } else if last.close >= stop {
             signal = "空头平仓";
             exit_price = Some(stop);
-            sig_text = format!("触及2N止损{:.2}，空头平仓", stop);
+            sig_text = format!("触及2N止损{stop:.2}，空头平仓");
         } else {
             signal = "持仓";
             exit_price = None;
-            sig_text = format!("持有空头{}日，止损{:.2}", holding_days, stop);
+            sig_text = format!("持有空头{holding_days}日，止损{stop:.2}");
         }
     }
 
-    let short_system_name = system_name
-        .replace("(20日)", "")
-        .replace("(55日)", "");
+    let short_system_name = system_name.replace("(20日)", "").replace("(55日)", "");
     BreakoutResult {
         system: system_name.to_string(),
         signal: signal.to_string(),
@@ -204,8 +203,7 @@ fn analyze_system(klines: &[Kline], period: usize, system_name: &str) -> Breakou
         next_add_price: next_add.filter(|&p| p != 0.0).map(|p| py_round(p, 2)),
         signals: vec![sig_text],
         description: format!(
-            "{}入场={}@{:.2}，N={:.4}，持有{}日",
-            short_system_name, direction, entry, n_val, holding_days
+            "{short_system_name}入场={direction}@{entry:.2}，N={n_val:.4}，持有{holding_days}日"
         ),
     }
 }
@@ -222,5 +220,8 @@ pub fn analyze_breakout_system2(klines: &[Kline]) -> BreakoutResult {
 
 /// Combined breakout analysis: both systems, in order.
 pub fn analyze_breakout(klines: &[Kline]) -> Vec<BreakoutResult> {
-    vec![analyze_breakout_system1(klines), analyze_breakout_system2(klines)]
+    vec![
+        analyze_breakout_system1(klines),
+        analyze_breakout_system2(klines),
+    ]
 }

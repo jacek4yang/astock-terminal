@@ -118,8 +118,14 @@ pub fn piotroski_input_from(
         ),
         shares_curr: bs_curr.share_capital,
         shares_prev: bs_prev.share_capital,
-        gross_margin_curr: metrics::gross_margin(inc_curr.operating_revenue, inc_curr.operating_cost),
-        gross_margin_prev: metrics::gross_margin(inc_prev.operating_revenue, inc_prev.operating_cost),
+        gross_margin_curr: metrics::gross_margin(
+            inc_curr.operating_revenue,
+            inc_curr.operating_cost,
+        ),
+        gross_margin_prev: metrics::gross_margin(
+            inc_prev.operating_revenue,
+            inc_prev.operating_cost,
+        ),
         asset_turnover_curr: {
             let avg = metrics::average_balance(bs_prev.total_assets, bs_curr.total_assets);
             metrics::div_public(inc_curr.total_operating_revenue, avg)
@@ -171,7 +177,10 @@ pub fn piotroski(input: &PiotroskiInput) -> FScore {
         CriterionResult {
             name: "no_dilution",
             description: "No new shares issued (share count not increased)",
-            passed: input.shares_curr.zip(input.shares_prev).map(|(c, p)| c <= p),
+            passed: input
+                .shares_curr
+                .zip(input.shares_prev)
+                .map(|(c, p)| c <= p),
         },
         CriterionResult {
             name: "gross_margin_improving",
@@ -344,14 +353,21 @@ pub const BENEISH_CUTOFF: f64 = -1.78;
 pub fn beneish(indices: &BeneishIndices) -> MScore {
     let i = indices;
     let total = match (i.dsri, i.gmi, i.aqi, i.sgi, i.depi, i.sgai, i.tata, i.lvgi) {
-        (Some(dsri), Some(gmi), Some(aqi), Some(sgi), Some(depi), Some(sgai), Some(tata), Some(lvgi)) => {
-            Some(
-                -4.84 + 0.92 * dsri + 0.528 * gmi + 0.404 * aqi + 0.892 * sgi + 0.115 * depi
-                    - 0.172 * sgai
-                    + 4.679 * tata
-                    - 0.327 * lvgi,
-            )
-        }
+        (
+            Some(dsri),
+            Some(gmi),
+            Some(aqi),
+            Some(sgi),
+            Some(depi),
+            Some(sgai),
+            Some(tata),
+            Some(lvgi),
+        ) => Some(
+            -4.84 + 0.92 * dsri + 0.528 * gmi + 0.404 * aqi + 0.892 * sgi + 0.115 * depi
+                - 0.172 * sgai
+                + 4.679 * tata
+                - 0.327 * lvgi,
+        ),
         _ => None,
     };
     MScore {
@@ -414,10 +430,7 @@ pub fn beneish_indices_from(
         let fixed = ppe(bs)?;
         Some(d / (d + fixed))
     };
-    let depi = match (
-        depr_rate(cf_curr, bs_curr),
-        depr_rate(cf_prev, bs_prev),
-    ) {
+    let depi = match (depr_rate(cf_curr, bs_curr), depr_rate(cf_prev, bs_prev)) {
         (Some(c), Some(p)) if c > 0.0 => Some(p / c),
         _ => None,
     };

@@ -1,5 +1,7 @@
 # 通达信 (TDX) 行情 TCP 协议数据源调研报告
 
+> 实施状态（2026-08-22）：本文前半是接入前的上游审计，文中的“建议/计划”保留为决策记录。当前仓库已建立纯 Rust `crates/tdx`，并已产品化证券列表、K线、实时快照/五档、当日及历史分钟、服务器探测/连接池/心跳/黑名单；逐笔、财务、除权和板块尚未全部接入产品 UI。实际边界以 [upstream-tdxrs.md](upstream-tdxrs.md) 和代码为准。
+
 调研日期：2026-08-22（本地时间）。调研方式：通读两个开源实现源码 —— Go 版 [oficcejo/tdx-api](https://github.com/oficcejo/tdx-api)（实为 MIT 上游 [injoyai/tdx](https://github.com/injoyai/tdx) 的二开，协议层即上游代码）与 Rust 版 [jiangtaovan/tdxrs](https://github.com/jiangtaovan/tdxrs)（本地克隆于 `../research-tmp/`，HEAD 与 GitHub main 一致），关键结论（license、命令码、服务器列表）已在本地克隆中逐项核对。
 
 ## 结论速览

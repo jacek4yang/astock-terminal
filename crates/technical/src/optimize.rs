@@ -111,10 +111,7 @@ pub fn apply_signal_optimization(signal: &mut Value, veto: &VetoInputs) {
         .to_string();
     let score = get_i64(signal, "score", 0);
     let confidence = get_i64(signal, "confidence", 0);
-    let module_scores = signal
-        .get("module_scores")
-        .cloned()
-        .unwrap_or(Value::Null);
+    let module_scores = signal.get("module_scores").cloned().unwrap_or(Value::Null);
     let mut risk_warnings: Vec<String> = signal
         .get("risk_warnings")
         .and_then(Value::as_array)
@@ -178,7 +175,7 @@ pub fn apply_signal_optimization(signal: &mut Value, veto: &VetoInputs) {
     } else if is_buy {
         if let Some(reason) = hard_veto_reason {
             action = "观望".to_string();
-            veto_reason = Some(format!("硬否决：{}", reason));
+            veto_reason = Some(format!("硬否决：{reason}"));
         } else {
             let mut new_action = if score >= 75 && confidence >= 60 && modules_above_55 >= 4 {
                 "强烈买入"
@@ -194,10 +191,10 @@ pub fn apply_signal_optimization(signal: &mut Value, veto: &VetoInputs) {
             if let Some(reason) = soft_veto_reason {
                 if new_action == "强烈买入" {
                     new_action = "买入";
-                    veto_reason = Some(format!("软否决：{}", reason));
+                    veto_reason = Some(format!("软否决：{reason}"));
                 } else if new_action == "买入" {
                     new_action = "谨慎买入";
-                    veto_reason = Some(format!("软否决：{}", reason));
+                    veto_reason = Some(format!("软否决：{reason}"));
                 }
             }
             action = new_action.to_string();
@@ -216,16 +213,16 @@ pub fn apply_signal_optimization(signal: &mut Value, veto: &VetoInputs) {
             position_advice = "轻仓(1/4) — 大盘偏空，严格控制仓位".to_string();
             if action == "强烈买入" {
                 action = "买入".to_string();
-                let extra = format!("大盘M分{}偏低，降级为买入", m_score);
+                let extra = format!("大盘M分{m_score}偏低，降级为买入");
                 veto_reason = Some(match veto_reason {
-                    Some(r) => format!("{}；{}", r, extra),
+                    Some(r) => format!("{r}；{extra}"),
                     None => extra,
                 });
             } else if action == "买入" {
                 action = "谨慎买入".to_string();
-                let extra = format!("大盘M分{}偏低，降级为谨慎买入", m_score);
+                let extra = format!("大盘M分{m_score}偏低，降级为谨慎买入");
                 veto_reason = Some(match veto_reason {
-                    Some(r) => format!("{}；{}", r, extra),
+                    Some(r) => format!("{r}；{extra}"),
                     None => extra,
                 });
             }
@@ -271,7 +268,7 @@ pub fn apply_signal_optimization(signal: &mut Value, veto: &VetoInputs) {
                     action = "观望".to_string();
                     let extra = format!("盈亏比{}倒挂", py_f64(risk_reward));
                     veto_reason = Some(match veto_reason {
-                        Some(r) => format!("{}；{}", r, extra),
+                        Some(r) => format!("{r}；{extra}"),
                         None => extra,
                     });
                 }

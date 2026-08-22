@@ -82,7 +82,7 @@ fn classify_price_volume(klines: &[Kline]) -> (String, &'static str, i64) {
         "平"
     };
 
-    let pattern = format!("价{}量{}", price_dir, vol_dir);
+    let pattern = format!("价{price_dir}量{vol_dir}");
     let direction = match price_dir {
         "涨" => "看涨",
         "跌" => "看跌",
@@ -199,8 +199,7 @@ pub fn analyze_volume_price(
     let volume_ratio = if let Some(q) = quote {
         if klines.len() >= 6 {
             let prev = &klines[klines.len() - 6..klines.len() - 1];
-            let avg5 = prev.iter().map(|k| k.volume).sum::<f64>()
-                / prev.len().max(1) as f64;
+            let avg5 = prev.iter().map(|k| k.volume).sum::<f64>() / prev.len().max(1) as f64;
             if avg5 != 0.0 {
                 py_round(q.volume / avg5, 2)
             } else {
@@ -268,7 +267,7 @@ pub fn analyze_volume_price(
         turnover
     );
     if !fund_text.is_empty() {
-        desc.push_str(&format!("，{}", fund_text));
+        desc.push_str(&format!("，{fund_text}"));
     }
 
     VolumePriceResult {

@@ -165,10 +165,7 @@ fn kmeanspp(points: &[Vec<f64>], k: usize, rng: &mut StdRng) -> Vec<Vec<f64>> {
     let mut centroids: Vec<Vec<f64>> = Vec::with_capacity(k);
     let first = rng.random_range(0..n);
     centroids.push(points[first].clone());
-    let mut d2: Vec<f64> = points
-        .iter()
-        .map(|p| sq_dist(p, &centroids[0]))
-        .collect();
+    let mut d2: Vec<f64> = points.iter().map(|p| sq_dist(p, &centroids[0])).collect();
     while centroids.len() < k {
         let total: f64 = d2.iter().sum();
         if total <= 0.0 {
@@ -231,8 +228,8 @@ fn lloyd(points: &[Vec<f64>], centroids: &mut [Vec<f64>]) -> (Vec<usize>, f64) {
         let mut counts = vec![0usize; k];
         for (p, &a) in points.iter().zip(&assignments) {
             counts[a] += 1;
-            for dim in 0..d {
-                sums[a][dim] += p[dim];
+            for (dim, &value) in p.iter().enumerate().take(d) {
+                sums[a][dim] += value;
             }
         }
         for c in 0..k {

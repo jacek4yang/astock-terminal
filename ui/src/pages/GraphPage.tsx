@@ -16,7 +16,6 @@ import {
   type ShockJson,
   type SubgraphResult,
 } from "../lib/api";
-import { onAgentEvent } from "../lib/events";
 import { ErrorBox, LoadBar, Term } from "../components/ui";
 import Markdown from "../components/Markdown";
 import { useAppStore } from "../store";
@@ -375,9 +374,17 @@ function SupplyChainView() {
             {loading ? "查询中…" : "查询产业链"}
           </button>
           {data && (
-            <span className="muted text-xs">
-              {data.nodes.length} 个节点 · {data.edges.length} 条关系
-            </span>
+            <>
+              <span className="muted text-xs">
+                {data.nodes.length} 个节点 · {data.edges.length} 条关系
+              </span>
+              <span
+                className={`chip ${data.coverage === "identity_only" ? "bg-amber-500/10 text-amber-600 dark:text-amber-400" : "bg-down/10 text-down"}`}
+                title={data.coverage_note}
+              >
+                {data.coverage === "identity_only" ? "仅身份覆盖" : "有来源关系"}
+              </span>
+            </>
           )}
         </div>
         <div className="mt-2.5 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-2.5 dark:border-slate-800/60">
@@ -573,9 +580,7 @@ function RelationshipView() {
   const [err, setErr] = useState<string | null>(null);
   const [selEdge, setSelEdge] = useState<RelationshipEdge | null>(null);
   const [ai, setAi] = useState<AiState>({ status: "idle", text: "" });
-  const unlistenRef = useRef<(() => void) | undefined>(undefined);
-
-  useEffect(() => () => unlistenRef.current?.(), []);
+  const agentGenerationRef = useRef(0);
 
   const nameOf = useCallback((code: string) => names[code] ?? code, [names]);
 
@@ -623,7 +628,7 @@ function RelationshipView() {
     setErr(null);
     setSelEdge(null);
     setAi({ status: "idle", text: "" });
-    unlistenRef.current?.();
+    agentGenerationRef.current += 1;
     try {
       setData(await relationshipGraph(symbols, windowDays));
     } catch (e) {
@@ -713,7 +718,7 @@ function RelationshipView() {
   /** Agent 解释:把图摘要作为上下文提问 */
   const askAgent = async () => {
     if (!data || !selEdge) return;
-    unlistenRef.current?.();
+    const generation = ++agentGenerationRef.current;
     setAi({ status: "running", text: "" });
     const [a, b] = selEdge.pair;
     const top = [...data.edges]
@@ -729,8 +734,8 @@ function RelationshipView() {
       `p=${selEdge.p_value ?? "未知"},${selEdge.significant ? "显著" : "不显著"})。\n` +
       `请解释这两只股票为什么相关,并提示相关性不等于因果的风险。`;
     try {
-      const r = await agentAsk(q, null);
-      unlistenRef.current = await onAgentEvent(r.task_id, (ev) => {
+      await agentAsk(q, null, ({ event: ev }) => {
+        if (agentGenerationRef.current !== generation) return;
         if (ev.type === "text_delta") {
           setAi((s) => ({ ...s, text: s.text + ev.text }));
         } else if (ev.type === "completed") {
@@ -738,12 +743,12 @@ function RelationshipView() {
         } else if (ev.type === "failed") {
           setAi({ status: "failed", text: "", err: ev.error });
         } else if (ev.type === "suspended") {
-          setAi({ status: "failed", text: "", err: "配额已用尽,任务挂起;请到 AI 助手页继续。" });
+          setAi({ status: "failed", text: "", err: "订阅额度已用尽，任务已挂起；请到智能助手页继续。" });
         }
       });
     } catch (e) {
       if (errKind(e) === "no_key") {
-        setAi({ status: "failed", text: "", err: "尚未配置 MiniMax API Key,请先到「设置」页填写后再提问。" });
+        setAi({ status: "failed", text: "", err: "尚未配置 MiniMax 访问密钥，请先到「设置」页填写后再提问。" });
       } else {
         setAi({ status: "failed", text: "", err: errMsg(e) });
       }
@@ -853,7 +858,7 @@ function RelationshipView() {
               <span className="text-xs">试着降低 |r| 阈值,或扩大回看窗口</span>
             </div>
           ) : (
-            <GraphChart option={option} onEdgeClick={(i) => { setSelEdge(filtered[i] ?? null); setAi({ status: "idle", text: "" }); unlistenRef.current?.(); }} />
+            <GraphChart option={option} onEdgeClick={(i) => { setSelEdge(filtered[i] ?? null); setAi({ status: "idle", text: "" }); agentGenerationRef.current += 1; }} />
           )}
         </div>
 
@@ -865,7 +870,7 @@ function RelationshipView() {
                 <div className="text-sm font-semibold">
                   {nameOf(selEdge.pair[0])} ↔ {nameOf(selEdge.pair[1])}
                 </div>
-                <button className="muted shrink-0 text-xs" onClick={() => { setSelEdge(null); setAi({ status: "idle", text: "" }); unlistenRef.current?.(); }}>
+                <button className="muted shrink-0 text-xs" onClick={() => { setSelEdge(null); setAi({ status: "idle", text: "" }); agentGenerationRef.current += 1; }}>
                   ✕
                 </button>
               </div>

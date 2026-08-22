@@ -57,6 +57,20 @@ pub trait Http: Send + Sync {
         body: Option<&'a serde_json::Value>,
     ) -> BoxFuture<'a, Result<HttpResponse, MinimaxError>>;
 
+    /// `POST` JSON with additional non-secret provider headers. Test
+    /// transports may use the default implementation when header inspection
+    /// is irrelevant.
+    fn post_with_headers<'a>(
+        &'a self,
+        url: &'a str,
+        bearer: Option<&'a SecretKey>,
+        body: Option<&'a serde_json::Value>,
+        headers: &'a [(&'a str, &'a str)],
+    ) -> BoxFuture<'a, Result<HttpResponse, MinimaxError>> {
+        let _ = headers;
+        self.post(url, bearer, body)
+    }
+
     /// `POST` a JSON body and return the response body as a byte stream.
     ///
     /// Non-2xx statuses are consumed into a typed error before streaming
@@ -86,10 +100,27 @@ impl ReqwestHttp {
     /// buffered requests; streaming requests have no overall timeout because a
     /// reasoning model may stream for minutes (cancel by dropping the stream).
     pub fn new() -> Self {
+        Self::build(false)
+    }
+
+    /// Build a transport that never inherits process proxy variables. This
+    /// is intended for loopback test servers and explicitly direct custom
+    /// endpoints; production uses [`ReqwestHttp::new`] so user proxy policy
+    /// remains available.
+    pub fn new_direct() -> Self {
+        Self::build(true)
+    }
+
+    fn build(direct: bool) -> Self {
         let builder = || {
-            reqwest::Client::builder()
+            let builder = reqwest::Client::builder()
                 .user_agent(concat!("astock-terminal/", env!("CARGO_PKG_VERSION")))
-                .connect_timeout(Duration::from_secs(10))
+                .connect_timeout(Duration::from_secs(10));
+            if direct {
+                builder.no_proxy()
+            } else {
+                builder
+            }
         };
         let client = builder()
             .timeout(Duration::from_secs(60))
@@ -137,6 +168,29 @@ impl Http for ReqwestHttp {
             let mut req = self.client.post(url);
             if let Some(key) = bearer {
                 req = req.bearer_auth(key.expose());
+            }
+            if let Some(json) = body {
+                req = req.json(json);
+            }
+            let resp = req.send().await.map_err(map_transport)?;
+            buffered(resp).await
+        })
+    }
+
+    fn post_with_headers<'a>(
+        &'a self,
+        url: &'a str,
+        bearer: Option<&'a SecretKey>,
+        body: Option<&'a serde_json::Value>,
+        headers: &'a [(&'a str, &'a str)],
+    ) -> BoxFuture<'a, Result<HttpResponse, MinimaxError>> {
+        Box::pin(async move {
+            let mut req = self.client.post(url);
+            if let Some(key) = bearer {
+                req = req.bearer_auth(key.expose());
+            }
+            for (name, value) in headers {
+                req = req.header(*name, *value);
             }
             if let Some(json) = body {
                 req = req.json(json);

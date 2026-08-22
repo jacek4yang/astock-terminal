@@ -2,6 +2,7 @@
 
 use astock_core::{Adjust, Bar, FundFlowPoint, KlinePeriod, Quote as CoreQuote, Symbol};
 use astock_market_data::{DataProvider, MarketData};
+use astock_trading_rules::RuleSet;
 use serde_json::Value;
 use tauri::State;
 
@@ -64,6 +65,7 @@ pub(crate) async fn analyze_symbol(
     index_klines: Option<&[astock_technical::Kline]>,
     breadth: Option<&astock_technical::Breadth>,
     min_bars: usize,
+    rules: Option<&RuleSet>,
 ) -> Result<(Value, Option<CoreQuote>), CmdError> {
     let klines_fetched = market
         .kline(symbol, period, Adjust::Qfq, ANALYZE_KLINE_COUNT)
@@ -96,14 +98,120 @@ pub(crate) async fn analyze_symbol(
         }
     };
 
-    let signal = run_signal_pipeline(
+    let mut signal = run_signal_pipeline(
         &klines_fetched.data,
         quote.as_ref(),
         flows.as_deref(),
         index_klines,
         breadth,
     );
+    if let (Some(rules), Some(quote)) = (rules, quote.as_ref()) {
+        attach_manual_plan(
+            &mut signal,
+            symbol,
+            quote,
+            &klines_fetched.data,
+            rules,
+            &klines_fetched.source.to_string(),
+        );
+    }
     Ok((signal, quote))
+}
+
+/// Attach the production manual-execution playbook without changing the
+/// golden-tested legacy engine. Concrete levels come only from bars and the
+/// deterministic signal, while sessions/limits/lots come from RuleSet data.
+pub(crate) fn attach_manual_plan(
+    signal: &mut Value,
+    symbol: &Symbol,
+    quote: &CoreQuote,
+    bars: &[Bar],
+    rules: &RuleSet,
+    source: &str,
+) {
+    let auction = &rules.data.auction;
+    let sessions = astock_technical::SessionSchedule {
+        open_auction_start: auction.open_call_auction.start.clone(),
+        open_auction_end: auction.open_call_auction.end.clone(),
+        morning_start: auction.continuous_morning.start.clone(),
+        morning_end: auction.continuous_morning.end.clone(),
+        afternoon_start: auction.continuous_afternoon.start.clone(),
+        afternoon_end: auction.continuous_afternoon.end.clone(),
+        close_auction_start: auction.close_call_auction.start.clone(),
+        close_auction_end: auction.close_call_auction.end.clone(),
+    };
+    let board = rules.for_symbol(symbol.code()).ok();
+    let constraints = astock_technical::TradingConstraints {
+        board_name: board
+            .as_ref()
+            .map(|value| value.board_name.clone())
+            .unwrap_or_else(|| "未知板块".to_string()),
+        price_limit_pct: board
+            .as_ref()
+            .map_or(0.10, |value| value.price_limit_pct(false)),
+        min_lot: board.as_ref().map_or(100, |value| value.min_lot),
+        lot_step: board.as_ref().map_or(100, |value| value.lot_step),
+        t_plus_1: board.as_ref().is_none_or(|value| value.t_plus_1),
+    };
+    let klines = convert::bars_to_klines(bars);
+    let generated_at = cache_path::shanghai_now().to_rfc3339();
+    let Some(plan) = astock_technical::build_manual_trading_plan(
+        symbol.code(),
+        &quote.name,
+        &klines,
+        signal,
+        &sessions,
+        &constraints,
+        &generated_at,
+        source,
+    ) else {
+        return;
+    };
+    let Ok(plan_json) = serde_json::to_value(&plan) else {
+        return;
+    };
+    let Some(object) = signal.as_object_mut() else {
+        return;
+    };
+    object.insert("manual_plan".to_string(), plan_json);
+    object.insert(
+        "plain_summary".to_string(),
+        Value::String(format!(
+            "{}；反方条件：{}。本方案只在检查点条件成立时供人工执行。",
+            plan.thesis, plan.counter_thesis
+        )),
+    );
+    if let Some(trade_plan) = object.get_mut("trade_plan").and_then(Value::as_object_mut) {
+        trade_plan.insert(
+            "entry_price".to_string(),
+            serde_json::json!((plan.entry_zone_low + plan.entry_zone_high) / 2.0),
+        );
+        trade_plan.insert("stop_loss".to_string(), serde_json::json!(plan.stop_loss));
+        trade_plan.insert(
+            "target_price".to_string(),
+            serde_json::json!(plan.target_price),
+        );
+        trade_plan.insert(
+            "risk_reward_ratio".to_string(),
+            serde_json::json!(plan.risk_reward_ratio),
+        );
+        trade_plan.insert(
+            "max_loss_pct".to_string(),
+            serde_json::json!(plan.risk_budget_pct),
+        );
+        trade_plan.insert(
+            "position_size".to_string(),
+            Value::String(plan.position_guidance.clone()),
+        );
+        trade_plan.insert(
+            "holding_period".to_string(),
+            Value::String(plan.expected_holding_period.clone()),
+        );
+        trade_plan.insert(
+            "notes".to_string(),
+            Value::String(format!("{}；{}", plan.stop_basis, plan.target_basis)),
+        );
+    }
 }
 
 /// Run the technical signal pipeline on bars the caller already has (the
@@ -192,6 +300,7 @@ pub async fn analyze(
         index_klines.as_deref(),
         breadth.as_ref(),
         0,
+        Some(&state.rules),
     )
     .await?;
     cache_path::tool_cache_put_json(

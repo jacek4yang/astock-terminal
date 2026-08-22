@@ -34,7 +34,11 @@ pub enum QuantError {
 
 /// Validate that a slice contains only finite values and has at least
 /// `needed` elements. Shared by virtually every routine in the crate.
-pub(crate) fn validate_series(x: &[f64], needed: usize, context: &'static str) -> Result<(), QuantError> {
+pub(crate) fn validate_series(
+    x: &[f64],
+    needed: usize,
+    context: &'static str,
+) -> Result<(), QuantError> {
     if x.len() < needed {
         return Err(QuantError::InsufficientData {
             context,

@@ -2,6 +2,9 @@
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+use crate::FieldProvenance;
 
 /// A realtime quote snapshot (EastMoney `stock/get` shape).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -29,9 +32,12 @@ pub struct Quote {
     /// Percent change vs. pre_close.
     pub pct: f64,
     /// Turnover rate in percent.
-    pub turnover: f64,
+    pub turnover: Option<f64>,
     /// When this snapshot was fetched.
     pub timestamp: DateTime<Utc>,
+    /// Field-level source, time, quality and missing-value metadata.
+    #[serde(default)]
+    pub field_provenance: BTreeMap<String, FieldProvenance>,
 }
 
 /// One point of an intraday minute series (分时).

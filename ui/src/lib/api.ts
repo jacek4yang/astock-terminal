@@ -3,7 +3,7 @@
  * 契约见 ../docs/command-contract.md;所有命令返回 JSON(snake_case),
  * 错误统一 { error: string, kind: string }。
  */
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 
 /** 是否在 Tauri 桌面环境(纯浏览器 dev 时为 false) */
 export function isTauri(): boolean {
@@ -48,8 +48,18 @@ export interface Quote {
   pre_close: number;
   volume: number;
   amount: number;
-  turnover: number;
+  turnover: number | null;
   timestamp: string;
+  field_provenance: Record<string, FieldProvenance>;
+}
+
+export interface FieldProvenance {
+  source: string;
+  as_of: string | null;
+  fetched_at: string;
+  stale: boolean;
+  quality: "reported" | "reference" | "derived" | "missing";
+  missing_reason: string | null;
 }
 
 export interface Bar {
@@ -59,9 +69,9 @@ export interface Bar {
   high: number;
   low: number;
   volume: number;
-  amount: number;
-  pct: number;
-  turnover: number;
+  amount: number | null;
+  pct: number | null;
+  turnover: number | null;
 }
 
 export type KlinePeriod = "day" | "week" | "month";
@@ -102,9 +112,13 @@ export interface MarketBreadth {
 export interface AllShare {
   code: string;
   name: string;
-  price: number;
-  pct: number;
-  amount: number;
+  market: string;
+  board: "main" | "chi_next" | "star" | "beijing" | "fund" | "other" | string;
+  price: number | null;
+  pct: number | null;
+  amount: number | null;
+  source: string;
+  fetched_at: string;
 }
 
 export interface FundFlow {
@@ -140,6 +154,25 @@ export interface RealtimeFlow {
 }
 
 export const getQuote = (symbol: string) => cmd<Quote>("get_quote", { symbol });
+export interface OrderBookLevel {
+  level: number;
+  price: number;
+  volume: number;
+}
+export interface OrderBook {
+  symbol: string;
+  server_time: string;
+  current_volume: number;
+  inner_volume: number;
+  outer_volume: number;
+  bids: OrderBookLevel[];
+  asks: OrderBookLevel[];
+  source: string;
+  fetched_at: string;
+  transaction_detail_available: boolean;
+  limitation: string;
+}
+export const getOrderBook = (symbol: string) => cmd<OrderBook>("get_order_book", { symbol });
 export const getKline = (symbol: string, period: KlinePeriod, adjust: KlineAdjust, count: number) =>
   cmd<KlineResult>("get_kline", { symbol, period, adjust, count });
 export const getMinute = (symbol: string) => cmd<MinuteData>("get_minute", { symbol });
@@ -195,6 +228,60 @@ export interface TradePlan {
   risk_reward_ratio: number | null;
   max_loss_pct: number | null;
   notes: string;
+}
+
+export interface ManualScenario {
+  name: string;
+  condition: string;
+  response: string;
+  invalidation: string;
+}
+
+export interface ManualCheckpoint {
+  phase: string;
+  time_window: string;
+  observe: string[];
+  required_conditions: string[];
+  action_if_confirmed: string;
+  action_if_failed: string;
+  next_checkpoint: string;
+}
+
+export interface ManualEvidence {
+  label: string;
+  value: string;
+  source: string;
+  as_of: string;
+}
+
+/** 仅供人工执行的条件化计划；软件不会据此自动下单。 */
+export interface ManualTradingPlan {
+  plan_id: string;
+  symbol: string;
+  name: string;
+  generated_at: string;
+  data_as_of: string;
+  market_regime: string;
+  thesis: string;
+  counter_thesis: string;
+  confidence: number;
+  risk_budget_pct: number;
+  entry_zone_low: number;
+  entry_zone_high: number;
+  stop_loss: number;
+  target_price: number;
+  risk_reward_ratio: number;
+  stop_basis: string;
+  target_basis: string;
+  expected_holding_period: string;
+  position_guidance: string;
+  scenarios: ManualScenario[];
+  checkpoints: ManualCheckpoint[];
+  invalidation_conditions: string[];
+  review_triggers: string[];
+  constraints: string[];
+  evidence: ManualEvidence[];
+  disclaimer: string;
 }
 
 export interface TrendInfo {
@@ -281,6 +368,7 @@ export interface SignalJson {
   signal_strength: string;
   plain_summary: string;
   trade_plan: TradePlan;
+  manual_plan?: ManualTradingPlan | null;
   module_scores: Record<string, number>;
   buy_signals: string[];
   sell_signals: string[];
@@ -584,6 +672,7 @@ export interface ScanStatus {
 
 export const scanStart = () => cmd<{ started: boolean }>("scan_start");
 export const scanStatus = () => cmd<ScanStatus>("scan_status");
+export const scanCancel = () => cmd<{ cancelled: boolean }>("scan_cancel");
 
 // ==================== 自选股 ====================
 
@@ -605,14 +694,29 @@ export const watchlistPin = (code: string, group: string, pinned: boolean) =>
 
 // ==================== 设置 / MiniMax / 缓存 ====================
 
-/** 配额状态(字段以后端实际返回为准,均可选) */
-export interface QuotaStatus {
-  used?: number;
-  total?: number;
-  remaining?: number;
-  unit?: string;
-  reset_at?: string;
+export interface ModelQuotaStatus {
+  model_name: string;
+  start_time: number | null;
+  end_time: number | null;
+  remains_time: number | null;
+  current_interval_total_count: number | null;
+  current_interval_usage_count: number | null;
+  current_weekly_total_count: number | null;
+  current_weekly_usage_count: number | null;
+  weekly_start_time: number | null;
+  weekly_end_time: number | null;
+  weekly_remains_time: number | null;
+  current_interval_status: number | null;
+  current_interval_remaining_percent: number | null;
+  current_weekly_status: number | null;
+  current_weekly_remaining_percent: number | null;
   [key: string]: unknown;
+}
+
+/** 官方 token_plan/remains 返回的按模型 5 小时/周窗口快照。 */
+export interface QuotaStatus {
+  models: ModelQuotaStatus[];
+  fetched_at: number;
 }
 
 export interface MinimaxStatus {
@@ -621,6 +725,24 @@ export interface MinimaxStatus {
   api_host?: string;
   model?: string;
   quota?: QuotaStatus;
+  available_models?: AvailableMinimaxModel[];
+  model_routing?: AgentModelRoutingSettings;
+}
+
+export interface AvailableMinimaxModel {
+  id: string;
+  object: string;
+  created: number;
+  owned_by: string;
+}
+
+export interface AgentModelRoutingSettings {
+  coordinator_model: string;
+  fast_model: string;
+  deep_model: string;
+  verifier_model: string;
+  multi_agent_enabled: boolean;
+  max_parallel_agents: number;
 }
 
 /** minimax_set_key 返回的服务信息(key 永不回显) */
@@ -650,6 +772,10 @@ export interface CacheCleanupResult {
 export const minimaxSetKey = (key: string) => cmd<ServiceInfo>("minimax_set_key", { key });
 export const minimaxStatus = () => cmd<MinimaxStatus>("minimax_status");
 export const minimaxQuota = () => cmd<QuotaStatus>("minimax_quota");
+export const settingsGetAgentModelRouting = () =>
+  cmd<AgentModelRoutingSettings>("settings_get_agent_model_routing");
+export const settingsSetAgentModelRouting = (settings: AgentModelRoutingSettings) =>
+  cmd<AgentModelRoutingSettings>("settings_set_agent_model_routing", { settings });
 export const cacheStats = () => cmd<CacheStats>("cache_stats");
 export const cacheCleanup = (targetMb: number) =>
   // backend uses #[tauri::command(rename_all = "snake_case")] — keys must be snake_case
@@ -698,10 +824,19 @@ export function errKind(e: unknown): string | null {
   return null;
 }
 
-export type AgentTaskStatus = "running" | "suspended" | "completed" | "failed";
+export type AgentTaskStatus =
+  | "queued"
+  | "starting"
+  | "running"
+  | "waiting"
+  | "suspended"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export interface AgentTask {
   id: string;
+  conversation_id: string;
   kind: string;
   status: AgentTaskStatus | string;
   /** unix 秒 */
@@ -712,25 +847,138 @@ export interface AgentTask {
 
 export interface AgentConversation {
   id: string;
-  title: string;
+  title: string | null;
   /** unix 秒 */
   created_at: number;
 }
 
-/** 历史消息(role/content JSON,工具消息 role 为 tool 等) */
-export interface AgentMessage {
-  role: string;
-  content: string;
-  [key: string]: unknown;
+export interface AgentHistoryToolCall {
+  id: string | null;
+  name: string | null;
+  arguments: string | null;
 }
 
-export const agentAsk = (question: string, conversationId: string | null) =>
+/** Rust 已规范化的历史消息；content 永远是字符串。 */
+export interface AgentMessage {
+  id: string;
+  role: string;
+  content: string;
+  tool_calls: AgentHistoryToolCall[];
+  tool_call_id: string | null;
+  created_at: number;
+  malformed: boolean;
+}
+
+export interface AgentEvidence {
+  tool: string;
+  cache_key: string;
+  source: string;
+  fetched_at: string;
+}
+
+export interface AgentReport {
+  task_id: string;
+  answer: string;
+  conclusions: unknown;
+  evidence: AgentEvidence[];
+  generated_at: string;
+}
+
+export type AgentEvent =
+  | {
+      type: "progress";
+      phase: "preparing" | "reasoning" | "tools" | "synthesizing" | string;
+      message: string;
+      round: number;
+      max_rounds: number;
+      completed: number | null;
+      total: number | null;
+    }
+  | {
+      type: "context_compacted";
+      before_chars: number;
+      after_chars: number;
+      retained_messages: number;
+    }
+  | { type: "text_delta"; text: string }
+  | { type: "text_reset"; message: string }
+  | {
+      type: "tool_call_started";
+      call_id: string;
+      name: string;
+      args: unknown;
+      position: number;
+      total: number;
+      timeout_ms: number;
+    }
+  | {
+      type: "tool_call_progress";
+      call_id: string;
+      name: string;
+      elapsed_ms: number;
+      timeout_ms: number;
+      stage: string;
+    }
+  | {
+      type: "tool_call_finished";
+      call_id: string;
+      name: string;
+      cache_key: string;
+      elapsed_ms: number;
+      success: boolean;
+      source: string | null;
+      fetched_at: string | null;
+      error: string | null;
+    }
+  | {
+      type: "suspended";
+      reason: { kind: "quota_exhausted"; reset_at_unix: number | null };
+    }
+  | { type: "completed"; report: AgentReport }
+  | { type: "failed"; error: string };
+
+export interface AgentStreamEnvelope {
+  run_id: string;
+  conversation_id: string;
+  seq: number;
+  event: AgentEvent;
+}
+
+export type AgentResearchMode = "quick" | "deep" | "plan";
+export type AgentReasoningDepth = "standard" | "deep" | "maximum";
+export interface AgentRunOptions {
+  research_mode: AgentResearchMode;
+  reasoning_depth: AgentReasoningDepth;
+  enabled_tools: string[];
+  auto_resume_on_quota: boolean;
+}
+
+function agentChannel(handler: (message: AgentStreamEnvelope) => void) {
+  const channel = new Channel<AgentStreamEnvelope>();
+  channel.onmessage = handler;
+  return channel;
+}
+
+export const agentAsk = (
+  question: string,
+  conversationId: string | null,
+  onEvent: (message: AgentStreamEnvelope) => void,
+  options?: AgentRunOptions,
+) =>
   cmd<{ task_id: string; conversation_id: string }>("agent_ask", {
     question,
     conversation_id: conversationId,
+    options,
+    on_event: agentChannel(onEvent),
   });
-export const agentResume = (taskId: string) =>
-  cmd<{ resumed: boolean }>("agent_resume", { task_id: taskId });
+export const agentResume = (
+  taskId: string,
+  onEvent: (message: AgentStreamEnvelope) => void,
+) =>
+  cmd<{ resumed: boolean }>("agent_resume", {
+    task_id: taskId,
+    on_event: agentChannel(onEvent),
+  });
 export const agentCancel = (taskId: string) =>
   cmd<{ cancelled: boolean }>("agent_cancel", { task_id: taskId });
 export const agentTasks = () => cmd<AgentTask[]>("agent_tasks");
@@ -768,6 +1016,8 @@ export interface GraphEdge {
 export interface SubgraphResult {
   center: string;
   hops: number;
+  coverage: "identity_only" | "sourced_relations";
+  coverage_note: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
 }

@@ -182,11 +182,7 @@ pub(crate) struct Gap {
 ///
 /// The y search is constrained to ±3 px around the server-provided `inity`,
 /// which eliminates most photographic false positives.
-pub(crate) fn find_gap(
-    slice_png: &[u8],
-    bg_jpeg: &[u8],
-    inity: f64,
-) -> Result<Gap, WencaiError> {
+pub(crate) fn find_gap(slice_png: &[u8], bg_jpeg: &[u8], inity: f64) -> Result<Gap, WencaiError> {
     let slice = image::load_from_memory(slice_png)
         .map_err(|e| WencaiError::Parse(format!("slice decode: {e}")))?
         .to_rgba8();
@@ -196,10 +192,7 @@ pub(crate) fn find_gap(
 
     // Piece mask and its bounding box.
     let (sw, sh) = (slice.width(), slice.height());
-    let mask: Vec<bool> = slice
-        .pixels()
-        .map(|p| p.0[3] > 100)
-        .collect();
+    let mask: Vec<bool> = slice.pixels().map(|p| p.0[3] > 100).collect();
     let (mut x0, mut y0, mut x1, mut y1) = (sw, sh, 0, 0);
     for y in 0..sh {
         for x in 0..sw {

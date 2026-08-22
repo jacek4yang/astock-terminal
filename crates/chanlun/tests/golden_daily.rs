@@ -69,5 +69,9 @@ fn golden_daily_fixtures_match_legacy() {
             }
         }
     }
-    assert!(failures.is_empty(), "golden mismatches:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "golden mismatches:\n{}",
+        failures.join("\n")
+    );
 }

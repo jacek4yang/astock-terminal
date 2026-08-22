@@ -36,6 +36,7 @@ const MARKET_SZ: u8 = 0;
 /// lazily on the first data request.
 pub struct TdxProvider {
     client: OnceCell<TdxClient>,
+    securities: OnceCell<Vec<StockListItem>>,
 }
 
 impl Default for TdxProvider {
@@ -49,6 +50,7 @@ impl TdxProvider {
     pub fn new() -> Self {
         TdxProvider {
             client: OnceCell::new(),
+            securities: OnceCell::new(),
         }
     }
 
@@ -76,6 +78,23 @@ impl TdxProvider {
             KlinePeriod::Month => Ok(KlineCategory::Monthly),
             _ => Err(DataError::NoProvider("tdx (仅日/周/月)")),
         }
+    }
+
+    /// Raw TDX five-level snapshot for the professional order-book surface.
+    /// The core quote pipeline consumes the same snapshot but deliberately
+    /// projects away the five levels.
+    pub async fn order_book(&self, symbol: &Symbol) -> Result<TdxQuote, DataError> {
+        let code = symbol.code();
+        let market = astock_tdx::protocol::types::auto_market(code)
+            .ok_or(DataError::NoProvider("tdx (不支持该市场)"))?;
+        self.client()
+            .await?
+            .quotes(&[(market, code)])
+            .await
+            .map_err(map_err)?
+            .into_iter()
+            .find(|quote| quote.code == code)
+            .ok_or_else(|| DataError::Empty(format!("tdx order book {symbol}")))
     }
 }
 
@@ -121,7 +140,7 @@ fn bar_from_tdx(raw: &SecurityBar) -> Option<Bar> {
 }
 
 /// 五档快照 → 核心 [`Quote`]。核心模型不带档位字段，盘口五档在此处丢弃；
-/// `turnover`（换手率）快照不含，置 0；`name` 快照不含，置空。
+/// `turnover`（换手率）快照不含，保持缺失；`name` 由证券主数据补齐。
 fn quote_from_tdx(raw: &TdxQuote) -> Quote {
     let change = raw.price - raw.last_close;
     let pct = if raw.last_close > 0.0 {
@@ -129,6 +148,35 @@ fn quote_from_tdx(raw: &TdxQuote) -> Quote {
     } else {
         0.0
     };
+    let timestamp = astock_core::time::utc_now();
+    let mut field_provenance = std::collections::BTreeMap::new();
+    for field in [
+        "price",
+        "open",
+        "high",
+        "low",
+        "pre_close",
+        "volume",
+        "amount",
+    ] {
+        field_provenance.insert(
+            field.to_string(),
+            astock_core::FieldProvenance::reported("tdx", timestamp),
+        );
+    }
+    for field in ["change", "pct"] {
+        let mut derived = astock_core::FieldProvenance::reported("tdx", timestamp);
+        derived.quality = astock_core::DataQuality::Derived;
+        field_provenance.insert(field.to_string(), derived);
+    }
+    field_provenance.insert(
+        "name".to_string(),
+        astock_core::FieldProvenance::missing("tdx", "TDX 快照不包含证券名称"),
+    );
+    field_provenance.insert(
+        "turnover".to_string(),
+        astock_core::FieldProvenance::missing("tdx", "TDX 快照不包含换手率"),
+    );
     Quote {
         symbol: raw.code.clone(),
         name: String::new(),
@@ -141,8 +189,9 @@ fn quote_from_tdx(raw: &TdxQuote) -> Quote {
         amount: raw.amount,
         change,
         pct,
-        turnover: 0.0,
-        timestamp: astock_core::time::utc_now(),
+        turnover: None,
+        timestamp,
+        field_provenance,
     }
 }
 
@@ -162,9 +211,9 @@ fn item_from_tdx(info: &SecurityInfo) -> StockListItem {
     StockListItem {
         code: info.code.clone(),
         name: info.name.clone(),
-        price: 0.0,
-        pct: 0.0,
-        amount: 0.0,
+        price: None,
+        pct: None,
+        amount: None,
     }
 }
 
@@ -208,37 +257,31 @@ impl DataProvider for TdxProvider {
     }
 
     async fn quote(&self, symbol: &Symbol) -> Result<Fetched<Quote>, DataError> {
-        let code = symbol.code();
-        let market = astock_tdx::protocol::types::auto_market(code)
-            .ok_or(DataError::NoProvider("tdx (不支持该市场)"))?;
-        let quotes = self
-            .client()
-            .await?
-            .quotes(&[(market, code)])
-            .await
-            .map_err(map_err)?;
-        let raw = quotes
-            .iter()
-            .find(|q| q.code == code)
-            .ok_or_else(|| DataError::Empty(format!("tdx quote {symbol}")))?;
-        Ok(Fetched::now(quote_from_tdx(raw), Source::Tdx))
+        let raw = self.order_book(symbol).await?;
+        Ok(Fetched::now(quote_from_tdx(&raw), Source::Tdx))
     }
 
     async fn all_a_shares(&self) -> Result<Fetched<Vec<StockListItem>>, DataError> {
-        let client = self.client().await?;
-        let mut items = Vec::new();
-        for market in [MARKET_SH, MARKET_SZ] {
-            let list = client.security_list(market).await.map_err(map_err)?;
-            items.extend(
-                list.iter()
-                    .filter(|s| is_a_share(market, &s.code))
-                    .map(item_from_tdx),
-            );
-        }
-        if items.is_empty() {
-            return Err(DataError::Empty("tdx all_a_shares".to_string()));
-        }
-        Ok(Fetched::now(items, Source::Tdx))
+        let items = self
+            .securities
+            .get_or_try_init(|| async {
+                let client = self.client().await?;
+                let mut items = Vec::new();
+                for market in [MARKET_SH, MARKET_SZ] {
+                    let list = client.security_list(market).await.map_err(map_err)?;
+                    items.extend(
+                        list.iter()
+                            .filter(|s| is_a_share(market, &s.code))
+                            .map(item_from_tdx),
+                    );
+                }
+                if items.is_empty() {
+                    return Err(DataError::Empty("tdx all_a_shares".to_string()));
+                }
+                Ok(items)
+            })
+            .await?;
+        Ok(Fetched::now(items.clone(), Source::Tdx))
     }
 }
 
@@ -344,7 +387,7 @@ mod tests {
         assert_eq!(q.volume, 33_472.0); // 快照量已是手，不再换算
         assert!((q.change - (1272.83 - 1291.5)).abs() < 1e-9);
         assert!((q.pct - (1272.83 - 1291.5) / 1291.5 * 100.0).abs() < 1e-9);
-        assert_eq!(q.turnover, 0.0);
+        assert_eq!(q.turnover, None);
     }
 
     #[test]

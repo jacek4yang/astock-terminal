@@ -51,10 +51,7 @@ impl RawResponse {
     pub fn sse(body: &str) -> Self {
         Self {
             status: 200,
-            headers: vec![(
-                "content-type".to_string(),
-                "text/event-stream".to_string(),
-            )],
+            headers: vec![("content-type".to_string(), "text/event-stream".to_string())],
             body: body.as_bytes().to_vec(),
             drip: true,
         }
@@ -145,9 +142,7 @@ fn handle_conn(
             content_length = v.trim().parse().unwrap_or(0);
         }
         if lower.starts_with("authorization:") {
-            authorization = trimmed
-                .split_once(':')
-                .map(|(_, v)| v.trim().to_string());
+            authorization = trimmed.split_once(':').map(|(_, v)| v.trim().to_string());
         }
     }
 
@@ -202,7 +197,7 @@ fn handle_conn(
 /// (`{url}/cn`, `{url}/intl`) so a handler can emulate per-region behavior;
 /// both use a fast gate so retries stay test-friendly.
 pub fn test_client(key: &str, url: &str) -> MinimaxClient {
-    let http: Arc<dyn Http> = Arc::new(ReqwestHttp::new());
+    let http: Arc<dyn Http> = Arc::new(ReqwestHttp::new_direct());
     let detector = RegionDetector::with_hosts(
         http.clone(),
         vec![

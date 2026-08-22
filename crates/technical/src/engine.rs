@@ -220,7 +220,7 @@ fn build_trade_plan(
                 b.stop_loss
             );
             if let Some(next_add) = b.next_add_price {
-                note.push_str(&format!("；加仓价{:.2}", next_add));
+                note.push_str(&format!("；加仓价{next_add:.2}"));
             }
             notes.push(note);
             break;
@@ -345,14 +345,10 @@ pub fn run_analysis(
     };
 
     // confidence = max(10, int(score*0.8) + 12*n - 40), n = #modules >= 60
-    let qualified_count = module_scores
-        .iter()
-        .filter(|(_, s)| *s >= 60)
-        .count() as i64;
+    let qualified_count = module_scores.iter().filter(|(_, s)| *s >= 60).count() as i64;
     let confidence = (py_int(score as f64 * 0.8) + 12 * qualified_count - 40).max(10);
 
-    let (risk_level, signal_strength) =
-        calc_risk_level(score, &trend, &vp, &canslim, &breakouts);
+    let (risk_level, signal_strength) = calc_risk_level(score, &trend, &vp, &canslim, &breakouts);
 
     // ---- Signal aggregation ----
     let mut buy_signals: Vec<String> = Vec::new();
@@ -466,15 +462,14 @@ pub fn run_analysis(
         desc_parts.push(format!("趋势={}({})", trend.direction, trend_score));
     }
     desc_parts.push(format!("量价={}({})", vp.pattern, vp_score));
-    desc_parts.push(format!("突破={}", breakout_score));
+    desc_parts.push(format!("突破={breakout_score}"));
     desc_parts.push(format!("CS={}({})", canslim.grade, canslim_score));
     if !patterns.is_empty() {
-        desc_parts.push(format!("形态={}", pattern_score));
+        desc_parts.push(format!("形态={pattern_score}"));
     }
     let description = desc_parts.join(" | ");
 
-    let plain_summary =
-        build_plain_summary(action, &trend, &patterns, &vp, &canslim, &trade_plan);
+    let plain_summary = build_plain_summary(action, &trend, &patterns, &vp, &canslim, &trade_plan);
 
     SignalEngineResult {
         action: action.to_string(),

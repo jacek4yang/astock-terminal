@@ -128,7 +128,8 @@ impl QuotaStatus {
     /// True when the model's rolling window is exhausted; callers should stop
     /// sending requests until [`QuotaStatus::window_reset_at`].
     pub fn exhausted(&self, model: &str) -> bool {
-        self.model(model).is_some_and(ModelQuota::interval_exhausted)
+        self.model(model)
+            .is_some_and(ModelQuota::interval_exhausted)
     }
 
     /// When the model's rolling window resets, if reported.

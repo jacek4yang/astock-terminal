@@ -47,9 +47,9 @@ pub struct StockListItem {
     /// Display name.
     pub name: String,
     /// Latest price.
-    pub price: f64,
+    pub price: Option<f64>,
     /// Percent change on the day.
-    pub pct: f64,
+    pub pct: Option<f64>,
     /// Turnover amount in CNY.
-    pub amount: f64,
+    pub amount: Option<f64>,
 }

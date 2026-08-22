@@ -113,12 +113,7 @@ fn calc_ma_scores(klines: &[Kline]) -> (MaScores, Vec<String>, Option<f64>, Opti
     let ma60 = sma_series(&closes, 60);
     let (ma20_last, ma60_last) = (ma20[ma20.len() - 1], ma60[ma60.len() - 1]);
     let (Some(ma20_val), Some(ma60_val)) = (ma20_last, ma60_last) else {
-        return (
-            MaScores::default(),
-            Vec::new(),
-            ma20_last,
-            ma60_last,
-        );
+        return (MaScores::default(), Vec::new(), ma20_last, ma60_last);
     };
 
     let ma20_dir = ma_direction(&ma20, 5);

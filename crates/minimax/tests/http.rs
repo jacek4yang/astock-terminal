@@ -75,6 +75,26 @@ async fn quota_parses_over_the_wire() {
 }
 
 #[tokio::test]
+async fn coding_plan_web_search_preserves_sources() {
+    let server = common::spawn(|req| {
+        if req.path.ends_with("/v1/token_plan/remains") {
+            return RawResponse::json(200, &quota_body(80));
+        }
+        assert!(req.path.ends_with("/v1/coding_plan/search"));
+        assert!(req.body.contains("政策"));
+        RawResponse::json(
+            200,
+            r#"{"organic":[{"title":"监管文件","link":"https://example.com/policy","snippet":"摘要","date":"2026-08-22"}],"related_searches":[],"base_resp":{"status_code":0,"status_msg":"success"}}"#,
+        )
+    });
+    let client = common::test_client("cn-key", &server.url);
+    let payload = client.web_search("2026 政策").await.unwrap();
+    assert_eq!(payload["organic"][0]["title"], "监管文件");
+    assert_eq!(payload["organic"][0]["link"], "https://example.com/policy");
+    assert_eq!(server.count_path("coding_plan/search"), 1);
+}
+
+#[tokio::test]
 async fn model_fallback_skips_failing_models() {
     let calls = Arc::new(AtomicUsize::new(0));
     let server = common::spawn({
@@ -84,7 +104,7 @@ async fn model_fallback_skips_failing_models() {
                 return RawResponse::json(200, &quota_body(80));
             }
             calls.fetch_add(1, Ordering::SeqCst);
-            if req.body.contains("MiniMax-M2.5") {
+            if req.body.contains("MiniMax-M3") {
                 // Best model unavailable on this plan.
                 RawResponse::json(
                     200,
@@ -100,11 +120,11 @@ async fn model_fallback_skips_failing_models() {
     });
     let client = common::test_client("cn-key", &server.url);
     let selected = client.selected_model().await.unwrap();
-    assert_eq!(selected, "MiniMax-M2");
-    assert_eq!(client.catalog().selected(), Some("MiniMax-M2"));
-    // M2.5 tried once, M2 succeeded; second selected_model() call is cached.
+    assert_eq!(selected, "MiniMax-M2.7");
+    assert_eq!(client.catalog().selected(), Some("MiniMax-M2.7"));
+    // M3 tried once, M2.7 succeeded; second selected_model() call is cached.
     let again = client.selected_model().await.unwrap();
-    assert_eq!(again, "MiniMax-M2");
+    assert_eq!(again, "MiniMax-M2.7");
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
@@ -117,9 +137,13 @@ async fn model_fallback_aborts_on_auth_error() {
         )
     });
     let catalog = ModelCatalog::new();
-    let http: Arc<dyn astock_minimax::Http> = Arc::new(astock_minimax::ReqwestHttp::new());
+    let http: Arc<dyn astock_minimax::Http> = Arc::new(astock_minimax::ReqwestHttp::new_direct());
     let err = catalog
-        .probe_models(&*http, &server.url, &astock_minimax::SecretKey::new("bad-key"))
+        .probe_models(
+            &*http,
+            &server.url,
+            &astock_minimax::SecretKey::new("bad-key"),
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, MinimaxError::Auth(_)), "got {err:?}");
@@ -197,6 +221,42 @@ async fn chat_stream_parses_dripped_sse() {
 }
 
 #[tokio::test]
+async fn chat_stream_retries_only_before_establishment() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = common::spawn({
+        let calls = calls.clone();
+        move |req| {
+            if req.path.ends_with("/v1/token_plan/remains") {
+                return RawResponse::json(200, &quota_body(80));
+            }
+            let attempt = calls.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                RawResponse {
+                    status: 429,
+                    headers: vec![("retry-after".to_string(), "0".to_string())],
+                    body: br#"{"error":{"message":"slow down"}}"#.to_vec(),
+                    drip: false,
+                }
+            } else {
+                RawResponse::sse(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                )
+            }
+        }
+    });
+    let client = common::test_client("cn-key", &server.url);
+    let request = ChatRequest::new("MiniMax-M2.5", vec![ChatMessage::user("hi")]);
+    let stream = client.chat_stream(&request).await.unwrap();
+    futures::pin_mut!(stream);
+    let chunk = futures::StreamExt::next(&mut stream)
+        .await
+        .expect("one SSE chunk")
+        .unwrap();
+    assert_eq!(chunk.raw_delta().as_deref(), Some("ok"));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn rate_gate_retries_429_then_succeeds() {
     let calls = Arc::new(AtomicUsize::new(0));
     let server = common::spawn({
@@ -239,7 +299,10 @@ async fn rate_gate_gives_up_after_max_attempts() {
     let client = common::test_client("cn-key", &server.url);
     let request = ChatRequest::new("MiniMax-M2.5", vec![ChatMessage::user("hi")]);
     let err = client.chat(&request).await.unwrap_err();
-    assert!(matches!(err, MinimaxError::RateLimited { .. }), "got {err:?}");
+    assert!(
+        matches!(err, MinimaxError::RateLimited { .. }),
+        "got {err:?}"
+    );
     assert_eq!(server.count_path("chat/completions"), 4); // gate max_attempts
 }
 

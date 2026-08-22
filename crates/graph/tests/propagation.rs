@@ -91,10 +91,7 @@ async fn seed_then_propagate_copper_price_up() {
     assert_eq!(chalco.direction, ImpactDirection::Benefit);
 
     // Snapshot the logic chains (readable, deterministic).
-    assert_eq!(
-        jiangxi.logic_chain,
-        "铜↑10% → 江西铜业（自产铜，受益）"
-    );
+    assert_eq!(jiangxi.logic_chain, "铜↑10% → 江西铜业（自产铜，受益）");
     assert_eq!(
         gree.logic_chain,
         "铜↑10% → 远东股份（采购铜，成本上升，受损） → 电线电缆（成本传导提价） → 格力电器（采购电线电缆，成本上升，受损）"
@@ -116,11 +113,18 @@ async fn seed_then_propagate_copper_price_up() {
 
     // Provenance travels with every entry.
     assert!(!jiangxi.provenance.is_empty());
-    assert!(jiangxi.provenance.iter().all(|(name, url)| !name.is_empty() && !url.is_empty()));
+    assert!(jiangxi
+        .provenance
+        .iter()
+        .all(|(name, url)| !name.is_empty() && !url.is_empty()));
 
     // Ranking: primary buckets before secondary; confidence descending
     // within a bucket.
-    let confs: Vec<f64> = report.primary_benefit.iter().map(|e| e.confidence).collect();
+    let confs: Vec<f64> = report
+        .primary_benefit
+        .iter()
+        .map(|e| e.confidence)
+        .collect();
     assert!(confs.windows(2).all(|w| w[0] >= w[1]));
 
     // The disclaimer labels everything as heuristic.
@@ -137,7 +141,15 @@ async fn propagate_lithium_down_via_name_lookup() {
 
     let engine = Engine::new(store);
     // Subject resolved by Chinese name, direction down.
-    let event = Event::new("evt-li-1", "commodity_price", "碳酸锂下跌20%", "碳酸锂", Some(0.20), -1, 0);
+    let event = Event::new(
+        "evt-li-1",
+        "commodity_price",
+        "碳酸锂下跌20%",
+        "碳酸锂",
+        Some(0.20),
+        -1,
+        0,
+    );
     let report = engine.propagate(&event).await.unwrap();
 
     // Falling lithium carbonate: miners hurt, cathode makers helped.
@@ -145,7 +157,7 @@ async fn propagate_lithium_down_via_name_lookup() {
     assert!(codes(&report.primary_harm).contains(&"002466")); // 天齐锂业
     assert!(codes(&report.primary_benefit).contains(&"300073")); // 当升科技
     assert!(codes(&report.primary_benefit).contains(&"688005")); // 容百科技
-    // 二阶: cathode price follows → battery makers' cost falls (受益).
+                                                                 // 二阶: cathode price follows → battery makers' cost falls (受益).
     assert!(codes(&report.secondary_benefit).contains(&"300750")); // 宁德时代
 }
 
@@ -158,7 +170,15 @@ async fn propagate_company_accident_hits_suppliers_customers_competitors() {
 
     let engine = Engine::new(store);
     // 格力电器事故 (negative company event): competitors gain.
-    let event = Event::new("evt-gree", "accident", "格力电器工厂事故", "000651", None, -1, 0);
+    let event = Event::new(
+        "evt-gree",
+        "accident",
+        "格力电器工厂事故",
+        "000651",
+        None,
+        -1,
+        0,
+    );
     let report = engine.propagate(&event).await.unwrap();
 
     // Competitor 美的集团 benefits at hop 1 (competes, company subject).

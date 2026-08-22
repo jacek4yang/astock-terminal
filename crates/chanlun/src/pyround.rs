@@ -11,7 +11,7 @@ pub(crate) fn py_round(x: f64, ndigits: usize) -> f64 {
     if !x.is_finite() {
         return x;
     }
-    format!("{:.*}", ndigits, x).parse().unwrap_or(x)
+    format!("{x:.ndigits$}").parse().unwrap_or(x)
 }
 
 /// Equivalent of Python's `int(round(x))` (banker's rounding).

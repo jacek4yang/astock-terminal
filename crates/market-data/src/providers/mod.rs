@@ -6,6 +6,7 @@
 pub mod eastmoney;
 pub mod eastmoney_f10;
 pub mod em_datacenter;
+pub mod finance_news;
 pub mod iwencai_openapi;
 pub mod joinquant;
 pub mod sina;
@@ -18,8 +19,11 @@ pub use eastmoney_f10::{EastMoneyF10, F10Report};
 pub use em_datacenter::{
     BillboardRow, BlockTradeRow, BoardConsRow, BoardKind, BoardRow, BrokenPoolRow, DtPoolRow,
     EarningsPredictRow, EmDataCenter, HolderNumRow, LiftStageRow, LimitStat, MarginDailyRow,
-    NoticeNode, NoticeRow, OrgSurveyRow, PrevZtPoolRow, StrongPoolRow, StrongReason,
-    SubNewPoolRow, SuspendRow, ZtPoolRow,
+    NoticeNode, NoticeRow, OrgSurveyRow, PrevZtPoolRow, StrongPoolRow, StrongReason, SubNewPoolRow,
+    SuspendRow, ZtPoolRow,
+};
+pub use finance_news::{
+    FinanceNewsBatch, FinanceNewsItem, FinanceNewsProvider, FINANCE_NEWS_SOURCES,
 };
 pub use iwencai_openapi::{IwencaiOpenApi, StockEvents, WencaiRows};
 pub use joinquant::JoinQuantProvider;

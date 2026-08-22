@@ -85,7 +85,11 @@ impl FundamentalClient {
     ) -> Result<Fetched<Vec<CashFlowStatement>>, DataError> {
         let rows = self
             .f10
-            .f10_rows(&Self::secucode(symbol), F10Report::CashFlow, STATEMENT_PAGES)
+            .f10_rows(
+                &Self::secucode(symbol),
+                F10Report::CashFlow,
+                STATEMENT_PAGES,
+            )
             .await?;
         Ok(rows.map(|r| parse::parse_cashflow(&r)))
     }
@@ -97,7 +101,11 @@ impl FundamentalClient {
     ) -> Result<Fetched<Vec<KeyIndicators>>, DataError> {
         let rows = self
             .f10
-            .f10_rows(&Self::secucode(symbol), F10Report::MainIndicators, STATEMENT_PAGES)
+            .f10_rows(
+                &Self::secucode(symbol),
+                F10Report::MainIndicators,
+                STATEMENT_PAGES,
+            )
             .await?;
         Ok(rows.map(|r| parse::parse_indicators(&r)))
     }
@@ -117,10 +125,7 @@ impl FundamentalClient {
 
     /// Current valuation snapshot (PE_TTM/PE_static/PE_dynamic/PB, shares,
     /// market caps).
-    pub async fn snapshot(
-        &self,
-        symbol: &Symbol,
-    ) -> Result<Fetched<ValuationSnapshot>, DataError> {
+    pub async fn snapshot(&self, symbol: &Symbol) -> Result<Fetched<ValuationSnapshot>, DataError> {
         let data = self.f10.valuation_snapshot(symbol).await?;
         Ok(data.map(|d| parse::parse_snapshot(&d)))
     }
@@ -139,7 +144,10 @@ impl FundamentalClient {
         &self,
         symbol: &Symbol,
     ) -> Result<Fetched<Vec<ValuationPoint>>, DataError> {
-        let rows = self.f10.value_analysis(symbol.code(), VALUATION_PAGES).await?;
+        let rows = self
+            .f10
+            .value_analysis(symbol.code(), VALUATION_PAGES)
+            .await?;
         Ok(rows.map(|r| parse::parse_valuation_history(&r)))
     }
 

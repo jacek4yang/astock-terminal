@@ -103,7 +103,11 @@ fn detect_double_top_bottom(klines: &[Kline], price: f64) -> Option<PatternResul
                 let bottom = v0;
                 if neck > bottom {
                     let target = neck + (neck - bottom);
-                    let status = if price > neck { "已突破" } else { "形成中" };
+                    let status = if price > neck {
+                        "已突破"
+                    } else {
+                        "形成中"
+                    };
                     return Some(PatternResult {
                         name: "双底".to_string(),
                         direction: "看涨".to_string(),
@@ -145,10 +149,7 @@ fn detect_double_top_bottom(klines: &[Kline], price: f64) -> Option<PatternResul
                             ("颈线".to_string(), py_round(neck, 2)),
                             ("顶部".to_string(), py_round(top, 2)),
                         ],
-                        description: format!(
-                            "双顶颈线{:.2}，跌破后目标{:.2}",
-                            neck, target
-                        ),
+                        description: format!("双顶颈线{neck:.2}，跌破后目标{target:.2}"),
                     });
                 }
             }
@@ -182,7 +183,11 @@ fn detect_head_shoulders(klines: &[Kline], price: f64) -> Option<PatternResult> 
                 let depth = neck - vm;
                 if neck > vm {
                     let target = neck + depth;
-                    let status = if price > neck { "已突破" } else { "形成中" };
+                    let status = if price > neck {
+                        "已突破"
+                    } else {
+                        "形成中"
+                    };
                     let confidence = if status == "已突破" { 80 } else { 60 };
                     return Some(PatternResult {
                         name: "头肩底".to_string(),
@@ -194,10 +199,7 @@ fn detect_head_shoulders(klines: &[Kline], price: f64) -> Option<PatternResult> 
                             ("颈线".to_string(), py_round(neck, 2)),
                             ("头部".to_string(), py_round(vm, 2)),
                         ],
-                        description: format!(
-                            "底部深度{:.2}，突破颈线后目标{:.2}",
-                            depth, target
-                        ),
+                        description: format!("底部深度{depth:.2}，突破颈线后目标{target:.2}"),
                     });
                 }
             }
@@ -220,7 +222,11 @@ fn detect_head_shoulders(klines: &[Kline], price: f64) -> Option<PatternResult> 
                 if neck < vm {
                     let height = vm - neck;
                     let target = neck - height;
-                    let status = if price < neck { "已突破" } else { "形成中" };
+                    let status = if price < neck {
+                        "已突破"
+                    } else {
+                        "形成中"
+                    };
                     return Some(PatternResult {
                         name: "头肩顶".to_string(),
                         direction: "看跌".to_string(),
@@ -231,10 +237,7 @@ fn detect_head_shoulders(klines: &[Kline], price: f64) -> Option<PatternResult> 
                             ("颈线".to_string(), py_round(neck, 2)),
                             ("头部".to_string(), py_round(vm, 2)),
                         ],
-                        description: format!(
-                            "头部高度{:.2}，跌破颈线后目标{:.2}",
-                            height, target
-                        ),
+                        description: format!("头部高度{height:.2}，跌破颈线后目标{target:.2}"),
                     });
                 }
             }
@@ -346,7 +349,11 @@ fn detect_triangle(klines: &[Kline], price: f64) -> Option<PatternResult> {
     }
     // Ascending: flat highs + higher lows
     if upper_slope.abs() / h1 < 0.02 && lower_slope > 0.0 {
-        let status = if price > h2 { "已突破" } else { "接近突破" };
+        let status = if price > h2 {
+            "已突破"
+        } else {
+            "接近突破"
+        };
         return Some(PatternResult {
             name: "上升三角形".to_string(),
             direction: "看涨".to_string(),
@@ -359,7 +366,11 @@ fn detect_triangle(klines: &[Kline], price: f64) -> Option<PatternResult> {
     }
     // Descending: flat lows + lower highs
     if lower_slope.abs() / l1 < 0.02 && upper_slope < 0.0 {
-        let status = if price < l2 { "已跌破" } else { "接近跌破" };
+        let status = if price < l2 {
+            "已跌破"
+        } else {
+            "接近跌破"
+        };
         return Some(PatternResult {
             name: "下降三角形".to_string(),
             direction: "看跌".to_string(),
@@ -431,7 +442,7 @@ fn detect_gap(klines: &[Kline], _price: f64) -> Option<PatternResult> {
             status: "已形成".to_string(),
             target_price: None,
             key_levels: vec![("缺口上沿".to_string(), py_round(latest.low, 2))],
-            description: format!("向上跳空缺口{:.2}，回补前视为支撑", gap),
+            description: format!("向上跳空缺口{gap:.2}，回补前视为支撑"),
         });
     }
     if latest.high < prev.low {
@@ -443,7 +454,7 @@ fn detect_gap(klines: &[Kline], _price: f64) -> Option<PatternResult> {
             status: "已形成".to_string(),
             target_price: None,
             key_levels: vec![("缺口下沿".to_string(), py_round(latest.high, 2))],
-            description: format!("向下跳空缺口{:.2}，回补前视为压力", gap),
+            description: format!("向下跳空缺口{gap:.2}，回补前视为压力"),
         });
     }
     None

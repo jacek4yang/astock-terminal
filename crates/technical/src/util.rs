@@ -19,7 +19,7 @@ pub fn py_round(value: f64, digits: u32) -> f64 {
 /// (`1362.0`, not `1362`). For the price/volume magnitudes used here (no
 /// exponent notation on either side), the outputs are identical.
 pub fn py_f64(value: f64) -> String {
-    format!("{:?}", value)
+    format!("{value:?}")
 }
 
 /// Reproduce Python's `int(x)` truncation toward zero for finite values.

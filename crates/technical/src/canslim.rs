@@ -82,7 +82,7 @@ fn calc_c_score(klines: &[Kline]) -> (i64, String) {
         35
     };
     let score = score20.max(score5);
-    (score, format!("C(近期动量){}分", score))
+    (score, format!("C(近期动量){score}分"))
 }
 
 /// A — mid-term trend: 120-day gain tiers.
@@ -107,7 +107,7 @@ fn calc_a_score(klines: &[Kline]) -> (i64, String) {
     } else {
         20
     };
-    (score, format!("A(中期趋势){}分", score))
+    (score, format!("A(中期趋势){score}分"))
 }
 
 /// N — new-high pattern: distance to the 52-week high + cup-handle breakout.
@@ -157,7 +157,7 @@ fn calc_n_score(klines: &[Kline]) -> (i64, String, Option<CupHandle>) {
     } else {
         40
     };
-    (score, format!("N(新高/形态){}分", score), cup_handle)
+    (score, format!("N(新高/形态){score}分"), cup_handle)
 }
 
 /// S — supply/demand: base 40, shrink −2, big volume +15, volume +5.
@@ -182,7 +182,7 @@ fn calc_s_score(klines: &[Kline], quote: Option<&Quote>) -> (i64, String) {
     } else if vol_ratio >= 1.5 {
         score += 5; // volume
     }
-    (score, format!("S(供需关系){}分", score))
+    (score, format!("S(供需关系){score}分"))
 }
 
 /// L — leadership strength: 60-day gain base tier + 250-day gain adjustment.
@@ -225,7 +225,7 @@ fn calc_l_score(klines: &[Kline]) -> (i64, String) {
         0
     };
     let score = (base + adj).clamp(0, 100);
-    (score, format!("L(相对强度){}分", score))
+    (score, format!("L(相对强度){score}分"))
 }
 
 /// I — institutional flow (fund flow as a proxy for institutional holdings).
@@ -258,7 +258,7 @@ fn calc_i_score(flows: Option<&[FundFlow]>) -> (i64, String) {
     } else {
         55
     };
-    (score, format!("I(机构资金){}分", score))
+    (score, format!("I(机构资金){score}分"))
 }
 
 /// M — market environment: index MA20/MA60 + up-day count; falls back to the
@@ -270,15 +270,18 @@ fn calc_m_score(index_klines: Option<&[Kline]>, stock_klines: &[Kline]) -> (i64,
     } else {
         stock_klines
     };
-    let src_name = if use_index { "大盘指数" } else { "个股均线(近似)" };
+    let src_name = if use_index {
+        "大盘指数"
+    } else {
+        "个股均线(近似)"
+    };
     if src.len() < 30 {
         return (50, String::new());
     }
     let closes: Vec<f64> = src.iter().map(|k| k.close).collect();
     let ma20 = sma_series(&closes, 20);
     let ma60 = sma_series(&closes, 60);
-    let (Some(ma20_val), Some(ma60_val)) = (ma20[ma20.len() - 1], ma60[ma60.len() - 1])
-    else {
+    let (Some(ma20_val), Some(ma60_val)) = (ma20[ma20.len() - 1], ma60[ma60.len() - 1]) else {
         return (50, String::new());
     };
 
@@ -300,7 +303,7 @@ fn calc_m_score(index_klines: Option<&[Kline]>, stock_klines: &[Kline]) -> (i64,
     } else {
         35
     };
-    (score, format!("M(市场环境){}分", score))
+    (score, format!("M(市场环境){score}分"))
 }
 
 /// Grade tiers: A+/A/B+/B/C+/C/D at 85/70/60/50/40/30.
@@ -472,8 +475,7 @@ pub fn analyze_canslim(
     let _ = s_text; // legacy computes the S text but never emits it as a signal
 
     let description = format!(
-        "综合{}分({}) | C={} A={} N={} S={} L={} I={} M={}",
-        total, grade, c_score, a_score, n_score, s_score, l_score, i_score, m_score
+        "综合{total}分({grade}) | C={c_score} A={a_score} N={n_score} S={s_score} L={l_score} I={i_score} M={m_score}"
     );
 
     CanslimResult {

@@ -18,6 +18,7 @@
 //! 映射,供 UI / Agent 层按名调用。多标的轮动不是单标的
 //! [`crate::strategy::Strategy`],注册表以 [`StrategyHandle`] 枚举区分。
 
+pub mod formula;
 pub mod min_corr_rotation;
 pub mod zscore_mean_reversion;
 
@@ -25,6 +26,7 @@ use thiserror::Error;
 
 use crate::strategy::{MaCross, Strategy};
 
+pub use formula::{FormulaStrategy, FormulaStrategySpec, PriceField, RuleExpr, ValueExpr};
 use min_corr_rotation::MinCorrRotation;
 use zscore_mean_reversion::ZscoreMeanReversion;
 
@@ -106,6 +108,11 @@ pub fn list_strategies() -> Vec<StrategyInfo> {
         StrategyInfo {
             name: "ma_cross",
             description: "双均线(2022/72):5/60 日 SMA 金叉全仓买、死叉清仓(单标的)",
+            multi_symbol: false,
+        },
+        StrategyInfo {
+            name: "formula_dsl",
+            description: "AI 公式策略:受限条件树只读取当前及历史行情，支持价格、SMA、区间高低点与 RSI，禁止文件/网络/任意代码(单标的)",
             multi_symbol: false,
         },
         StrategyInfo {
@@ -200,6 +207,12 @@ pub fn strategy_meta() -> Vec<StrategyMeta> {
             ],
         },
         StrategyMeta {
+            name: "formula_dsl",
+            kind: "single",
+            description: "AI 公式策略:受限条件树只读取当前及历史行情，支持价格、SMA、区间高低点与 RSI，禁止文件/网络/任意代码(单标的)",
+            params: vec![],
+        },
+        StrategyMeta {
             name: "min_corr_etf_rotation",
             kind: "rotation",
             description: "最小相关 ETF 轮动:候选池两两相关矩阵,持有平均相关最低的 4 只等权,月度再平衡(多标的)",
@@ -230,6 +243,10 @@ pub fn build_strategy(name: &str) -> Result<StrategyHandle, ParamError> {
         ))),
         // 文档 2022/72 口径:5/60 金叉全仓、死叉清仓。
         "ma_cross" => Ok(StrategyHandle::Single(Box::new(ma_cross(5, 60)?))),
+        "formula_dsl" => Err(ParamError::invalid(
+            "formula_dsl",
+            "公式策略必须提供 spec 参数，不能使用空白默认策略",
+        )),
         "min_corr_etf_rotation" => Ok(StrategyHandle::Rotation(MinCorrRotation::default_params())),
         other => Err(ParamError::UnknownStrategy(other.to_string())),
     }
@@ -257,8 +274,11 @@ mod tests {
     #[test]
     fn registry_roundtrip() {
         let infos = list_strategies();
-        assert_eq!(infos.len(), 3);
+        assert_eq!(infos.len(), 4);
         for info in &infos {
+            if info.name == "formula_dsl" {
+                continue;
+            }
             let handle = build_strategy(info.name).unwrap();
             assert_eq!(handle.name(), info.name);
         }
@@ -291,7 +311,10 @@ mod tests {
         assert_eq!(ma["params"][0]["name"], "fast");
         assert_eq!(ma["params"][0]["ty"], "int");
         assert_eq!(ma["params"][0]["default"], 5);
-        let rot = &json[2];
+        let formula = &json[2];
+        assert_eq!(formula["name"], "formula_dsl");
+        assert_eq!(formula["params"].as_array().unwrap().len(), 0);
+        let rot = &json[3];
         assert_eq!(rot["kind"], "rotation");
         assert_eq!(rot["params"][1]["default"], 4);
     }

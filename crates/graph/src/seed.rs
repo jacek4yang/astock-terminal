@@ -74,7 +74,9 @@ pub fn parse_seed() -> Result<(Vec<Node>, Vec<Edge>)> {
     let mut edges = Vec::with_capacity(file.edges.len());
     for SeedEdge(src, dst, relation, weight, confidence, source_key) in file.edges {
         let source = file.sources.get(&source_key).ok_or_else(|| {
-            Error::Invalid(format!("seed edge {src} -> {dst} uses unknown source {source_key}"))
+            Error::Invalid(format!(
+                "seed edge {src} -> {dst} uses unknown source {source_key}"
+            ))
         })?;
         edges.push(Edge {
             id: None,
@@ -126,7 +128,10 @@ pub fn validate_seed(nodes: &[Node], edges: &[Edge]) -> Vec<String> {
             ));
         }
         if edge.source_name.trim().is_empty() || edge.source_url.trim().is_empty() {
-            problems.push(format!("edge {} -> {} missing provenance", edge.src, edge.dst));
+            problems.push(format!(
+                "edge {} -> {} missing provenance",
+                edge.src, edge.dst
+            ));
         }
     }
     problems
@@ -157,7 +162,11 @@ pub async fn seed_if_empty(store: &GraphStore) -> Result<SeedSummary> {
     for edge in &edges {
         store.upsert_edge(edge).await?;
     }
-    tracing::info!(nodes = nodes.len(), edges = edges.len(), "seed graph loaded");
+    tracing::info!(
+        nodes = nodes.len(),
+        edges = edges.len(),
+        "seed graph loaded"
+    );
     Ok(SeedSummary {
         nodes: nodes.len(),
         edges: edges.len(),

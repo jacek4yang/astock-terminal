@@ -42,6 +42,7 @@ pub mod hub;
 pub mod provider;
 pub mod providers;
 pub mod proxy;
+mod security_master;
 pub mod validate;
 
 pub use breaker::{BreakerConfig, CircuitBreaker, CircuitState, ProviderHealth};
@@ -50,8 +51,10 @@ pub use http::HttpClient;
 pub use hub::MarketData;
 pub use provider::{DataProvider, Failover};
 pub use providers::{
-    EastMoney, EastMoneyF10, EmDataCenter, F10Report, IndustryClassified, IwencaiOpenApi,
-    JoinQuantProvider, SinaKline, TdxProvider, TencentKline, TushareProvider,
+    EastMoney, EastMoneyF10, EmDataCenter, F10Report, FinanceNewsBatch, FinanceNewsItem,
+    FinanceNewsProvider, IndustryClassified, IwencaiOpenApi, JoinQuantProvider, SinaKline,
+    TdxProvider, TencentKline, TushareProvider, FINANCE_NEWS_SOURCES,
 };
 pub use proxy::{ProxyConfig, ProxyRoute};
+pub use security_master::SecurityMaster;
 pub use validate::filter_valid_bars;

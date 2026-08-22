@@ -102,7 +102,9 @@ impl ScriptedChat {
     /// Script a quota-exhausted failure at stream establishment.
     pub fn push_quota_exhausted(&self) -> &Self {
         self.push(ScriptedReply::Error(MinimaxError::QuotaExhausted {
-            window_reset_at: Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000)),
+            window_reset_at: Some(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000),
+            ),
         }))
     }
 }
@@ -124,7 +126,11 @@ fn content_chunk(text: &str, finish: &str) -> ChatChunk {
 }
 
 fn tool_call_chunk(call: ToolCall) -> ChatChunk {
-    let last = call.function.as_ref().and_then(|f| f.name.as_ref()).is_none();
+    let last = call
+        .function
+        .as_ref()
+        .and_then(|f| f.name.as_ref())
+        .is_none();
     ChatChunk {
         choices: vec![ChatChoice {
             index: Some(0),
@@ -203,7 +209,11 @@ impl AgentTool for EchoTool {
     }
     async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolResult> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        let text = args.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+        let text = args
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         Ok(ToolResult {
             summary_json: json!({"echo": text}),
             full_json: None,

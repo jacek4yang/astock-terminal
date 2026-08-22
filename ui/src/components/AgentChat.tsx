@@ -17,49 +17,110 @@ import {
   type AgentMessage,
   type AgentTask,
 } from "../lib/api";
-import { onAgentEvent, type AgentEvent, type AgentReport } from "../lib/events";
 import Markdown from "./Markdown";
 import { Term } from "./ui";
 import { useAppStore } from "../store";
+import {
+  fetchedAtDisplay,
+  sourceDisplayName,
+  toolArgumentsDisplay,
+  toolDisplayName,
+} from "../lib/agentLabels";
+import {
+  appendAgentTurn,
+  DEFAULT_AGENT_TOOLS,
+  handleAgentEnvelope,
+  nextAgentKey,
+  patchLastAssistant,
+  resetAgentSession,
+  selectAgentTask,
+  setAgentRunIdentity,
+  useAgentSession,
+  type AgentProgress,
+  type ChatMsg,
+  type RunStatus,
+  type ToolCallItem,
+} from "../agentSession";
+
+export type { ChatMsg } from "../agentSession";
+
+const RESEARCH_MODES = [
+  { id: "quick" as const, label: "快速", detail: "只取必要证据，适合行情快问" },
+  { id: "deep" as const, label: "深度", detail: "多源验证、反方证据与情景分析" },
+  { id: "plan" as const, label: "计划", detail: "先分批澄清需求，再列计划并执行" },
+];
+
+const REASONING_DEPTHS = [
+  { id: "standard" as const, label: "标准" },
+  { id: "deep" as const, label: "深入" },
+  { id: "maximum" as const, label: "极深" },
+];
+
+const TOOL_GROUPS = [
+  {
+    label: "行情与技术",
+    tools: [
+      "get_quote",
+      "get_kline",
+      "compute_indicators",
+      "run_full_analysis",
+      "run_chanlun",
+      "get_fund_flow",
+      "get_market_breadth",
+      "get_market_regime",
+    ],
+  },
+  {
+    label: "基本面与估值",
+    tools: ["get_fundamentals", "run_valuation"],
+  },
+  {
+    label: "扫描与横向比较",
+    tools: ["search_stock", "compare_stocks", "scan_market", "get_watchlist", "get_cached_detail"],
+  },
+  {
+    label: "产业链与关系",
+    tools: ["get_industry_chain", "run_supply_chain_shock", "build_relationship_graph"],
+  },
+  {
+    label: "策略实验",
+    tools: ["run_backtest", "iterate_strategy"],
+  },
+  {
+    label: "外部研究数据",
+    tools: ["research_news", "search_web", "run_joinquant_research"],
+  },
+] as const;
 
 // ==================== 数据模型 ====================
-
-interface ToolCallItem {
-  key: number;
-  name: string;
-  args?: string;
-  done: boolean;
-  cacheKey?: string;
-  elapsedMs?: number;
-  source?: string;
-  fetchedAt?: string;
-}
-
-interface ChatMsg {
-  key: number;
-  role: "user" | "assistant";
-  /** 流式原始文本(含 <think> 标签) */
-  raw: string;
-  tools: ToolCallItem[];
-  report?: AgentReport;
-  suspendedAt?: number;
-  failed?: string;
-  done: boolean;
-}
-
-type RunStatus = "idle" | "running" | "suspended" | "completed" | "failed";
-
-let keySeq = 1;
-const nextKey = () => keySeq++;
 
 function fmtUnix(sec: number): string {
   return new Date(sec * 1000).toLocaleString("zh-CN", { hour12: false });
 }
 
-/** 拆分 <think>…</think> 思考块(兼容流式未闭合),返回正文与思考内容 */
-function splitThink(raw: string): { text: string; think: string } {
+/** Reconcile the persisted UI state with the durable task record after reload. */
+export function taskRunStatus(status: string): RunStatus {
+  switch (status) {
+    case "queued":
+    case "starting":
+    case "running":
+      return "running";
+    case "waiting":
+    case "suspended":
+    case "interrupted":
+      return "suspended";
+    case "completed":
+    case "failed":
+    case "cancelled":
+      return status;
+    default:
+      return "idle";
+  }
+}
+
+/** Strip provider-private reasoning blocks, including an unfinished stream. */
+export function stripPrivateReasoning(raw: string): string {
   let text = "";
-  let think = "";
   let rest = raw;
   for (;;) {
     const i = rest.indexOf("<think>");
@@ -71,17 +132,15 @@ function splitThink(raw: string): { text: string; think: string } {
     rest = rest.slice(i + "<think>".length);
     const j = rest.indexOf("</think>");
     if (j < 0) {
-      think += rest;
       rest = "";
       break;
     }
-    think += rest.slice(0, j);
     rest = rest.slice(j + "</think>".length);
   }
   // 流式中途可能残留半个标签,隐藏正文中未完整的 "<th…" 尾巴
   const partial = text.match(/<(?:t(?:h(?:i(?:n(?:k)?)?)?)?)?$/);
   if (partial) text = text.slice(0, text.length - partial[0].length);
-  return { text, think };
+  return text;
 }
 
 // ==================== 子组件 ====================
@@ -91,6 +150,10 @@ const STATUS_LABEL: Record<string, { text: string; cls: string }> = {
   suspended: { text: "已挂起", cls: "bg-amber-500/10 text-amber-600 dark:text-amber-400" },
   completed: { text: "已完成", cls: "bg-down/10 text-down" },
   failed: { text: "失败", cls: "bg-up/10 text-up" },
+  cancelled: { text: "已取消", cls: "bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300" },
+  queued: { text: "排队中", cls: "bg-blue-600/10 text-blue-600 dark:text-blue-400" },
+  starting: { text: "启动中", cls: "bg-blue-600/10 text-blue-600 dark:text-blue-400" },
+  interrupted: { text: "待恢复", cls: "bg-amber-500/10 text-amber-600 dark:text-amber-400" },
 };
 
 function StatusBadge({ status }: { status: string }) {
@@ -104,66 +167,156 @@ function StatusBadge({ status }: { status: string }) {
 /** 单条工具调用时间线卡片 */
 function ToolCard({ tool }: { tool: ToolCallItem }) {
   const [open, setOpen] = useState(false);
+  const [now, setNow] = useState(Date.now());
+  const businessName = toolDisplayName(tool.name);
+  const label = tool.done ? `${businessName}已完成` : `正在${businessName}`;
+  const argumentsToShow = toolArgumentsDisplay(tool.args);
+  useEffect(() => {
+    if (tool.done || tool.startedAt == null) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 500);
+    return () => window.clearInterval(timer);
+  }, [tool.done, tool.startedAt]);
+  const elapsedMs = tool.done
+    ? tool.elapsedMs
+    : tool.startedAt == null
+      ? undefined
+      : now - tool.startedAt;
+  const toolPercent = tool.done
+    ? 100
+    : tool.timeoutMs && elapsedMs != null
+      ? Math.min(96, Math.max(3, (elapsedMs / tool.timeoutMs) * 100))
+      : 18;
+  const timeoutSeconds = tool.timeoutMs ? Math.round(tool.timeoutMs / 1000) : null;
   return (
     <div className="rounded border border-slate-200 bg-slate-50 px-2.5 py-1.5 dark:border-slate-800 dark:bg-slate-900/60">
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <span
           className={
             "inline-block h-1.5 w-1.5 rounded-full " +
-            (tool.done ? "bg-down" : "animate-pulse bg-blue-500")
+            (tool.done
+              ? tool.success === false
+                ? "bg-up"
+                : "bg-down"
+              : "animate-pulse bg-blue-500")
           }
         />
-        <span className="num font-medium">{tool.name}</span>
-        {tool.done && tool.elapsedMs != null && (
-          <span className="num muted">{(tool.elapsedMs / 1000).toFixed(1)}s</span>
+        <span className="font-medium">{label}</span>
+        {tool.position != null && tool.total != null && (
+          <span className="num muted">{tool.position}/{tool.total}</span>
         )}
-        {!tool.done && <span className="muted">调用中…</span>}
-        {tool.args && (
+        {elapsedMs != null && <span className="num muted">{(elapsedMs / 1000).toFixed(1)}s</span>}
+        {!tool.done && <span className="muted">{tool.stage ?? "正在后台分析，切换页面也会继续"}</span>}
+        {argumentsToShow.length > 0 && (
           <button className="muted underline decoration-dotted underline-offset-2" onClick={() => setOpen(!open)}>
-            {open ? "收起参数" : "参数"}
+            {open ? "收起分析条件" : "查看分析条件"}
           </button>
         )}
       </div>
-      {open && tool.args && (
-        <pre className="num muted mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-all text-xs">
-          {tool.args}
-        </pre>
+      <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+        <div
+          className={
+            "h-full rounded-full transition-all duration-500 " +
+            (tool.success === false ? "bg-up" : "bg-blue-500")
+          }
+          style={{ width: `${toolPercent}%` }}
+        />
+      </div>
+      {!tool.done && timeoutSeconds != null && (
+        <div className="muted mt-1 flex flex-wrap justify-between gap-2 text-[10px]">
+          <span>本步骤最长等待 {timeoutSeconds} 秒</span>
+          <span>超时后自动跳过慢源，继续使用其他证据</span>
+        </div>
+      )}
+      {open && argumentsToShow.length > 0 && (
+        <dl className="muted mt-1 grid gap-x-3 gap-y-0.5 text-xs sm:grid-cols-2">
+          {argumentsToShow.map((item, index) => (
+            <div key={`${item.label}-${index}`} className="flex min-w-0 gap-1">
+              <dt className="shrink-0">{item.label}：</dt>
+              <dd className="num min-w-0 break-all">{item.value}</dd>
+            </div>
+          ))}
+        </dl>
       )}
       {tool.done && (tool.source || tool.fetchedAt) && (
-        <div className="muted num mt-1 text-xs">
-          {tool.source && <span>数据源:{tool.source}</span>}
-          {tool.fetchedAt && <span className="ml-2">时间:{tool.fetchedAt}</span>}
+        <div className="muted mt-1 text-xs">
+          {tool.source && <span>数据来源：{sourceDisplayName(tool.source)}</span>}
+          {tool.fetchedAt && <span className="num ml-2">更新时间：{fetchedAtDisplay(tool.fetchedAt)}</span>}
+        </div>
+      )}
+      {tool.done && tool.success === false && tool.error && (
+        <div className="mt-1 rounded bg-red-50 px-2 py-1 text-xs text-red-700 dark:bg-red-950/40 dark:text-red-300">
+          本步骤未在时限内取得可靠结果，已自动降级，不影响其他分析继续完成。
         </div>
       )}
     </div>
   );
 }
 
+function ResearchProgress({ progress }: { progress: AgentProgress }) {
+  const determinate = progress.total != null && progress.total > 0;
+  const percent = determinate
+    ? Math.min(100, Math.max(0, ((progress.completed ?? 0) / progress.total!) * 100))
+    : null;
+  const currentPhase = Math.max(0, PROGRESS_PHASE_ORDER.indexOf(progress.phase));
+  return (
+    <div className="rounded-lg border border-blue-200 bg-blue-50/80 px-3 py-2.5 text-xs dark:border-blue-900/70 dark:bg-blue-950/30">
+      <div className="mb-2 grid grid-cols-5 gap-1">
+        {PROGRESS_PHASE_ORDER.map((phase, index) => (
+          <div
+            key={phase}
+            className={
+              "rounded px-1.5 py-1 text-center transition-colors " +
+              (index < currentPhase
+                ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                : index === currentPhase
+                  ? "bg-blue-600 text-white"
+                  : "bg-slate-200/70 text-slate-500 dark:bg-slate-800 dark:text-slate-400")
+            }
+          >
+            {index < currentPhase ? "✓ " : index === currentPhase ? "● " : "○ "}
+            {PROGRESS_PHASE_LABELS[phase]}
+          </div>
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="font-medium text-blue-700 dark:text-blue-300">{progress.message}</span>
+        <span className="num muted ml-auto">
+          分析轮次 {progress.round}
+          {progress.maxRounds > 0 ? ` / 安全上限 ${progress.maxRounds}` : ""}
+        </span>
+      </div>
+      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-blue-100 dark:bg-blue-950">
+        <div
+          className={
+            "h-full rounded-full bg-blue-500 transition-all duration-500 " +
+            (percent == null ? "w-2/5 animate-pulse" : "")
+          }
+          style={percent == null ? undefined : { width: `${percent}%` }}
+        />
+      </div>
+      <div className="muted mt-1.5 flex justify-between">
+        <span>阶段：{PROGRESS_PHASE_LABELS[progress.phase] ?? progress.phase}</span>
+        {determinate && <span className="num">{progress.completed ?? 0} / {progress.total}</span>}
+      </div>
+      <details className="mt-2 border-t border-blue-200/70 pt-1.5 dark:border-blue-900/60">
+        <summary className="muted cursor-pointer select-none text-[11px]">系统优化详情</summary>
+        <div className="muted mt-1 grid gap-1 text-[11px] sm:grid-cols-2">
+          <span>· 相同数据自动复用缓存，避免重复访问上游</span>
+          <span>· 独立分析最多 6 项并行，完成一项更新一项</span>
+          <span>· 普通步骤 45–60 秒自动降级，长计算单独限时</span>
+          <span>· 对话、证据与任务状态持续保存，切换页面不中断</span>
+          <span>· 深度任务可由独立专家并行复核，主分析师统一综合</span>
+        </div>
+      </details>
+    </div>
+  );
+}
+
 /** 助手消息气泡 */
 function AssistantMsg({ msg }: { msg: ChatMsg }) {
-  const [thinkOpen, setThinkOpen] = useState(false);
-  const { text, think } = splitThink(msg.report ? msg.report.answer : msg.raw);
-  const answer = msg.report ? msg.report.answer : text;
+  const answer = stripPrivateReasoning(msg.report ? msg.report.answer : msg.raw);
   return (
     <div className="card anim-fade-up mr-auto w-full max-w-3xl px-3 py-2.5">
-      {think.trim() && (
-        <div className="mb-2">
-          <button
-            className="muted flex items-center gap-1 text-xs underline decoration-dotted underline-offset-2"
-            onClick={() => setThinkOpen(!thinkOpen)}
-          >
-            <span className={"inline-block transition-transform " + (thinkOpen ? "rotate-90" : "")}>
-              ▸
-            </span>
-            思考过程
-          </button>
-          {thinkOpen && (
-            <div className="muted mt-1 whitespace-pre-wrap rounded bg-slate-100 px-2.5 py-2 text-xs leading-relaxed dark:bg-slate-800/60">
-              {think.trim()}
-            </div>
-          )}
-        </div>
-      )}
       {msg.tools.length > 0 && (
         <div className="mb-2 space-y-1.5 border-l-2 border-slate-200 pl-2.5 dark:border-slate-700">
           {msg.tools.map((t) => (
@@ -185,9 +338,9 @@ function AssistantMsg({ msg }: { msg: ChatMsg }) {
           <ul className="divide-y divide-slate-100 dark:divide-slate-800/60">
             {msg.report.evidence.map((ev, i) => (
               <li key={i} className="num flex flex-wrap gap-x-3 px-2.5 py-1.5 text-xs">
-                <span className="font-medium">{ev.tool}</span>
-                <span className="muted">来源:{ev.source}</span>
-                <span className="muted">时间:{ev.fetched_at}</span>
+                <span className="font-medium">{toolDisplayName(ev.tool)}</span>
+                <span className="muted">数据来源：{sourceDisplayName(ev.source)}</span>
+                <span className="muted">更新时间：{fetchedAtDisplay(ev.fetched_at)}</span>
               </li>
             ))}
           </ul>
@@ -220,17 +373,30 @@ export default function AgentChat({
   const currentSymbol = useAppStore((s) => s.currentSymbol);
   const currentName = useAppStore((s) => s.currentName);
   const [hasKey, setHasKey] = useState<boolean | null>(null);
-  const [msgs, setMsgs] = useState<ChatMsg[]>([]);
-  const [input, setInput] = useState("");
-  const [status, setStatus] = useState<RunStatus>("idle");
+  const msgs = useAgentSession((s) => s.msgs);
+  const input = useAgentSession((s) => s.input);
+  const status = useAgentSession((s) => s.status);
+  const compactionCount = useAgentSession((s) => s.compactionCount);
+  const taskId = useAgentSession((s) => s.taskId);
+  const err = useAgentSession((s) => s.err);
+  const progress = useAgentSession((s) => s.progress);
+  const pendingQuestions = useAgentSession((s) => s.pendingQuestions ?? []);
+  const researchMode = useAgentSession((s) => s.researchMode ?? "deep");
+  const reasoningDepth = useAgentSession((s) => s.reasoningDepth ?? "deep");
+  const enabledTools = useAgentSession((s) => s.enabledTools ?? [...DEFAULT_AGENT_TOOLS]);
+  const autoResumeOnQuota = useAgentSession((s) => s.autoResumeOnQuota ?? true);
+  const setInput = useAgentSession((s) => s.setInput);
+  const setStatus = useAgentSession((s) => s.setStatus);
+  const setErr = useAgentSession((s) => s.setErr);
+  const setResearchMode = useAgentSession((s) => s.setResearchMode);
+  const setReasoningDepth = useAgentSession((s) => s.setReasoningDepth);
+  const setEnabledTools = useAgentSession((s) => s.setEnabledTools);
+  const setAutoResumeOnQuota = useAgentSession((s) => s.setAutoResumeOnQuota);
   const [tasks, setTasks] = useState<AgentTask[]>([]);
   const [convs, setConvs] = useState<AgentConversation[]>([]);
-  const [err, setErr] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
-  const taskIdRef = useRef<string | null>(null);
-  const convIdRef = useRef<string | null>(null);
-  const unlistenRef = useRef<(() => void) | undefined>(undefined);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const running = status === "running";
@@ -240,105 +406,6 @@ export default function AgentChat({
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [msgs, status]);
-
-  const patchLastAssistant = useCallback((fn: (m: ChatMsg) => ChatMsg) => {
-    setMsgs((prev) => {
-      for (let i = prev.length - 1; i >= 0; i--) {
-        if (prev[i].role === "assistant") {
-          const next = [...prev];
-          next[i] = fn(next[i]);
-          return next;
-        }
-      }
-      return prev;
-    });
-  }, []);
-
-  const handleEvent = useCallback(
-    (ev: AgentEvent) => {
-      switch (ev.type) {
-        case "text_delta":
-          setStatus("running");
-          patchLastAssistant((m) => ({ ...m, raw: m.raw + ev.text, suspendedAt: undefined }));
-          break;
-        case "tool_call_started":
-          patchLastAssistant((m) => ({
-            ...m,
-            tools: [
-              ...m.tools,
-              {
-                key: nextKey(),
-                name: ev.name,
-                args:
-                  ev.args == null
-                    ? undefined
-                    : typeof ev.args === "string"
-                      ? ev.args
-                      : JSON.stringify(ev.args),
-                done: false,
-              },
-            ],
-          }));
-          break;
-        case "tool_call_finished":
-          patchLastAssistant((m) => {
-            const tools = [...m.tools];
-            for (let i = tools.length - 1; i >= 0; i--) {
-              if (!tools[i].done && tools[i].name === ev.name) {
-                tools[i] = {
-                  ...tools[i],
-                  done: true,
-                  cacheKey: ev.cache_key,
-                  elapsedMs: ev.elapsed_ms,
-                };
-                break;
-              }
-            }
-            return { ...m, tools };
-          });
-          break;
-        case "suspended":
-          setStatus("suspended");
-          patchLastAssistant((m) => ({ ...m, suspendedAt: ev.reset_at_unix }));
-          break;
-        case "completed":
-          setStatus("completed");
-          patchLastAssistant((m) => {
-            const byCache = new Map(ev.report.evidence.map((e) => [e.cache_key, e]));
-            return {
-              ...m,
-              report: ev.report,
-              suspendedAt: undefined,
-              done: true,
-              tools: m.tools.map((t) => {
-                const evd = t.cacheKey ? byCache.get(t.cacheKey) : undefined;
-                return evd ? { ...t, source: evd.source, fetchedAt: evd.fetched_at } : t;
-              }),
-            };
-          });
-          break;
-        case "failed":
-          setStatus("failed");
-          patchLastAssistant((m) => ({ ...m, failed: ev.error, done: true }));
-          break;
-      }
-    },
-    [patchLastAssistant],
-  );
-
-  const subscribeTask = useCallback(
-    (taskId: string) => {
-      unlistenRef.current?.();
-      taskIdRef.current = taskId;
-      onAgentEvent(taskId, handleEvent).then((u) => {
-        if (taskIdRef.current === taskId) unlistenRef.current = u;
-        else u();
-      });
-    },
-    [handleEvent],
-  );
-
-  useEffect(() => () => unlistenRef.current?.(), []);
 
   const refreshTasks = useCallback(async () => {
     try {
@@ -361,38 +428,54 @@ export default function AgentChat({
     if (!isTauri()) return;
     minimaxStatus()
       .then((s) => setHasKey(s.has_key))
-      .catch(() => setHasKey(null));
+      .catch((e) => {
+        setHasKey(null);
+        setErr(`智能助手服务暂不可用：${errMsg(e)}`);
+      });
     refreshTasks();
     refreshConvs();
     agentTasks()
       .then((list) => {
+        const session = useAgentSession.getState();
+        const current = session.taskId
+          ? list.find((task) => task.id === session.taskId)
+          : undefined;
+        if (current) {
+          const durableStatus = taskRunStatus(current.status);
+          if (durableStatus !== session.status) {
+            useAgentSession.setState({
+              status: durableStatus,
+              progress: durableStatus === "running" ? session.progress : null,
+            });
+          }
+          return;
+        }
         const pending = list
-          .filter((t) => t.status === "running" || t.status === "suspended")
+          .filter((t) => t.status === "running" || t.status === "suspended" || t.status === "interrupted")
           .sort((a, b) => b.updated_at - a.updated_at)[0];
-        if (pending && !taskIdRef.current) {
-          setStatus(pending.status === "suspended" ? "suspended" : "running");
-          setMsgs((prev) =>
-            prev.length === 0
-              ? [
-                  {
-                    key: nextKey(),
-                    role: "assistant",
-                    raw:
-                      pending.status === "suspended"
-                        ? "检测到上次未完成的任务(配额挂起)。配额恢复后点击下方「继续分析」即可接着运行。"
-                        : "已恢复上次运行中的任务,正在等待后续输出…",
-                    tools: [],
-                    suspendedAt: pending.status === "suspended" ? pending.updated_at : undefined,
-                    done: false,
-                  },
-                ]
-              : prev,
-          );
-          subscribeTask(pending.id);
+        if (pending && !session.taskId) {
+          selectAgentTask(pending.id, pending.conversation_id, "suspended");
+          if (session.msgs.length === 0) {
+            useAgentSession.setState({
+              msgs: [
+                {
+                  key: nextAgentKey(),
+                  role: "assistant",
+                  raw:
+                    pending.status === "suspended"
+                      ? "检测到上次因配额挂起的任务，可在配额恢复后继续。"
+                      : "检测到应用退出时被中断的后台任务，可从持久化状态继续运行。",
+                  tools: [],
+                  suspendedAt: pending.status === "suspended" ? pending.updated_at : undefined,
+                  done: false,
+                },
+              ],
+            });
+          }
         }
       })
       .catch(() => {});
-  }, [refreshTasks, refreshConvs, subscribeTask]);
+  }, [refreshTasks, refreshConvs]);
 
   // 任务列表轮询(挂起/运行状态刷新)
   useEffect(() => {
@@ -403,23 +486,26 @@ export default function AgentChat({
   const send = async (question: string) => {
     const q = question.trim();
     if (!q || running) return;
-    setErr(null);
-    setInput("");
-    setMsgs((prev) => [
-      ...prev,
-      { key: nextKey(), role: "user", raw: q, tools: [], done: true },
-      { key: nextKey(), role: "assistant", raw: "", tools: [], done: false },
-    ]);
+    const session = useAgentSession.getState();
+    appendAgentTurn(q);
     // 新会话首轮:把当前查看的股票作为上下文前置(气泡仍只显示用户原文)
     let payload = q;
-    if (convIdRef.current === null && currentSymbol) {
+    if (session.conversationId === null && currentSymbol) {
       payload = `【上下文】用户在查看 ${currentSymbol} ${currentName ?? ""}\n`.replace(/\s+\n/, "\n") + q;
     }
     try {
-      const r = await agentAsk(payload, convIdRef.current);
-      convIdRef.current = r.conversation_id;
-      setStatus("running");
-      subscribeTask(r.task_id);
+      const r = await agentAsk(
+        payload,
+        session.conversationId,
+        handleAgentEnvelope,
+        {
+          research_mode: session.researchMode ?? "deep",
+          reasoning_depth: session.reasoningDepth ?? "deep",
+          enabled_tools: session.enabledTools ?? [...DEFAULT_AGENT_TOOLS],
+          auto_resume_on_quota: session.autoResumeOnQuota ?? true,
+        },
+      );
+      setAgentRunIdentity(r.task_id, r.conversation_id);
       refreshTasks();
       refreshConvs();
     } catch (e) {
@@ -427,7 +513,7 @@ export default function AgentChat({
         setHasKey(false);
         patchLastAssistant((m) => ({
           ...m,
-          failed: "尚未配置 MiniMax API Key,请先到「设置」页填写后再提问。",
+          failed: "尚未配置 MiniMax 访问密钥，请先到「设置」页填写后再提问。",
           done: true,
         }));
       } else {
@@ -437,26 +523,57 @@ export default function AgentChat({
     }
   };
 
+  const queueFollowUp = (question: string) => {
+    const q = question.trim();
+    if (!q) return;
+    const session = useAgentSession.getState();
+    useAgentSession.setState({
+      input: "",
+      pendingQuestions: [...(session.pendingQuestions ?? []), q],
+    });
+  };
+
+  // The user can keep talking while a long analysis runs. Follow-ups are
+  // dispatched in order against the same persisted conversation.
+  useEffect(() => {
+    if (status !== "completed" || hasKey === false || pendingQuestions.length === 0) return;
+    const [next, ...rest] = pendingQuestions;
+    useAgentSession.setState({ pendingQuestions: rest });
+    void send(next);
+  }, [status, hasKey, pendingQuestions]);
+
   const resume = async () => {
-    const id = taskIdRef.current;
+    const id = useAgentSession.getState().taskId;
     if (!id) return;
     setErr(null);
     try {
-      await agentResume(id);
-      setStatus("running");
+      useAgentSession.setState({
+        lastSeq: 0,
+        status: "running",
+        progress: {
+          phase: "preparing",
+          message: "正在校验中断点并恢复后台任务",
+          round: 1,
+          maxRounds: 32,
+          completed: null,
+          total: null,
+          updatedAt: Date.now(),
+        },
+      });
+      await agentResume(id, handleAgentEnvelope);
       patchLastAssistant((m) => ({ ...m, suspendedAt: undefined }));
-      subscribeTask(id);
     } catch (e) {
       setErr(errMsg(e));
+      setStatus("failed");
     }
   };
 
   const cancel = async () => {
-    const id = taskIdRef.current;
+    const id = useAgentSession.getState().taskId;
     if (!id) return;
     try {
       await agentCancel(id);
-      setStatus("failed");
+      useAgentSession.setState({ status: "cancelled", progress: null });
       patchLastAssistant((m) => ({ ...m, failed: "已手动取消。", done: true }));
       refreshTasks();
     } catch (e) {
@@ -466,19 +583,21 @@ export default function AgentChat({
 
   /** 从任务列表恢复某个挂起任务 */
   const resumeTask = (t: AgentTask) => {
-    setStatus("suspended");
-    setMsgs((prev) => [
-      ...prev,
-      {
-        key: nextKey(),
-        role: "assistant",
-        raw: "已选中挂起的任务。配额恢复后点击下方「继续分析」。",
-        tools: [],
-        suspendedAt: t.updated_at,
-        done: false,
-      },
-    ]);
-    subscribeTask(t.id);
+    selectAgentTask(t.id, t.conversation_id, "suspended");
+    const session = useAgentSession.getState();
+    useAgentSession.setState({
+      msgs: [
+        ...session.msgs,
+        {
+          key: nextAgentKey(),
+          role: "assistant",
+          raw: "已选中中断任务。点击下方「继续分析」后，将先修复工具调用链再恢复。",
+          tools: [],
+          suspendedAt: t.updated_at,
+          done: false,
+        },
+      ],
+    });
   };
 
   /** 加载历史会话 */
@@ -486,13 +605,19 @@ export default function AgentChat({
     setErr(null);
     try {
       const history = await agentConversationLoad(c.id);
-      convIdRef.current = c.id;
       const out: ChatMsg[] = [];
       for (const m of history) {
         out.push(...historyToMsgs(m, out));
       }
-      setMsgs(out);
-      setStatus("idle");
+      useAgentSession.setState({
+        msgs: out,
+        conversationId: c.id,
+        taskId: null,
+        lastSeq: 0,
+        status: "idle",
+        err: null,
+        progress: null,
+      });
       setHistoryOpen(false);
     } catch (e) {
       setErr(errMsg(e));
@@ -502,13 +627,7 @@ export default function AgentChat({
   /** 新对话:清空当前上下文,下一次提问开启新 conversation */
   const newChat = () => {
     if (running) return;
-    convIdRef.current = null;
-    taskIdRef.current = null;
-    unlistenRef.current?.();
-    unlistenRef.current = undefined;
-    setMsgs([]);
-    setStatus("idle");
-    setErr(null);
+    resetAgentSession();
     setHistoryOpen(false);
   };
 
@@ -518,7 +637,7 @@ export default function AgentChat({
     setErr(null);
     try {
       await agentConversationDelete(c.id);
-      if (convIdRef.current === c.id) newChat();
+      if (useAgentSession.getState().conversationId === c.id) newChat();
       await refreshConvs();
     } catch (e) {
       setErr(errMsg(e));
@@ -530,6 +649,7 @@ export default function AgentChat({
     "为什么最近跑输行业",
     "扫描今日强势信号股",
     "我的自选股有风险吗",
+    currentSymbol ? `迭代 ${currentSymbol} 的策略并做稳健性检验` : "迭代一个策略并做稳健性检验",
   ];
 
   const suspendedMsg = [...msgs].reverse().find((m) => m.role === "assistant" && m.suspendedAt);
@@ -590,7 +710,7 @@ export default function AgentChat({
               >
                 <StatusBadge status={t.status} />
                 <span className="num muted truncate">{fmtUnix(t.created_at)}</span>
-                {t.status === "suspended" && (
+                {(t.status === "suspended" || t.status === "interrupted") && (
                   <button className="btn ml-auto shrink-0" onClick={() => resumeTask(t)}>
                     继续
                   </button>
@@ -610,16 +730,42 @@ export default function AgentChat({
       {/* 对话主区 */}
       <section className="flex min-w-0 flex-1 flex-col">
         <div className="flex items-center gap-3 border-b border-slate-200 px-4 py-2.5 dark:border-slate-800">
-          <h1 className="text-sm font-semibold text-slate-700 dark:text-slate-300">AI 助手</h1>
+          <h1 className="text-sm font-semibold text-slate-700 dark:text-slate-300">智能助手</h1>
           <span className="muted text-xs">
-            <Term label="投研 Agent" tip="调用行情/分析工具取数后由大模型生成解读,过程与证据均可溯源" />
+            <Term label="智能投研" tip="调用行情与分析能力取得数据后生成解读，过程与证据均可追溯" />
           </span>
           {currentSymbol && (
             <span className="chip bg-blue-600/10 text-blue-600 dark:text-blue-400">
               上下文:{currentName ?? currentSymbol}
             </span>
           )}
+          <span
+            className="chip bg-violet-500/10 text-violet-600 dark:text-violet-400"
+            title="超出预算时会将旧上下文压缩成确定性的工作状态快照，保留目标、证据键、完成工具与最近消息"
+          >
+            自动上下文压缩{compactionCount ? ` · ${compactionCount}` : ""}
+          </span>
+          <span className="chip bg-blue-600/10 text-blue-600 dark:text-blue-400">
+            {RESEARCH_MODES.find((mode) => mode.id === researchMode)?.label ?? "深度"}模式
+          </span>
+          <span className="chip bg-amber-500/10 text-amber-700 dark:text-amber-300">
+            {REASONING_DEPTHS.find((depth) => depth.id === reasoningDepth)?.label ?? "深入"}思考
+          </span>
+          {taskId && status !== "idle" && (
+            <span className="chip num bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-300" title={taskId}>
+              {{
+                running: "后台任务运行中",
+                suspended: "后台任务待恢复",
+                completed: "本轮分析已完成",
+                failed: "本轮分析未完成",
+                cancelled: "本轮分析已取消",
+              }[status] ?? "后台任务"}
+            </span>
+          )}
           <div className="ml-auto flex items-center gap-2">
+            <button className="btn" onClick={() => setSettingsOpen((open) => !open)}>
+              研究设置
+            </button>
             <button className="btn-primary" onClick={newChat} disabled={running}>
               新对话
             </button>
@@ -636,9 +782,126 @@ export default function AgentChat({
           </div>
         </div>
 
+        {settingsOpen && (
+          <div className="border-b border-slate-200 bg-slate-50/80 px-4 py-3 text-xs dark:border-slate-800 dark:bg-slate-900/70">
+            <div className="grid gap-4 xl:grid-cols-[1fr_0.75fr_2fr]">
+              <fieldset disabled={running}>
+                <legend className="micro-label mb-1.5">研究流程</legend>
+                <div className="grid gap-1.5">
+                  {RESEARCH_MODES.map((mode) => (
+                    <button
+                      key={mode.id}
+                      type="button"
+                      className={
+                        "rounded border px-2.5 py-2 text-left transition-colors " +
+                        (researchMode === mode.id
+                          ? "border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300"
+                          : "border-slate-200 bg-white hover:border-slate-300 dark:border-slate-700 dark:bg-slate-900")
+                      }
+                      onClick={() => setResearchMode(mode.id)}
+                    >
+                      <span className="font-medium">{mode.label}模式</span>
+                      <span className="muted ml-2">{mode.detail}</span>
+                    </button>
+                  ))}
+                </div>
+              </fieldset>
+
+              <fieldset disabled={running}>
+                <legend className="micro-label mb-1.5">思考深度</legend>
+                <div className="flex gap-1.5">
+                  {REASONING_DEPTHS.map((depth) => (
+                    <button
+                      key={depth.id}
+                      type="button"
+                      className={reasoningDepth === depth.id ? "btn-primary flex-1" : "btn flex-1"}
+                      onClick={() => setReasoningDepth(depth.id)}
+                    >
+                      {depth.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="muted mt-2 leading-relaxed">
+                  极深模式会提高证据核验、反例、压力情景和稳健性检查上限，耗时与额度也会增加。
+                </p>
+                <label className="mt-3 flex cursor-pointer items-start gap-2 rounded border border-slate-200 bg-white p-2 dark:border-slate-700 dark:bg-slate-900">
+                  <input
+                    className="mt-0.5"
+                    type="checkbox"
+                    checked={autoResumeOnQuota}
+                    onChange={(event) => setAutoResumeOnQuota(event.target.checked)}
+                  />
+                  <span>
+                    <span className="block font-medium">额度恢复后自动继续</span>
+                    <span className="muted mt-0.5 block leading-relaxed">
+                      保存当前计划、证据和步骤，等待下一额度窗口后从断点续跑。
+                    </span>
+                  </span>
+                </label>
+              </fieldset>
+
+              <fieldset disabled={running}>
+                <div className="mb-1.5 flex items-center gap-2">
+                  <legend className="micro-label">本轮可用工具</legend>
+                  <span className="num muted">{enabledTools.length} / {DEFAULT_AGENT_TOOLS.length}</span>
+                  <button className="btn ml-auto" type="button" onClick={() => setEnabledTools([...DEFAULT_AGENT_TOOLS])}>
+                    全部开启
+                  </button>
+                  <button className="btn" type="button" onClick={() => setEnabledTools([])}>
+                    全部关闭
+                  </button>
+                </div>
+                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                  {TOOL_GROUPS.map((group) => {
+                    const allOn = group.tools.every((tool) => enabledTools.includes(tool));
+                    return (
+                      <div key={group.label} className="rounded border border-slate-200 bg-white p-2 dark:border-slate-700 dark:bg-slate-900">
+                        <label className="mb-1.5 flex cursor-pointer items-center gap-2 font-medium">
+                          <input
+                            type="checkbox"
+                            checked={allOn}
+                            onChange={(event) => {
+                              const groupSet = new Set<string>(group.tools);
+                              setEnabledTools(
+                                event.target.checked
+                                  ? [...new Set([...enabledTools, ...group.tools])]
+                                  : enabledTools.filter((tool) => !groupSet.has(tool)),
+                              );
+                            }}
+                          />
+                          {group.label}
+                        </label>
+                        <div className="grid gap-1">
+                          {group.tools.map((tool) => (
+                            <label key={tool} className="muted flex cursor-pointer items-center gap-1.5">
+                              <input
+                                type="checkbox"
+                                checked={enabledTools.includes(tool)}
+                                onChange={(event) =>
+                                  setEnabledTools(
+                                    event.target.checked
+                                      ? [...new Set([...enabledTools, tool])]
+                                      : enabledTools.filter((item) => item !== tool),
+                                  )
+                                }
+                              />
+                              {toolDisplayName(tool)}
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </fieldset>
+            </div>
+            {running && <div className="muted mt-2">当前后台任务已锁定本轮设置；新设置会用于下一轮提问。</div>}
+          </div>
+        )}
+
         {hasKey === false && (
           <div className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300">
-            <span>尚未配置 MiniMax API Key,AI 助手不可用。</span>
+            <span>尚未配置 MiniMax 访问密钥，智能助手暂不可用。</span>
             <Link to="/settings" className="font-medium underline underline-offset-2">
               前往设置页配置
             </Link>
@@ -652,9 +915,10 @@ export default function AgentChat({
 
         {/* 消息区 */}
         <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+          {running && progress && <ResearchProgress progress={progress} />}
           {msgs.length === 0 && (
             <div className="muted py-10 text-center text-sm">
-              向 AI 助手提问,或点击下方快捷模板开始
+              向智能助手提问，或点击下方快捷模板开始
             </div>
           )}
           {msgs.map((m) =>
@@ -673,14 +937,15 @@ export default function AgentChat({
             <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300">
               <div className="flex flex-wrap items-center gap-3">
                 <span>
-                  配额已用尽,任务已保存。
+                  任务已保存，可从中断点继续。
                   {suspendedMsg?.suspendedAt && (
                     <>
-                      恢复时间:
+                      建议恢复时间:
                       <span className="num font-medium">{fmtUnix(suspendedMsg.suspendedAt)}</span>。
                     </>
                   )}
-                  配额恢复后点击继续。
+                  系统会自动补齐应用退出时未返回的分析结果，避免工具链不匹配错误（错误码 2013）。
+                  {autoResumeOnQuota && " 已开启额度恢复后自动续跑；也可立即手动尝试。"}
                 </span>
                 <button className="btn-primary" onClick={resume}>
                   继续分析
@@ -697,6 +962,16 @@ export default function AgentChat({
 
         {/* 输入区 */}
         <div className="shrink-0 border-t border-slate-200 p-3 dark:border-slate-800">
+          {pendingQuestions.length > 0 && (
+            <div className="mb-2 flex flex-wrap items-center gap-1.5 text-xs">
+              <span className="muted">等待继续分析：</span>
+              {pendingQuestions.map((question, index) => (
+                <span key={`${question}-${index}`} className="tag max-w-72 truncate" title={question}>
+                  {index + 1}. {question}
+                </span>
+              ))}
+            </div>
+          )}
           <div className="mb-2 flex flex-wrap gap-1.5">
             {chips.map((c) => (
               <button
@@ -723,9 +998,14 @@ export default function AgentChat({
               }}
             />
             {running ? (
-              <button className="btn-danger" onClick={cancel}>
-                取消
-              </button>
+              <>
+                <button className="btn-primary" disabled={!input.trim()} onClick={() => queueFollowUp(input)}>
+                  加入追问
+                </button>
+                <button className="btn-danger" onClick={cancel}>
+                  取消当前分析
+                </button>
+              </>
             ) : (
               <button
                 className="btn-primary"
@@ -743,17 +1023,25 @@ export default function AgentChat({
 }
 
 /** 历史消息(role/content JSON)转换为气泡:工具消息折叠进上一条助手消息的轨迹 */
-function historyToMsgs(m: AgentMessage, out: ChatMsg[]): ChatMsg[] {
+export function historyToMsgs(m: AgentMessage, out: ChatMsg[]): ChatMsg[] {
+  if (m.role === "system") return [];
   if (m.role === "user") {
-    return [{ key: nextKey(), role: "user", raw: m.content, tools: [], done: true }];
+    return [{ key: nextAgentKey(), role: "user", raw: m.content, tools: [], done: true }];
   }
   if (m.role === "assistant") {
+    const tools = m.tool_calls.map((call) => ({
+      key: nextAgentKey(),
+      name: call.name || "tool",
+      args: call.arguments ?? undefined,
+      done: true,
+    }));
     return [
       {
-        key: nextKey(),
+        key: nextAgentKey(),
         role: "assistant",
         raw: m.content,
-        tools: [],
+        tools,
+        failed: m.malformed ? "该历史消息格式异常，已按纯文本安全加载。" : undefined,
         done: true,
       },
     ];
@@ -771,9 +1059,19 @@ function historyToMsgs(m: AgentMessage, out: ChatMsg[]): ChatMsg[] {
     }
     last.tools = [
       ...last.tools,
-      { key: nextKey(), name, args: m.content, done: true },
+      { key: nextAgentKey(), name, args: m.content, done: true },
     ];
     return [];
   }
   return [];
 }
+
+const PROGRESS_PHASE_LABELS: Record<string, string> = {
+  preparing: "准备任务",
+  reasoning: "理解与规划",
+  tools: "取数与计算",
+  reviewing: "多专家复核",
+  synthesizing: "图表与结论",
+};
+
+const PROGRESS_PHASE_ORDER = ["preparing", "reasoning", "tools", "reviewing", "synthesizing"];

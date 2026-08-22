@@ -167,9 +167,9 @@ impl GraphStore {
             return Ok(Some(node));
         }
         let nodes = self.all_nodes().await?;
-        Ok(nodes.into_iter().find(|n| {
-            n.code.as_deref() == Some(query) || n.name == query
-        }))
+        Ok(nodes
+            .into_iter()
+            .find(|n| n.code.as_deref() == Some(query) || n.name == query))
     }
 
     /// All nodes, ordered by id.
@@ -341,20 +341,20 @@ pub(crate) fn build_adjacency(nodes: Vec<Node>, edges: Vec<Edge>) -> Adjacency {
             .or_default()
             .push((edge.clone(), edge.src.clone()));
     }
-    Adjacency { nodes: node_map, links }
+    Adjacency {
+        nodes: node_map,
+        links,
+    }
 }
 
 fn adjacency_node(adj: &Adjacency, id: &str) -> Node {
-    adj.nodes
-        .get(id)
-        .cloned()
-        .unwrap_or_else(|| Node {
-            id: id.to_string(),
-            kind: NodeKind::Segment,
-            name: id.to_string(),
-            code: None,
-            meta: serde_json::Value::Null,
-        })
+    adj.nodes.get(id).cloned().unwrap_or_else(|| Node {
+        id: id.to_string(),
+        kind: NodeKind::Segment,
+        name: id.to_string(),
+        code: None,
+        meta: serde_json::Value::Null,
+    })
 }
 
 pub(crate) fn node_from(row: GraphNodeRow) -> Node {
@@ -432,7 +432,10 @@ mod tests {
     #[tokio::test]
     async fn upsert_validates_invariants() {
         let (_dir, store) = test_store().await;
-        store.upsert_node(&company("600362", "江西铜业")).await.unwrap();
+        store
+            .upsert_node(&company("600362", "江西铜业"))
+            .await
+            .unwrap();
         store.upsert_node(&commodity("copper", "铜")).await.unwrap();
 
         // Bad confidence rejected.
@@ -452,7 +455,11 @@ mod tests {
         assert!(store.upsert_node(&no_code).await.is_err());
 
         store
-            .upsert_edge(&edge("company:600362", "commodity:copper", Relation::Produces))
+            .upsert_edge(&edge(
+                "company:600362",
+                "commodity:copper",
+                Relation::Produces,
+            ))
             .await
             .unwrap();
         assert_eq!(store.all_edges().await.unwrap().len(), 1);
@@ -461,7 +468,10 @@ mod tests {
     #[tokio::test]
     async fn find_node_by_id_code_or_name() {
         let (_dir, store) = test_store().await;
-        store.upsert_node(&company("600362", "江西铜业")).await.unwrap();
+        store
+            .upsert_node(&company("600362", "江西铜业"))
+            .await
+            .unwrap();
         for query in ["company:600362", "600362", "江西铜业"] {
             let found = store.find_node(query).await.unwrap().unwrap();
             assert_eq!(found.id, "company:600362");
@@ -478,10 +488,22 @@ mod tests {
         store.upsert_node(&commodity("b", "乙")).await.unwrap();
         store.upsert_node(&commodity("c", "丙")).await.unwrap();
         store.upsert_node(&commodity("d", "丁")).await.unwrap();
-        store.upsert_edge(&edge("commodity:a", "commodity:b", Relation::Substitutes)).await.unwrap();
-        store.upsert_edge(&edge("commodity:b", "commodity:c", Relation::Substitutes)).await.unwrap();
-        store.upsert_edge(&edge("commodity:c", "commodity:a", Relation::Substitutes)).await.unwrap();
-        store.upsert_edge(&edge("commodity:c", "commodity:d", Relation::Substitutes)).await.unwrap();
+        store
+            .upsert_edge(&edge("commodity:a", "commodity:b", Relation::Substitutes))
+            .await
+            .unwrap();
+        store
+            .upsert_edge(&edge("commodity:b", "commodity:c", Relation::Substitutes))
+            .await
+            .unwrap();
+        store
+            .upsert_edge(&edge("commodity:c", "commodity:a", Relation::Substitutes))
+            .await
+            .unwrap();
+        store
+            .upsert_edge(&edge("commodity:c", "commodity:d", Relation::Substitutes))
+            .await
+            .unwrap();
 
         let paths = store.paths_from("commodity:a", 3).await.unwrap();
         assert_eq!(paths.len(), 3); // b, c, d — a is the start, not revisited
@@ -506,8 +528,14 @@ mod tests {
         store.upsert_node(&commodity("a", "甲")).await.unwrap();
         store.upsert_node(&commodity("b", "乙")).await.unwrap();
         store.upsert_node(&commodity("c", "丙")).await.unwrap();
-        store.upsert_edge(&edge("commodity:a", "commodity:b", Relation::Substitutes)).await.unwrap();
-        store.upsert_edge(&edge("commodity:b", "commodity:c", Relation::Substitutes)).await.unwrap();
+        store
+            .upsert_edge(&edge("commodity:a", "commodity:b", Relation::Substitutes))
+            .await
+            .unwrap();
+        store
+            .upsert_edge(&edge("commodity:b", "commodity:c", Relation::Substitutes))
+            .await
+            .unwrap();
 
         let one = store.subgraph("commodity:a", 1).await.unwrap();
         assert_eq!(one.nodes.len(), 2);

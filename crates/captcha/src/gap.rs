@@ -158,7 +158,9 @@ pub fn detect_gap_with_template(
         return Err(CaptchaError::InvalidTemplate("piece smaller than 8x8"));
     }
     if tw > w || th > h {
-        return Err(CaptchaError::InvalidTemplate("piece larger than background"));
+        return Err(CaptchaError::InvalidTemplate(
+            "piece larger than background",
+        ));
     }
 
     // Alpha-mask boundary pixels: opaque pixels touching a transparent one.
@@ -197,7 +199,8 @@ pub fn detect_gap_with_template(
         }
     }
     let rect_sum = |table: &[f64], x: usize, y: usize| -> f64 {
-        table[(y + th) * stride + x + tw] - table[y * stride + x + tw]
+        table[(y + th) * stride + x + tw]
+            - table[y * stride + x + tw]
             - table[(y + th) * stride + x]
             + table[y * stride + x]
     };

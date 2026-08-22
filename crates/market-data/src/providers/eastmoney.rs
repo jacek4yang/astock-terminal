@@ -360,6 +360,33 @@ impl DataProvider for EastMoney {
             return Err(DataError::Empty(format!("eastmoney quote {symbol}")));
         }
         let get = |f: &str| d.get(f).and_then(json_f64).unwrap_or(0.0);
+        let timestamp = astock_core::time::utc_now();
+        let mut field_provenance = std::collections::BTreeMap::new();
+        for field in [
+            "name",
+            "price",
+            "high",
+            "low",
+            "open",
+            "volume",
+            "amount",
+            "pre_close",
+            "change",
+            "pct",
+        ] {
+            field_provenance.insert(
+                field.to_string(),
+                astock_core::FieldProvenance::reported("eastmoney", timestamp),
+            );
+        }
+        let turnover = d.get("f168").and_then(json_f64);
+        field_provenance.insert(
+            "turnover".to_string(),
+            turnover.map_or_else(
+                || astock_core::FieldProvenance::missing("eastmoney", "上游未返回换手率"),
+                |_| astock_core::FieldProvenance::reported("eastmoney", timestamp),
+            ),
+        );
         let quote = Quote {
             symbol: symbol.code().to_string(),
             name: d
@@ -376,8 +403,9 @@ impl DataProvider for EastMoney {
             pre_close: get("f60"),
             change: get("f169"),
             pct: get("f170"),
-            turnover: get("f168"),
-            timestamp: astock_core::time::utc_now(),
+            turnover,
+            timestamp,
+            field_provenance,
         };
         let out = Fetched::now(quote, Source::EastMoney);
         self.cache.set(&key, &out);
@@ -661,9 +689,9 @@ impl DataProvider for EastMoney {
                     .unwrap_or("")
                     .trim()
                     .to_string(),
-                price: d.get("f2").and_then(json_f64).unwrap_or(0.0),
-                pct: d.get("f3").and_then(json_f64).unwrap_or(0.0),
-                amount: d.get("f6").and_then(json_f64).unwrap_or(0.0),
+                price: d.get("f2").and_then(json_f64),
+                pct: d.get("f3").and_then(json_f64),
+                amount: d.get("f6").and_then(json_f64),
             });
         }
         let out = Fetched::now(items, Source::EastMoney);

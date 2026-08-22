@@ -1,9 +1,7 @@
 //! Property-based invariants over the indicators and the full pipeline.
 
 use astock_technical::breakout::calc_true_range;
-use astock_technical::indicators::{
-    ema_series, find_peaks, find_troughs, macd_series, sma_series,
-};
+use astock_technical::indicators::{ema_series, find_peaks, find_troughs, macd_series, sma_series};
 use astock_technical::types::Kline;
 use proptest::prelude::*;
 

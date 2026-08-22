@@ -1761,7 +1761,7 @@ impl EmDataCenter {
             .clist_rows(kind.fs(), "f12,f14,f2,f3,f62,f128,f140", 8, "board_list")
             .await?;
         if rows.is_empty() {
-            return Err(DataError::Empty(format!("board_list {:?}", kind)));
+            return Err(DataError::Empty(format!("board_list {kind:?}")));
         }
         let out = Fetched::now(
             rows.iter().map(parse_board_row).collect::<Vec<_>>(),

@@ -21,6 +21,7 @@ pub mod breakout;
 pub mod canslim;
 pub mod engine;
 pub mod indicators;
+pub mod manual_plan;
 pub mod optimize;
 pub mod pattern;
 pub mod trend;
@@ -29,6 +30,10 @@ pub mod util;
 pub mod volume_price;
 
 pub use engine::{run_analysis, signal_to_json, SignalEngineResult, TradePlan};
+pub use manual_plan::{
+    build_manual_trading_plan, ManualCheckpoint, ManualEvidence, ManualScenario, ManualTradingPlan,
+    SessionSchedule, TradingConstraints,
+};
 pub use optimize::{
     apply_breadth_m_adjustment, apply_signal_optimization, breadth_m_bonus, VetoInputs,
 };

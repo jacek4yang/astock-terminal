@@ -295,14 +295,8 @@ mod tests {
     #[test]
     fn date_parsing_accepts_datetime_and_date() {
         let row = json!({"A": "2026-06-30 00:00:00", "B": "2026-06-26", "C": "n/a"});
-        assert_eq!(
-            json_date(&row, "A"),
-            NaiveDate::from_ymd_opt(2026, 6, 30)
-        );
-        assert_eq!(
-            json_date(&row, "B"),
-            NaiveDate::from_ymd_opt(2026, 6, 26)
-        );
+        assert_eq!(json_date(&row, "A"), NaiveDate::from_ymd_opt(2026, 6, 30));
+        assert_eq!(json_date(&row, "B"), NaiveDate::from_ymd_opt(2026, 6, 26));
         assert_eq!(json_date(&row, "C"), None);
     }
 
@@ -321,10 +315,7 @@ mod tests {
     fn report_type_falls_back_to_period_end_month() {
         let rows = vec![json!({"REPORT_DATE": "2025-09-30 00:00:00", "REPORT_TYPE": "unexpected"})];
         let parsed = parse_income(&rows);
-        assert_eq!(
-            parsed[0].meta.map(|m| m.report_type),
-            Some(ReportType::Q3)
-        );
+        assert_eq!(parsed[0].meta.map(|m| m.report_type), Some(ReportType::Q3));
     }
 
     #[test]

@@ -2,11 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import {
   getQuote,
+  getOrderBook,
   getStockBundle,
   getMinute,
   watchlistAdd,
   errMsg,
   type Quote,
+  type OrderBook,
   type Bar,
   type KlinePeriod,
   type KlineAdjust,
@@ -16,6 +18,7 @@ import {
   type ChanlunDailyJson,
 } from "../lib/api";
 import { fmtPct, fmtVolume, fmtYiWan, fmtNum, pctClass } from "../lib/format";
+import { sourceDisplayName } from "../lib/agentLabels";
 import { Loading, ErrorBox, Stat, Term, useMinLoading } from "../components/ui";
 import KlineChart, { type SubIndicator } from "../components/KlineChart";
 import MinuteChart from "../components/MinuteChart";
@@ -25,6 +28,7 @@ import FundFlowPanel from "../components/FundFlowPanel";
 import FundamentalsPanel from "../components/FundamentalsPanel";
 import ValuationPanel from "../components/ValuationPanel";
 import CanslimCard from "../components/CanslimCard";
+import OrderBookPanel from "../components/OrderBookPanel";
 import { useAppStore } from "../store";
 
 const KLINE_COUNT = 500;
@@ -96,6 +100,8 @@ export default function StockPage() {
   const [quote, setQuote] = useState<Quote | null>(null);
   const [quoteErr, setQuoteErr] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [orderBook, setOrderBook] = useState<OrderBook | null>(null);
+  const [orderBookErr, setOrderBookErr] = useState<string | null>(null);
 
   const [view, setView] = useState<"kline" | "minute" | "fundamentals">("kline");
   const [period, setPeriod] = useState<KlinePeriod>("day");
@@ -151,6 +157,27 @@ export default function StockPage() {
     const t = setInterval(loadQuote, 2000);
     return () => clearInterval(t);
   }, [loadQuote, autoRefresh]);
+
+  useEffect(() => {
+    if (mode !== "pro") return;
+    let alive = true;
+    const load = () =>
+      getOrderBook(symbol)
+        .then((book) => {
+          if (alive) {
+            setOrderBook(book);
+            setOrderBookErr(null);
+          }
+        })
+        .catch((reason) => alive && setOrderBookErr(errMsg(reason)));
+    void load();
+    if (!autoRefresh) return () => { alive = false; };
+    const timer = setInterval(load, 2000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [symbol, mode, autoRefresh]);
 
   // 一次取数(get_stock_bundle):K线只拉一次,信号/缠论由同组 bars 推导,
   // 资金流走自带 TTL 通道;除 quote 硬错误外各分区独立降级(missing 记录)
@@ -257,6 +284,18 @@ export default function StockPage() {
               <div className="flex items-center gap-2">
                 <span className="text-lg font-bold">{q.name || symbol}</span>
                 <span className="num muted text-xs">{q.symbol}</span>
+                <span
+                  className="chip bg-sky-500/10 text-sky-600 dark:text-sky-400"
+                  title={`价格时间：${q.field_provenance?.price?.as_of ?? q.timestamp}`}
+                >
+                  行情来源：{sourceDisplayName(q.field_provenance?.price?.source)}
+                </span>
+                <span
+                  className="chip bg-slate-500/10 text-slate-500"
+                  title={`名称刷新：${q.field_provenance?.name?.fetched_at ?? "暂无"}`}
+                >
+                  股票资料：{sourceDisplayName(q.field_provenance?.name?.source)}
+                </span>
               </div>
               <div className="flex items-baseline gap-2">
                 <span className={"num text-2xl font-bold " + pctClass(q.pct)}>
@@ -274,11 +313,15 @@ export default function StockPage() {
             <Stat label="昨收" value={fmtNum(q.pre_close)} />
             <Stat
               label={<Term label="量比" tip="当日每分钟均量 ÷ 过去5日每分钟均量,>1 说明放量" />}
-              value={signal ? fmtNum(signal.volume_price.volume_ratio) : "--"}
+              value={signal ? fmtNum(signal.volume_price.volume_ratio) : "暂无"}
             />
             <Stat
               label={<Term label="换手" tip="当日成交量占流通股的比例,反映交投活跃度" />}
-              value={q.turnover.toFixed(2) + "%"}
+              value={
+                <span title={q.field_provenance?.turnover?.missing_reason ?? undefined}>
+                  {fmtPct(q.turnover, 2, false)}
+                </span>
+              }
             />
             <Stat label="成交量" value={fmtVolume(q.volume)} />
             <Stat label="成交额" value={fmtYiWan(q.amount)} />
@@ -440,6 +483,13 @@ export default function StockPage() {
               </button>
             </div>
             <div className="stagger min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+              {mode === "pro" && (
+                orderBook ? <OrderBookPanel data={orderBook} /> : orderBookErr ? (
+                  <div className="card"><div className="card-title">五档盘口</div><DegradeBox text={orderBookErr} /></div>
+                ) : (
+                  <div className="card"><div className="card-title">五档盘口</div><Loading text="同步 TDX 盘口…" /></div>
+                )
+              )}
               {/* 信号卡 */}
               {signalErr ? (
                 <div className="card">

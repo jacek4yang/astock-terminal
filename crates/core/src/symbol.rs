@@ -42,7 +42,7 @@ impl Symbol {
         if trimmed.is_empty() {
             return Err(DataError::InvalidSymbol(trimmed.to_string()));
         }
-        let padded = format!("{:0>6}", trimmed);
+        let padded = format!("{trimmed:0>6}");
         if padded.len() == 6 && padded.bytes().all(|b| b.is_ascii_digit()) {
             Ok(Symbol(padded))
         } else {

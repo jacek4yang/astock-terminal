@@ -31,7 +31,11 @@ pub fn rsi_series(closes: &[f64], period: usize) -> Vec<Option<f64>> {
     out[period] = Some(rsi(avg_gain, avg_loss));
     for i in (period + 1)..n {
         let diff = closes[i] - closes[i - 1];
-        let (g, l) = if diff > 0.0 { (diff, 0.0) } else { (0.0, -diff) };
+        let (g, l) = if diff > 0.0 {
+            (diff, 0.0)
+        } else {
+            (0.0, -diff)
+        };
         avg_gain = (avg_gain * (period as f64 - 1.0) + g) / period as f64;
         avg_loss = (avg_loss * (period as f64 - 1.0) + l) / period as f64;
         out[i] = Some(rsi(avg_gain, avg_loss));
@@ -49,12 +53,7 @@ fn rsi(avg_gain: f64, avg_loss: f64) -> f64 {
 /// Chinese KDJ (9,3,3): RSV over a 9-bar window, K/D seeded at 50 with the
 /// 1/3 SMA recursion, J = 3K − 2D. Returns `(K, D, J)` series aligned with
 /// the input; entries before the first full window are `None`.
-pub fn kdj_series(
-    highs: &[f64],
-    lows: &[f64],
-    closes: &[f64],
-    period: usize,
-) -> TripleSeries {
+pub fn kdj_series(highs: &[f64], lows: &[f64], closes: &[f64], period: usize) -> TripleSeries {
     let n = closes.len();
     let (mut ks, mut ds, mut js): TripleSeries = (vec![None; n], vec![None; n], vec![None; n]);
     if n < period || period == 0 {
@@ -86,11 +85,7 @@ pub fn kdj_series(
 
 /// Bollinger bands `(mid, upper, lower)`: SMA(period) ± mult × population
 /// standard deviation. Entries before the first full window are `None`.
-pub fn bollinger_series(
-    closes: &[f64],
-    period: usize,
-    mult: f64,
-) -> TripleSeries {
+pub fn bollinger_series(closes: &[f64], period: usize, mult: f64) -> TripleSeries {
     let n = closes.len();
     let (mut mid, mut up, mut lo): TripleSeries = (vec![None; n], vec![None; n], vec![None; n]);
     if n < period || period == 0 {

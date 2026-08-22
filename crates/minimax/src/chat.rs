@@ -1,9 +1,10 @@
 //! OpenAI-compatible chat types plus a hand-rolled SSE parser for streaming.
 //!
 //! MiniMax speaks the OpenAI chat-completions schema and adds a `base_resp`
-//! envelope. Reasoning models (e.g. `MiniMax-M2.5`) inline their chain of
-//! thought as `<think>...</think>` blocks inside the regular content; helpers
-//! here split that reasoning from the user-facing text.
+//! envelope. MiniMax can either inline thinking in `<think>` blocks or, with
+//! `reasoning_split=true`, return it separately in `reasoning_content` and
+//! `reasoning_details`. Both representations are preserved for protocol-safe
+//! multi-turn tool use while callers only render regular `content`.
 
 use std::collections::VecDeque;
 use std::pin::Pin;
@@ -38,6 +39,14 @@ pub struct ChatMessage {
     /// Message content: a JSON string, or an array of content parts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<serde_json::Value>,
+    /// MiniMax separated reasoning text. It must be replayed unchanged in a
+    /// multi-turn tool-call conversation, but is never user-visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+    /// MiniMax interleaved-thinking details. Kept as raw JSON so newly added
+    /// detail kinds remain forward compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_details: Option<serde_json::Value>,
     /// Tool calls requested by the assistant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
@@ -427,7 +436,8 @@ impl SseParser {
         }
         if let Some(data) = line.strip_prefix(b"data:") {
             let data = data.strip_prefix(b" ").unwrap_or(data);
-            self.data_lines.push(String::from_utf8_lossy(data).into_owned());
+            self.data_lines
+                .push(String::from_utf8_lossy(data).into_owned());
         }
         // Anything else (`event:`, `id:`, `:` comments) is ignored.
         None
