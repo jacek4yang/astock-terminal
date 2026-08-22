@@ -6,6 +6,11 @@ import type {
   AgentResearchMode,
   AgentStreamEnvelope,
 } from "./lib/api";
+import {
+  emptyClarificationDraft,
+  hasClarification,
+  type ClarificationDraft,
+} from "./lib/agentClarification";
 
 export const DEFAULT_AGENT_TOOLS = [
   "get_quote",
@@ -64,11 +69,15 @@ export interface ChatMsg {
   suspendedAt?: number;
   failed?: string;
   done: boolean;
+  /** Persisted form state for an Agent clarification card. */
+  clarificationDraft?: ClarificationDraft;
+  clarificationSubmitted?: boolean;
 }
 
 export type RunStatus =
   | "idle"
   | "running"
+  | "waiting_input"
   | "suspended"
   | "completed"
   | "failed"
@@ -141,7 +150,7 @@ export const useAgentSession = create<AgentSessionState>()(
     }),
     {
       name: "astock-agent-session-v2",
-      version: 3,
+      version: 4,
       storage: createJSONStorage(() => window.localStorage),
       migrate: (persisted, version) => {
         const state = persisted as Partial<AgentSessionState>;
@@ -188,6 +197,26 @@ export function patchLastAssistant(patch: (message: ChatMsg) => ChatMsg) {
       return;
     }
   }
+}
+
+/** Update one persisted clarification card even while its route is unmounted. */
+export function patchClarificationDraft(
+  messageKey: number,
+  patch: (draft: ClarificationDraft) => ClarificationDraft,
+) {
+  const state = useAgentSession.getState();
+  useAgentSession.setState({
+    msgs: state.msgs.map((message) =>
+      message.key === messageKey
+        ? {
+            ...message,
+            clarificationDraft: patch(
+              message.clarificationDraft ?? emptyClarificationDraft(),
+            ),
+          }
+        : message,
+    ),
+  });
 }
 
 /** Stable channel callback: it lives outside any route component. */
@@ -308,7 +337,10 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
       }));
       break;
     case "completed":
-      useAgentSession.setState({ status: "completed", progress: null });
+      useAgentSession.setState({
+        status: hasClarification(event.report.answer) ? "waiting_input" : "completed",
+        progress: null,
+      });
       patchLastAssistant((item) => {
         const evidenceByCache = new Map(
           event.report.evidence.map((evidence) => [evidence.cache_key, evidence]),
@@ -316,6 +348,9 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
         return {
           ...item,
           report: event.report,
+          clarificationDraft: hasClarification(event.report.answer)
+            ? item.clarificationDraft ?? emptyClarificationDraft()
+            : item.clarificationDraft,
           suspendedAt: undefined,
           done: true,
           tools: item.tools.map((tool) => {

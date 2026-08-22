@@ -134,7 +134,7 @@ impl TaskSpec {
     fn runtime_directive(&self) -> String {
         let mode = match self.research_mode.as_deref().unwrap_or("deep") {
             "quick" => "快速模式：只调用回答当前问题必需的工具，优先在较少轮次内给出可核验结论。",
-            "plan" => "计划模式：先判断目标、资金规模、期限、风险承受力和交易限制是否足以决定研究路线。若缺少会实质改变结论的信息，本轮只提出不超过3个具体问题并停止；用户回答后检查仍未明确的关键项，可继续分批提问。信息充分后先列研究计划，再按计划取证、反证和综合。",
+            "plan" => "计划模式：先判断目标、资金规模、期限、风险承受力和交易限制是否足以决定研究路线。若缺少会实质改变结论的信息，本轮只提出不超过3个具体问题并停止；必须用系统约定的astock-questions结构化选择框，禁止退化成普通Markdown问答列表。用户回答后检查仍未明确的关键项，可继续分批提问。信息充分后先列研究计划，再按计划取证、反证和综合。",
             _ => "深度模式：主动进行多源取证、交叉验证和反方检验，只在证据足以支持结论后完成回答。",
         };
         let depth = match self.reasoning_depth.as_deref().unwrap_or("deep") {
@@ -758,7 +758,13 @@ impl AgentEngine {
                     }
                 }
             }
+            // A plan-mode clarification is a user-input boundary, not an
+            // analyst draft. Sending it through the specialist panel used to
+            // trigger TextReset and made the questions flash then disappear.
+            let awaiting_user_input = state.spec.research_mode.as_deref() == Some("plan")
+                && is_clarification_request(&clean_text);
             let awaiting_specialist_review = calls.is_empty()
+                && !awaiting_user_input
                 && !state.multi_agent_reviewed
                 && !state.spec.specialists.is_empty();
             // A first draft awaiting specialist review is internal working
@@ -881,7 +887,11 @@ impl AgentEngine {
                     &tx,
                     AgentEvent::Progress {
                         phase: "synthesizing".to_string(),
-                        message: "证据核验完成，正在生成最终结论".to_string(),
+                        message: if awaiting_user_input {
+                            "需要你确认关键条件，已生成可选择的问题卡片".to_string()
+                        } else {
+                            "证据核验完成，正在生成最终结论".to_string()
+                        },
                         round: state.round + 1,
                         max_rounds,
                         completed: Some(1),
@@ -1498,6 +1508,40 @@ fn explicitly_requests_chart(prompt: &str) -> bool {
     ["画图", "图表", "折线图", "柱状图", "走势图", "交互图"]
         .iter()
         .any(|needle| prompt.contains(needle))
+}
+
+/// Recognize both the structured selection protocol and the legacy numbered
+/// Markdown format. The latter keeps older/provider-deviating answers from
+/// entering specialist review and disappearing from the UI.
+fn is_clarification_request(answer: &str) -> bool {
+    if answer.contains("```astock-questions") {
+        return true;
+    }
+    let mut question_count = 0_usize;
+    let mut option_count = 0_usize;
+    for line in answer.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("• ") {
+            option_count += 1;
+        }
+        let plain = trimmed.trim_matches('*').trim_start_matches('#').trim();
+        let numbered_question = plain.find(['.', '、', ')']).is_some_and(|separator| {
+            let separator_len = plain[separator..]
+                .chars()
+                .next()
+                .map(char::len_utf8)
+                .unwrap_or(0);
+            let number = &plain[..separator];
+            let text = &plain[separator + separator_len..];
+            !number.is_empty()
+                && number.chars().all(|ch| ch.is_ascii_digit())
+                && (text.trim_end().ends_with('?') || text.trim_end().ends_with('？'))
+        });
+        if numbered_question {
+            question_count += 1;
+        }
+    }
+    (1..=3).contains(&question_count) && option_count >= question_count * 2
 }
 
 /// Typical duration shown to the user. This value is deliberately not used as
@@ -2352,6 +2396,19 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_structured_and_legacy_clarification_boundaries() {
+        assert!(is_clarification_request(
+            "```astock-questions\n{\"questions\":[]}\n```"
+        ));
+        assert!(is_clarification_request(
+            "**1. 资金用途？**\n- A. 试探建仓\n- B. 长期定投\n\n**2. 风险偏好？**\n- 保守\n- 平衡"
+        ));
+        assert!(!is_clarification_request(
+            "1. 关键依据\n- 营收增长\n- 现金流改善\n2. 风险因素\n- 估值偏高"
+        ));
+    }
+
+    #[test]
     fn tool_event_contract_exposes_estimate_without_deadline() {
         let event = AgentEvent::ToolCallStarted {
             call_id: "c1".to_string(),
@@ -2643,6 +2700,42 @@ mod tests {
         assert_eq!(assistant_rows.len(), 1, "内部初稿不得显示为历史答案");
         assert!(assistant_rows[0].content.contains("最终答案"));
         assert!(!assistant_rows[0].content.contains("主分析师初稿"));
+    }
+
+    #[tokio::test]
+    async fn plan_clarification_waits_for_user_instead_of_flashing_into_specialist_review() {
+        let (_dir, storage) = test_storage();
+        let chat = Arc::new(ScriptedChat::new("main-model"));
+        let clarification = "```astock-questions\n{\"title\":\"请确认\",\"questions\":[{\"id\":\"risk\",\"question\":\"风险偏好？\",\"kind\":\"single\",\"options\":[{\"id\":\"safe\",\"label\":\"保守\"},{\"id\":\"balanced\",\"label\":\"平衡\"}],\"allow_other\":true}]}\n```";
+        chat.push_text(clarification);
+        let echo = Arc::new(EchoTool::new());
+        let engine = build_engine(storage.clone(), chat.clone(), echo);
+        let task = spec("t-plan-input")
+            .with_run_options("plan", "deep", Vec::new(), true)
+            .with_specialists(vec![SpecialistRoute {
+                name: "风险审计师".into(),
+                instruction: "检查风险".into(),
+                model: Some("review-model".into()),
+            }]);
+
+        let events = collect(engine.run_task(task)).await;
+        assert!(!events.iter().any(
+            |event| matches!(event, AgentEvent::Progress { phase, .. } if phase == "reviewing")
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TextReset { .. })));
+        let answer = events.iter().find_map(|event| match event {
+            AgentEvent::Completed { report } => Some(report.answer.as_str()),
+            _ => None,
+        });
+        assert_eq!(answer, Some(clarification));
+        assert_eq!(chat.requests.lock().unwrap().len(), 1);
+        let stored = storage.conversation_load("t-plan-input").await.unwrap();
+        assert!(stored
+            .iter()
+            .any(|message| message.role == "assistant"
+                && message.content.contains("astock-questions")));
     }
 
     #[tokio::test]

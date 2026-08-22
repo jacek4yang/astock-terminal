@@ -31,6 +31,7 @@ import {
   DEFAULT_AGENT_TOOLS,
   handleAgentEnvelope,
   nextAgentKey,
+  patchClarificationDraft,
   patchLastAssistant,
   resetAgentSession,
   selectAgentTask,
@@ -41,6 +42,15 @@ import {
   type RunStatus,
   type ToolCallItem,
 } from "../agentSession";
+import {
+  clarificationIsComplete,
+  emptyClarificationDraft,
+  formatClarificationAnswer,
+  hasClarification,
+  parseClarification,
+  type ClarificationDraft,
+  type ClarificationRequest,
+} from "../lib/agentClarification";
 
 export type { ChatMsg } from "../agentSession";
 
@@ -147,6 +157,7 @@ export function stripPrivateReasoning(raw: string): string {
 
 const STATUS_LABEL: Record<string, { text: string; cls: string }> = {
   running: { text: "运行中", cls: "bg-blue-600/10 text-blue-600 dark:text-blue-400" },
+  waiting_input: { text: "等待回答", cls: "bg-violet-500/10 text-violet-600 dark:text-violet-400" },
   suspended: { text: "已挂起", cls: "bg-amber-500/10 text-amber-600 dark:text-amber-400" },
   completed: { text: "已完成", cls: "bg-down/10 text-down" },
   failed: { text: "失败", cls: "bg-up/10 text-up" },
@@ -315,9 +326,149 @@ function ResearchProgress({ progress }: { progress: AgentProgress }) {
   );
 }
 
+export function ClarificationCard({
+  request,
+  draft,
+  submitted,
+  onChange,
+  onSubmit,
+}: {
+  request: ClarificationRequest;
+  draft: ClarificationDraft;
+  submitted: boolean;
+  onChange: (draft: ClarificationDraft) => void;
+  onSubmit: () => void;
+}) {
+  const choose = (questionId: string, optionId: string, multiple: boolean) => {
+    const current = draft.selections[questionId] ?? [];
+    const next = multiple
+      ? current.includes(optionId)
+        ? current.filter((id) => id !== optionId)
+        : [...current, optionId]
+      : [optionId];
+    onChange({ ...draft, selections: { ...draft.selections, [questionId]: next } });
+  };
+  const complete = clarificationIsComplete(request, draft);
+  return (
+    <section className="mt-3 overflow-hidden rounded-lg border border-violet-300 bg-violet-50/70 dark:border-violet-900/80 dark:bg-violet-950/25">
+      <div className="border-b border-violet-200 px-3 py-2.5 dark:border-violet-900/70">
+        <div className="flex items-center gap-2">
+          <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-violet-600 text-xs font-bold text-white">?</span>
+          <div>
+            <div className="text-sm font-semibold text-violet-900 dark:text-violet-100">{request.title}</div>
+            {request.description && <div className="muted mt-0.5 text-xs">{request.description}</div>}
+          </div>
+          <span className="chip ml-auto bg-violet-600/10 text-violet-700 dark:text-violet-300">
+            {submitted ? "已回答" : `共 ${request.questions.length} 项`}
+          </span>
+        </div>
+      </div>
+      <div className="space-y-4 p-3">
+        {request.questions.map((question, questionIndex) => {
+          const selected = draft.selections[question.id] ?? [];
+          return (
+            <fieldset key={question.id} disabled={submitted} className="space-y-2">
+              <legend className="mb-2 text-sm font-semibold">
+                <span className="mr-1.5 text-violet-600 dark:text-violet-400">{questionIndex + 1}.</span>
+                {question.question}
+                {question.kind === "multiple" && <span className="muted ml-2 text-xs font-normal">可多选</span>}
+              </legend>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {question.options.map((option) => {
+                  const checked = selected.includes(option.id);
+                  return (
+                    <label
+                      key={option.id}
+                      className={
+                        "cursor-pointer rounded-md border px-3 py-2 transition-colors " +
+                        (checked
+                          ? "border-violet-500 bg-violet-100 ring-1 ring-violet-400 dark:bg-violet-900/45"
+                          : "border-slate-200 bg-white hover:border-violet-300 dark:border-slate-700 dark:bg-slate-900/70") +
+                        (submitted ? " cursor-default opacity-80" : "")
+                      }
+                    >
+                      <span className="flex items-start gap-2">
+                        <input
+                          className="mt-0.5 accent-violet-600"
+                          type={question.kind === "multiple" ? "checkbox" : "radio"}
+                          name={`clarification-${question.id}`}
+                          checked={checked}
+                          onChange={() => choose(question.id, option.id, question.kind === "multiple")}
+                        />
+                        <span className="min-w-0">
+                          <span className="text-sm font-medium">{option.label}</span>
+                          {option.recommended && (
+                            <span className="ml-1.5 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-700 dark:text-emerald-400">建议</span>
+                          )}
+                          {option.description && <span className="muted mt-0.5 block text-xs">{option.description}</span>}
+                        </span>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+              {question.allowOther && (
+                <input
+                  className="input mt-2 w-full"
+                  value={draft.other[question.id] ?? ""}
+                  disabled={submitted}
+                  placeholder="其他情况或补充说明（可直接填写）"
+                  onChange={(event) =>
+                    onChange({
+                      ...draft,
+                      other: { ...draft.other, [question.id]: event.target.value },
+                    })
+                  }
+                />
+              )}
+            </fieldset>
+          );
+        })}
+        {!submitted ? (
+          <div className="flex flex-wrap items-center gap-2 border-t border-violet-200 pt-3 dark:border-violet-900/60">
+            <button className="btn-primary" disabled={!complete} onClick={onSubmit}>
+              提交选择并继续分析
+            </button>
+            <span className="muted text-xs">
+              {complete ? "提交后，Agent 会把这些选择作为本会话的已确认条件。" : "请为每个问题选择一项，或填写补充说明。"}
+            </span>
+          </div>
+        ) : (
+          <div className="rounded bg-emerald-500/10 px-2.5 py-2 text-xs text-emerald-700 dark:text-emerald-400">
+            已提交，Agent 正在沿用这些条件继续研究；返回本页面时选择记录仍会保留。
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+export function hasUnansweredClarification(messages: ChatMsg[]): boolean {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role === "user") return false;
+    if (
+      message.role === "assistant" &&
+      hasClarification(message.report?.answer ?? message.raw)
+    ) {
+      return message.clarificationSubmitted !== true && message.clarificationDraft?.submitted !== true;
+    }
+  }
+  return false;
+}
+
 /** 助手消息气泡 */
-function AssistantMsg({ msg }: { msg: ChatMsg }) {
+function AssistantMsg({
+  msg,
+  onClarificationSubmit,
+}: {
+  msg: ChatMsg;
+  onClarificationSubmit: (request: ClarificationRequest, draft: ClarificationDraft) => void;
+}) {
   const answer = stripPrivateReasoning(msg.report ? msg.report.answer : msg.raw);
+  const clarification = parseClarification(answer);
+  const visibleAnswer = clarification ? clarification.displayText : answer;
+  const draft = msg.clarificationDraft ?? emptyClarificationDraft();
   return (
     <div className="card anim-fade-up mr-auto w-full max-w-3xl px-3 py-2.5">
       {msg.tools.length > 0 && (
@@ -327,10 +478,24 @@ function AssistantMsg({ msg }: { msg: ChatMsg }) {
           ))}
         </div>
       )}
-      {answer.trim() ? (
-        <Markdown src={answer} />
+      {visibleAnswer.trim() ? (
+        <Markdown src={visibleAnswer} />
       ) : (
-        !msg.failed && !msg.done && <div className="muted text-sm">正在思考…</div>
+        !msg.failed && !msg.done && !clarification?.pending && <div className="muted text-sm">正在思考…</div>
+      )}
+      {clarification?.pending && (
+        <div className="mt-2 rounded border border-violet-200 bg-violet-50 px-3 py-2 text-sm text-violet-700 dark:border-violet-900/70 dark:bg-violet-950/30 dark:text-violet-300">
+          正在整理需要你确认的选项…
+        </div>
+      )}
+      {clarification && !clarification.pending && clarification.request.questions.length > 0 && (
+        <ClarificationCard
+          request={clarification.request}
+          draft={draft}
+          submitted={msg.clarificationSubmitted === true || draft.submitted === true}
+          onChange={(next) => patchClarificationDraft(msg.key, () => next)}
+          onSubmit={() => onClarificationSubmit(clarification.request, draft)}
+        />
       )}
       {msg.report && msg.report.evidence.length > 0 && (
         <div className="mt-3 rounded border border-slate-200 dark:border-slate-800">
@@ -349,7 +514,7 @@ function AssistantMsg({ msg }: { msg: ChatMsg }) {
           </ul>
         </div>
       )}
-      {msg.report && (
+      {msg.report && !clarification && (
         <div className="muted mt-3 rounded border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs dark:border-amber-900/60 dark:bg-amber-950/30">
           免责声明:以上内容由 AI 基于公开数据生成,仅供参考,不构成投资建议。市场有风险,决策需独立。
         </div>
@@ -445,10 +610,14 @@ export default function AgentChat({
           : undefined;
         if (current) {
           const durableStatus = taskRunStatus(current.status);
-          if (durableStatus !== session.status) {
+          const effectiveStatus =
+            durableStatus === "completed" && hasUnansweredClarification(session.msgs)
+              ? "waiting_input"
+              : durableStatus;
+          if (effectiveStatus !== session.status) {
             useAgentSession.setState({
-              status: durableStatus,
-              progress: durableStatus === "running" ? session.progress : null,
+              status: effectiveStatus,
+              progress: effectiveStatus === "running" ? session.progress : null,
             });
           }
           return;
@@ -524,6 +693,17 @@ export default function AgentChat({
       }
       setStatus("failed");
     }
+  };
+
+  const submitClarification = (
+    messageKey: number,
+    request: ClarificationRequest,
+    draft: ClarificationDraft,
+  ) => {
+    if (!clarificationIsComplete(request, draft) || running) return;
+    patchClarificationDraft(messageKey, (current) => ({ ...current, submitted: true }));
+    useAgentSession.setState({ status: "completed" });
+    void send(formatClarificationAnswer(request, draft));
   };
 
   const queueFollowUp = (question: string) => {
@@ -617,7 +797,7 @@ export default function AgentChat({
         conversationId: c.id,
         taskId: null,
         lastSeq: 0,
-        status: "idle",
+        status: hasUnansweredClarification(out) ? "waiting_input" : "idle",
         err: null,
         progress: null,
       });
@@ -758,6 +938,7 @@ export default function AgentChat({
             <span className="chip num bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-300" title={taskId}>
               {{
                 running: "后台任务运行中",
+                waiting_input: "等待你确认研究条件",
                 suspended: "后台任务待恢复",
                 completed: "本轮分析已完成",
                 failed: "本轮分析未完成",
@@ -932,7 +1113,13 @@ export default function AgentChat({
                 </div>
               </div>
             ) : (
-              <AssistantMsg key={m.key} msg={m} />
+              <AssistantMsg
+                key={m.key}
+                msg={m}
+                onClarificationSubmit={(request, draft) =>
+                  submitClarification(m.key, request, draft)
+                }
+              />
             ),
           )}
 
@@ -1029,6 +1216,10 @@ export default function AgentChat({
 export function historyToMsgs(m: AgentMessage, out: ChatMsg[]): ChatMsg[] {
   if (m.role === "system") return [];
   if (m.role === "user") {
+    const last = out[out.length - 1];
+    if (last?.role === "assistant" && hasClarification(last.raw)) {
+      last.clarificationSubmitted = true;
+    }
     return [{ key: nextAgentKey(), role: "user", raw: m.content, tools: [], done: true }];
   }
   if (m.role === "assistant") {
@@ -1045,6 +1236,7 @@ export function historyToMsgs(m: AgentMessage, out: ChatMsg[]): ChatMsg[] {
         raw: m.content,
         tools,
         failed: m.malformed ? "该历史消息格式异常，已按纯文本安全加载。" : undefined,
+        clarificationDraft: hasClarification(m.content) ? emptyClarificationDraft() : undefined,
         done: true,
       },
     ];

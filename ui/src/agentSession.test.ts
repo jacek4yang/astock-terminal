@@ -83,4 +83,29 @@ describe("persistent Agent session channel", () => {
       stage: "等待数据源返回并执行确定性计算",
     });
   });
+
+  it("persists a completed clarification as waiting for user input", () => {
+    appendAgentTurn("帮我制定两万元计划");
+    const answer = `\`\`\`astock-questions
+{"title":"请确认","questions":[{"id":"risk","question":"风险偏好？","options":["保守","平衡"]}]}
+\`\`\``;
+    handleAgentEnvelope({
+      run_id: "run-input",
+      conversation_id: "conv-input",
+      seq: 1,
+      event: {
+        type: "completed",
+        report: {
+          task_id: "run-input",
+          answer,
+          conclusions: [],
+          evidence: [],
+          generated_at: "2026-08-22T10:00:00+08:00",
+        },
+      },
+    });
+    const state = useAgentSession.getState();
+    expect(state.status).toBe("waiting_input");
+    expect(state.msgs.at(-1)?.clarificationDraft).toEqual({ selections: {}, other: {} });
+  });
 });
