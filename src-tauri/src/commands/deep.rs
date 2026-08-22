@@ -18,11 +18,14 @@ use astock_backtest::strategies::min_corr_rotation::{
 use astock_backtest::strategies::zscore_mean_reversion::ZscoreMeanReversion;
 use astock_backtest::strategies::{strategy_meta, ParamError};
 use astock_core::{Adjust, KlinePeriod, Symbol};
-use astock_graph::{Engine as GraphEngine, Event};
+use astock_graph::{Edge, Engine as GraphEngine, Event, Node, NodeKind, Relation};
 use astock_market_data::{DataProvider, MarketData};
 use astock_trading_rules::{RuleSet, TradeSide};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tauri::State;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::CmdError;
 use crate::state::AppState;
@@ -33,6 +36,23 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+static BACKTEST_JOB_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+fn next_backtest_job_id() -> String {
+    format!(
+        "bt-{}-{}",
+        now_millis(),
+        BACKTEST_JOB_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 /// Map an agent-layer error onto the command error contract.
@@ -71,10 +91,17 @@ pub async fn graph_subgraph(
         ));
     }
     let hops = hops.unwrap_or(2).clamp(1, 3);
+    ensure_graph_company(&state, &query).await?;
     let sub = state.graph.subgraph(&query, hops).await?;
     Ok(json!({
         "center": query,
         "hops": hops,
+        "coverage": if sub.edges.is_empty() { "identity_only" } else { "sourced_relations" },
+        "coverage_note": if sub.edges.is_empty() {
+            "已解析公司身份，但尚无经公开来源验证的产业链关系"
+        } else {
+            "仅展示带来源与置信度的关系"
+        },
         "nodes": sub.nodes,
         "edges": sub.edges,
     }))
@@ -162,6 +189,99 @@ fn param_err(e: ParamError) -> CmdError {
 
 fn engine_err(e: impl std::fmt::Display) -> CmdError {
     CmdError::new("engine", e.to_string())
+}
+
+/// Resolve an arbitrary listed company into the graph. Identity nodes may be
+/// partial; only source-backed F10 classification is allowed to create an edge.
+async fn ensure_graph_company(state: &AppState, raw: &str) -> Result<(), CmdError> {
+    if state.graph.find_node(raw).await?.is_some() {
+        return Ok(());
+    }
+    let symbol = match Symbol::new(raw) {
+        Ok(symbol) => symbol,
+        Err(_) => return Ok(()),
+    };
+    if state.market.security_master.get(symbol.code()).is_none() {
+        let _ = state.market.all_a_shares().await;
+    }
+    let mut identity = state.market.security_master.get(symbol.code());
+    let profile = state
+        .fundamental
+        .profile(&symbol)
+        .await
+        .ok()
+        .map(|f| f.data);
+    let name = identity
+        .as_ref()
+        .map(|row| row.canonical_name.clone())
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            profile
+                .as_ref()
+                .map(|p| p.short_name.clone())
+                .filter(|name| !name.trim().is_empty())
+        })
+        .ok_or_else(|| {
+            CmdError::new(
+                "not_found",
+                format!("无法解析证券 {} 的身份", symbol.code()),
+            )
+        })?;
+    let company_id = format!("company:{}", symbol.code());
+    state
+        .graph
+        .upsert_node(&Node {
+            id: company_id.clone(),
+            kind: NodeKind::Company,
+            name,
+            code: Some(symbol.code().to_string()),
+            meta: json!({
+                "source": identity.as_ref().map(|row| row.source.as_str()).unwrap_or("eastmoney_f10"),
+                "dynamic": true,
+                "coverage": "identity",
+            }),
+        })
+        .await?;
+
+    if let Some(industry) = profile.as_ref().and_then(|p| p.industry.clone()) {
+        let industry_id = format!("industry:f10:{industry}");
+        state
+            .graph
+            .upsert_node(&Node {
+                id: industry_id.clone(),
+                kind: NodeKind::Industry,
+                name: industry.clone(),
+                code: None,
+                meta: json!({"source": "eastmoney_f10", "dynamic": true}),
+            })
+            .await?;
+        state
+            .graph
+            .upsert_edge(&Edge {
+                id: None,
+                src: company_id,
+                dst: industry_id,
+                relation: Relation::BelongsTo,
+                weight: 1.0,
+                source_name: "东方财富 F10 公司概况".to_string(),
+                source_url: format!(
+                    "https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/Index?type=web&code={}{}",
+                    symbol.market(),
+                    symbol.code()
+                ),
+                confidence: 0.95,
+                valid_from: now_secs(),
+                valid_to: None,
+            })
+            .await?;
+        if let Some(mut record) = identity.take() {
+            record.industry = Some(industry);
+            record.refreshed_at = astock_core::time::utc_now();
+            state.market.security_master.upsert(record.clone());
+            state.storage.securities_upsert(vec![record]).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Reject unknown keys in the `params` JSON object so typos fail loudly
@@ -261,8 +381,41 @@ pub async fn run_backtest(
     exit_n: Option<u32>,
     bars: Option<u32>,
 ) -> Result<Value, CmdError> {
+    run_backtest_impl(
+        &state.market,
+        &state.rules,
+        symbol,
+        strategy,
+        params,
+        pool,
+        fast,
+        slow,
+        entry_n,
+        exit_n,
+        bars,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_backtest_impl(
+    market: &MarketData,
+    rules: &RuleSet,
+    symbol: Option<String>,
+    strategy: Option<String>,
+    params: Option<Value>,
+    pool: Option<Vec<String>>,
+    fast: Option<u32>,
+    slow: Option<u32>,
+    entry_n: Option<u32>,
+    exit_n: Option<u32>,
+    bars: Option<u32>,
+) -> Result<Value, CmdError> {
     let bars = bars.unwrap_or(750).clamp(60, 2000);
-    let name = strategy.as_deref().unwrap_or("ma_cross").to_ascii_lowercase();
+    let name = strategy
+        .as_deref()
+        .unwrap_or("ma_cross")
+        .to_ascii_lowercase();
     match name.as_str() {
         "ma_cross" | "ma" | "turtle" | "turtle_breakout" | "buy_hold" | "buyhold" => {
             let symbol = require_symbol(&symbol)?;
@@ -272,7 +425,7 @@ pub async fn run_backtest(
             let entry_n = opt_u32(entry_n, &params, "entry_n")?;
             let exit_n = opt_u32(exit_n, &params, "exit_n")?;
             run_backtest_json(
-                &*state.market,
+                market,
                 &symbol,
                 strategy.as_deref(),
                 fast,
@@ -286,11 +439,9 @@ pub async fn run_backtest(
         }
         "zscore_mean_reversion" => {
             let symbol = require_symbol(&symbol)?;
-            run_registry_single(&state.market, &state.rules, &symbol, &params, bars).await
+            run_registry_single(market, rules, &symbol, &params, bars).await
         }
-        "min_corr_etf_rotation" => {
-            run_registry_rotation(&state.market, &state.rules, pool, &params, bars).await
-        }
+        "min_corr_etf_rotation" => run_registry_rotation(market, rules, pool, &params, bars).await,
         other => Err(CmdError::new(
             "invalid_param",
             format!(
@@ -299,6 +450,139 @@ pub async fn run_backtest(
             ),
         )),
     }
+}
+
+/// Start a single background backtest. The job is independent of the page
+/// component and is polled through `backtest_status`.
+#[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
+pub async fn backtest_start(
+    state: State<'_, AppState>,
+    symbol: Option<String>,
+    strategy: Option<String>,
+    params: Option<Value>,
+    pool: Option<Vec<String>>,
+    fast: Option<u32>,
+    slow: Option<u32>,
+    entry_n: Option<u32>,
+    exit_n: Option<u32>,
+    bars: Option<u32>,
+) -> Result<Value, CmdError> {
+    let job_id = next_backtest_job_id();
+    let started_at = now_millis();
+    {
+        let mut snapshot = state
+            .backtest
+            .snapshot
+            .lock()
+            .expect("backtest snapshot poisoned");
+        if snapshot.status == "running" {
+            return Err(CmdError::new(
+                "already_running",
+                "已有回测后台任务正在运行，请先等待或取消",
+            ));
+        }
+        *snapshot = crate::state::BacktestSnapshot {
+            job_id: Some(job_id.clone()),
+            status: "running".into(),
+            phase: "校验参数并加载历史行情".into(),
+            progress: None,
+            started_at: Some(started_at),
+            updated_at: started_at,
+            result: None,
+            error: None,
+        };
+    }
+
+    let token = CancellationToken::new();
+    *state
+        .backtest
+        .cancel
+        .lock()
+        .expect("backtest cancel poisoned") = Some(token.clone());
+    let market = Arc::clone(&state.market);
+    let rules = state.rules.clone();
+    let backtest = Arc::clone(&state.backtest);
+    let spawned_job_id = job_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let outcome = tokio::select! {
+            _ = token.cancelled() => None,
+            result = run_backtest_impl(
+                &market,
+                &rules,
+                symbol,
+                strategy,
+                params,
+                pool,
+                fast,
+                slow,
+                entry_n,
+                exit_n,
+                bars,
+            ) => Some(result),
+        };
+        let now = now_millis();
+        let mut snapshot = backtest
+            .snapshot
+            .lock()
+            .expect("backtest snapshot poisoned");
+        // A newer job cannot currently overlap, but keep the identity guard
+        // so future multi-job support cannot overwrite another result.
+        if snapshot.job_id.as_deref() != Some(spawned_job_id.as_str()) {
+            return;
+        }
+        match outcome {
+            None => {
+                snapshot.status = "cancelled".into();
+                snapshot.phase = "已取消".into();
+                snapshot.progress = None;
+            }
+            Some(Ok(result)) => {
+                snapshot.status = "completed".into();
+                snapshot.phase = "回测与绩效统计完成".into();
+                snapshot.progress = Some(100);
+                snapshot.result = Some(result);
+            }
+            Some(Err(error)) => {
+                snapshot.status = "failed".into();
+                snapshot.phase = "回测失败".into();
+                snapshot.error = Some(error.to_string());
+                snapshot.progress = None;
+            }
+        }
+        snapshot.updated_at = now;
+        drop(snapshot);
+        *backtest.cancel.lock().expect("backtest cancel poisoned") = None;
+    });
+
+    Ok(json!({ "job_id": job_id, "started": true }))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn backtest_status(
+    state: State<'_, AppState>,
+) -> Result<crate::state::BacktestSnapshot, CmdError> {
+    Ok(state
+        .backtest
+        .snapshot
+        .lock()
+        .expect("backtest snapshot poisoned")
+        .clone())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn backtest_cancel(state: State<'_, AppState>) -> Result<Value, CmdError> {
+    let token = state
+        .backtest
+        .cancel
+        .lock()
+        .expect("backtest cancel poisoned")
+        .clone();
+    let cancelled = token.is_some();
+    if let Some(token) = token {
+        token.cancel();
+    }
+    Ok(json!({ "cancelled": cancelled }))
 }
 
 /// Registry single-symbol strategy backtest (currently
@@ -643,10 +927,7 @@ mod tests {
 
     #[test]
     fn require_symbol_trims_and_rejects_empty() {
-        assert_eq!(
-            require_symbol(&Some(" 600519 ".into())).unwrap(),
-            "600519"
-        );
+        assert_eq!(require_symbol(&Some(" 600519 ".into())).unwrap(), "600519");
         assert!(require_symbol(&None).is_err());
         assert!(require_symbol(&Some("  ".into())).is_err());
     }

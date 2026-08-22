@@ -64,7 +64,11 @@ pub struct ScanCancelResponse {
 pub(crate) fn scan_prefilter(items: &[StockListItem]) -> Vec<StockListItem> {
     items
         .iter()
-        .filter(|s| !s.name.contains("ST") && !s.name.contains('退') && s.price > 0.0)
+        .filter(|s| {
+            !s.name.contains("ST")
+                && !s.name.contains('退')
+                && s.price.is_some_and(|price| price > 0.0)
+        })
         .cloned()
         .collect()
 }
@@ -204,6 +208,7 @@ async fn run_scan(
                             index_klines.as_deref(),
                             breadth.as_ref(),
                             MIN_BARS,
+                            None,
                         )
                         .await
                         {
@@ -282,9 +287,9 @@ mod tests {
         StockListItem {
             code: code.into(),
             name: name.into(),
-            price,
-            pct: 0.0,
-            amount: 0.0,
+            price: Some(price),
+            pct: Some(0.0),
+            amount: Some(0.0),
         }
     }
 

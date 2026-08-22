@@ -40,7 +40,7 @@ pub fn quote_to_technical(quote: &CoreQuote) -> Quote {
         pre_close: quote.pre_close,
         volume: quote.volume,
         amount: quote.amount,
-        turnover: quote.turnover,
+        turnover: quote.turnover.unwrap_or(0.0),
         timestamp: quote.timestamp.to_rfc3339(),
     }
 }
@@ -120,8 +120,9 @@ mod tests {
             amount: 1.8e6,
             change: 5.0,
             pct: 0.28,
-            turnover: 0.3,
+            turnover: Some(0.3),
             timestamp: Utc.with_ymd_and_hms(2025, 1, 2, 7, 0, 0).unwrap(),
+            field_provenance: Default::default(),
         };
         let t = quote_to_technical(&q);
         assert_eq!(t.symbol, "600519");

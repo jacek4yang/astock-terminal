@@ -155,6 +155,43 @@ pub struct BreadthJson {
     pub breadth_ratio: f64,
 }
 
+/// Professional market-table row with classification and explicit nulls.
+#[derive(Debug, Serialize)]
+pub struct AllShareJson {
+    pub code: String,
+    pub name: String,
+    pub market: String,
+    pub board: String,
+    pub price: Option<f64>,
+    pub pct: Option<f64>,
+    pub amount: Option<f64>,
+    pub source: String,
+    pub fetched_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OrderBookLevelJson {
+    pub level: u8,
+    pub price: f64,
+    /// Quantity in lots (手).
+    pub volume: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OrderBookJson {
+    pub symbol: String,
+    pub server_time: String,
+    pub current_volume: f64,
+    pub inner_volume: f64,
+    pub outer_volume: f64,
+    pub bids: Vec<OrderBookLevelJson>,
+    pub asks: Vec<OrderBookLevelJson>,
+    pub source: String,
+    pub fetched_at: chrono::DateTime<chrono::Utc>,
+    pub transaction_detail_available: bool,
+    pub limitation: String,
+}
+
 /// Contract daily fund-flow row: `{date,main_net,super_large_net,large_net,
 /// medium_net,small_net,main_pct}`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -239,7 +276,45 @@ pub async fn get_quote(
 ) -> Result<astock_core::Quote, CmdError> {
     let symbol = parse_symbol(&symbol)?;
     let fetched = state.market.quote(&symbol).await?;
+    if let Some(record) = state.market.security_master.get(symbol.code()) {
+        state.storage.securities_upsert(vec![record]).await?;
+    }
     Ok(fetched.data)
+}
+
+/// TDX five-level order book. The bundled upstream currently exposes the
+/// snapshot and minute series but not tick-by-tick transaction details.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_order_book(
+    state: State<'_, AppState>,
+    symbol: String,
+) -> Result<OrderBookJson, CmdError> {
+    let symbol = parse_symbol(&symbol)?;
+    let raw = state.market.tdx.order_book(&symbol).await?;
+    let levels = |rows: &[(f64, f64); 5]| {
+        rows.iter()
+            .enumerate()
+            .map(|(index, (price, volume))| OrderBookLevelJson {
+                level: (index + 1) as u8,
+                price: *price,
+                volume: *volume,
+            })
+            .collect()
+    };
+    Ok(OrderBookJson {
+        symbol: raw.code,
+        server_time: raw.servertime,
+        current_volume: raw.cur_vol,
+        inner_volume: raw.s_vol,
+        outer_volume: raw.b_vol,
+        bids: levels(&raw.bid),
+        asks: levels(&raw.ask),
+        source: "tdx".to_string(),
+        fetched_at: astock_core::time::utc_now(),
+        transaction_detail_available: false,
+        limitation: "当前内置 TDX 协议层支持五档快照与分时，不支持逐笔成交；未使用虚构逐笔数据"
+            .to_string(),
+    })
 }
 
 /// Historical kline bars (`count` clamped to ≤ 10000).
@@ -303,6 +378,12 @@ pub async fn search_stocks(
     keyword: String,
 ) -> Result<Vec<astock_core::SearchResult>, CmdError> {
     let fetched = state.market.search(&keyword).await?;
+    let records = fetched
+        .data
+        .iter()
+        .filter_map(|hit| state.market.security_master.get(&hit.code))
+        .collect();
+    state.storage.securities_upsert(records).await?;
     Ok(fetched.data)
 }
 
@@ -322,11 +403,35 @@ pub async fn get_market_breadth(state: State<'_, AppState>) -> Result<BreadthJso
 
 /// Full A-share list for scanner pre-filtering.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn get_all_a_shares(
-    state: State<'_, AppState>,
-) -> Result<Vec<astock_core::StockListItem>, CmdError> {
+pub async fn get_all_a_shares(state: State<'_, AppState>) -> Result<Vec<AllShareJson>, CmdError> {
     let fetched = state.market.all_a_shares().await?;
-    Ok(fetched.data)
+    state
+        .storage
+        .securities_upsert(state.market.security_master.all())
+        .await?;
+    Ok(fetched
+        .data
+        .into_iter()
+        .map(|item| {
+            let identity = state.market.security_master.get(&item.code);
+            AllShareJson {
+                market: identity
+                    .as_ref()
+                    .map_or_else(|| "unknown".to_string(), |row| row.market.to_string()),
+                board: identity.as_ref().map_or_else(
+                    || "other".to_string(),
+                    |row| format!("{:?}", row.board).to_lowercase(),
+                ),
+                code: item.code,
+                name: identity.map_or(item.name, |row| row.canonical_name),
+                price: item.price,
+                pct: item.pct,
+                amount: item.amount,
+                source: fetched.source.to_string(),
+                fetched_at: fetched.fetched_at,
+            }
+        })
+        .collect())
 }
 
 /// Daily fund flow for the last `days` trading days.

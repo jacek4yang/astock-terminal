@@ -18,23 +18,21 @@ use astock_agent::{
     ToolContext,
 };
 use astock_market_data::DataProvider;
-use astock_minimax::MinimaxClient;
+use astock_minimax::{ChatMessage as ProviderChatMessage, MinimaxClient, ToolCall};
 use astock_storage::{AgentTask, ChatMessage as StoredChatMessage};
 use futures::StreamExt;
 use serde::Serialize;
-use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, State};
+use serde_json::Value;
+use tauri::{ipc::Channel, State};
 
 use crate::error::CmdError;
 use crate::state::AppState;
 
-/// Tauri event name every agent event is forwarded on.
-pub(crate) const AGENT_EVENT: &str = "agent-event";
-
 /// Task-id disambiguator within the same millisecond.
 static TASK_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-/// `agent_ask` response: the task id doubles as the conversation id.
+/// `agent_ask` response. The run and conversation identities are deliberately
+/// separate: every user turn gets a new run while a conversation stays stable.
 #[derive(Debug, Serialize)]
 pub struct AgentAskResponse {
     /// The spawned task id.
@@ -62,6 +60,8 @@ pub struct AgentCancelResponse {
 pub struct AgentTaskSummary {
     /// Task id.
     pub id: String,
+    /// Stable conversation owning this run.
+    pub conversation_id: String,
     /// Task kind, e.g. "chat".
     pub kind: String,
     /// Lifecycle status: running / suspended / completed / failed / cancelled.
@@ -100,13 +100,21 @@ fn no_key_error() -> CmdError {
 }
 
 /// Generate a fresh task/conversation id.
-fn new_task_id() -> String {
+fn new_id(prefix: &str) -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let seq = TASK_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("chat-{millis:x}-{seq:04x}")
+    format!("{prefix}-{millis:x}-{seq:04x}")
+}
+
+fn new_task_id() -> String {
+    new_id("run")
+}
+
+fn new_conversation_id() -> String {
+    new_id("conv")
 }
 
 /// One engine per task: the builtin tools are stateless over the shared
@@ -124,14 +132,50 @@ fn build_engine(state: &AppState, backend: Arc<MinimaxClient>) -> AgentEngine {
 
 /// `agent-event` payload: `{task_id, event}` where `event` keeps the agent
 /// crate's own serde tags (`{type: "text_delta", ...}`).
-fn event_payload(task_id: &str, event: &AgentEvent) -> Value {
-    json!({ "task_id": task_id, "event": event })
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentStreamEnvelope {
+    /// Unique execution id.
+    pub run_id: String,
+    /// Stable conversation id.
+    pub conversation_id: String,
+    /// Monotonically increasing sequence number within the run.
+    pub seq: u64,
+    /// Typed engine event.
+    pub event: AgentEvent,
+}
+
+fn event_payload(
+    run_id: &str,
+    conversation_id: &str,
+    seq: u64,
+    event: &AgentEvent,
+) -> AgentStreamEnvelope {
+    AgentStreamEnvelope {
+        run_id: run_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        seq,
+        event: event.clone(),
+    }
+}
+
+fn task_conversation_id(task: &AgentTask) -> String {
+    serde_json::from_str::<Value>(&task.state_json)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/spec/conversation_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| task.id.clone())
 }
 
 /// Project a stored task row to its summary (drops `state_json`).
 fn task_summary(task: AgentTask) -> AgentTaskSummary {
+    let conversation_id = task_conversation_id(&task);
     AgentTaskSummary {
         id: task.id,
+        conversation_id,
         kind: task.kind,
         status: task.status,
         created_at: task.created_at,
@@ -139,19 +183,75 @@ fn task_summary(task: AgentTask) -> AgentTaskSummary {
     }
 }
 
-/// One stored message as JSON. The agent crate stores the full provider
-/// message (role/content/tool_calls/tool_call_id) serialized in `content`;
-/// surface it as a parsed object, falling back to raw text for rows written
-/// by other components.
-fn message_json(message: &StoredChatMessage) -> Value {
-    let content = serde_json::from_str::<Value>(&message.content)
-        .unwrap_or_else(|_| Value::String(message.content.clone()));
-    json!({
-        "id": message.id,
-        "role": message.role,
-        "content": content,
-        "created_at": message.created_at,
-    })
+/// Normalized function call exposed to the desktop UI.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HistoryToolCall {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub arguments: Option<String>,
+}
+
+impl From<ToolCall> for HistoryToolCall {
+    fn from(call: ToolCall) -> Self {
+        let (name, arguments) = call
+            .function
+            .map(|function| (function.name, function.arguments))
+            .unwrap_or_default();
+        Self {
+            id: call.id,
+            name,
+            arguments,
+        }
+    }
+}
+
+/// Explicit Rust -> TypeScript history contract. `content` is always text,
+/// regardless of whether the provider stored a JSON string or multipart
+/// content. Malformed legacy rows remain loadable and are marked.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AgentHistoryMessage {
+    pub id: String,
+    pub role: String,
+    pub content: String,
+    pub tool_calls: Vec<HistoryToolCall>,
+    pub tool_call_id: Option<String>,
+    pub created_at: i64,
+    pub malformed: bool,
+}
+
+fn normalize_message(message: &StoredChatMessage) -> AgentHistoryMessage {
+    match serde_json::from_str::<ProviderChatMessage>(&message.content) {
+        Ok(provider) => {
+            let content = provider.content_text().unwrap_or_default();
+            AgentHistoryMessage {
+                id: message.id.clone(),
+                role: if provider.role.is_empty() {
+                    message.role.clone()
+                } else {
+                    provider.role
+                },
+                content,
+                tool_calls: provider
+                    .tool_calls
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(HistoryToolCall::from)
+                    .collect(),
+                tool_call_id: provider.tool_call_id,
+                created_at: message.created_at,
+                malformed: false,
+            }
+        }
+        Err(_) => AgentHistoryMessage {
+            id: message.id.clone(),
+            role: message.role.clone(),
+            content: message.content.clone(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            created_at: message.created_at,
+            malformed: true,
+        },
+    }
 }
 
 /// Spawn the forwarder draining `stream` into `agent-event` emissions and
@@ -161,16 +261,19 @@ fn message_json(message: &StoredChatMessage) -> Value {
 fn spawn_forwarder(
     handles: Arc<Mutex<std::collections::HashMap<String, tauri::async_runtime::JoinHandle<()>>>>,
     task_id: String,
+    conversation_id: String,
     mut stream: TaskStream,
-    app: AppHandle,
+    on_event: Channel<AgentStreamEnvelope>,
 ) {
     let id = task_id.clone();
     let forwarder = {
         let handles = Arc::clone(&handles);
         tauri::async_runtime::spawn(async move {
+            let mut seq = 0_u64;
             while let Some(event) = stream.next().await {
-                if let Err(e) = app.emit(AGENT_EVENT, event_payload(&id, &event)) {
-                    tracing::warn!(task_id = %id, error = %e, "agent event emit failed");
+                seq += 1;
+                if let Err(e) = on_event.send(event_payload(&id, &conversation_id, seq, &event)) {
+                    tracing::warn!(task_id = %id, error = %e, "agent channel send failed");
                 }
             }
             handles.lock().expect("agent handles poisoned").remove(&id);
@@ -188,9 +291,9 @@ fn spawn_forwarder(
 #[tauri::command(rename_all = "snake_case")]
 pub async fn agent_ask(
     state: State<'_, AppState>,
-    app: AppHandle,
     question: String,
     conversation_id: Option<String>,
+    on_event: Channel<AgentStreamEnvelope>,
 ) -> Result<AgentAskResponse, CmdError> {
     let question = question.trim().to_string();
     if question.is_empty() {
@@ -206,19 +309,23 @@ pub async fn agent_ask(
         .clone()
         .expect("ensure_minimax just built it");
 
-    let task_id = conversation_id
+    let conversation_id = conversation_id
         .filter(|id| !id.trim().is_empty())
-        .unwrap_or_else(new_task_id);
+        .unwrap_or_else(new_conversation_id);
+    let task_id = new_task_id();
     let engine = build_engine(&state, backend);
-    let stream = engine.run_task(TaskSpec::new(task_id.clone(), "chat", question));
+    let stream = engine.run_task(
+        TaskSpec::new(task_id.clone(), "chat", question).in_conversation(conversation_id.clone()),
+    );
     spawn_forwarder(
         Arc::clone(&state.agent_handles),
         task_id.clone(),
+        conversation_id.clone(),
         stream,
-        app,
+        on_event,
     );
     Ok(AgentAskResponse {
-        conversation_id: task_id.clone(),
+        conversation_id,
         task_id,
     })
 }
@@ -229,8 +336,8 @@ pub async fn agent_ask(
 #[tauri::command(rename_all = "snake_case")]
 pub async fn agent_resume(
     state: State<'_, AppState>,
-    app: AppHandle,
     task_id: String,
+    on_event: Channel<AgentStreamEnvelope>,
 ) -> Result<AgentResumeResponse, CmdError> {
     if !state.ensure_minimax().await? {
         return Err(no_key_error());
@@ -242,13 +349,25 @@ pub async fn agent_resume(
         .clone()
         .expect("ensure_minimax just built it");
 
+    let record = state
+        .storage
+        .agent_task_get(&task_id)
+        .await?
+        .ok_or_else(|| CmdError::new("not_found", format!("task not found: {task_id}")))?;
+    let conversation_id = task_conversation_id(&record);
     let engine = build_engine(&state, backend);
     let stream = engine.resume_task(&task_id).await.map_err(|e| match e {
         AgentError::TaskNotFound(_) => CmdError::new("not_found", e.to_string()),
         AgentError::NotResumable(..) => CmdError::new("not_resumable", e.to_string()),
         other => CmdError::new("agent", other.to_string()),
     })?;
-    spawn_forwarder(Arc::clone(&state.agent_handles), task_id, stream, app);
+    spawn_forwarder(
+        Arc::clone(&state.agent_handles),
+        task_id,
+        conversation_id,
+        stream,
+        on_event,
+    );
     Ok(AgentResumeResponse { resumed: true })
 }
 
@@ -256,7 +375,23 @@ pub async fn agent_resume(
 #[tauri::command(rename_all = "snake_case")]
 pub async fn agent_tasks(state: State<'_, AppState>) -> Result<Vec<AgentTaskSummary>, CmdError> {
     let tasks = state.storage.agent_task_list().await?;
-    Ok(tasks.into_iter().map(task_summary).collect())
+    let live_ids: std::collections::HashSet<String> = state
+        .agent_handles
+        .lock()
+        .expect("agent handles poisoned")
+        .keys()
+        .cloned()
+        .collect();
+    Ok(tasks
+        .into_iter()
+        .map(|task| {
+            let mut summary = task_summary(task);
+            if summary.status == "running" && !live_ids.contains(&summary.id) {
+                summary.status = "interrupted".to_string();
+            }
+            summary
+        })
+        .collect())
 }
 
 /// Mark a task cancelled. A running engine loop notices at the next round;
@@ -312,9 +447,9 @@ pub async fn agent_conversations(
 pub async fn agent_conversation_load(
     state: State<'_, AppState>,
     conversation_id: String,
-) -> Result<Vec<Value>, CmdError> {
+) -> Result<Vec<AgentHistoryMessage>, CmdError> {
     let messages = state.storage.conversation_load(&conversation_id).await?;
-    Ok(messages.iter().map(message_json).collect())
+    Ok(messages.iter().map(normalize_message).collect())
 }
 
 /// Delete a conversation and all of its messages.
@@ -336,12 +471,12 @@ mod tests {
         let event = AgentEvent::TextDelta {
             text: "你好".into(),
         };
-        let payload = event_payload("t1", &event);
-        assert_eq!(payload["task_id"], "t1");
+        let payload = serde_json::to_value(event_payload("r1", "c1", 1, &event)).unwrap();
+        assert_eq!(payload["run_id"], "r1");
+        assert_eq!(payload["conversation_id"], "c1");
+        assert_eq!(payload["seq"], 1);
         assert_eq!(payload["event"]["type"], "text_delta");
         assert_eq!(payload["event"]["text"], "你好");
-        // Exactly the two contract keys.
-        assert_eq!(payload.as_object().unwrap().len(), 2);
     }
 
     #[test]
@@ -365,13 +500,14 @@ mod tests {
         });
         let json = serde_json::to_value(&summary).unwrap();
         assert_eq!(json["id"], "t1");
+        assert_eq!(json["conversation_id"], "t1");
         assert_eq!(json["status"], "suspended");
         assert_eq!(json["updated_at"], 1_700_000_100);
         assert!(json.get("state_json").is_none());
     }
 
     #[test]
-    fn message_json_parses_provider_message_or_keeps_text() {
+    fn message_contract_normalizes_provider_message_or_keeps_text() {
         let stored = StoredChatMessage {
             id: "t1-0002".into(),
             conversation_id: "t1".into(),
@@ -380,15 +516,17 @@ mod tests {
             tool_calls: None,
             created_at: 1_700_000_000,
         };
-        let json = message_json(&stored);
-        assert_eq!(json["role"], "assistant");
-        assert_eq!(json["content"]["content"], "答案");
+        let message = normalize_message(&stored);
+        assert_eq!(message.role, "assistant");
+        assert_eq!(message.content, "答案");
+        assert!(!message.malformed);
 
         let plain = StoredChatMessage {
             content: "plain text".into(),
             ..stored
         };
-        let json = message_json(&plain);
-        assert_eq!(json["content"], "plain text");
+        let message = normalize_message(&plain);
+        assert_eq!(message.content, "plain text");
+        assert!(message.malformed);
     }
 }

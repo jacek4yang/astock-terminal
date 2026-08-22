@@ -18,7 +18,8 @@ use crate::error::CmdError;
 use crate::state::AppState;
 
 use super::analysis::{
-    chanlun_from_bars, fetch_shared_context, run_signal_pipeline, ANALYZE_FLOW_DAYS,
+    attach_manual_plan, chanlun_from_bars, fetch_shared_context, run_signal_pipeline,
+    ANALYZE_FLOW_DAYS,
 };
 use super::market::{
     clamp_count, parse_adjust, parse_period, parse_symbol, BarJson, FundFlowJson, KlineResponse,
@@ -101,13 +102,14 @@ pub async fn get_stock_bundle(
     let (analysis, chanlun_daily) = match &kline {
         Some((bars, _source)) if !bars.is_empty() => {
             let (index_klines, breadth) = fetch_shared_context(&state.market).await;
-            let analysis = run_signal_pipeline(
+            let mut analysis = run_signal_pipeline(
                 bars,
                 Some(&quote),
                 flows.as_deref(),
                 index_klines.as_deref(),
                 breadth.as_ref(),
             );
+            attach_manual_plan(&mut analysis, &symbol, &quote, bars, &state.rules, _source);
             let chanlun = record(
                 &mut missing,
                 "chanlun_daily",
@@ -158,8 +160,9 @@ mod tests {
             amount: 1.8e6,
             change: 5.0,
             pct: 0.28,
-            turnover: 0.3,
+            turnover: Some(0.3),
             timestamp: Utc.with_ymd_and_hms(2025, 1, 2, 7, 0, 0).unwrap(),
+            field_provenance: Default::default(),
         }
     }
 

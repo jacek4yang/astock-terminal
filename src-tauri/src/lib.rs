@@ -40,6 +40,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // 行情数据
             commands::market::get_quote,
+            commands::market::get_order_book,
             commands::market::get_kline,
             commands::market::get_minute,
             commands::market::search_stocks,
@@ -62,6 +63,9 @@ pub fn run() {
             commands::deep::supply_chain_shock,
             commands::deep::relationship_graph,
             commands::deep::run_backtest,
+            commands::deep::backtest_start,
+            commands::deep::backtest_status,
+            commands::deep::backtest_cancel,
             commands::deep::list_strategies,
             commands::deep::get_market_regime,
             // 东财数据中心

@@ -38,6 +38,49 @@ pub struct ScanState {
     pub cancel: Mutex<Option<CancellationToken>>,
 }
 
+/// Pollable background-backtest snapshot. Results remain available when the
+/// user navigates away from the lab and returns later in the same app run.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BacktestSnapshot {
+    pub job_id: Option<String>,
+    pub status: String,
+    pub phase: String,
+    pub progress: Option<u8>,
+    pub started_at: Option<i64>,
+    pub updated_at: i64,
+    pub result: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+
+impl Default for BacktestSnapshot {
+    fn default() -> Self {
+        Self {
+            job_id: None,
+            status: "idle".into(),
+            phase: "尚未运行".into(),
+            progress: None,
+            started_at: None,
+            updated_at: 0,
+            result: None,
+            error: None,
+        }
+    }
+}
+
+pub struct BacktestState {
+    pub snapshot: Mutex<BacktestSnapshot>,
+    pub cancel: Mutex<Option<CancellationToken>>,
+}
+
+impl Default for BacktestState {
+    fn default() -> Self {
+        Self {
+            snapshot: Mutex::new(BacktestSnapshot::default()),
+            cancel: Mutex::new(None),
+        }
+    }
+}
+
 impl Default for ScanState {
     fn default() -> Self {
         ScanState {
@@ -81,6 +124,8 @@ pub struct AppState {
     pub minimax: RwLock<Option<Arc<MinimaxClient>>>,
     /// Scan coordination state.
     pub scan: Arc<ScanState>,
+    /// Background backtest coordination state.
+    pub backtest: Arc<BacktestState>,
     /// Live agent event-forwarder tasks, keyed by task id. Entries are
     /// removed when the event stream ends (Completed / Failed / Suspended)
     /// or on `agent_cancel`.
@@ -120,6 +165,15 @@ impl AppState {
         );
 
         let market = Arc::new(MarketData::new());
+        match tauri::async_runtime::block_on(storage.securities_list()) {
+            Ok(records) => market.security_master.merge_records(records),
+            Err(error) => tracing::warn!(%error, "failed to load cached security master"),
+        }
+        if let Err(error) =
+            tauri::async_runtime::block_on(storage.securities_upsert(market.security_master.all()))
+        {
+            tracing::warn!(%error, "failed to persist security-master bootstrap records");
+        }
         let f10 = Arc::new(EastMoneyF10::new(market.http.clone(), market.cache.clone()));
 
         // Supply-chain graph over the shared storage; seed the built-in
@@ -162,6 +216,7 @@ impl AppState {
             rules,
             minimax: RwLock::new(None),
             scan: Arc::new(ScanState::default()),
+            backtest: Arc::new(BacktestState::default()),
             agent_handles: Arc::new(Mutex::new(HashMap::new())),
         })
     }
