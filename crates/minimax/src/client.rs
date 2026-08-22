@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use futures::Stream;
+use futures::{Stream, StreamExt};
 
 use crate::chat::{ChatChunk, ChatRequest, ChatResponse, ChatStream};
 use crate::error::MinimaxError;
@@ -16,6 +16,10 @@ use crate::region::{RegionDetector, ServiceInfo};
 
 /// How long a quota snapshot is reused by the quota guard before refetching.
 const QUOTA_CACHE_TTL: Duration = Duration::from_secs(30);
+/// Bound concurrent reasoning streams so multiple background Agents cannot
+/// stampede a Token Plan account. Plan-side dynamic limits still take
+/// precedence through 429/Retry-After handling.
+const MAX_CONCURRENT_CHAT_STREAMS: usize = 4;
 
 /// Entry point of the crate.
 ///
@@ -30,6 +34,8 @@ pub struct MinimaxClient {
     gate: RateGate,
     quota_guard: bool,
     quota_cache: tokio::sync::Mutex<Option<(SystemTime, QuotaStatus)>>,
+    quota_pacing_next: tokio::sync::Mutex<Option<tokio::time::Instant>>,
+    chat_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl MinimaxClient {
@@ -48,6 +54,8 @@ impl MinimaxClient {
             gate: RateGate::default(),
             quota_guard: true,
             quota_cache: tokio::sync::Mutex::new(None),
+            quota_pacing_next: tokio::sync::Mutex::new(None),
+            chat_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CHAT_STREAMS)),
         }
     }
 
@@ -152,8 +160,28 @@ impl MinimaxClient {
             obj.insert("stream".to_string(), true.into());
         }
         tracing::debug!(model = %request.model, "streaming chat completion request");
-        let bytes = self.http.post_stream(&url, &self.key, &body).await?;
-        Ok(ChatStream::from_byte_stream(bytes))
+        let permit = self
+            .chat_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| MinimaxError::Network("MiniMax并发调度器已关闭".to_string()))?;
+        let http = &self.http;
+        let key = &self.key;
+        // Retry only before a stream is established. Retrying after partial
+        // text/tool deltas would duplicate protocol state and can itself
+        // cause a tool-call/result mismatch.
+        let bytes = self
+            .gate
+            .run(|| async { http.post_stream(&url, key, &body).await })
+            .await?;
+        let chunks = ChatStream::from_byte_stream(bytes);
+        Ok(futures::stream::unfold(
+            (Box::pin(chunks), permit),
+            |(mut chunks, permit)| async move {
+                chunks.next().await.map(|item| (item, (chunks, permit)))
+            },
+        ))
     }
 
     /// Pre-flight quota check: fail fast when the rolling window is exhausted
@@ -178,16 +206,39 @@ impl MinimaxClient {
         }
         if quota.throttled(model) {
             let pacing = quota.pacing(model);
-            tracing::info!(%model, ?pacing.min_interval, "quota nearly exhausted; consider pacing");
+            tracing::info!(%model, ?pacing.min_interval, "quota nearly exhausted; applying pacing");
+            self.reserve_paced_slot(pacing.min_interval).await;
         }
         Ok(())
+    }
+
+    /// Reserve a globally spaced slot for this client. Concurrent tasks are
+    /// assigned different future instants instead of all waking together.
+    async fn reserve_paced_slot(&self, min_interval: Duration) {
+        if min_interval.is_zero() {
+            return;
+        }
+        let wait = {
+            let now = tokio::time::Instant::now();
+            let mut next = self.quota_pacing_next.lock().await;
+            let scheduled = next.map_or(now, |instant| instant.max(now));
+            *next = Some(scheduled + min_interval);
+            scheduled.saturating_duration_since(now)
+        };
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
     }
 
     async fn cached_quota(&self) -> Result<QuotaStatus, MinimaxError> {
         {
             let cache = self.quota_cache.lock().await;
             if let Some((fetched, quota)) = &*cache {
-                if fetched.elapsed().map(|age| age < QUOTA_CACHE_TTL).unwrap_or(false) {
+                if fetched
+                    .elapsed()
+                    .map(|age| age < QUOTA_CACHE_TTL)
+                    .unwrap_or(false)
+                {
                     return Ok(quota.clone());
                 }
             }

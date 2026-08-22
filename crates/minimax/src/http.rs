@@ -86,10 +86,27 @@ impl ReqwestHttp {
     /// buffered requests; streaming requests have no overall timeout because a
     /// reasoning model may stream for minutes (cancel by dropping the stream).
     pub fn new() -> Self {
+        Self::build(false)
+    }
+
+    /// Build a transport that never inherits process proxy variables. This
+    /// is intended for loopback test servers and explicitly direct custom
+    /// endpoints; production uses [`ReqwestHttp::new`] so user proxy policy
+    /// remains available.
+    pub fn new_direct() -> Self {
+        Self::build(true)
+    }
+
+    fn build(direct: bool) -> Self {
         let builder = || {
-            reqwest::Client::builder()
+            let builder = reqwest::Client::builder()
                 .user_agent(concat!("astock-terminal/", env!("CARGO_PKG_VERSION")))
-                .connect_timeout(Duration::from_secs(10))
+                .connect_timeout(Duration::from_secs(10));
+            if direct {
+                builder.no_proxy()
+            } else {
+                builder
+            }
         };
         let client = builder()
             .timeout(Duration::from_secs(60))

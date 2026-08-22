@@ -154,7 +154,12 @@ fn failure_sections(failures: &[String]) -> Vec<String> {
 
 /// Latest period metadata + headline metrics off the latest income statement.
 fn latest_metrics_json(bundle: &FundamentalBundle) -> (Value, Value) {
-    let Some((inc, meta)) = bundle.income.iter().rev().find_map(|s| s.meta.map(|m| (s, m))) else {
+    let Some((inc, meta)) = bundle
+        .income
+        .iter()
+        .rev()
+        .find_map(|s| s.meta.map(|m| (s, m)))
+    else {
         return (Value::Null, Value::Null);
     };
     let empty_bs = BalanceSheet::default();
@@ -169,13 +174,18 @@ fn latest_metrics_json(bundle: &FundamentalBundle) -> (Value, Value) {
     let rev_yoy = yoy_map(&bundle.income, |s| s.total_operating_revenue);
     let prof_yoy = yoy_map(&bundle.income, |s| s.net_profit_parent.or(s.net_profit));
     let sq = metrics::to_single_quarters(&bundle.income);
-    let rev_qoq: HashMap<NaiveDate, f64> =
-        metrics::qoq_growth(&metrics::series(&sq, |s| s.meta, |s| s.total_operating_revenue))
-            .into_iter()
-            .collect();
-    let prof_qoq: HashMap<NaiveDate, f64> = metrics::qoq_growth(&metrics::series(&sq, |s| s.meta, |s| {
-        s.net_profit_parent.or(s.net_profit)
-    }))
+    let rev_qoq: HashMap<NaiveDate, f64> = metrics::qoq_growth(&metrics::series(
+        &sq,
+        |s| s.meta,
+        |s| s.total_operating_revenue,
+    ))
+    .into_iter()
+    .collect();
+    let prof_qoq: HashMap<NaiveDate, f64> = metrics::qoq_growth(&metrics::series(
+        &sq,
+        |s| s.meta,
+        |s| s.net_profit_parent.or(s.net_profit),
+    ))
     .into_iter()
     .collect();
 
@@ -258,8 +268,16 @@ fn piotroski_json(
     let empty_bs = BalanceSheet::default();
     let empty_cf = CashFlowStatement::default();
     let bs_curr = bs_a.last().copied().unwrap_or(&empty_bs);
-    let bs_prev = bs_a.len().checked_sub(2).map(|i| bs_a[i]).unwrap_or(&empty_bs);
-    let bs_open_prev = bs_a.len().checked_sub(3).map(|i| bs_a[i]).unwrap_or(&empty_bs);
+    let bs_prev = bs_a
+        .len()
+        .checked_sub(2)
+        .map(|i| bs_a[i])
+        .unwrap_or(&empty_bs);
+    let bs_open_prev = bs_a
+        .len()
+        .checked_sub(3)
+        .map(|i| bs_a[i])
+        .unwrap_or(&empty_bs);
     let cf_curr = cf_a.last().copied().unwrap_or(&empty_cf);
     let input =
         scores::piotroski_input_from(inc_curr, inc_prev, cf_curr, bs_open_prev, bs_prev, bs_curr);
@@ -278,7 +296,10 @@ fn altman_json(bundle: &FundamentalBundle) -> Option<Value> {
     let inc = *inc_a.last()?;
     let bs = *bs_a.last()?;
     let z = scores::altman(&scores::AltmanInput {
-        working_capital: metrics::working_capital(bs.total_current_assets, bs.total_current_liabilities),
+        working_capital: metrics::working_capital(
+            bs.total_current_assets,
+            bs.total_current_liabilities,
+        ),
         retained_earnings: bs.retained_earnings,
         ebit: scores::altman_ebit(inc),
         market_cap: bundle.snapshot.as_ref().and_then(|s| s.total_market_cap),
@@ -287,14 +308,11 @@ fn altman_json(bundle: &FundamentalBundle) -> Option<Value> {
         total_assets: bs.total_assets,
         revenue: inc.total_operating_revenue,
     });
-    let zone = z
-        .emerging_zone
-        .or(z.classic_zone)
-        .map(|zone| match zone {
-            scores::AltmanZone::Safe => "safe",
-            scores::AltmanZone::Grey => "grey",
-            scores::AltmanZone::Distress => "distress",
-        });
+    let zone = z.emerging_zone.or(z.classic_zone).map(|zone| match zone {
+        scores::AltmanZone::Safe => "safe",
+        scores::AltmanZone::Grey => "grey",
+        scores::AltmanZone::Distress => "distress",
+    });
     Some(json!({
         "z_classic": z.classic,
         "z_emerging": z.z_emerging,
@@ -314,9 +332,17 @@ fn beneish_json(
     let empty_bs = BalanceSheet::default();
     let empty_cf = CashFlowStatement::default();
     let bs_curr = bs_a.last().copied().unwrap_or(&empty_bs);
-    let bs_prev = bs_a.len().checked_sub(2).map(|i| bs_a[i]).unwrap_or(&empty_bs);
+    let bs_prev = bs_a
+        .len()
+        .checked_sub(2)
+        .map(|i| bs_a[i])
+        .unwrap_or(&empty_bs);
     let cf_curr = cf_a.last().copied().unwrap_or(&empty_cf);
-    let cf_prev = cf_a.len().checked_sub(2).map(|i| cf_a[i]).unwrap_or(&empty_cf);
+    let cf_prev = cf_a
+        .len()
+        .checked_sub(2)
+        .map(|i| cf_a[i])
+        .unwrap_or(&empty_cf);
     let m = scores::beneish(&scores::beneish_indices_from(
         inc_curr, inc_prev, cf_curr, cf_prev, bs_curr, bs_prev,
     ));
@@ -489,10 +515,13 @@ fn fundamentals_summary(full: &Value) -> Value {
         .and_then(Value::as_f64)
         .map(|v| r2(v / 1e8));
     let scores = &full["scores"];
-    let piotroski = scores
-        .get("piotroski")
-        .filter(|p| !p.is_null())
-        .map(|p| format!("{}/{}", p["score"].as_u64().unwrap_or(0), p["available"].as_u64().unwrap_or(0)));
+    let piotroski = scores.get("piotroski").filter(|p| !p.is_null()).map(|p| {
+        format!(
+            "{}/{}",
+            p["score"].as_u64().unwrap_or(0),
+            p["available"].as_u64().unwrap_or(0)
+        )
+    });
     let anomalies = full["anomalies"].as_array().cloned().unwrap_or_default();
     let max_severity = anomalies
         .iter()
@@ -593,7 +622,13 @@ impl AgentTool for RunValuation {
         let symbol = parse_symbol(self.name(), &args.symbol)?;
         let client = require_fundamental(ctx, self.name())?;
         let outcome = client.bundle(&symbol).await;
-        let full = valuation_full_json(&symbol, &outcome.bundle, args.growth, args.wacc, &outcome.failures);
+        let full = valuation_full_json(
+            &symbol,
+            &outcome.bundle,
+            args.growth,
+            args.wacc,
+            &outcome.failures,
+        );
         let summary = valuation_summary(&full);
         Ok(ToolResult {
             summary_json: summary,
@@ -696,7 +731,8 @@ fn dcf_json(bundle: &FundamentalBundle, growth: Option<f64>, wacc: Option<f64>) 
             shares,
         };
         let sc = valuation::scenarios(&inputs, DCF_SPREAD)?;
-        let grid = valuation::sensitivity(&inputs, &DCF_SENSITIVITY_WACCS, &DCF_SENSITIVITY_GROWTHS);
+        let grid =
+            valuation::sensitivity(&inputs, &DCF_SENSITIVITY_WACCS, &DCF_SENSITIVITY_GROWTHS);
         Some(json!({
             "assumptions": {
                 "base_fcf": base_fcf,
@@ -817,6 +853,101 @@ struct IndustryChainArgs {
 /// The company's position in the supply-chain graph.
 pub struct GetIndustryChain;
 
+async fn ensure_agent_company(ctx: &ToolContext, symbol: &Symbol) -> Result<Node> {
+    let tool = "get_industry_chain";
+    let graph = require_graph(ctx, tool)?;
+    if let Some(node) = graph
+        .find_node(symbol.code())
+        .await
+        .map_err(|error| tool_err(tool, error.to_string()))?
+    {
+        return Ok(node);
+    }
+
+    let profile = match ctx.fundamental.as_deref() {
+        Some(client) => client.profile(symbol).await.ok().map(|f| f.data),
+        None => None,
+    };
+    let search_name = ctx
+        .market
+        .search(symbol.code())
+        .await
+        .ok()
+        .and_then(|fetched| {
+            fetched
+                .data
+                .into_iter()
+                .find(|row| row.code == symbol.code())
+                .map(|row| row.name)
+        })
+        .filter(|name| !name.trim().is_empty());
+    let quote_name = if search_name.is_none() {
+        ctx.market
+            .quote(symbol)
+            .await
+            .ok()
+            .map(|fetched| fetched.data.name)
+            .filter(|name| !name.trim().is_empty())
+    } else {
+        None
+    };
+    let name = search_name
+        .or(quote_name)
+        .or_else(|| {
+            profile
+                .as_ref()
+                .map(|row| row.short_name.clone())
+                .filter(|name| !name.trim().is_empty())
+        })
+        .ok_or_else(|| tool_err(tool, format!("无法解析 {} 的证券身份", symbol.code())))?;
+    let company_id = format!("company:{}", symbol.code());
+    let company = Node {
+        id: company_id.clone(),
+        kind: astock_graph::NodeKind::Company,
+        name,
+        code: Some(symbol.code().to_string()),
+        meta: json!({"dynamic": true, "source": "security_master_or_f10"}),
+    };
+    graph
+        .upsert_node(&company)
+        .await
+        .map_err(|error| tool_err(tool, error.to_string()))?;
+
+    if let Some(industry) = profile.and_then(|row| row.industry) {
+        let industry_id = format!("industry:f10:{industry}");
+        graph
+            .upsert_node(&Node {
+                id: industry_id.clone(),
+                kind: astock_graph::NodeKind::Industry,
+                name: industry,
+                code: None,
+                meta: json!({"dynamic": true, "source": "eastmoney_f10"}),
+            })
+            .await
+            .map_err(|error| tool_err(tool, error.to_string()))?;
+        graph
+            .upsert_edge(&astock_graph::Edge {
+                id: None,
+                src: company_id,
+                dst: industry_id,
+                relation: Relation::BelongsTo,
+                weight: 1.0,
+                source_name: "东方财富 F10 公司概况".to_string(),
+                source_url: format!(
+                    "https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/Index?type=web&code={}{}",
+                    symbol.market(),
+                    symbol.code()
+                ),
+                confidence: 0.95,
+                valid_from: now_secs(),
+                valid_to: None,
+            })
+            .await
+            .map_err(|error| tool_err(tool, error.to_string()))?;
+    }
+    Ok(company)
+}
+
 #[async_trait]
 impl AgentTool for GetIndustryChain {
     fn name(&self) -> &'static str {
@@ -835,16 +966,7 @@ impl AgentTool for GetIndustryChain {
         let args: IndustryChainArgs = parse_args(self.name(), args)?;
         let symbol = parse_symbol(self.name(), &args.symbol)?;
         let graph = require_graph(ctx, self.name())?;
-        let node = graph
-            .find_node(symbol.code())
-            .await
-            .map_err(|e| tool_err(self.name(), e.to_string()))?
-            .ok_or_else(|| {
-                tool_err(
-                    self.name(),
-                    format!("图谱中未找到 {} 对应的节点（当前图谱覆盖有限）", symbol.code()),
-                )
-            })?;
+        let node = ensure_agent_company(ctx, &symbol).await?;
         let neighbors = graph
             .neighbors(&node.id)
             .await
@@ -883,21 +1005,41 @@ pub fn industry_chain_json(node: &Node, neighbors: &[(astock_graph::Edge, Node)]
         match edge.relation {
             // src supplies dst / src is a customer of dst.
             Relation::Supplies => {
-                if node_is_src { downstream.push(entry) } else { upstream.push(entry) }
+                if node_is_src {
+                    downstream.push(entry)
+                } else {
+                    upstream.push(entry)
+                }
             }
             Relation::CustomerOf => {
-                if node_is_src { upstream.push(entry) } else { downstream.push(entry) }
+                if node_is_src {
+                    upstream.push(entry)
+                } else {
+                    downstream.push(entry)
+                }
             }
             // Consumed inputs are upstream; produced outputs are downstream.
             Relation::Consumes => {
-                if node_is_src { upstream.push(entry) } else { downstream.push(entry) }
+                if node_is_src {
+                    upstream.push(entry)
+                } else {
+                    downstream.push(entry)
+                }
             }
             Relation::Produces => {
-                if node_is_src { downstream.push(entry) } else { upstream.push(entry) }
+                if node_is_src {
+                    downstream.push(entry)
+                } else {
+                    upstream.push(entry)
+                }
             }
             Relation::Competes => competitors.push(entry),
             Relation::BelongsTo => {
-                if node_is_src { industries.push(entry) } else { other_edges.push(entry) }
+                if node_is_src {
+                    industries.push(entry)
+                } else {
+                    other_edges.push(entry)
+                }
             }
             Relation::Substitutes | Relation::ExposedTo => other_edges.push(entry),
         }
@@ -1205,7 +1347,11 @@ pub async fn relationship_graph_json(
     if common.len() < REL_MIN_ALIGNED {
         return Err(tool_err(
             tool,
-            format!("重叠交易日不足：仅 {} 天，至少需要 {}", common.len(), REL_MIN_ALIGNED),
+            format!(
+                "重叠交易日不足：仅 {} 天，至少需要 {}",
+                common.len(),
+                REL_MIN_ALIGNED
+            ),
         ));
     }
     let mut dates: Vec<NaiveDate> = common.into_iter().collect();
@@ -1331,6 +1477,240 @@ impl AgentTool for RunBacktest {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct StrategyCandidate {
+    /// 双均线快线窗口。
+    fast: Option<u32>,
+    /// 双均线慢线窗口。
+    slow: Option<u32>,
+    /// 海龟入场通道。
+    entry_n: Option<u32>,
+    /// 海龟退出通道。
+    exit_n: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct IterateStrategyArgs {
+    /// 6位证券代码。
+    symbol: String,
+    /// ma_cross（默认）或 turtle。
+    strategy: Option<String>,
+    /// 自定义候选参数；省略时使用审慎的内置网格。
+    candidates: Option<Vec<StrategyCandidate>>,
+    /// 最长回测窗口，默认 750 根日K（180-2000）。
+    bars: Option<u32>,
+    /// 排名目标：robust（默认）/ sharpe / cagr / calmar。
+    objective: Option<String>,
+    /// 最大候选数，默认 8、最大 16。
+    max_candidates: Option<usize>,
+}
+
+/// Bounded parameter iteration with multi-window robustness scoring.
+pub struct IterateStrategy;
+
+#[async_trait]
+impl AgentTool for IterateStrategy {
+    fn name(&self) -> &'static str {
+        "iterate_strategy"
+    }
+
+    fn description(&self) -> &'static str {
+        "策略迭代实验：对双均线或海龟参数做有上限的候选搜索，在短/中/长三个历史窗口分别回测并按稳健性、Sharpe、CAGR 或 Calmar 排名；返回完整候选榜、窗口稳定性与过拟合警告，不产生交易指令"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        schema_value::<IterateStrategyArgs>()
+    }
+
+    fn cache_ttl_secs(&self) -> i64 {
+        1800
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
+        let args: IterateStrategyArgs = parse_args(self.name(), args)?;
+        let strategy = args
+            .strategy
+            .unwrap_or_else(|| "ma_cross".to_string())
+            .to_ascii_lowercase();
+        if !matches!(
+            strategy.as_str(),
+            "ma_cross" | "ma" | "turtle" | "turtle_breakout"
+        ) {
+            return Err(invalid_args(
+                self.name(),
+                "策略迭代仅支持 ma_cross 或 turtle",
+            ));
+        }
+        let bars = args.bars.unwrap_or(750).clamp(180, 2000);
+        let max_candidates = args.max_candidates.unwrap_or(8).clamp(1, 16);
+        let objective = args
+            .objective
+            .unwrap_or_else(|| "robust".to_string())
+            .to_ascii_lowercase();
+        if !matches!(objective.as_str(), "robust" | "sharpe" | "cagr" | "calmar") {
+            return Err(invalid_args(
+                self.name(),
+                "objective 仅支持 robust / sharpe / cagr / calmar",
+            ));
+        }
+
+        let defaults = if strategy.starts_with("turtle") {
+            vec![
+                (None, None, Some(10), Some(5)),
+                (None, None, Some(20), Some(10)),
+                (None, None, Some(40), Some(20)),
+                (None, None, Some(55), Some(20)),
+                (None, None, Some(80), Some(30)),
+            ]
+        } else {
+            vec![
+                (Some(3), Some(10), None, None),
+                (Some(5), Some(20), None, None),
+                (Some(8), Some(30), None, None),
+                (Some(10), Some(30), None, None),
+                (Some(10), Some(60), None, None),
+                (Some(20), Some(60), None, None),
+                (Some(20), Some(120), None, None),
+                (Some(30), Some(120), None, None),
+            ]
+        };
+        let mut candidates: Vec<StrategyCandidate> = args.candidates.unwrap_or_else(|| {
+            defaults
+                .into_iter()
+                .map(|(fast, slow, entry_n, exit_n)| StrategyCandidate {
+                    fast,
+                    slow,
+                    entry_n,
+                    exit_n,
+                })
+                .collect()
+        });
+        candidates.truncate(max_candidates);
+
+        let mut windows = vec![(bars / 3).max(120), (bars * 2 / 3).max(180), bars];
+        windows.sort_unstable();
+        windows.dedup();
+        let mut leaderboard = Vec::new();
+        let mut errors = Vec::new();
+
+        for candidate in candidates {
+            let params = if strategy.starts_with("turtle") {
+                json!({"entry_n": candidate.entry_n.unwrap_or(20), "exit_n": candidate.exit_n.unwrap_or(10)})
+            } else {
+                json!({"fast": candidate.fast.unwrap_or(5), "slow": candidate.slow.unwrap_or(20)})
+            };
+            let mut results = Vec::new();
+            for window in &windows {
+                match run_backtest_json(
+                    &*ctx.market,
+                    &args.symbol,
+                    Some(&strategy),
+                    candidate.fast,
+                    candidate.slow,
+                    candidate.entry_n,
+                    candidate.exit_n,
+                    *window,
+                )
+                .await
+                {
+                    Ok(full) => results.push(json!({
+                        "bars": full["data"]["bars"],
+                        "start": full["data"]["start"],
+                        "end": full["data"]["end"],
+                        "cagr": full["cagr"],
+                        "sharpe": full["sharpe"],
+                        "calmar": full["calmar"],
+                        "max_drawdown": full["max_drawdown"],
+                        "round_trips": full["round_trips"],
+                    })),
+                    Err(error) => errors.push(
+                        json!({"params": params, "bars": window, "error": error.to_string()}),
+                    ),
+                }
+            }
+            if results.is_empty() {
+                continue;
+            }
+            let values = |key: &str| -> Vec<f64> {
+                results.iter().filter_map(|row| row[key].as_f64()).collect()
+            };
+            let sharpes = values("sharpe");
+            let cagrs = values("cagr");
+            let calmars = values("calmar");
+            let drawdowns = values("max_drawdown");
+            let mean = |rows: &[f64]| rows.iter().sum::<f64>() / rows.len().max(1) as f64;
+            let sharpe_mean = mean(&sharpes);
+            let cagr_mean = mean(&cagrs);
+            let calmar_mean = mean(&calmars);
+            let drawdown_mean = mean(&drawdowns);
+            let sharpe_std = (sharpes
+                .iter()
+                .map(|value| (value - sharpe_mean).powi(2))
+                .sum::<f64>()
+                / sharpes.len().max(1) as f64)
+                .sqrt();
+            let positive_windows = cagrs.iter().filter(|value| **value > 0.0).count();
+            let score = match objective.as_str() {
+                "sharpe" => sharpe_mean,
+                "cagr" => cagr_mean,
+                "calmar" => calmar_mean,
+                _ => sharpe_mean + cagr_mean - drawdown_mean.abs() * 2.0 - sharpe_std,
+            };
+            leaderboard.push(json!({
+                "params": params,
+                "score": r4(score),
+                "robustness": {
+                    "positive_windows": positive_windows,
+                    "tested_windows": results.len(),
+                    "sharpe_mean": r4(sharpe_mean),
+                    "sharpe_std": r4(sharpe_std),
+                    "cagr_mean": r4(cagr_mean),
+                    "calmar_mean": r4(calmar_mean),
+                    "max_drawdown_mean": r4(drawdown_mean),
+                },
+                "windows": results,
+            }));
+        }
+        leaderboard.sort_by(|a, b| {
+            b["score"]
+                .as_f64()
+                .unwrap_or(f64::NEG_INFINITY)
+                .total_cmp(&a["score"].as_f64().unwrap_or(f64::NEG_INFINITY))
+        });
+        if leaderboard.is_empty() {
+            return Err(tool_err(self.name(), "所有策略候选均回测失败"));
+        }
+        for (rank, row) in leaderboard.iter_mut().enumerate() {
+            row["rank"] = json!(rank + 1);
+        }
+        let full = json!({
+            "symbol": args.symbol,
+            "strategy": strategy,
+            "objective": objective,
+            "windows_requested": windows,
+            "leaderboard": leaderboard,
+            "errors": errors,
+            "method": "同一参数在短/中/长三个滚动历史窗口独立回测，以跨窗口均值和离散度衡量稳健性",
+            "warning": "这是有边界的参数敏感性实验，不是严格样本外或走步验证；搜索最优会引入选择偏差，必须结合经济逻辑、未见数据与人工风控复核",
+        });
+        let summary = json!({
+            "symbol": full["symbol"],
+            "strategy": full["strategy"],
+            "objective": full["objective"],
+            "top_candidates": full["leaderboard"].as_array().map(|rows| rows.iter().take(5).cloned().collect::<Vec<_>>()).unwrap_or_default(),
+            "method": full["method"],
+            "warning": full["warning"],
+        });
+        Ok(ToolResult {
+            summary_json: summary,
+            full_json: Some(full),
+            cache_key: String::new(),
+            source: "engine".to_string(),
+            fetched_at: now_rfc3339(),
+        })
+    }
+}
+
 /// Initial cash for every agent-driven backtest.
 const BACKTEST_INITIAL_CASH: f64 = 1_000_000.0;
 /// Minimum bars for a meaningful backtest.
@@ -1359,7 +1739,11 @@ pub async fn run_backtest_json(
     if fetched.data.len() < BACKTEST_MIN_BARS {
         return Err(tool_err(
             tool,
-            format!("k线数据不足：仅{}根，至少需要{}根", fetched.data.len(), BACKTEST_MIN_BARS),
+            format!(
+                "k线数据不足：仅{}根，至少需要{}根",
+                fetched.data.len(),
+                BACKTEST_MIN_BARS
+            ),
         ));
     }
     let series = PriceSeries::new(
@@ -1378,7 +1762,10 @@ pub async fn run_backtest_json(
             let f = fast.unwrap_or(5) as usize;
             let s = slow.unwrap_or(20) as usize;
             if f == 0 || f >= s {
-                return Err(invalid_args(tool, format!("ma_cross 需要 1 <= fast({f}) < slow({s})")));
+                return Err(invalid_args(
+                    tool,
+                    format!("ma_cross 需要 1 <= fast({f}) < slow({s})"),
+                ));
             }
             Box::new(MaCross::new(f, s))
         }
@@ -1386,7 +1773,10 @@ pub async fn run_backtest_json(
             let e = entry_n.unwrap_or(20) as usize;
             let x = exit_n.unwrap_or(10) as usize;
             if e < 2 || x < 1 {
-                return Err(invalid_args(tool, format!("turtle 需要 entry_n({e}) >= 2 且 exit_n({x}) >= 1")));
+                return Err(invalid_args(
+                    tool,
+                    format!("turtle 需要 entry_n({e}) >= 2 且 exit_n({x}) >= 1"),
+                ));
             }
             Box::new(TurtleBreakout::new(e, x))
         }
@@ -1406,7 +1796,8 @@ pub async fn run_backtest_json(
         _ => json!({}),
     };
 
-    let rules = RuleSet::load(None).map_err(|e| tool_err(tool, format!("加载交易规则失败：{e}")))?;
+    let rules =
+        RuleSet::load(None).map_err(|e| tool_err(tool, format!("加载交易规则失败：{e}")))?;
     let engine = BacktestEngine::new(rules, BtConfig::new(symbol.code(), BACKTEST_INITIAL_CASH))
         .map_err(|e| tool_err(tool, e.to_string()))?;
     let result = engine
@@ -1524,8 +1915,14 @@ pub async fn market_regime_json(market: &dyn DataProvider) -> Result<(Value, Str
     let (source, fetched_at) = (index.source.to_string(), index.fetched_at.to_rfc3339());
     let closes: Vec<f64> = index.data.iter().map(|b| b.close).collect();
     let last = *closes.last().unwrap();
-    let ma20 = tech::indicators::sma_series(&closes, 20).last().copied().flatten();
-    let ma60 = tech::indicators::sma_series(&closes, 60).last().copied().flatten();
+    let ma20 = tech::indicators::sma_series(&closes, 20)
+        .last()
+        .copied()
+        .flatten();
+    let ma60 = tech::indicators::sma_series(&closes, 60)
+        .last()
+        .copied()
+        .flatten();
     let window = &closes[closes.len() - 21..];
     let up_days = window.windows(2).filter(|w| w[1] > w[0]).count();
     let up_ratio_20 = up_days as f64 / 20.0;
@@ -1578,13 +1975,13 @@ pub async fn market_regime_json(market: &dyn DataProvider) -> Result<(Value, Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use astock_core::{DataError, Fetched, MarketBreadth, Quote, Source, VolumeUnit};
     use astock_fundamental::model::{CompanyProfile, KeyIndicators, ValuationSnapshot};
     use astock_graph::{Edge, NodeKind};
     use astock_market_data::DataProvider;
     use astock_storage::{Storage, StorageConfig};
     use serde_json::json;
+    use std::sync::Arc;
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
@@ -1598,7 +1995,15 @@ mod tests {
         })
     }
 
-    fn income(y: i32, m: u32, day: u32, rt: ReportType, rev: f64, cost: f64, np: f64) -> IncomeStatement {
+    fn income(
+        y: i32,
+        m: u32,
+        day: u32,
+        rt: ReportType,
+        rev: f64,
+        cost: f64,
+        np: f64,
+    ) -> IncomeStatement {
         IncomeStatement {
             meta: meta(y, m, day, rt),
             total_operating_revenue: Some(rev),
@@ -1631,7 +2036,14 @@ mod tests {
         }
     }
 
-    fn cashflow(y: i32, m: u32, day: u32, rt: ReportType, cfo: f64, capex: f64) -> CashFlowStatement {
+    fn cashflow(
+        y: i32,
+        m: u32,
+        day: u32,
+        rt: ReportType,
+        cfo: f64,
+        capex: f64,
+    ) -> CashFlowStatement {
         CashFlowStatement {
             meta: meta(y, m, day, rt),
             cash_from_sales: Some(cfo * 6.0),
@@ -1713,12 +2125,18 @@ mod tests {
         assert!(full["metrics"]["debt_ratio"].is_number());
         // No 2024 H1 row → latest-period YoY is Missing, never fabricated.
         assert!(full["metrics"]["revenue_yoy"].is_null());
-        assert_eq!(full["scores"]["piotroski"]["available"].as_u64().unwrap(), 9);
+        assert_eq!(
+            full["scores"]["piotroski"]["available"].as_u64().unwrap(),
+            9
+        );
         assert!(full["scores"]["altman"]["z_emerging"].is_number());
 
         let summary = fundamentals_summary(&full);
         assert_eq!(summary["metrics"]["fcf_yi"], json!(r2(65.0 / 1e8)));
-        assert!(summary["scores"]["piotroski"].as_str().unwrap().contains('/'));
+        assert!(summary["scores"]["piotroski"]
+            .as_str()
+            .unwrap()
+            .contains('/'));
         assert_eq!(summary["anomalies"]["count"], json!(0));
         assert!(summary["anomalies"]["max_severity"].is_null());
         // Bulky sections stay out of the summary.
@@ -1729,7 +2147,11 @@ mod tests {
     #[test]
     fn fundamentals_empty_bundle_degrades() {
         let sym = Symbol::new("600519").unwrap();
-        let full = fundamentals_full_json(&sym, &FundamentalBundle::default(), &["income: timeout".to_string()]);
+        let full = fundamentals_full_json(
+            &sym,
+            &FundamentalBundle::default(),
+            &["income: timeout".to_string()],
+        );
         let missing: Vec<&str> = full["missing"]
             .as_array()
             .unwrap()
@@ -1752,7 +2174,10 @@ mod tests {
         assert_eq!(full["current"]["ps_ttm"], json!(5.0));
         // PE history 18..=27, current 20 → 3 of 10 ≤ 20 → 30%.
         assert!((full["percentile"]["pe_ttm_pct"].as_f64().unwrap() - 30.0).abs() < 1e-9);
-        assert!(full["percentile"]["method"].as_str().unwrap().contains("历史分位"));
+        assert!(full["percentile"]["method"]
+            .as_str()
+            .unwrap()
+            .contains("历史分位"));
         let dcf = &full["dcf"];
         assert_eq!(dcf["assumptions"]["base_fcf"], json!(120.0)); // 180 − 60
         assert!((dcf["assumptions"]["stage1_growth"].as_f64().unwrap() - 0.2).abs() < 1e-9);
@@ -1817,25 +2242,106 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(StorageConfig::with_base_dir(dir.path())).unwrap();
         let store = GraphStore::new(storage.clone());
-        store.upsert_node(&plain_node("commodity:cu", NodeKind::Commodity, "铜")).await.unwrap();
-        store.upsert_node(&plain_node("commodity:sorghum", NodeKind::Commodity, "高粱")).await.unwrap();
-        store.upsert_node(&plain_node("product:cable", NodeKind::Product, "电线电缆")).await.unwrap();
-        store.upsert_node(&plain_node("industry:liquor", NodeKind::Industry, "白酒")).await.unwrap();
-        store.upsert_node(&company("600362", "江西铜业")).await.unwrap();
-        store.upsert_node(&company("600869", "远东股份")).await.unwrap();
-        store.upsert_node(&company("000651", "格力电器")).await.unwrap();
-        store.upsert_node(&company("600519", "贵州茅台")).await.unwrap();
-        store.upsert_node(&company("000858", "五粮液")).await.unwrap();
-        store.upsert_node(&company("600859", "经销商")).await.unwrap();
-        store.upsert_edge(&edge("company:600362", "commodity:cu", Relation::Produces)).await.unwrap();
-        store.upsert_edge(&edge("company:600869", "commodity:cu", Relation::Consumes)).await.unwrap();
-        store.upsert_edge(&edge("company:600869", "product:cable", Relation::Produces)).await.unwrap();
-        store.upsert_edge(&edge("company:000651", "product:cable", Relation::Consumes)).await.unwrap();
-        store.upsert_edge(&edge("company:600519", "industry:liquor", Relation::BelongsTo)).await.unwrap();
-        store.upsert_edge(&edge("company:000858", "industry:liquor", Relation::BelongsTo)).await.unwrap();
-        store.upsert_edge(&edge("company:600519", "company:000858", Relation::Competes)).await.unwrap();
-        store.upsert_edge(&edge("company:600519", "commodity:sorghum", Relation::Consumes)).await.unwrap();
-        store.upsert_edge(&edge("company:600519", "company:600859", Relation::Supplies)).await.unwrap();
+        store
+            .upsert_node(&plain_node("commodity:cu", NodeKind::Commodity, "铜"))
+            .await
+            .unwrap();
+        store
+            .upsert_node(&plain_node(
+                "commodity:sorghum",
+                NodeKind::Commodity,
+                "高粱",
+            ))
+            .await
+            .unwrap();
+        store
+            .upsert_node(&plain_node("product:cable", NodeKind::Product, "电线电缆"))
+            .await
+            .unwrap();
+        store
+            .upsert_node(&plain_node("industry:liquor", NodeKind::Industry, "白酒"))
+            .await
+            .unwrap();
+        store
+            .upsert_node(&company("600362", "江西铜业"))
+            .await
+            .unwrap();
+        store
+            .upsert_node(&company("600869", "远东股份"))
+            .await
+            .unwrap();
+        store
+            .upsert_node(&company("000651", "格力电器"))
+            .await
+            .unwrap();
+        store
+            .upsert_node(&company("600519", "贵州茅台"))
+            .await
+            .unwrap();
+        store
+            .upsert_node(&company("000858", "五粮液"))
+            .await
+            .unwrap();
+        store
+            .upsert_node(&company("600859", "经销商"))
+            .await
+            .unwrap();
+        store
+            .upsert_edge(&edge("company:600362", "commodity:cu", Relation::Produces))
+            .await
+            .unwrap();
+        store
+            .upsert_edge(&edge("company:600869", "commodity:cu", Relation::Consumes))
+            .await
+            .unwrap();
+        store
+            .upsert_edge(&edge("company:600869", "product:cable", Relation::Produces))
+            .await
+            .unwrap();
+        store
+            .upsert_edge(&edge("company:000651", "product:cable", Relation::Consumes))
+            .await
+            .unwrap();
+        store
+            .upsert_edge(&edge(
+                "company:600519",
+                "industry:liquor",
+                Relation::BelongsTo,
+            ))
+            .await
+            .unwrap();
+        store
+            .upsert_edge(&edge(
+                "company:000858",
+                "industry:liquor",
+                Relation::BelongsTo,
+            ))
+            .await
+            .unwrap();
+        store
+            .upsert_edge(&edge(
+                "company:600519",
+                "company:000858",
+                Relation::Competes,
+            ))
+            .await
+            .unwrap();
+        store
+            .upsert_edge(&edge(
+                "company:600519",
+                "commodity:sorghum",
+                Relation::Consumes,
+            ))
+            .await
+            .unwrap();
+        store
+            .upsert_edge(&edge(
+                "company:600519",
+                "company:600859",
+                Relation::Supplies,
+            ))
+            .await
+            .unwrap();
         (dir, storage, store)
     }
 
@@ -1847,7 +2353,8 @@ mod tests {
         (0..n)
             .map(|i| {
                 let t = i as f64;
-                let close = 10.0 + (t * 0.11).sin() * 0.8 + (t * 0.37 + seed).cos() * 0.3 + t * 0.02;
+                let close =
+                    10.0 + (t * 0.11).sin() * 0.8 + (t * 0.37 + seed).cos() * 0.3 + t * 0.02;
                 Bar {
                     date: start + chrono::Duration::days(i as i64),
                     open: close - 0.05,
@@ -1900,7 +2407,10 @@ mod tests {
             _adjust: Adjust,
             count: u32,
         ) -> std::result::Result<Fetched<Vec<Bar>>, DataError> {
-            Ok(Fetched::now(series_bars(symbol.code(), count as usize), Source::EastMoney))
+            Ok(Fetched::now(
+                series_bars(symbol.code(), count as usize),
+                Source::EastMoney,
+            ))
         }
         async fn quote(&self, _symbol: &Symbol) -> std::result::Result<Fetched<Quote>, DataError> {
             Err(DataError::NoProvider("quote"))
@@ -1980,11 +2490,17 @@ mod tests {
         assert_eq!(s["counts"]["primary_benefit"], json!(1));
         assert_eq!(s["counts"]["primary_harm"], json!(1));
         let impacted = s["impacted"].as_array().unwrap();
-        let jxt = impacted.iter().find(|e| e["code"] == json!("600362")).unwrap();
+        let jxt = impacted
+            .iter()
+            .find(|e| e["code"] == json!("600362"))
+            .unwrap();
         assert_eq!(jxt["direction"], json!("受益"));
         assert_eq!(jxt["hop"], json!(1));
         assert!(jxt["logic_chain"].as_str().unwrap().contains("铜↑10%"));
-        let yd = impacted.iter().find(|e| e["code"] == json!("600869")).unwrap();
+        let yd = impacted
+            .iter()
+            .find(|e| e["code"] == json!("600869"))
+            .unwrap();
         assert_eq!(yd["direction"], json!("受损"));
         // Full report carries lag / confidence / magnitude.
         let full = r.full_json.unwrap();
@@ -2013,7 +2529,10 @@ mod tests {
         let registry = crate::default_registry();
         for (tool, args) in [
             ("get_industry_chain", json!({"symbol": "600519"})),
-            ("run_supply_chain_shock", json!({"subject": "铜", "direction": "up"})),
+            (
+                "run_supply_chain_shock",
+                json!({"subject": "铜", "direction": "up"}),
+            ),
             ("get_fundamentals", json!({"symbol": "600519"})),
             ("run_valuation", json!({"symbol": "600519"})),
         ] {
@@ -2054,7 +2573,11 @@ mod tests {
 
         // One symbol → typed arg error.
         let bad = registry
-            .dispatch("build_relationship_graph", json!({"symbols": ["600519"]}), &ctx)
+            .dispatch(
+                "build_relationship_graph",
+                json!({"symbols": ["600519"]}),
+                &ctx,
+            )
             .await;
         assert!(matches!(bad, Err(AgentError::InvalidArgs { .. })));
     }
@@ -2107,9 +2630,43 @@ mod tests {
             .await;
         assert!(matches!(bad, Err(AgentError::InvalidArgs { .. })));
         let unknown = registry
-            .dispatch("run_backtest", json!({"symbol": "600519", "strategy": "magic"}), &ctx)
+            .dispatch(
+                "run_backtest",
+                json!({"symbol": "600519", "strategy": "magic"}),
+                &ctx,
+            )
             .await;
         assert!(matches!(unknown, Err(AgentError::InvalidArgs { .. })));
+    }
+
+    #[tokio::test]
+    async fn strategy_iteration_is_bounded_and_reports_robustness_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(StorageConfig::with_base_dir(dir.path())).unwrap();
+        let ctx = deep_ctx(storage, None);
+        let registry = crate::default_registry();
+        let result = registry
+            .dispatch(
+                "iterate_strategy",
+                json!({
+                    "symbol": "600519",
+                    "strategy": "ma_cross",
+                    "bars": 300,
+                    "max_candidates": 2,
+                    "objective": "robust"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let top = result.summary_json["top_candidates"].as_array().unwrap();
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0]["rank"], json!(1));
+        assert!(top[0]["robustness"]["tested_windows"].as_u64().unwrap() >= 2);
+        assert!(result.summary_json["warning"]
+            .as_str()
+            .unwrap()
+            .contains("不是严格样本外"));
     }
 
     #[tokio::test]

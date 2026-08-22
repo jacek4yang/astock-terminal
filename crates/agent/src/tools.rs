@@ -326,7 +326,11 @@ mod tests {
         let args = json!({"text": "hi"});
         let first = registry.dispatch("echo", args.clone(), &ctx).await.unwrap();
         let second = registry.dispatch("echo", args, &ctx).await.unwrap();
-        assert_eq!(echo.calls.load(Ordering::SeqCst), 1, "second call served from cache");
+        assert_eq!(
+            echo.calls.load(Ordering::SeqCst),
+            1,
+            "second call served from cache"
+        );
         assert_eq!(first.cache_key, second.cache_key);
         assert!(first.cache_key.starts_with("echo:"));
         assert_eq!(second.summary_json, json!({"echo": "hi"}));

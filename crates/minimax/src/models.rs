@@ -11,7 +11,12 @@ use crate::http::{map_http_error, Http};
 use crate::key::SecretKey;
 
 /// Default preference chain, best first.
-pub const DEFAULT_CHAIN: &[&str] = &["MiniMax-M2.5", "MiniMax-M2", "MiniMax-M1"];
+pub const DEFAULT_CHAIN: &[&str] = &[
+    "MiniMax-M3",
+    "MiniMax-M2.7",
+    "MiniMax-M2.7-highspeed",
+    "MiniMax-M2.5",
+];
 
 /// An ordered model fallback chain plus a cached probe result.
 pub struct ModelCatalog {

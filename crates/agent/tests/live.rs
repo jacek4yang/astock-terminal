@@ -58,7 +58,9 @@ async fn live_one_tool_conversation() {
         "model should call the echo tool"
     );
     assert!(
-        events.iter().any(|e| matches!(e, AgentEvent::Completed { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Completed { .. })),
         "task should complete"
     );
 }
@@ -101,7 +103,9 @@ async fn live_market_data_tool_conversation() {
         "model should call get_quote"
     );
     assert!(
-        events.iter().any(|e| matches!(e, AgentEvent::Completed { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Completed { .. })),
         "task should complete"
     );
 }

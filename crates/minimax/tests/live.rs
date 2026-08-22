@@ -23,7 +23,10 @@ async fn live_detect_and_chat() {
     let client = MinimaxClient::new(key);
 
     let service = client.detect_service().await.expect("detect service");
-    eprintln!("[{masked}] region: {:?}, api: {}", service.region, service.api_host);
+    eprintln!(
+        "[{masked}] region: {:?}, api: {}",
+        service.region, service.api_host
+    );
 
     let quota = client.quota().await.expect("quota");
     for m in &quota.models {
@@ -36,10 +39,8 @@ async fn live_detect_and_chat() {
     let model = client.selected_model().await.expect("select model");
     eprintln!("selected model: {model}");
 
-    let request = ChatRequest::new(&model, vec![ChatMessage::user(
-        "Reply with exactly: pong",
-    )])
-    .with_max_tokens(64);
+    let request = ChatRequest::new(&model, vec![ChatMessage::user("Reply with exactly: pong")])
+        .with_max_tokens(64);
     match client.chat(&request).await {
         Ok(resp) => {
             eprintln!("chat text: {:?}", resp.text());

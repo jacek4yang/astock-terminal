@@ -121,8 +121,7 @@ impl KeyStore {
     }
 
     fn entry(&self) -> Result<Entry, MinimaxError> {
-        Entry::new(&self.service, &self.account)
-            .map_err(|e| MinimaxError::KeyStore(e.to_string()))
+        Entry::new(&self.service, &self.account).map_err(|e| MinimaxError::KeyStore(e.to_string()))
     }
 
     /// Persist the key, overwriting any existing value.

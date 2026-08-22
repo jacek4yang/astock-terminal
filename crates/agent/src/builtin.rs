@@ -73,7 +73,10 @@ pub(crate) fn bar_stats(bars: &[Bar]) -> Value {
     }
     let first = bars.first().unwrap();
     let last = bars.last().unwrap();
-    let max_high = bars.iter().map(|b| b.high).fold(f64::NEG_INFINITY, f64::max);
+    let max_high = bars
+        .iter()
+        .map(|b| b.high)
+        .fold(f64::NEG_INFINITY, f64::max);
     let min_low = bars.iter().map(|b| b.low).fold(f64::INFINITY, f64::min);
     let avg_volume = bars.iter().map(|b| b.volume).sum::<f64>() / bars.len() as f64;
     let window_pct = if first.close > 0.0 {
@@ -123,7 +126,7 @@ fn to_tech_quote(q: &Quote) -> tech::Quote {
         pre_close: q.pre_close,
         volume: q.volume,
         amount: q.amount,
-        turnover: q.turnover,
+        turnover: q.turnover.unwrap_or(0.0),
         timestamp: q.timestamp.to_rfc3339(),
     }
 }
@@ -161,6 +164,7 @@ const ANALYSIS_SUMMARY_KEYS: &[&str] = &[
     "description",
     "plain_summary",
     "trade_plan",
+    "manual_plan",
     "module_scores",
     "buy_signals",
     "sell_signals",
@@ -191,6 +195,57 @@ struct AnalysisInputs {
     fetched_at: String,
 }
 
+fn attach_agent_manual_plan(signal: &mut Value, symbol: &Symbol, inputs: &AnalysisInputs) {
+    let Ok(rules) = astock_trading_rules::RuleSet::load(None) else {
+        return;
+    };
+    let auction = &rules.data.auction;
+    let sessions = tech::SessionSchedule {
+        open_auction_start: auction.open_call_auction.start.clone(),
+        open_auction_end: auction.open_call_auction.end.clone(),
+        morning_start: auction.continuous_morning.start.clone(),
+        morning_end: auction.continuous_morning.end.clone(),
+        afternoon_start: auction.continuous_afternoon.start.clone(),
+        afternoon_end: auction.continuous_afternoon.end.clone(),
+        close_auction_start: auction.close_call_auction.start.clone(),
+        close_auction_end: auction.close_call_auction.end.clone(),
+    };
+    let board = rules.for_symbol(symbol.code()).ok();
+    let constraints = tech::TradingConstraints {
+        board_name: board
+            .as_ref()
+            .map(|value| value.board_name.clone())
+            .unwrap_or_else(|| "未知板块".to_string()),
+        price_limit_pct: board
+            .as_ref()
+            .map_or(0.10, |value| value.price_limit_pct(false)),
+        min_lot: board.as_ref().map_or(100, |value| value.min_lot),
+        lot_step: board.as_ref().map_or(100, |value| value.lot_step),
+        t_plus_1: board.as_ref().is_none_or(|value| value.t_plus_1),
+    };
+    let name = inputs
+        .quote
+        .as_ref()
+        .map(|quote| quote.name.as_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| symbol.code());
+    if let Some(plan) = tech::build_manual_trading_plan(
+        symbol.code(),
+        name,
+        &inputs.klines,
+        signal,
+        &sessions,
+        &constraints,
+        &inputs.fetched_at,
+        &inputs.source,
+    ) {
+        if let (Some(object), Ok(plan_json)) = (signal.as_object_mut(), serde_json::to_value(plan))
+        {
+            object.insert("manual_plan".to_string(), plan_json);
+        }
+    }
+}
+
 /// Minimum history the signal engine needs to be meaningful (MA60/MACD).
 const MIN_ANALYSIS_BARS: usize = 60;
 
@@ -205,7 +260,10 @@ async fn fetch_analysis_inputs(
     count: u32,
     with_context: bool,
 ) -> Result<AnalysisInputs> {
-    let fetched = ctx.market.kline(symbol, period, astock_core::Adjust::Qfq, count).await?;
+    let fetched = ctx
+        .market
+        .kline(symbol, period, astock_core::Adjust::Qfq, count)
+        .await?;
     if fetched.data.len() < MIN_ANALYSIS_BARS {
         return Err(tool_err(
             tool,
@@ -219,27 +277,25 @@ async fn fetch_analysis_inputs(
     let (source, fetched_at) = provenance(&fetched);
     let klines = to_tech_klines(&fetched.data);
 
-    let (mut quote, mut flows, mut index) = (None, None, None);
-    if with_context {
-        quote = ctx
-            .market
-            .quote(symbol)
-            .await
-            .ok()
-            .map(|q| to_tech_quote(&q.data));
-        flows = ctx
-            .market
-            .fund_flow_daily(symbol, 30)
-            .await
-            .ok()
-            .map(|f| f.data.iter().map(to_tech_flow).collect::<Vec<_>>());
-        index = ctx
-            .market
-            .index_kline("1.000001", count)
-            .await
-            .ok()
-            .map(|f| to_tech_klines(&f.data));
-    }
+    let (quote, flows, index) = if with_context {
+        // These three sources are independent. Running them sequentially made
+        // a comparison pay the sum of every upstream latency for every stock;
+        // joining them bounds the context phase by the slowest one instead.
+        let (quote, flows, index) = tokio::join!(
+            ctx.market.quote(symbol),
+            ctx.market.fund_flow_daily(symbol, 30),
+            ctx.market.index_kline("1.000001", count),
+        );
+        (
+            quote.ok().map(|q| to_tech_quote(&q.data)),
+            flows
+                .ok()
+                .map(|f| f.data.iter().map(to_tech_flow).collect::<Vec<_>>()),
+            index.ok().map(|f| to_tech_klines(&f.data)),
+        )
+    } else {
+        (None, None, None)
+    };
     Ok(AnalysisInputs {
         klines,
         quote,
@@ -363,7 +419,13 @@ impl AgentTool for GetKline {
         }
         let (source, fetched_at) = provenance(&fetched);
         let bars = &fetched.data;
-        let tail: Vec<Value> = bars.iter().rev().take(KLINE_TAIL).rev().map(bar_row).collect();
+        let tail: Vec<Value> = bars
+            .iter()
+            .rev()
+            .take(KLINE_TAIL)
+            .rev()
+            .map(bar_row)
+            .collect();
         let summary = json!({
             "symbol": symbol.code(),
             "period": format!("{period:?}"),
@@ -519,17 +581,20 @@ impl AgentTool for RunFullAnalysis {
         let args: KlineArgs = parse_args(self.name(), args)?;
         let symbol = parse_symbol(self.name(), &args.symbol)?;
         let period = parse_period(args.period.as_deref())?;
-        let count = args.count.unwrap_or(250).clamp(MIN_ANALYSIS_BARS as u32, 500);
+        let count = args
+            .count
+            .unwrap_or(250)
+            .clamp(MIN_ANALYSIS_BARS as u32, 500);
 
-        let inputs =
-            fetch_analysis_inputs(ctx, self.name(), &symbol, period, count, true).await?;
+        let inputs = fetch_analysis_inputs(ctx, self.name(), &symbol, period, count, true).await?;
         let breadth = ctx
             .market
             .market_breadth()
             .await
             .ok()
             .map(|b| to_tech_breadth(&b.data));
-        let signal = run_engine(&inputs, breadth.as_ref());
+        let mut signal = run_engine(&inputs, breadth.as_ref());
+        attach_agent_manual_plan(&mut signal, &symbol, &inputs);
 
         let mut summary = analysis_summary(&signal);
         if let Some(obj) = summary.as_object_mut() {
@@ -607,7 +672,12 @@ impl AgentTool for RunChanlun {
         } else {
             let fetched = ctx
                 .market
-                .kline(&symbol, astock_core::KlinePeriod::Day, astock_core::Adjust::Qfq, 250)
+                .kline(
+                    &symbol,
+                    astock_core::KlinePeriod::Day,
+                    astock_core::Adjust::Qfq,
+                    250,
+                )
                 .await?;
             if fetched.data.len() < 10 {
                 return Err(tool_err(self.name(), "k线数据不足，无法运行缠论分析"));
@@ -661,7 +731,10 @@ pub(crate) fn chanlun_summary(dict: &Value, daily: bool) -> Value {
         .unwrap_or_default();
     let kept = signals.len().min(10);
     out.insert("signal_count".into(), json!(signals.len()));
-    out.insert("signals".into(), json!(signals[signals.len() - kept..].to_vec()));
+    out.insert(
+        "signals".into(),
+        json!(signals[signals.len() - kept..].to_vec()),
+    );
     Value::Object(out)
 }
 
@@ -906,32 +979,32 @@ impl AgentTool for CompareStocks {
 
         let rows: Vec<Result<(Value, String, String)>> =
             futures::stream::iter(args.symbols.iter().cloned())
-            .map(|code| {
-                let ctx = ctx.clone();
-                let breadth = breadth.clone();
-                async move {
-                    let symbol = parse_symbol(self.name(), &code)?;
-                    let inputs = fetch_analysis_inputs(
-                        &ctx,
-                        self.name(),
-                        &symbol,
-                        astock_core::KlinePeriod::Day,
-                        250,
-                        true,
-                    )
-                    .await?;
-                    let signal = run_engine(&inputs, breadth.as_ref().as_ref());
-                    let name = inputs.quote.as_ref().map(|q| q.name.clone());
-                    Ok::<_, AgentError>((
-                        comparison_row(&code, name.as_deref(), inputs.quote.as_ref(), &signal),
-                        inputs.source,
-                        inputs.fetched_at,
-                    ))
-                }
-            })
-            .buffer_unordered(4)
-            .collect::<Vec<_>>()
-            .await;
+                .map(|code| {
+                    let ctx = ctx.clone();
+                    let breadth = breadth.clone();
+                    async move {
+                        let symbol = parse_symbol(self.name(), &code)?;
+                        let inputs = fetch_analysis_inputs(
+                            &ctx,
+                            self.name(),
+                            &symbol,
+                            astock_core::KlinePeriod::Day,
+                            250,
+                            true,
+                        )
+                        .await?;
+                        let signal = run_engine(&inputs, breadth.as_ref().as_ref());
+                        let name = inputs.quote.as_ref().map(|q| q.name.clone());
+                        Ok::<_, AgentError>((
+                            comparison_row(&code, name.as_deref(), inputs.quote.as_ref(), &signal),
+                            inputs.source,
+                            inputs.fetched_at,
+                        ))
+                    }
+                })
+                .buffer_unordered(4)
+                .collect::<Vec<_>>()
+                .await;
 
         let mut table = Vec::new();
         let mut errors = Vec::new();
@@ -948,7 +1021,10 @@ impl AgentTool for CompareStocks {
             }
         }
         if table.is_empty() {
-            return Err(tool_err(self.name(), format!("全部失败：{}", errors.join("; "))));
+            return Err(tool_err(
+                self.name(),
+                format!("全部失败：{}", errors.join("; ")),
+            ));
         }
         let summary = json!({"table": table, "errors": errors});
         Ok(ToolResult {
@@ -1002,10 +1078,21 @@ impl AgentTool for ScanMarket {
         let mut pool: Vec<_> = list
             .data
             .iter()
-            .filter(|s| s.price > 0.0 && s.amount >= SCAN_MIN_AMOUNT)
-            .filter(|s| Symbol::new(&s.code).map(|sym| !sym.is_etf()).unwrap_or(false))
+            .filter(|s| {
+                s.price.is_some_and(|price| price > 0.0)
+                    && s.amount.is_some_and(|amount| amount >= SCAN_MIN_AMOUNT)
+            })
+            .filter(|s| {
+                Symbol::new(&s.code)
+                    .map(|sym| !sym.is_etf())
+                    .unwrap_or(false)
+            })
             .collect();
-        pool.sort_by(|a, b| b.amount.total_cmp(&a.amount));
+        pool.sort_by(|a, b| {
+            b.amount
+                .unwrap_or(f64::NEG_INFINITY)
+                .total_cmp(&a.amount.unwrap_or(f64::NEG_INFINITY))
+        });
         pool.truncate(candidates);
 
         let breadth = ctx
@@ -1021,7 +1108,9 @@ impl AgentTool for ScanMarket {
                 let ctx = ctx.clone();
                 let breadth = breadth.clone();
                 async move {
-                    let row = self.scan_one(&ctx, &item.code, breadth.as_ref().as_ref()).await?;
+                    let row = self
+                        .scan_one(&ctx, &item.code, breadth.as_ref().as_ref())
+                        .await?;
                     let mut row = row;
                     if let Some(obj) = row.as_object_mut() {
                         obj.insert("name".into(), json!(item.name));
@@ -1276,6 +1365,7 @@ pub fn default_registry() -> ToolRegistry {
         Arc::new(crate::deep::RunSupplyChainShock),
         Arc::new(crate::deep::BuildRelationshipGraph),
         Arc::new(crate::deep::RunBacktest),
+        Arc::new(crate::deep::IterateStrategy),
         Arc::new(crate::deep::GetMarketRegime),
     ])
 }
@@ -1327,8 +1417,7 @@ mod tests {
     }
 
     fn mock_minute(n: usize) -> MinuteData {
-        let start =
-            NaiveDateTime::parse_from_str("2026-08-21 09:30", "%Y-%m-%d %H:%M").unwrap();
+        let start = NaiveDateTime::parse_from_str("2026-08-21 09:30", "%Y-%m-%d %H:%M").unwrap();
         let points = (0..n)
             .map(|i| MinutePoint {
                 time: start + chrono::Duration::minutes(i as i64),
@@ -1361,8 +1450,9 @@ mod tests {
                 amount: 3.6e9,
                 change: 5.5,
                 pct: 0.31,
-                turnover: 0.4,
+                turnover: Some(0.4),
                 timestamp: chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap(),
+                field_provenance: Default::default(),
             },
             flows: (0..10)
                 .map(|i| FundFlowPoint {
@@ -1394,23 +1484,23 @@ mod tests {
                 StockListItem {
                     code: "600519".to_string(),
                     name: "贵州茅台".to_string(),
-                    price: 1800.5,
-                    pct: 0.31,
-                    amount: 3.6e9,
+                    price: Some(1800.5),
+                    pct: Some(0.31),
+                    amount: Some(3.6e9),
                 },
                 StockListItem {
                     code: "000001".to_string(),
                     name: "平安银行".to_string(),
-                    price: 12.0,
-                    pct: -0.5,
-                    amount: 2e9,
+                    price: Some(12.0),
+                    pct: Some(-0.5),
+                    amount: Some(2e9),
                 },
                 StockListItem {
                     code: "510300".to_string(), // ETF: filtered out
                     name: "沪深300ETF".to_string(),
-                    price: 4.0,
-                    pct: 0.1,
-                    amount: 5e9,
+                    price: Some(4.0),
+                    pct: Some(0.1),
+                    amount: Some(5e9),
                 },
             ],
             minute: mock_minute(240),
@@ -1431,10 +1521,7 @@ mod tests {
         ) -> std::result::Result<Fetched<Vec<Bar>>, DataError> {
             Ok(Fetched::now(self.bars.clone(), Source::EastMoney))
         }
-        async fn quote(
-            &self,
-            _symbol: &Symbol,
-        ) -> std::result::Result<Fetched<Quote>, DataError> {
+        async fn quote(&self, _symbol: &Symbol) -> std::result::Result<Fetched<Quote>, DataError> {
             Ok(Fetched::now(self.quote.clone(), Source::EastMoney))
         }
         async fn search(
@@ -1461,9 +1548,7 @@ mod tests {
         ) -> std::result::Result<Fetched<Vec<StockListItem>>, DataError> {
             Ok(Fetched::now(self.stocks.clone(), Source::EastMoney))
         }
-        async fn market_breadth(
-            &self,
-        ) -> std::result::Result<Fetched<MarketBreadth>, DataError> {
+        async fn market_breadth(&self) -> std::result::Result<Fetched<MarketBreadth>, DataError> {
             Ok(Fetched::now(self.breadth, Source::EastMoney))
         }
         async fn index_kline(
@@ -1489,7 +1574,12 @@ mod tests {
         )
     }
 
-    async fn dispatch(registry: &ToolRegistry, ctx: &ToolContext, name: &str, args: Value) -> ToolResult {
+    async fn dispatch(
+        registry: &ToolRegistry,
+        ctx: &ToolContext,
+        name: &str,
+        args: Value,
+    ) -> ToolResult {
         registry
             .dispatch(name, args, ctx)
             .await
@@ -1499,16 +1589,25 @@ mod tests {
     #[tokio::test]
     async fn tool_schemas_are_valid() {
         let registry = default_registry();
-        assert_eq!(registry.len(), 19);
+        assert_eq!(registry.len(), 20);
         let mut names = Vec::new();
         for spec in registry.specs() {
             assert_eq!(spec.kind, "function");
             let params = &spec.function.parameters;
             assert_eq!(params.get("type").and_then(Value::as_str), Some("object"));
             if params.get("required").is_some() {
-                assert!(params.get("properties").is_some(), "{} properties", spec.function.name);
+                assert!(
+                    params.get("properties").is_some(),
+                    "{} properties",
+                    spec.function.name
+                );
             }
-            assert!(!spec.function.description.as_deref().unwrap_or("").is_empty());
+            assert!(!spec
+                .function
+                .description
+                .as_deref()
+                .unwrap_or("")
+                .is_empty());
             names.push(spec.function.name.clone());
         }
         for expected in [
@@ -1530,6 +1629,7 @@ mod tests {
             "run_supply_chain_shock",
             "build_relationship_graph",
             "run_backtest",
+            "iterate_strategy",
             "get_market_regime",
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
@@ -1634,7 +1734,10 @@ mod tests {
         assert!(daily.summary_json["fractal_count"].is_number());
         assert!(daily.summary_json.get("zhongshu_count").is_some());
         let full = daily.full_json.unwrap();
-        assert!(full.get("chart_strokes").is_some(), "overlay kept in full payload");
+        assert!(
+            full.get("chart_strokes").is_some(),
+            "overlay kept in full payload"
+        );
 
         let minute = dispatch(
             &registry,
@@ -1758,10 +1861,7 @@ mod tests {
         fn name(&self) -> &'static str {
             "partial"
         }
-        async fn quote(
-            &self,
-            symbol: &Symbol,
-        ) -> std::result::Result<Fetched<Quote>, DataError> {
+        async fn quote(&self, symbol: &Symbol) -> std::result::Result<Fetched<Quote>, DataError> {
             if symbol.code() == "600519" {
                 Ok(Fetched::now(mock_market().quote, Source::EastMoney))
             } else {
