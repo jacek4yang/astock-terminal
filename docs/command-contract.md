@@ -29,6 +29,13 @@
 - `get_source_documents(limit) -> [SourceDocumentSummary]` — 查询最近来源、来源层级、一级来源标记、读取状态与失败原因，不发起网络请求。
 - `get_source_document(source_version_id) -> SourceDocumentDetail` — 按 `srcver:...` 读取不可变版本、原文分段和字段证据。
 - `compare_source_evidence(source_version_ids) -> [EvidenceConflict]` — 对 2–10 个版本逐字段展示冲突值及精确证据，不自动裁决。
+- `get_data_quality_slo(window_secs) -> [DatasetSlo]` — 从本地真实观测计算分数据集/来源的错误率、P50/P95、最近成功、连续陈旧、缺失和冲突；不访问上游。
+- `get_data_quality_observations(dataset?, provider?, limit) -> [QualityObservation]` — 查询成功、失败、缓存命中、延迟与质量门禁明细。
+- `get_field_lineage(dataset?, entity_key?, limit) -> [FieldLineageRecord]` — 查询字段的来源、时点、解析/结构版本、许可、单位、币种、复权和财务口径。
+- `get_data_reconciliations(dataset?, entity_key?, limit) -> [ReconciliationAudit]` — 查询双方原值、偏差、容差、口径与阻断状态。
+- `reconcile_quote_sources(symbol) -> QuoteReconciliationReport` — 通达信与东方财富并发取数并逐字段校验；不足两个成功来源时明确阻断高置信。
+- `reconcile_valuation_sources(symbol) -> ValuationReconciliationReport` — 东方财富与已配置的聚宽/Tushare 并发对账；单位换算显式完成并保留原来源。
+- `get_data_health_report(window_secs) -> DataHealthReport` — 生成可复制的真实连续健康报告；样本覆盖不足时不补造历史。
 - `get_minute(symbol) -> { points: {time,price,avg_price,volume}[], pre_close, name }`
 - `search_stocks(keyword) -> {code,name,classify}[]`
 - `get_market_breadth() -> {up,down,flat,total,breadth_ratio}`

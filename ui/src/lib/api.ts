@@ -216,6 +216,191 @@ export interface ProviderHealthItem {
 
 export const getProviderHealth = () => cmd<ProviderHealthItem[]>("get_provider_health");
 
+export type DatasetKind =
+  | "realtime_quote"
+  | "intraday_minute"
+  | "daily_kline"
+  | "weekly_kline"
+  | "monthly_kline"
+  | "fund_flow"
+  | "fundamentals"
+  | "valuation"
+  | "announcement"
+  | "news"
+  | "knowledge_graph"
+  | "macro"
+  | "backtest"
+  | "search_discovery"
+  | "other";
+
+export interface QualityFlag {
+  code: string;
+  severity: "info" | "warning" | "blocking";
+  field: string | null;
+  message: string;
+}
+
+export interface DataQualitySummary {
+  dataset: DatasetKind;
+  dataset_name: string;
+  freshness: "fresh" | "stale" | "expired";
+  age_secs: number;
+  expected_cadence_secs: number;
+  stale_after_secs: number;
+  hard_expiry_secs: number;
+  quality_flags: QualityFlag[];
+  confidence_ceiling: "high" | "medium" | "low" | "blocked";
+  allow_high_confidence: boolean;
+  allow_deterministic_compute: boolean;
+}
+
+export interface QualityObservation {
+  observation_id: number | null;
+  dataset: DatasetKind;
+  provider: string;
+  entity_key: string | null;
+  operation: string;
+  success: boolean;
+  latency_ms: number | null;
+  summary: DataQualitySummary;
+  missing_fields: number;
+  conflicts: number;
+  error_kind: string | null;
+  recorded_at: number;
+}
+
+export interface DatasetSlo {
+  dataset: DatasetKind;
+  dataset_name: string;
+  provider: string;
+  observations: number;
+  successes: number;
+  error_rate: number;
+  latency_p50_ms: number | null;
+  latency_p95_ms: number | null;
+  last_success_at: number | null;
+  consecutive_stale: number;
+  missing_fields: number;
+  conflicts: number;
+  current_freshness: "fresh" | "stale" | "expired";
+  expected_cadence_secs: number;
+  stale_after_secs: number;
+  hard_expiry_secs: number;
+  latest_quality_flags: QualityFlag[];
+}
+
+export interface FieldLineageRecord {
+  lineage_id: number | null;
+  dataset: DatasetKind;
+  entity_key: string;
+  field_path: string;
+  source: string;
+  source_url: string | null;
+  event_time: number | null;
+  as_of_time: number | null;
+  publish_time: number | null;
+  fetched_at: number;
+  parser_version: string;
+  schema_version: string;
+  license: string;
+  unit: string | null;
+  currency: string | null;
+  adjustment: string;
+  revision: string | null;
+  accounting_scope: string;
+  quality_flags: QualityFlag[];
+  created_at: number;
+}
+
+export interface NumericObservation {
+  provider: string;
+  field: string;
+  value: number;
+  unit: string;
+  currency: string | null;
+  adjustment: string;
+  accounting_scope: string;
+  as_of_time: string | null;
+}
+
+export interface ReconciliationResult {
+  field: string;
+  left: NumericObservation;
+  right: NumericObservation;
+  absolute_diff: number;
+  relative_diff: number;
+  tolerance: { absolute: number; relative: number };
+  status: "matched" | "within_tolerance" | "conflict" | "incompatible_contract";
+  explanation: string;
+  quality_flags: QualityFlag[];
+}
+
+export interface ReconciliationAudit {
+  reconciliation_id: number | null;
+  dataset: DatasetKind;
+  entity_key: string;
+  result: ReconciliationResult;
+  blocking: boolean;
+  compared_at: number;
+}
+
+export interface QuoteReconciliationReport {
+  symbol: string;
+  compared_at: number;
+  results: ReconciliationResult[];
+  failures: { provider: string; error: string }[];
+  blocking: boolean;
+  comparable_sources: number;
+  limitation: string | null;
+}
+
+export interface ValuationReconciliationReport {
+  symbol: string;
+  compared_at: number;
+  results: ReconciliationResult[];
+  failures: { provider: string; error: string }[];
+  blocking: boolean;
+  comparable_sources: number;
+  limitation: string | null;
+}
+
+export interface DataHealthReport {
+  generated_at: number;
+  window_secs: number;
+  actual_observations: number;
+  coverage_start: number | null;
+  coverage_end: number | null;
+  coverage_secs: number;
+  continuous_window_satisfied: boolean;
+  rows: DatasetSlo[];
+  markdown: string;
+  limitation: string | null;
+}
+
+export const getDataQualitySlo = (windowSecs: number) =>
+  cmd<DatasetSlo[]>("get_data_quality_slo", { window_secs: windowSecs });
+export const getDataQualityObservations = (
+  dataset: DatasetKind | null,
+  provider: string | null,
+  limit = 100,
+) => cmd<QualityObservation[]>("get_data_quality_observations", { dataset, provider, limit });
+export const getFieldLineage = (
+  dataset: DatasetKind | null,
+  entityKey: string | null,
+  limit = 100,
+) => cmd<FieldLineageRecord[]>("get_field_lineage", { dataset, entity_key: entityKey, limit });
+export const getDataReconciliations = (
+  dataset: DatasetKind | null,
+  entityKey: string | null,
+  limit = 100,
+) => cmd<ReconciliationAudit[]>("get_data_reconciliations", { dataset, entity_key: entityKey, limit });
+export const reconcileQuoteSources = (symbol: string) =>
+  cmd<QuoteReconciliationReport>("reconcile_quote_sources", { symbol });
+export const reconcileValuationSources = (symbol: string) =>
+  cmd<ValuationReconciliationReport>("reconcile_valuation_sources", { symbol });
+export const getDataHealthReport = (windowSecs: number) =>
+  cmd<DataHealthReport>("get_data_health_report", { window_secs: windowSecs });
+
 export type NewsTrustTier =
   | "first_party_disclosure"
   | "licensed_media"

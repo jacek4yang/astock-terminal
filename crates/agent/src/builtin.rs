@@ -2058,7 +2058,7 @@ mod tests {
         let registry = default_registry();
         let r = dispatch(&registry, &ctx, "get_watchlist", json!({})).await;
 
-        let items = r.summary_json.as_array().unwrap();
+        let items = r.summary_json["data"].as_array().unwrap();
         assert_eq!(items.len(), 3);
         // Group ascending; pinned first within a group.
         assert_eq!(items[0]["group"], json!("core"));
@@ -2079,7 +2079,8 @@ mod tests {
         // Empty watchlist → empty array, still not an error.
         let (_dir2, ctx2) = test_ctx();
         let empty = dispatch(&registry, &ctx2, "get_watchlist", json!({})).await;
-        assert_eq!(empty.summary_json.as_array().unwrap().len(), 0);
+        assert_eq!(empty.summary_json["data"].as_array().unwrap().len(), 0);
+        assert!(empty.summary_json["data_quality"].is_object());
     }
 
     #[tokio::test]

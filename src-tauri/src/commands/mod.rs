@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod analysis;
 pub mod bundle;
+pub mod data_quality;
 pub mod datacenter;
 pub mod deep;
 pub mod entities;

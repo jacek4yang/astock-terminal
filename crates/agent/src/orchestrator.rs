@@ -798,6 +798,23 @@ impl AgentEngine {
                     },
                 );
             }
+            if calls.is_empty() && !awaiting_user_input && !awaiting_specialist_review {
+                let (blocked, downgraded) = tool_quality_gate_counts(&messages);
+                if (blocked > 0 || downgraded > 0) && !clean_text.contains("数据质量门禁") {
+                    let disclosure = if blocked > 0 {
+                        format!(
+                            "\n\n**数据质量门禁：** 有 {blocked} 项工具结果因硬过期、口径不兼容或未解决冲突被阻止用于确定性计算；另有 {downgraded} 项仅可作为中低置信参考。以上项目不得用于明确买卖结论。"
+                        )
+                    } else {
+                        format!(
+                            "\n\n**数据质量门禁：** 有 {downgraded} 项工具结果存在陈旧、缺失或尚未跨源复核，结论置信度已自动下调，不应据此单独调度资金。"
+                        )
+                    };
+                    clean_text.push_str(&disclosure);
+                    assistant.content = Some(Value::String(clean_text.clone()));
+                    send(&tx, AgentEvent::TextDelta { text: disclosure });
+                }
+            }
             // A first draft awaiting specialist review is internal working
             // material, not a durable user-facing answer. Persist tool-call
             // messages and final/single-agent answers normally; the reviewed
@@ -1891,6 +1908,54 @@ fn contains_primary_source_evidence(messages: &[ChatMessage]) -> bool {
         }
         has_primary && has_version
     })
+}
+
+fn tool_quality_gate_counts(messages: &[ChatMessage]) -> (usize, usize) {
+    fn inspect(value: &Value, blocked: &mut usize, downgraded: &mut usize) {
+        match value {
+            Value::Object(fields) => {
+                if let Some(quality) = fields.get("data_quality").and_then(Value::as_object) {
+                    let deterministic = quality
+                        .get("allow_deterministic_compute")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true);
+                    let high_confidence = quality
+                        .get("allow_high_confidence")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true);
+                    if !deterministic {
+                        *blocked += 1;
+                    } else if !high_confidence {
+                        *downgraded += 1;
+                    }
+                    return;
+                }
+                for child in fields.values() {
+                    inspect(child, blocked, downgraded);
+                }
+            }
+            Value::Array(values) => {
+                for child in values {
+                    inspect(child, blocked, downgraded);
+                }
+            }
+            Value::String(text) => {
+                if let Ok(decoded) = serde_json::from_str::<Value>(text) {
+                    inspect(&decoded, blocked, downgraded);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut blocked = 0;
+    let mut downgraded = 0;
+    for message in messages.iter().filter(|message| message.role == "tool") {
+        if let Some(content) = &message.content {
+            inspect(content, &mut blocked, &mut downgraded);
+        }
+    }
+    (blocked, downgraded)
 }
 
 /// Typical duration shown to the user. This value is deliberately not used as

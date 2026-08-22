@@ -69,6 +69,13 @@ pub fn run() {
             commands::source_evidence::get_source_documents,
             commands::source_evidence::get_source_document,
             commands::source_evidence::compare_source_evidence,
+            commands::data_quality::get_data_quality_slo,
+            commands::data_quality::get_data_quality_observations,
+            commands::data_quality::get_field_lineage,
+            commands::data_quality::get_data_reconciliations,
+            commands::data_quality::reconcile_quote_sources,
+            commands::data_quality::reconcile_valuation_sources,
+            commands::data_quality::get_data_health_report,
             commands::bundle::get_stock_bundle,
             // 分析引擎
             commands::analysis::analyze,

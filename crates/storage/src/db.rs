@@ -617,6 +617,74 @@ pub(crate) const MIGRATIONS: &[(u32, &str)] = &[
     );
     "#,
     ),
+    (
+        12,
+        r#"
+    -- Cross-dataset freshness, field lineage and reconciliation audit.
+    CREATE TABLE IF NOT EXISTS data_quality_observations (
+        observation_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        dataset               TEXT NOT NULL,
+        provider              TEXT NOT NULL,
+        entity_key           TEXT,
+        operation             TEXT NOT NULL,
+        success               INTEGER NOT NULL,
+        latency_ms            INTEGER,
+        freshness_state       TEXT NOT NULL,
+        age_secs              INTEGER NOT NULL,
+        expected_cadence_secs INTEGER NOT NULL,
+        stale_after_secs      INTEGER NOT NULL,
+        hard_expiry_secs      INTEGER NOT NULL,
+        missing_fields        INTEGER NOT NULL DEFAULT 0,
+        conflicts             INTEGER NOT NULL DEFAULT 0,
+        quality_flags_json    TEXT NOT NULL DEFAULT '[]',
+        error_kind            TEXT,
+        recorded_at           INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_quality_observations_slo
+        ON data_quality_observations(dataset,provider,recorded_at DESC);
+
+    CREATE TABLE IF NOT EXISTS field_lineage_records (
+        lineage_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        dataset             TEXT NOT NULL,
+        entity_key          TEXT NOT NULL,
+        field_path          TEXT NOT NULL,
+        source              TEXT NOT NULL,
+        source_url          TEXT,
+        event_time          INTEGER,
+        as_of_time          INTEGER,
+        publish_time        INTEGER,
+        fetched_at          INTEGER NOT NULL,
+        parser_version      TEXT NOT NULL,
+        schema_version      TEXT NOT NULL,
+        license             TEXT NOT NULL,
+        unit                TEXT,
+        currency            TEXT,
+        adjustment          TEXT NOT NULL,
+        revision            TEXT,
+        accounting_scope    TEXT NOT NULL,
+        quality_flags_json  TEXT NOT NULL DEFAULT '[]',
+        created_at          INTEGER NOT NULL,
+        UNIQUE(dataset,entity_key,field_path,source,fetched_at,revision)
+    );
+    CREATE INDEX IF NOT EXISTS idx_field_lineage_lookup
+        ON field_lineage_records(dataset,entity_key,field_path,created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS data_reconciliation_results (
+        reconciliation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        dataset            TEXT NOT NULL,
+        entity_key         TEXT NOT NULL,
+        field_path         TEXT NOT NULL,
+        left_provider      TEXT NOT NULL,
+        right_provider     TEXT NOT NULL,
+        status             TEXT NOT NULL,
+        blocking           INTEGER NOT NULL,
+        result_json        TEXT NOT NULL,
+        compared_at        INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_reconciliation_lookup
+        ON data_reconciliation_results(dataset,entity_key,compared_at DESC);
+    "#,
+    ),
 ];
 
 /// Current unix time in seconds. All timestamps in this crate are stored as
@@ -770,6 +838,9 @@ mod tests {
             "source_fact_evidence",
             "source_fetch_observations",
             "agent_source_evidence_refs",
+            "data_quality_observations",
+            "field_lineage_records",
+            "data_reconciliation_results",
         ] {
             let count: i64 = conn
                 .query_row(
