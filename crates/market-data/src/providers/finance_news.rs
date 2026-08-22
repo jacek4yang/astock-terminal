@@ -7,6 +7,7 @@
 use crate::cache::TtlCache;
 use crate::http::HttpClient;
 use astock_core::DataError;
+use astock_entity_linking::EntityLinkSummary;
 use astock_news_intelligence::ClusterExplanation;
 use astock_security::UrlSecurityPolicy;
 use astock_storage::Storage;
@@ -78,6 +79,11 @@ pub struct FinanceNewsItem {
     pub old_republication: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cluster_explanation: Option<ClusterExplanation>,
+    /// Only rule-validated, evidence-backed entity mappings are exposed to Agent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entity_links: Vec<EntityLinkSummary>,
+    #[serde(default)]
+    pub entity_review_required: bool,
     /// Bounded original provider row for offline re-parsing/audit. Agent strips
     /// this field before model context to avoid needless prompt expansion.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -552,6 +558,8 @@ impl NewsProvider for OfficialAnnouncementProvider {
                 independent_source_count: 1,
                 old_republication: false,
                 cluster_explanation: None,
+                entity_links: Vec::new(),
+                entity_review_required: false,
                 raw_payload: serde_json::to_value(&row)
                     .ok()
                     .as_ref()
@@ -642,6 +650,8 @@ fn normalize_item(
         independent_source_count: 1,
         old_republication: false,
         cluster_explanation: None,
+        entity_links: Vec::new(),
+        entity_review_required: false,
         raw_payload: bounded_raw(raw),
     })
 }
@@ -672,6 +682,8 @@ impl FinanceNewsItem {
             independent_source_count: 1,
             old_republication: false,
             cluster_explanation: None,
+            entity_links: Vec::new(),
+            entity_review_required: false,
             raw_payload: None,
         }
     }

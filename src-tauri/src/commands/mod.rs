@@ -5,6 +5,7 @@ pub mod analysis;
 pub mod bundle;
 pub mod datacenter;
 pub mod deep;
+pub mod entities;
 pub mod fundamental;
 pub mod market;
 pub mod news;

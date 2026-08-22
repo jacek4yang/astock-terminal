@@ -22,6 +22,9 @@
 - `split_news_event_revision(revision_id, reason) -> EventClusterDetail` — 将单一修订人工拆为独立事件；理由不能为空，历史成员记录不覆盖。
 - `get_pending_news_evidence_reviews(limit) -> [AgentConclusionReview]` — 查询因更正或撤回而进入待复核状态的 Agent 结论。
 - `resolve_news_evidence_review(task_id, conclusion_key, triggering_revision) -> void` — 显式标记一项结论已经人工复核。
+- `get_news_entity_links(revision_ids) -> [DocumentEntityLink]` — 批量查询资讯原文 span、候选实体、消歧理由、关系链、规则版本、置信度和 Agent 可用状态。
+- `get_entity_link_reviews(limit) -> [EntityLinkReview]` — 查询低置信、歧义或模型提议的待审核实体映射。
+- `resolve_entity_link_review(link_id, entity_id?, accept, reason) -> bool` — 在候选列表中人工确认或拒绝映射；理由不能为空，接受时仍要求精确修订证据。
 - `get_minute(symbol) -> { points: {time,price,avg_price,volume}[], pre_close, name }`
 - `search_stocks(keyword) -> {code,name,classify}[]`
 - `get_market_breadth() -> {up,down,flat,total,breadth_ratio}`

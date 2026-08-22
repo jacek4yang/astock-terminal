@@ -1,14 +1,20 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   errMsg,
+  getEntityLinkReviews,
   getNewsEventClusterDetail,
   getNewsEventClusters,
+  getNewsEntityLinks,
   getPendingNewsEvidenceReviews,
   mergeNewsEventClusters,
+  resolveEntityLinkReview,
   resolveNewsEvidenceReview,
   splitNewsEventRevision,
   type AgentConclusionReview,
   type DocumentRelationship,
+  type DocumentEntityLink,
+  type EntityKind,
+  type EntityLinkReview,
   type NewsEventCluster,
   type NewsEventClusterDetail,
 } from "../lib/api";
@@ -24,6 +30,19 @@ const RELATIONSHIP_LABEL: Record<DocumentRelationship, string> = {
   duplicate_fetch: "重复抓取",
 };
 
+const ENTITY_KIND_LABEL: Record<EntityKind, string> = {
+  legal_entity: "法人主体",
+  listed_security: "上市证券",
+  subsidiary: "子公司",
+  brand: "品牌",
+  person: "人物",
+  product: "产品",
+  industry: "行业",
+  commodity: "商品",
+  region: "地区",
+  policy: "政策",
+};
+
 function dateTime(seconds: number | null): string {
   if (seconds == null) return "时间未知";
   return new Date(seconds * 1000).toLocaleString("zh-CN", { hour12: false });
@@ -33,6 +52,10 @@ export default function NewsEventClusters() {
   const [clusters, setClusters] = useState<NewsEventCluster[]>([]);
   const [details, setDetails] = useState<Record<string, NewsEventClusterDetail>>({});
   const [reviews, setReviews] = useState<AgentConclusionReview[]>([]);
+  const [entityReviews, setEntityReviews] = useState<EntityLinkReview[]>([]);
+  const [entityLinks, setEntityLinks] = useState<Record<string, DocumentEntityLink[]>>({});
+  const [reviewEntities, setReviewEntities] = useState<Record<string, string>>({});
+  const [reviewReasons, setReviewReasons] = useState<Record<string, string>>({});
   const [targets, setTargets] = useState<Record<string, string>>({});
   const [reasons, setReasons] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
@@ -41,12 +64,14 @@ export default function NewsEventClusters() {
 
   const load = useCallback(async () => {
     try {
-      const [clusterRows, reviewRows] = await Promise.all([
+      const [clusterRows, reviewRows, entityReviewRows] = await Promise.all([
         getNewsEventClusters(50),
         getPendingNewsEvidenceReviews(50),
+        getEntityLinkReviews(50),
       ]);
       setClusters(clusterRows);
       setReviews(reviewRows);
+      setEntityReviews(entityReviewRows);
       setError(null);
     } catch (loadError) {
       setError(errMsg(loadError));
@@ -62,7 +87,15 @@ export default function NewsEventClusters() {
     setBusy(`detail:${clusterId}`);
     try {
       const detail = await getNewsEventClusterDetail(clusterId);
+      const links = await getNewsEntityLinks(detail.members.map((member) => member.revision_id));
       setDetails((current) => ({ ...current, [clusterId]: detail }));
+      setEntityLinks((current) => {
+        const next = { ...current };
+        for (const revision of detail.members) {
+          next[revision.revision_id] = links.filter((link) => link.revision_id === revision.revision_id);
+        }
+        return next;
+      });
     } catch (loadError) {
       setError(errMsg(loadError));
     } finally {
@@ -135,6 +168,27 @@ export default function NewsEventClusters() {
     }
   };
 
+  const resolveEntityReview = async (review: EntityLinkReview, accept: boolean) => {
+    const entityId = reviewEntities[review.link.link_id] ?? review.proposed_entity_id;
+    const reason = reviewReasons[review.link.link_id]?.trim();
+    if (!reason || (accept && !entityId)) return;
+    const key = `entity-review:${review.link.link_id}:${accept ? "accept" : "reject"}`;
+    if (confirmAction !== key) {
+      setConfirmAction(key);
+      return;
+    }
+    setBusy(key);
+    try {
+      await resolveEntityLinkReview(review.link.link_id, accept ? entityId : null, accept, reason);
+      setConfirmAction(null);
+      await load();
+    } catch (reviewError) {
+      setError(errMsg(reviewError));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
     <div className="card">
       <div className="card-title flex items-center justify-between gap-2">
@@ -161,6 +215,53 @@ export default function NewsEventClusters() {
                     {busy === key ? "保存中…" : confirmAction === key ? "再次确认：已人工复核" : "标记为已人工复核"}
                   </button>
                 </div>
+              );
+            })}
+          </div>
+        )}
+
+        {entityReviews.length > 0 && (
+          <div className="space-y-2 rounded-lg border border-amber-300 bg-amber-50 p-3 dark:border-amber-800 dark:bg-amber-950/30">
+            <div className="font-medium text-amber-700 dark:text-amber-300">
+              有 {entityReviews.length} 个低置信实体关联等待人工审核；审核前不会进入 Agent 投资结论
+            </div>
+            {entityReviews.map((review) => {
+              const acceptKey = `entity-review:${review.link.link_id}:accept`;
+              const rejectKey = `entity-review:${review.link.link_id}:reject`;
+              return (
+                <details key={review.link.link_id} className="rounded border border-amber-200 p-2 dark:border-amber-900">
+                  <summary className="cursor-pointer">
+                    原文“{review.link.span_text}”存在歧义 · 置信度 {(review.link.confidence * 100).toFixed(1)}% · 展开选择
+                  </summary>
+                  <div className="mt-2 space-y-2">
+                    <select
+                      className="input w-full"
+                      value={reviewEntities[review.link.link_id] ?? review.proposed_entity_id ?? ""}
+                      onChange={(event) => setReviewEntities((current) => ({ ...current, [review.link.link_id]: event.target.value }))}
+                    >
+                      <option value="">选择正确主体</option>
+                      {review.link.candidates.map((candidate) => (
+                        <option key={candidate.entity_id} value={candidate.entity_id}>
+                          {candidate.canonical_name}（{ENTITY_KIND_LABEL[candidate.entity_kind]}，候选分 {(candidate.score * 100).toFixed(1)}%）
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      className="input w-full"
+                      placeholder="填写审核依据；将永久写入审计记录"
+                      value={reviewReasons[review.link.link_id] ?? ""}
+                      onChange={(event) => setReviewReasons((current) => ({ ...current, [review.link.link_id]: event.target.value }))}
+                    />
+                    <div className="flex gap-2">
+                      <button className="btn" disabled={!reviewReasons[review.link.link_id]?.trim()} onClick={() => resolveEntityReview(review, true)}>
+                        {busy === acceptKey ? "保存中…" : confirmAction === acceptKey ? "再次确认采用该主体" : "采用所选主体"}
+                      </button>
+                      <button className="btn-danger" disabled={!reviewReasons[review.link.link_id]?.trim()} onClick={() => resolveEntityReview(review, false)}>
+                        {busy === rejectKey ? "保存中…" : confirmAction === rejectKey ? "再次确认拒绝关联" : "拒绝全部候选"}
+                      </button>
+                    </div>
+                  </div>
+                </details>
               );
             })}
           </div>
@@ -211,6 +312,7 @@ export default function NewsEventClusters() {
                     <div className="space-y-2">
                       {detail.members.map((member) => {
                         const revision = detail.revisions.find((row) => row.revision_id === member.revision_id);
+                        const linkedEntities = entityLinks[member.revision_id] ?? [];
                         const splitKey = `split:${member.revision_id}`;
                         return (
                           <div key={member.revision_id} className="rounded border border-slate-200 p-2.5 dark:border-slate-800">
@@ -232,6 +334,41 @@ export default function NewsEventClusters() {
                               <span>时间 {(member.explanation.features.time_proximity * 100).toFixed(0)}%</span>
                               <span className="num break-all">{member.revision_id}</span>
                             </div>
+                            {linkedEntities.length > 0 && (
+                              <details className="mt-2 rounded bg-slate-50 p-2 dark:bg-slate-900/70">
+                                <summary className="cursor-pointer font-medium">
+                                  为什么关联到这些股票/实体（{linkedEntities.length}）
+                                </summary>
+                                <div className="mt-2 space-y-2">
+                                  {linkedEntities.map((link) => (
+                                    <div key={link.link_id} className="rounded border border-slate-200 p-2 dark:border-slate-800">
+                                      <div className="flex flex-wrap gap-2">
+                                        <span>原文：<mark className="rounded bg-amber-100 px-1 dark:bg-amber-900/50">{link.span_text}</mark></span>
+                                        <span>→ {link.final_entity_name ?? "尚未确定"}</span>
+                                        {link.final_entity_kind && <span className="muted">{ENTITY_KIND_LABEL[link.final_entity_kind]}</span>}
+                                        {link.listed_code && <span className="num">{link.listed_code}</span>}
+                                        <span className="num">置信度 {(link.confidence * 100).toFixed(1)}%</span>
+                                        <span className={link.eligible_for_agent ? "text-emerald-600" : "text-amber-600"}>
+                                          {link.eligible_for_agent ? "可供 Agent 使用" : "等待审核，Agent 已隔离"}
+                                        </span>
+                                      </div>
+                                      <div className="muted mt-1">{link.reasons.join("；")}</div>
+                                      {link.candidates.map((candidate) => (
+                                        <div key={candidate.entity_id} className="mt-1 text-[11px]">
+                                          候选：{candidate.canonical_name} · {(candidate.score * 100).toFixed(1)}%
+                                          {candidate.related_listed.map((related) => (
+                                            <span key={related.entity_id} className="ml-2">
+                                              关联上市主体 {related.name} {related.code}（{related.relation_path.join(" → ")}，{(related.confidence * 100).toFixed(0)}%）
+                                            </span>
+                                          ))}
+                                        </div>
+                                      ))}
+                                      <div className="num muted mt-1 break-all">证据修订：{link.evidence_revision_id} · 规则：{link.linker_version}</div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </details>
+                            )}
                             {detail.members.length > 1 && cluster.status === "active" && (
                               <button
                                 className="btn mt-2"

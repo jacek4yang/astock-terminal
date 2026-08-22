@@ -9,6 +9,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use astock_entity_linking::{EntityLinker, LinkStatus};
 use astock_news_intelligence::{canonicalize_url, NewsEventClusterer};
 use astock_security::{redact_text, UrlSecurityPolicy};
 use astock_storage::{
@@ -282,6 +283,7 @@ pub struct NewsIngestor {
     permits: Semaphore,
     last_good: DashMap<String, NewsPage>,
     storage: Option<Storage>,
+    entity_linker: Option<Arc<EntityLinker>>,
 }
 
 impl NewsIngestor {
@@ -305,12 +307,16 @@ impl NewsIngestor {
                 Mutex::new(ProviderRuntime::default()),
             );
         }
+        let entity_linker = storage
+            .as_ref()
+            .map(|storage| Arc::new(EntityLinker::new(storage.clone())));
         Ok(Self {
             providers,
             runtime,
             permits: Semaphore::new(MAX_CONCURRENT_PROVIDERS),
             last_good: DashMap::new(),
             storage,
+            entity_linker,
         })
     }
 
@@ -407,6 +413,38 @@ impl NewsIngestor {
                 .cmp(&left.published_at_ms.unwrap_or_default())
                 .then_with(|| left.rank.cmp(&right.rank))
         });
+        let mut entity_queries = BTreeSet::new();
+        if let Some(linker) = &self.entity_linker {
+            for query in [request.symbol.as_deref(), request.keyword.as_deref()]
+                .into_iter()
+                .flatten()
+                .map(str::trim)
+                .filter(|query| !query.is_empty())
+            {
+                if let Ok(ids) = linker.resolve_query(query).await {
+                    entity_queries.extend(ids);
+                }
+            }
+        }
+        if request.symbol.is_some() || request.keyword.is_some() {
+            let raw_queries = [request.symbol.as_deref(), request.keyword.as_deref()]
+                .into_iter()
+                .flatten()
+                .map(|query| query.trim().to_lowercase())
+                .filter(|query| !query.is_empty())
+                .collect::<Vec<_>>();
+            outcome.items.retain(|item| {
+                let text = format!("{} {}", item.title, item.summary).to_lowercase();
+                raw_queries.iter().any(|query| text.contains(query))
+                    || item.entity_links.iter().any(|link| {
+                        entity_queries.contains(&link.entity_id)
+                            || link.related_listed.iter().any(|related| {
+                                entity_queries.contains(&related.entity_id)
+                                    || raw_queries.iter().any(|query| query == &related.code)
+                            })
+                    })
+            });
+        }
         outcome
     }
 
@@ -658,6 +696,25 @@ impl NewsIngestor {
                             %error,
                             "news event clustering failed; archived revision remains available"
                         ),
+                    }
+                    if let Some(linker) = &self.entity_linker {
+                        match linker.link_revision(&saved.revision_id).await {
+                            Ok(links) => {
+                                item.entity_review_required = links
+                                    .iter()
+                                    .any(|link| link.status == LinkStatus::PendingReview);
+                                item.entity_links = links
+                                    .iter()
+                                    .filter_map(|link| link.agent_summary())
+                                    .collect();
+                            }
+                            Err(error) => tracing::warn!(
+                                provider = capabilities.provider_id,
+                                item = item.id,
+                                %error,
+                                "news entity linking failed; archived revision remains available"
+                            ),
+                        }
                     }
                 }
                 Err(error) => tracing::warn!(
@@ -1140,19 +1197,12 @@ fn parse_generic_page(
                 false,
             )
         })?;
-    let mut items = rows
+    let items = rows
         .iter()
         .take(request.limit.clamp(1, 200))
         .enumerate()
         .filter_map(|(index, raw)| normalize_generic_item(capabilities, raw, index + 1))
         .collect::<Vec<_>>();
-    if let Some(keyword) = request.keyword.as_deref().filter(|value| !value.is_empty()) {
-        let keyword = keyword.to_lowercase();
-        items.retain(|item| {
-            item.title.to_lowercase().contains(&keyword)
-                || item.summary.to_lowercase().contains(&keyword)
-        });
-    }
     let next_cursor = value
         .get("next_cursor")
         .and_then(Value::as_str)
@@ -1228,6 +1278,8 @@ fn normalize_generic_item(
         independent_source_count: 1,
         old_republication: false,
         cluster_explanation: None,
+        entity_links: Vec::new(),
+        entity_review_required: false,
         raw_payload: bounded_raw(raw),
     })
 }
@@ -1413,6 +1465,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn entity_linking_finds_brand_news_for_listed_parent_query() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open(StorageConfig::with_base_dir(temp.path())).unwrap();
+        let mut provider = FakeProvider::new("brand-news", 0, NewsTrustTier::LicensedMedia);
+        provider.title = "腾势发布新能源新车型".into();
+        let ingestor = NewsIngestor::new(vec![Arc::new(provider)], Some(storage)).unwrap();
+        let outcome = ingestor
+            .ingest(
+                NewsIngestRequest {
+                    keyword: Some("比亚迪".into()),
+                    limit: 10,
+                    ..Default::default()
+                },
+                None,
+            )
+            .await;
+        assert_eq!(outcome.items.len(), 1);
+        assert!(outcome.items[0]
+            .entity_links
+            .iter()
+            .any(|link| link.entity_id == "brand:denza"));
+        assert!(outcome.items[0].entity_links.iter().any(|link| link
+            .related_listed
+            .iter()
+            .any(|related| related.code == "002594" && related.eligible_for_agent)));
+    }
+
+    #[tokio::test]
     async fn transient_failure_retries_and_health_exposes_metrics() {
         let ingestor = NewsIngestor::new(
             vec![Arc::new(FakeProvider::new(
@@ -1524,7 +1604,7 @@ mod tests {
     }
 
     #[test]
-    fn generic_provider_contract_parses_offline_fixture_with_provenance() {
+    fn generic_provider_contract_preserves_candidates_for_post_link_filtering() {
         let fixture: Value =
             serde_json::from_str(include_str!("../../tests/fixtures/news/generic_feed.json"))
                 .unwrap();
@@ -1540,7 +1620,7 @@ mod tests {
             &fixture,
         )
         .unwrap();
-        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items.len(), 2);
         assert_eq!(page.next_cursor.as_deref(), Some("fixture-cursor-2"));
         assert_eq!(page.items[0].license, "fixture-license");
         assert_eq!(page.items[0].parser_version, "fixture-v1");

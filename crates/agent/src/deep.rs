@@ -130,7 +130,7 @@ impl AgentTool for ResearchNews {
     }
 
     fn description(&self) -> &'static str {
-        "通过可插拔多源资讯层并行研究公司公告、授权媒体与公共快讯，并在已配置时用问财补充个股事件。每个来源独立限流、游标、熔断、重试和持久化失败回退；输出明确区分一手披露、授权媒体、公共聚合快讯和搜索线索"
+        "通过可插拔多源资讯层并行研究公司公告、授权媒体与公共快讯，并用证据化实体链接识别代码、公司、子公司、品牌、行业、商品和政策。只有达到阈值且有精确修订证据的映射会进入结果；每个来源独立限流、游标、熔断、重试和持久化失败回退"
     }
 
     fn parameters_schema(&self) -> Value {
@@ -207,13 +207,9 @@ impl AgentTool for ResearchNews {
         if args.important_only.unwrap_or(false) {
             batch.items.retain(|item| item.important);
         }
-        if let Some(keyword) = keyword {
-            let keyword = keyword.to_lowercase();
-            batch.items.retain(|item| {
-                item.title.to_lowercase().contains(&keyword)
-                    || item.summary.to_lowercase().contains(&keyword)
-            });
-        }
+        // Filtering happens after evidence-backed entity linking in the
+        // provider registry, so aliases, brands and subsidiaries are not
+        // discarded by a second raw substring pass here.
         batch.items.truncate(limit);
         let headlines = batch
             .items

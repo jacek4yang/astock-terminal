@@ -429,6 +429,95 @@ pub(crate) const MIGRATIONS: &[(u32, &str)] = &[
         ON agent_conclusion_reviews(status, created_at DESC);
     "#,
     ),
+    (
+        10,
+        r#"
+    -- Unified entity master and explainable document entity-link decisions.
+    CREATE TABLE IF NOT EXISTS research_entities (
+        entity_id          TEXT PRIMARY KEY,
+        entity_type        TEXT NOT NULL,
+        canonical_name     TEXT NOT NULL,
+        listed_code        TEXT,
+        market             TEXT,
+        parent_entity_id   TEXT,
+        source_name        TEXT NOT NULL,
+        source_url         TEXT,
+        valid_from         INTEGER,
+        valid_to           INTEGER,
+        metadata_json      TEXT NOT NULL DEFAULT '{}',
+        created_at         INTEGER NOT NULL,
+        updated_at         INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_research_entities_code
+        ON research_entities(listed_code);
+    CREATE INDEX IF NOT EXISTS idx_research_entities_name
+        ON research_entities(canonical_name);
+
+    CREATE TABLE IF NOT EXISTS research_entity_names (
+        name_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity_id       TEXT NOT NULL REFERENCES research_entities(entity_id),
+        name_text       TEXT NOT NULL,
+        normalized_name TEXT NOT NULL,
+        name_type       TEXT NOT NULL,
+        valid_from      INTEGER,
+        valid_to        INTEGER,
+        source_name     TEXT NOT NULL,
+        source_url      TEXT,
+        UNIQUE(entity_id, normalized_name, name_type, valid_from, valid_to)
+    );
+    CREATE INDEX IF NOT EXISTS idx_research_entity_names_normalized
+        ON research_entity_names(normalized_name);
+
+    CREATE TABLE IF NOT EXISTS research_entity_relations (
+        relation_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        from_entity_id    TEXT NOT NULL REFERENCES research_entities(entity_id),
+        to_entity_id      TEXT NOT NULL REFERENCES research_entities(entity_id),
+        relation_type     TEXT NOT NULL,
+        confidence        REAL NOT NULL,
+        evidence_revision_id TEXT,
+        source_name       TEXT NOT NULL,
+        source_url        TEXT,
+        valid_from        INTEGER,
+        valid_to          INTEGER,
+        status            TEXT NOT NULL DEFAULT 'accepted',
+        created_at        INTEGER NOT NULL,
+        UNIQUE(from_entity_id,to_entity_id,relation_type,source_name)
+    );
+
+    CREATE TABLE IF NOT EXISTS document_entity_links (
+        link_id             TEXT PRIMARY KEY,
+        revision_id         TEXT NOT NULL REFERENCES document_revisions(revision_id),
+        span_start          INTEGER NOT NULL,
+        span_end            INTEGER NOT NULL,
+        span_text           TEXT NOT NULL,
+        candidates_json     TEXT NOT NULL,
+        final_entity_id     TEXT,
+        confidence          REAL NOT NULL,
+        explanation_json    TEXT NOT NULL,
+        linker_version      TEXT NOT NULL,
+        evidence_revision_id TEXT NOT NULL,
+        status              TEXT NOT NULL,
+        proposed_by_model   INTEGER NOT NULL DEFAULT 0,
+        created_at          INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_document_entity_links_revision
+        ON document_entity_links(revision_id,linker_version,span_start);
+    CREATE INDEX IF NOT EXISTS idx_document_entity_links_review
+        ON document_entity_links(status,created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS entity_link_reviews (
+        review_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        link_id          TEXT NOT NULL REFERENCES document_entity_links(link_id),
+        proposed_entity_id TEXT,
+        decision         TEXT NOT NULL DEFAULT 'pending',
+        reason           TEXT,
+        reviewer         TEXT,
+        created_at       INTEGER NOT NULL,
+        reviewed_at      INTEGER,
+        UNIQUE(link_id)
+    );
+    "#,
+    ),
 ];
 
 /// Current unix time in seconds. All timestamps in this crate are stored as
@@ -571,6 +660,11 @@ mod tests {
             "event_cluster_decisions",
             "event_fact_conflicts",
             "agent_conclusion_reviews",
+            "research_entities",
+            "research_entity_names",
+            "research_entity_relations",
+            "document_entity_links",
+            "entity_link_reviews",
         ] {
             let count: i64 = conn
                 .query_row(

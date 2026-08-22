@@ -386,6 +386,67 @@ export interface AgentConclusionReview {
   reviewed_at: number | null;
 }
 
+export type EntityKind =
+  | "legal_entity"
+  | "listed_security"
+  | "subsidiary"
+  | "brand"
+  | "person"
+  | "product"
+  | "industry"
+  | "commodity"
+  | "region"
+  | "policy";
+
+export interface RelatedListedEntity {
+  entity_id: string;
+  code: string;
+  name: string;
+  relation_path: string[];
+  confidence: number;
+  eligible_for_agent: boolean;
+}
+
+export interface EntityLinkCandidate {
+  entity_id: string;
+  canonical_name: string;
+  entity_kind: EntityKind;
+  listed_code: string | null;
+  matched_name_type: string;
+  score: number;
+  reasons: string[];
+  related_listed: RelatedListedEntity[];
+}
+
+export interface DocumentEntityLink {
+  link_id: string;
+  revision_id: string;
+  span_start: number;
+  span_end: number;
+  span_text: string;
+  candidates: EntityLinkCandidate[];
+  final_entity_id: string | null;
+  final_entity_name: string | null;
+  final_entity_kind: EntityKind | null;
+  listed_code: string | null;
+  confidence: number;
+  reasons: string[];
+  linker_version: string;
+  evidence_revision_id: string;
+  status: "accepted" | "pending_review" | "rejected";
+  proposed_by_model: boolean;
+  eligible_for_agent: boolean;
+}
+
+export interface EntityLinkReview {
+  review_id: number;
+  link: DocumentEntityLink;
+  proposed_entity_id: string | null;
+  decision: string;
+  reason: string | null;
+  created_at: number;
+}
+
 export const getNewsProviderHealth = () =>
   cmd<NewsProviderHealthItem[]>("get_news_provider_health");
 
@@ -433,6 +494,24 @@ export const resolveNewsEvidenceReview = (
   task_id: taskId,
   conclusion_key: conclusionKey,
   triggering_revision: triggeringRevision,
+});
+
+export const getNewsEntityLinks = (revisionIds: string[]) =>
+  cmd<DocumentEntityLink[]>("get_news_entity_links", { revision_ids: revisionIds });
+
+export const getEntityLinkReviews = (limit = 50) =>
+  cmd<EntityLinkReview[]>("get_entity_link_reviews", { limit });
+
+export const resolveEntityLinkReview = (
+  linkId: string,
+  entityId: string | null,
+  accept: boolean,
+  reason: string,
+) => cmd<boolean>("resolve_entity_link_review", {
+  link_id: linkId,
+  entity_id: entityId,
+  accept,
+  reason,
 });
 
 // ==================== 分析引擎 ====================
