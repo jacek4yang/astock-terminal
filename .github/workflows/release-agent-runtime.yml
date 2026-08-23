@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/release-agent-runtime.yml
+      - .github/release-manifests/v5.0.3-agent-runtime.1.json
       - .github/release-requests/v5.0.3-agent-runtime.1.md
       - docs/releases/v5.0.3-agent-runtime.1.md
       - scripts/release-agent-runtime.ps1
@@ -12,6 +13,7 @@ on:
     branches:
       - main
     paths:
+      - .github/release-manifests/v5.0.3-agent-runtime.1.json
       - .github/release-requests/v5.0.3-agent-runtime.1.md
 
 permissions:
@@ -22,14 +24,78 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RELEASE_TAG: v5.0.3-agent-runtime.1
-  RELEASE_TARGET_SHA: 159e3fbecb045b72e858aa631b58be9526941bbc
-  RELEASE_NOTES: docs/releases/v5.0.3-agent-runtime.1.md
+  RELEASE_MANIFEST: .github/release-manifests/v5.0.3-agent-runtime.1.json
   CARGO_TERM_COLOR: always
 
 jobs:
+  release-metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.manifest.outputs.tag }}
+      source_commit: ${{ steps.manifest.outputs.source_commit }}
+      application_version: ${{ steps.manifest.outputs.application_version }}
+      release_notes: ${{ steps.manifest.outputs.release_notes }}
+      artifact_name: ${{ steps.manifest.outputs.artifact_name }}
+      platform: ${{ steps.manifest.outputs.platform }}
+      manifest_sha256: ${{ steps.manifest.outputs.manifest_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: manifest
+        name: Validate immutable release manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$RELEASE_MANIFEST"
+          jq -e '
+            .schema_version == 1 and
+            (.tag | test("^v[0-9]+\\.[0-9]+\\.[0-9]+-[A-Za-z0-9._-]+$")) and
+            (.source_commit | test("^[0-9a-f]{40}$")) and
+            (.application_version | test("^[0-9]+\\.[0-9]+\\.[0-9]+$")) and
+            .prerelease == true and
+            (.release_notes | type == "string" and length > 0) and
+            (.artifact_name | test("^[A-Za-z0-9._-]+$")) and
+            .platform == "windows-x86_64"
+          ' "$RELEASE_MANIFEST" >/dev/null
+
+          tag="$(jq -r .tag "$RELEASE_MANIFEST")"
+          source_commit="$(jq -r .source_commit "$RELEASE_MANIFEST")"
+          application_version="$(jq -r .application_version "$RELEASE_MANIFEST")"
+          release_notes="$(jq -r .release_notes "$RELEASE_MANIFEST")"
+          artifact_name="$(jq -r .artifact_name "$RELEASE_MANIFEST")"
+          platform="$(jq -r .platform "$RELEASE_MANIFEST")"
+          manifest_sha256="$(sha256sum "$RELEASE_MANIFEST" | awk '{print $1}')"
+
+          case "$release_notes" in
+            /*|*..*) echo "release_notes must be a repository-relative safe path" >&2; exit 1 ;;
+          esac
+          test -f "$release_notes"
+          grep -Fq "$tag" "$release_notes"
+          grep -Fq "$source_commit" "$release_notes"
+
+          git fetch origin "+refs/heads/main:refs/remotes/origin/main" --force
+          git cat-file -e "$source_commit^{commit}"
+          git merge-base --is-ancestor "$source_commit" origin/main
+
+          {
+            echo "tag=$tag"
+            echo "source_commit=$source_commit"
+            echo "application_version=$application_version"
+            echo "release_notes=$release_notes"
+            echo "artifact_name=$artifact_name"
+            echo "platform=$platform"
+            echo "manifest_sha256=$manifest_sha256"
+          } >> "$GITHUB_OUTPUT"
+
   automation-lint:
+    needs: release-metadata
     runs-on: windows-2022
+    env:
+      RELEASE_TAG: ${{ needs.release-metadata.outputs.tag }}
+      RELEASE_TARGET_SHA: ${{ needs.release-metadata.outputs.source_commit }}
+      RELEASE_NOTES: ${{ needs.release-metadata.outputs.release_notes }}
+      RELEASE_MANIFEST_SHA256: ${{ needs.release-metadata.outputs.manifest_sha256 }}
     steps:
       - uses: actions/checkout@v4
       - name: Parse fallback publisher and verify release identity
@@ -47,39 +113,51 @@ jobs:
             throw "PowerShell fallback publisher has syntax errors"
           }
 
-          $documents = @(
-            Get-Content ".github/workflows/release-agent-runtime.yml" -Raw,
-            Get-Content ".github/release-requests/v5.0.3-agent-runtime.1.md" -Raw,
-            Get-Content "docs/releases/v5.0.3-agent-runtime.1.md" -Raw,
-            Get-Content "scripts/release-agent-runtime.ps1" -Raw
-          )
-          foreach ($document in $documents) {
+          $manifest = Get-Content $env:RELEASE_MANIFEST -Raw | ConvertFrom-Json
+          if ($manifest.tag -ne $env:RELEASE_TAG) { throw "manifest tag output mismatch" }
+          if ($manifest.source_commit -ne $env:RELEASE_TARGET_SHA) { throw "manifest source output mismatch" }
+          if ($manifest.release_notes -ne $env:RELEASE_NOTES) { throw "manifest notes output mismatch" }
+          $manifestHash = (Get-FileHash $env:RELEASE_MANIFEST -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($manifestHash -ne $env:RELEASE_MANIFEST_SHA256) { throw "manifest hash output mismatch" }
+
+          foreach ($path in @(
+            ".github/release-requests/v5.0.3-agent-runtime.1.md",
+            $env:RELEASE_NOTES
+          )) {
+            $document = Get-Content $path -Raw
             if (-not $document.Contains($env:RELEASE_TAG)) {
-              throw "release automation document does not contain $env:RELEASE_TAG"
+              throw "$path does not contain $env:RELEASE_TAG"
             }
             if (-not $document.Contains($env:RELEASE_TARGET_SHA)) {
-              throw "release automation document does not contain $env:RELEASE_TARGET_SHA"
+              throw "$path does not contain $env:RELEASE_TARGET_SHA"
             }
           }
 
+          $script = Get-Content "scripts/release-agent-runtime.ps1" -Raw
+          if (-not $script.Contains($env:RELEASE_MANIFEST)) {
+            throw "fallback publisher does not consume $env:RELEASE_MANIFEST"
+          }
+
   security-audit:
+    needs: release-metadata
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.RELEASE_TARGET_SHA }}
+          ref: ${{ needs.release-metadata.outputs.source_commit }}
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   evaluation-gate:
+    needs: release-metadata
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.RELEASE_TARGET_SHA }}
+          ref: ${{ needs.release-metadata.outputs.source_commit }}
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
       - name: Run deterministic research evaluation gate
@@ -100,11 +178,18 @@ jobs:
           retention-days: 14
 
   windows-package:
+    needs: release-metadata
     runs-on: windows-2022
+    env:
+      RELEASE_TAG: ${{ needs.release-metadata.outputs.tag }}
+      RELEASE_TARGET_SHA: ${{ needs.release-metadata.outputs.source_commit }}
+      APPLICATION_VERSION: ${{ needs.release-metadata.outputs.application_version }}
+      RELEASE_PLATFORM: ${{ needs.release-metadata.outputs.platform }}
+      RELEASE_MANIFEST_SHA256: ${{ needs.release-metadata.outputs.manifest_sha256 }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.RELEASE_TARGET_SHA }}
+          ref: ${{ needs.release-metadata.outputs.source_commit }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@1.88.0
         with:
@@ -131,13 +216,16 @@ jobs:
           $package = Get-Content ui/package.json -Raw | ConvertFrom-Json
           $lock = Get-Content ui/package-lock.json -Raw | ConvertFrom-Json
           $cargo = Get-Content Cargo.toml -Raw
-          if ($tauri.version -ne "5.0.3") { throw "tauri version is $($tauri.version), expected 5.0.3" }
+          if ($tauri.version -ne $env:APPLICATION_VERSION) {
+            throw "tauri version is $($tauri.version), expected $env:APPLICATION_VERSION"
+          }
           if ($package.version -ne $tauri.version) { throw "package.json version does not match tauri.conf.json" }
           if ($lock.version -ne $tauri.version -or $lock.packages."".version -ne $tauri.version) {
             throw "package-lock.json version does not match tauri.conf.json"
           }
-          if ($cargo -notmatch '(?s)\[workspace\.package\].*?version\s*=\s*"5\.0\.3"') {
-            throw "Cargo workspace version does not match 5.0.3"
+          $escapedVersion = [regex]::Escape($env:APPLICATION_VERSION)
+          if ($cargo -notmatch "(?s)\[workspace\.package\].*?version\s*=\s*`"$escapedVersion`"") {
+            throw "Cargo workspace version does not match $env:APPLICATION_VERSION"
           }
           if (-not $env:RELEASE_TAG.StartsWith("v$($tauri.version)-")) {
             throw "release tag $env:RELEASE_TAG is not a prerelease of v$($tauri.version)"
@@ -180,8 +268,9 @@ jobs:
           @(
             "release_tag=$env:RELEASE_TAG",
             "source_commit=$env:RELEASE_TARGET_SHA",
-            "application_version=5.0.3",
-            "platform=windows-x86_64"
+            "application_version=$env:APPLICATION_VERSION",
+            "platform=$env:RELEASE_PLATFORM",
+            "release_manifest_sha256=$env:RELEASE_MANIFEST_SHA256"
           ) | Set-Content dist/BUILD-METADATA.txt -Encoding ascii
 
           Get-ChildItem dist -File |
@@ -193,7 +282,7 @@ jobs:
           Get-Content dist/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: astock-terminal-v5.0.3-agent-runtime.1-windows-x86_64
+          name: ${{ needs.release-metadata.outputs.artifact_name }}
           path: dist/
           if-no-files-found: error
           retention-days: 14
@@ -201,6 +290,7 @@ jobs:
   publish:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs:
+      - release-metadata
       - automation-lint
       - security-audit
       - evaluation-gate
@@ -208,23 +298,38 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: ${{ needs.release-metadata.outputs.tag }}
+      RELEASE_TARGET_SHA: ${{ needs.release-metadata.outputs.source_commit }}
+      RELEASE_NOTES: ${{ needs.release-metadata.outputs.release_notes }}
+      RELEASE_ARTIFACT: ${{ needs.release-metadata.outputs.artifact_name }}
+      APPLICATION_VERSION: ${{ needs.release-metadata.outputs.application_version }}
+      RELEASE_PLATFORM: ${{ needs.release-metadata.outputs.platform }}
+      RELEASE_MANIFEST_SHA256: ${{ needs.release-metadata.outputs.manifest_sha256 }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
-          name: astock-terminal-v5.0.3-agent-runtime.1-windows-x86_64
+          name: ${{ needs.release-metadata.outputs.artifact_name }}
           path: dist
       - name: Verify immutable release target and checksums
         shell: bash
         run: |
           set -euo pipefail
+          test -f "$RELEASE_MANIFEST"
           test -f "$RELEASE_NOTES"
           test -f dist/SHA256SUMS
           test -f dist/BUILD-METADATA.txt
+          actual_manifest_sha256="$(sha256sum "$RELEASE_MANIFEST" | awk '{print $1}')"
+          test "$actual_manifest_sha256" = "$RELEASE_MANIFEST_SHA256"
           sed -i 's/\r$//' dist/SHA256SUMS dist/BUILD-METADATA.txt
+          grep -Fx "release_tag=$RELEASE_TAG" dist/BUILD-METADATA.txt
           grep -Fx "source_commit=$RELEASE_TARGET_SHA" dist/BUILD-METADATA.txt
+          grep -Fx "application_version=$APPLICATION_VERSION" dist/BUILD-METADATA.txt
+          grep -Fx "platform=$RELEASE_PLATFORM" dist/BUILD-METADATA.txt
+          grep -Fx "release_manifest_sha256=$RELEASE_MANIFEST_SHA256" dist/BUILD-METADATA.txt
           (cd dist && sha256sum --check SHA256SUMS)
 
           git fetch origin "+refs/heads/main:refs/remotes/origin/main" --force
