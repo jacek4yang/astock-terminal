@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::error::{Error, Result};
 use crate::model::{Edge, Node, NodeKind, Relation};
-use crate::store::{now_secs, GraphStore};
+use crate::store::GraphStore;
 
 /// The embedded seed graph JSON.
 pub const SEED_GRAPH_JSON: &str = include_str!("../data/seed_graph.json");
@@ -87,8 +87,9 @@ pub fn parse_seed() -> Result<(Vec<Node>, Vec<Edge>)> {
             source_name: source.name.clone(),
             source_url: source.url.clone(),
             confidence,
-            // Seed relations describe the current industry structure.
-            valid_from: now_secs(),
+            // The bundled source list has no machine-verifiable business
+            // start date. Store unknown/always (0), never process startup.
+            valid_from: 0,
             valid_to: None,
         });
     }

@@ -1,0 +1,15 @@
+[
+  {"id":"code","text":"600519发布年度报告","event_time_utc":1800000000,"expected":["listed:cn:600519"],"kind":"listed_security"},
+  {"id":"legal","text":"宁德时代新能源科技股份有限公司拟扩建动力电池产能","event_time_utc":1800000000,"expected":["listed:cn:300750"],"kind":"listed_security"},
+  {"id":"english","text":"CATL宣布欧洲电池工厂新计划","event_time_utc":1800000000,"expected":["listed:cn:300750"],"kind":"listed_security"},
+  {"id":"subsidiary","text":"德国时代新能源在欧洲电池工厂扩产","event_time_utc":1800000000,"expected":["subsidiary:catl-germany"],"kind":"subsidiary"},
+  {"id":"brand","text":"腾势新车型交付量创新高","event_time_utc":1800000000,"expected":["brand:denza"],"kind":"brand"},
+  {"id":"product","text":"Apple发布新一代iPhone，消费电子供应链受关注","event_time_utc":1800000000,"expected":["legal:us:apple","product:iphone"],"kind":"legal_entity"},
+  {"id":"industry","text":"集成电路行业设备订单回暖","event_time_utc":1800000000,"expected":["industry:semiconductor"],"kind":"industry"},
+  {"id":"commodity","text":"电解铜价格上涨带动有色板块","event_time_utc":1800000000,"expected":["commodity:copper"],"kind":"commodity"},
+  {"id":"policy","text":"双碳政策推动新能源投资","event_time_utc":1800000000,"expected":["policy:carbon-neutral"],"kind":"policy"},
+  {"id":"rename-valid","text":"江南嘉捷披露重大资产重组进展","event_time_utc":1500000000,"expected":["listed:cn:601360"],"kind":"listed_security"},
+  {"id":"rename-expired","text":"江南嘉捷今日披露网络安全业务进展","event_time_utc":1800000000,"expected":[],"kind":"listed_security"},
+  {"id":"ambiguous-auto","text":"长城汽车新能源SUV销量增长","event_time_utc":1800000000,"expected":["listed:cn:601633"],"kind":"listed_security"},
+  {"id":"ambiguous-wine","text":"长城葡萄酒酒庄推出新品","event_time_utc":1800000000,"expected":["listed:cn:600084"],"kind":"listed_security"}
+]

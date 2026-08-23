@@ -1,0 +1,19 @@
+[package]
+name = "astock-disclosure"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+astock-storage = { path = "../storage" }
+chrono.workspace = true
+regex.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

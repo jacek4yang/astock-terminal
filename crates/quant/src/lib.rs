@@ -36,6 +36,7 @@ pub mod error;
 pub mod leadlag;
 pub mod matrix;
 pub mod regime;
+pub mod research;
 pub mod returns;
 pub mod simulation;
 pub mod timeseries;

@@ -6,7 +6,8 @@
 //! tools); this module is a thin argument-validation + error-mapping layer.
 
 use astock_agent::deep::{
-    impact_report_json, market_regime_json, relationship_graph_json, run_backtest_json,
+    impact_report_json, market_regime_json, quant_research_json, relationship_graph_json,
+    run_backtest_json, QuantCancellationCheck, QuantProgressReporter,
 };
 use astock_agent::AgentError;
 use astock_backtest::data::PriceSeries;
@@ -20,15 +21,17 @@ use astock_backtest::strategies::{strategy_meta, ParamError};
 use astock_core::{Adjust, KlinePeriod, Symbol};
 use astock_graph::{Edge, Engine as GraphEngine, Event, Node, NodeKind, Relation};
 use astock_market_data::{DataProvider, MarketData};
+use astock_quant::research::{ResearchConfig, ResearchProgress, ResearchSnapshot};
 use astock_trading_rules::{RuleSet, TradeSide};
 use serde_json::{json, Value};
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::State;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::CmdError;
-use crate::state::AppState;
+use crate::state::{AppState, QuantResearchJobSnapshot};
 
 /// Current unix time in seconds.
 fn now_secs() -> i64 {
@@ -46,6 +49,7 @@ fn now_millis() -> i64 {
 }
 
 static BACKTEST_JOB_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static QUANT_JOB_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 fn next_backtest_job_id() -> String {
     format!(
@@ -107,6 +111,126 @@ pub async fn graph_subgraph(
     }))
 }
 
+fn next_quant_job_id() -> String {
+    format!(
+        "quant-{}-{}",
+        now_millis(),
+        QUANT_JOB_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// Rebuild the graph for separate business-valid and system-knowledge clocks.
+/// Optional center/hops filtering never changes the global reproducible
+/// snapshot id; it only limits the UI payload.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn graph_as_of(
+    state: State<'_, AppState>,
+    business_time: i64,
+    knowledge_time: i64,
+    symbol_or_node: Option<String>,
+    hops: Option<u32>,
+) -> Result<Value, CmdError> {
+    let requested_query = symbol_or_node
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if let Some(query) = requested_query.as_deref() {
+        ensure_graph_company(&state, query).await?;
+    }
+    let mut snapshot = state
+        .graph
+        .graph_as_of(business_time, knowledge_time)
+        .await?;
+    let mut center = None;
+    let hops = hops.unwrap_or(2).clamp(1, 3);
+    if let Some(query) = requested_query.as_deref() {
+        let node = state
+            .graph
+            .find_node(query)
+            .await?
+            .ok_or_else(|| CmdError::new("not_found", format!("图谱节点不存在：{query}")))?;
+        center = Some(node.id.clone());
+        let mut visited = HashSet::from([node.id.clone()]);
+        let mut queue = VecDeque::from([(node.id, 0_u32)]);
+        while let Some((current, depth)) = queue.pop_front() {
+            if depth >= hops {
+                continue;
+            }
+            for edge in &snapshot.edges {
+                let next = if edge.src == current {
+                    Some(&edge.dst)
+                } else if edge.dst == current {
+                    Some(&edge.src)
+                } else {
+                    None
+                };
+                if let Some(next) = next {
+                    if visited.insert(next.clone()) {
+                        queue.push_back((next.clone(), depth + 1));
+                    }
+                }
+            }
+        }
+        snapshot
+            .edges
+            .retain(|edge| visited.contains(&edge.src) && visited.contains(&edge.dst));
+        snapshot.nodes.retain(|node| visited.contains(&node.id));
+    }
+    let mut value = serde_json::to_value(snapshot)
+        .map_err(|error| CmdError::new("engine", format!("serialize graph snapshot: {error}")))?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("center".into(), json!(center));
+        object.insert("hops".into(), json!(hops));
+    }
+    Ok(value)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn graph_history_bounds(
+    state: State<'_, AppState>,
+) -> Result<astock_graph::GraphHistoryBounds, CmdError> {
+    Ok(state.graph.graph_history_bounds().await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn graph_edge_timeline(
+    state: State<'_, AppState>,
+    identity_id: String,
+) -> Result<Vec<astock_graph::EdgeRevision>, CmdError> {
+    if identity_id.trim().is_empty() {
+        return Err(CmdError::new("invalid_param", "关系身份不能为空"));
+    }
+    Ok(state.graph.edge_timeline(identity_id.trim()).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn graph_snapshot_get(
+    state: State<'_, AppState>,
+    snapshot_id: String,
+) -> Result<Option<astock_graph::GraphSnapshot>, CmdError> {
+    Ok(state.graph.graph_snapshot(snapshot_id.trim()).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn graph_snapshot_diff(
+    state: State<'_, AppState>,
+    left_business_time: i64,
+    left_knowledge_time: i64,
+    right_business_time: i64,
+    right_knowledge_time: i64,
+) -> Result<astock_graph::GraphSnapshotDiff, CmdError> {
+    Ok(state
+        .graph
+        .compare_graph_snapshots(
+            left_business_time,
+            left_knowledge_time,
+            right_business_time,
+            right_knowledge_time,
+        )
+        .await?)
+}
+
 /// Propagate an event (e.g. 铜 +10%) through the supply-chain graph:
 /// 一级受益/受损、二级与潜在映射，每条含逻辑链、滞后与置信度。
 #[tauri::command(rename_all = "snake_case")]
@@ -155,6 +279,318 @@ pub async fn relationship_graph(
     relationship_graph_json(&*state.market, &symbols, window)
         .await
         .map_err(agent_err)
+}
+
+/// Start a Quant Lab job in the background. There is deliberately no hard
+/// timeout: the user gets an ETA and may cancel cooperatively at any point.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn quant_research_start(
+    state: State<'_, AppState>,
+    config: ResearchConfig,
+) -> Result<QuantResearchJobSnapshot, CmdError> {
+    if config.symbols.len() < 2 || config.symbols.len() > 50 {
+        return Err(CmdError::new(
+            "invalid_param",
+            "量化研究股票池需包含 2-50 个证券代码",
+        ));
+    }
+    let unique: HashSet<&str> = config.symbols.iter().map(String::as_str).collect();
+    if unique.len() != config.symbols.len() {
+        return Err(CmdError::new("invalid_param", "股票池中存在重复代码"));
+    }
+    let running = state
+        .quant_research
+        .jobs
+        .lock()
+        .expect("quant jobs poisoned")
+        .values()
+        .filter(|job| job.running)
+        .count();
+    if running >= 2 {
+        return Err(CmdError::new(
+            "busy",
+            "已有两个量化研究任务在后台运行，请等待或取消其中一个",
+        ));
+    }
+
+    let job_id = next_quant_job_id();
+    let now = now_secs();
+    let snapshot = QuantResearchJobSnapshot {
+        job_id: job_id.clone(),
+        running: true,
+        status: "running".into(),
+        phase: "等待获取行情".into(),
+        progress: 0,
+        done_pairs: 0,
+        total_pairs: 0,
+        current_pair: None,
+        effective_observations: 0,
+        fetched_series: 0,
+        total_series: config.symbols.len(),
+        estimated_remaining_seconds: None,
+        recent_logs: vec![format!("任务 {job_id} 已创建；无固定超时，可随时取消")],
+        result: None,
+        error: None,
+        started_at: now,
+        updated_at: now,
+    };
+    state
+        .quant_research
+        .jobs
+        .lock()
+        .expect("quant jobs poisoned")
+        .insert(job_id.clone(), snapshot.clone());
+    let token = CancellationToken::new();
+    state
+        .quant_research
+        .cancels
+        .lock()
+        .expect("quant cancels poisoned")
+        .insert(job_id.clone(), token.clone());
+    persist_quant_job(&state.storage, &snapshot, None).await?;
+
+    let market = state.market.clone();
+    let storage = state.storage.clone();
+    let jobs = state.quant_research.clone();
+    let spawned_job_id = job_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let progress_jobs = jobs.clone();
+        let progress_job_id = spawned_job_id.clone();
+        let progress: QuantProgressReporter = Arc::new(move |update: ResearchProgress| {
+            let now = now_secs();
+            let mut guard = progress_jobs.jobs.lock().expect("quant jobs poisoned");
+            let Some(job) = guard.get_mut(&progress_job_id) else {
+                return;
+            };
+            let fetching = update.phase == "获取版本化行情";
+            if fetching {
+                job.fetched_series = job.fetched_series.max(update.done_pairs);
+                job.total_series = update.total_pairs;
+                job.progress = update
+                    .done_pairs
+                    .saturating_mul(25)
+                    .checked_div(update.total_pairs)
+                    .unwrap_or(0)
+                    .min(25) as u8;
+            } else {
+                job.done_pairs = update.done_pairs;
+                job.total_pairs = update.total_pairs;
+                job.progress = (25
+                    + update
+                        .done_pairs
+                        .saturating_mul(70)
+                        .checked_div(update.total_pairs)
+                        .unwrap_or(0)
+                        .min(70)) as u8;
+            }
+            job.phase = update.phase;
+            job.current_pair = update.current_pair;
+            job.effective_observations = update.effective_observations;
+            job.updated_at = now;
+            let completed_units = if fetching {
+                job.fetched_series
+            } else {
+                job.done_pairs
+            };
+            let total_units = if fetching {
+                job.total_series
+            } else {
+                job.total_pairs
+            };
+            job.estimated_remaining_seconds =
+                if completed_units > 0 && total_units > completed_units {
+                    let elapsed = (now - job.started_at).max(1) as u64;
+                    Some(
+                        elapsed.saturating_mul((total_units - completed_units) as u64)
+                            / completed_units as u64,
+                    )
+                } else {
+                    None
+                };
+            if job.recent_logs.last() != Some(&update.message) {
+                job.recent_logs.push(update.message);
+                if job.recent_logs.len() > 80 {
+                    job.recent_logs.drain(0..job.recent_logs.len() - 80);
+                }
+            }
+        });
+        let cancel_token = token.clone();
+        let cancel: QuantCancellationCheck = Arc::new(move || cancel_token.is_cancelled());
+        let outcome = quant_research_json(&*market, &storage, config, Some(progress), cancel).await;
+        let terminal = {
+            let mut guard = jobs.jobs.lock().expect("quant jobs poisoned");
+            let job = guard
+                .get_mut(&spawned_job_id)
+                .expect("quant job disappeared while running");
+            job.running = false;
+            job.updated_at = now_secs();
+            job.estimated_remaining_seconds = Some(0);
+            match outcome {
+                Ok(result) => {
+                    job.status = "completed".into();
+                    job.phase = "研究完成，可展开查看全部检验与稳健性切片".into();
+                    job.progress = 100;
+                    job.done_pairs = result.results.len();
+                    job.total_pairs = result.budget.executed_pairs;
+                    job.recent_logs.push(format!(
+                        "快照 {} 已保存，共 {} 个有效关系",
+                        result.snapshot_id,
+                        result.results.len()
+                    ));
+                    job.result = serde_json::to_value(result).ok();
+                }
+                Err(_error) if token.is_cancelled() => {
+                    job.status = "cancelled".into();
+                    job.phase = "已由用户取消，已完成的上游缓存仍保留".into();
+                    job.error = Some("用户取消".into());
+                    job.recent_logs.push("任务已安全取消".into());
+                }
+                Err(error) => {
+                    job.status = "failed".into();
+                    job.phase = "研究失败，可复制错误用于诊断".into();
+                    job.error = Some(error.to_string());
+                    job.recent_logs.push(format!("错误：{error}"));
+                }
+            }
+            job.clone()
+        };
+        jobs.cancels
+            .lock()
+            .expect("quant cancels poisoned")
+            .remove(&spawned_job_id);
+        let snapshot_id = terminal
+            .result
+            .as_ref()
+            .and_then(|value| value.get("snapshot_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if let Err(error) = persist_quant_job(&storage, &terminal, snapshot_id).await {
+            tracing::warn!(%error, "failed to persist terminal quant job state");
+        }
+    });
+    Ok(snapshot)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn quant_research_status(
+    state: State<'_, AppState>,
+    job_id: Option<String>,
+) -> Result<Option<QuantResearchJobSnapshot>, CmdError> {
+    let guard = state
+        .quant_research
+        .jobs
+        .lock()
+        .expect("quant jobs poisoned");
+    Ok(match job_id {
+        Some(job_id) => guard.get(job_id.trim()).cloned(),
+        None => guard.values().max_by_key(|job| job.started_at).cloned(),
+    })
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn quant_research_cancel(
+    state: State<'_, AppState>,
+    job_id: String,
+) -> Result<bool, CmdError> {
+    let cancelled = state
+        .quant_research
+        .cancels
+        .lock()
+        .expect("quant cancels poisoned")
+        .get(job_id.trim())
+        .map(|token| {
+            token.cancel();
+            true
+        })
+        .unwrap_or(false);
+    if cancelled {
+        if let Some(job) = state
+            .quant_research
+            .jobs
+            .lock()
+            .expect("quant jobs poisoned")
+            .get_mut(job_id.trim())
+        {
+            job.phase = "正在安全取消：等待当前统计单元结束".into();
+            job.updated_at = now_secs();
+            job.recent_logs
+                .push("已收到取消请求，不会启动新的关系检验".into());
+        }
+    }
+    Ok(cancelled)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn quant_research_snapshot_get(
+    state: State<'_, AppState>,
+    snapshot_id: String,
+) -> Result<Option<ResearchSnapshot>, CmdError> {
+    let row = state
+        .storage
+        .quant_research_snapshot_get(snapshot_id.trim())
+        .await?;
+    row.map(|row| {
+        serde_json::from_str(&row.snapshot_json)
+            .map_err(|error| CmdError::new("storage", format!("快照内容损坏：{error}")))
+    })
+    .transpose()
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn quant_research_snapshot_list(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Value, CmdError> {
+    let rows = state
+        .storage
+        .quant_research_snapshot_list(limit.unwrap_or(20))
+        .await?;
+    Ok(json!(rows
+        .into_iter()
+        .map(|row| json!({
+            "snapshot_id": row.snapshot_id,
+            "function_version": row.function_version,
+            "metric": row.metric,
+            "symbols": serde_json::from_str::<Value>(&row.symbols_json).unwrap_or(Value::Null),
+            "data_versions": serde_json::from_str::<Value>(&row.data_versions_json).unwrap_or(Value::Null),
+            "config": serde_json::from_str::<Value>(&row.config_json).unwrap_or(Value::Null),
+            "created_at": row.created_at,
+        }))
+        .collect::<Vec<_>>()))
+}
+
+async fn persist_quant_job(
+    storage: &astock_storage::Storage,
+    job: &QuantResearchJobSnapshot,
+    snapshot_id: Option<String>,
+) -> Result<(), CmdError> {
+    let job = job.clone();
+    let progress_json = serde_json::to_string(&job)
+        .map_err(|error| CmdError::new("storage", format!("序列化任务状态失败：{error}")))?;
+    storage
+        .run(move |conn| {
+            conn.execute(
+                "INSERT INTO quant_research_jobs
+                 (job_id,status,phase,progress_json,snapshot_id,error,created_at,updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+                 ON CONFLICT(job_id) DO UPDATE SET
+                   status=excluded.status,phase=excluded.phase,progress_json=excluded.progress_json,
+                   snapshot_id=excluded.snapshot_id,error=excluded.error,updated_at=excluded.updated_at",
+                rusqlite::params![
+                    job.job_id,
+                    job.status,
+                    job.phase,
+                    progress_json,
+                    snapshot_id,
+                    job.error,
+                    job.started_at,
+                    job.updated_at,
+                ],
+            )?;
+            Ok(())
+        })
+        .await?;
+    Ok(())
 }
 
 /// Registered strategy list with parameter metadata (`name/kind/description/

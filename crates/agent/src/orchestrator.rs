@@ -7,6 +7,7 @@
 //! completed tool results come back as conversation messages and cached
 //! payloads, never re-executed.
 
+use std::collections::BTreeSet;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -18,12 +19,15 @@ use tokio::time::Instant;
 
 use astock_minimax::{ChatMessage, ChatRequest, MinimaxError, ToolCall};
 use astock_security::{authorize_tool, fingerprint_json, InvocationOrigin, ToolPermissionDomain};
-use astock_storage::{AgentTask, AgentToolAudit, Storage};
+use astock_storage::{AgentTask, AgentToolAudit, Report as StoredReport, Storage};
 
 use crate::backend::ChatBackend;
 use crate::error::{AgentError, Result};
 use crate::prompt::initial_messages_with_context;
-use crate::report::{assemble_report, AgentReport, Evidence};
+use crate::report::{
+    assemble_report, index_tool_evidence, report_versions, verified_subset_answer, AgentReport,
+    ClaimConfidence, Evidence, VerificationStatus,
+};
 use crate::tools::{now_secs, ToolContext, ToolProgressDetail, ToolRegistry};
 
 /// A boxed event stream for one running task.
@@ -777,11 +781,48 @@ impl AgentEngine {
                 && !awaiting_user_input
                 && !state.multi_agent_reviewed
                 && !state.spec.specialists.is_empty();
+            // Search snippets are URL-discovery hints, never evidence. Add the
+            // disclosure only to a durable final answer: not to a structured
+            // clarification and not to an internal draft awaiting review.
+            if calls.is_empty()
+                && !awaiting_user_input
+                && !awaiting_specialist_review
+                && contains_discovery_only(&messages)
+                && !contains_primary_source_evidence(&messages)
+                && !clean_text.contains("原文未核验")
+            {
+                let disclosure = "\n\n**核验状态：** 一级来源原文未核验。本轮搜索标题与摘要仅作为发现线索，不标记为【事实】，也不据此确认重大新闻结论。";
+                clean_text.push_str(disclosure);
+                assistant.content = Some(Value::String(clean_text.clone()));
+                send(
+                    &tx,
+                    AgentEvent::TextDelta {
+                        text: disclosure.to_string(),
+                    },
+                );
+            }
+            if calls.is_empty() && !awaiting_user_input && !awaiting_specialist_review {
+                let (blocked, downgraded) = tool_quality_gate_counts(&messages);
+                if (blocked > 0 || downgraded > 0) && !clean_text.contains("数据质量门禁") {
+                    let disclosure = if blocked > 0 {
+                        format!(
+                            "\n\n**数据质量门禁：** 有 {blocked} 项工具结果因硬过期、口径不兼容或未解决冲突被阻止用于确定性计算；另有 {downgraded} 项仅可作为中低置信参考。以上项目不得用于明确买卖结论。"
+                        )
+                    } else {
+                        format!(
+                            "\n\n**数据质量门禁：** 有 {downgraded} 项工具结果存在陈旧、缺失或尚未跨源复核，结论置信度已自动下调，不应据此单独调度资金。"
+                        )
+                    };
+                    clean_text.push_str(&disclosure);
+                    assistant.content = Some(Value::String(clean_text.clone()));
+                    send(&tx, AgentEvent::TextDelta { text: disclosure });
+                }
+            }
             // A first draft awaiting specialist review is internal working
             // material, not a durable user-facing answer. Persist tool-call
             // messages and final/single-agent answers normally; the reviewed
             // branch below persists a hidden system packet instead.
-            if !awaiting_specialist_review {
+            if !awaiting_specialist_review && !calls.is_empty() {
                 if let Err(e) = append_message(
                     &self.ctx.storage,
                     &task_id,
@@ -870,35 +911,151 @@ impl AgentEngine {
                         Err(error) => {
                             tracing::warn!(%error, "specialist panel failed; completing from main evidence");
                             state.multi_agent_reviewed = true;
-                            if let Err(storage_error) = append_message(
-                                &self.ctx.storage,
-                                &task_id,
-                                &conversation_id,
-                                &mut messages,
-                                &assistant,
+                        }
+                    }
+                }
+                let mut report =
+                    assemble_report(&task_id, &clean_text, state.evidence.clone(), now_secs());
+                if awaiting_user_input {
+                    // A clarification card is an interaction boundary, not a
+                    // publishable investment conclusion. Numeric examples in
+                    // the preface (capital, option counts, market context)
+                    // must not turn a valid question card into a
+                    // verification_failed terminal task.
+                    report.research.claims.clear();
+                    report.research.calculations.clear();
+                    report.research.confidence = ClaimConfidence::Low;
+                    report.research.verification.status = VerificationStatus::NotApplicable;
+                    report.research.verification.findings.clear();
+                }
+                if !awaiting_user_input {
+                    for attempt in 1..=2 {
+                        if report.research.verification.passed() {
+                            break;
+                        }
+                        send(
+                            &tx,
+                            AgentEvent::Progress {
+                                phase: "verifying".to_string(),
+                                message: format!(
+                                    "独立校验发现 {} 项发布阻断，正在进行第 {attempt}/2 次证据内修订",
+                                    report.research.verification.findings.len()
+                                ),
+                                round: state.round + 1,
+                                max_rounds,
+                                completed: Some(attempt - 1),
+                                total: Some(2),
+                            },
+                        );
+                        send(
+                            &tx,
+                            AgentEvent::TextReset {
+                                message: "草稿未通过证据校验，正在按具体错误自动修订".to_string(),
+                            },
+                        );
+                        match self
+                            .recover_verified_answer(
+                                &model,
+                                &messages,
+                                &clean_text,
+                                &report.research.verification.repair_instructions(),
+                                &tx,
                             )
                             .await
-                            {
-                                self.finish_with_error(
-                                    &state,
-                                    &tx,
-                                    format!("storage: {storage_error}"),
-                                )
-                                .await;
+                        {
+                            Ok((recovered, answer)) => {
+                                assistant = recovered;
+                                clean_text = answer;
+                                report = assemble_report(
+                                    &task_id,
+                                    &clean_text,
+                                    state.evidence.clone(),
+                                    now_secs(),
+                                );
+                            }
+                            Err(MinimaxError::QuotaExhausted { window_reset_at }) => {
+                                self.suspend(state, &tx, window_reset_at).await;
                                 return;
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, attempt, "verified-answer repair failed");
+                                break;
                             }
                         }
                     }
                 }
-                let report =
-                    assemble_report(&task_id, &clean_text, state.evidence.clone(), now_secs());
-                let _ = self.save_state(&state, "completed").await;
+                if !awaiting_user_input
+                    && report.research.verification.status == VerificationStatus::Failed
+                {
+                    // A long research run can contain both well-supported and
+                    // unsupported model prose. If two repair passes still
+                    // fail, publish the independently verified subset instead
+                    // of hiding all successful evidence behind a terminal
+                    // error. The fallback itself is assembled and verified
+                    // again before it can be shown.
+                    if let Some(subset) = verified_subset_answer(&report) {
+                        let candidate =
+                            assemble_report(&task_id, &subset, state.evidence.clone(), now_secs());
+                        if candidate.research.verification.passed() {
+                            send(
+                                &tx,
+                                AgentEvent::TextReset {
+                                    message:
+                                        "自动修订仍有证据缺口，已切换为仅发布通过校验的部分结论"
+                                            .to_string(),
+                                },
+                            );
+                            clean_text = subset;
+                            assistant = ChatMessage::assistant(clean_text.clone());
+                            report = candidate;
+                        }
+                    }
+                }
+                let publication_blocked = !awaiting_user_input
+                    && report.research.verification.status == VerificationStatus::Failed;
+                if publication_blocked {
+                    clean_text = format!(
+                        "## 报告未通过证据校验\n\n本轮草稿已被阻止发布，共发现 {} 项需要修正的问题。你可以展开下方“结论与证据校验”查看具体字段、错误原因和证据缺口；补充或刷新数据后可继续本任务。",
+                        report.research.verification.findings.len()
+                    );
+                    report.answer = clean_text.clone();
+                    assistant = ChatMessage::assistant(clean_text.clone());
+                }
+                if let Err(error) = append_message(
+                    &self.ctx.storage,
+                    &task_id,
+                    &conversation_id,
+                    &mut messages,
+                    &assistant,
+                )
+                .await
+                {
+                    self.finish_with_error(&state, &tx, format!("storage: {error}"))
+                        .await;
+                    return;
+                }
+                if !awaiting_user_input {
+                    self.link_news_evidence(&task_id, &messages).await;
+                }
+                if let Err(error) = self.persist_report(&report).await {
+                    self.finish_with_error(&state, &tx, format!("研究报告保存失败: {error}"))
+                        .await;
+                    return;
+                }
+                let terminal_status = if publication_blocked {
+                    "verification_failed"
+                } else {
+                    "completed"
+                };
+                let _ = self.save_state(&state, terminal_status).await;
                 send(
                     &tx,
                     AgentEvent::Progress {
                         phase: "synthesizing".to_string(),
                         message: if awaiting_user_input {
                             "需要你确认关键条件，已生成可选择的问题卡片".to_string()
+                        } else if publication_blocked {
+                            "报告未通过独立证据校验，草稿已阻止发布".to_string()
                         } else {
                             "证据核验完成，正在生成最终结论".to_string()
                         },
@@ -985,13 +1142,8 @@ impl AgentEngine {
                 return;
             }
             for exec in executed {
-                if exec.ok {
-                    state.evidence.push(Evidence {
-                        tool: exec.name.clone(),
-                        cache_key: exec.cache_key.clone(),
-                        source: exec.source.clone(),
-                        fetched_at: exec.fetched_at.clone(),
-                    });
+                if let Some(evidence) = exec.evidence.clone() {
+                    state.evidence.push(evidence);
                 }
                 let message = ChatMessage::tool_result(exec.call_id, exec.message_content);
                 if let Err(e) = append_message(
@@ -1018,6 +1170,36 @@ impl AgentEngine {
                     },
                 );
                 return;
+            }
+        }
+    }
+
+    /// Link every immutable news revision present in successful tool results
+    /// to the final report. Archive diagnostics are best-effort and cannot
+    /// discard an otherwise valid analysis.
+    async fn link_news_evidence(&self, task_id: &str, messages: &[ChatMessage]) {
+        for revision_id in news_revision_ids(messages) {
+            if let Err(error) = self
+                .ctx
+                .storage
+                .news_agent_evidence_link(task_id, "final_answer", &revision_id)
+                .await
+            {
+                tracing::warn!(task_id, revision_id, %error, "agent news evidence link failed");
+            }
+        }
+        let verifier = astock_source_verification::SourceVerifier::new(self.ctx.storage.clone());
+        for (source_version_id, fact_id) in source_evidence_pairs(messages) {
+            if let Err(error) = verifier
+                .link_agent_evidence(
+                    task_id,
+                    "final_answer",
+                    &source_version_id,
+                    (!fact_id.is_empty()).then_some(fact_id.as_str()),
+                )
+                .await
+            {
+                tracing::warn!(task_id, source_version_id, fact_id, %error, "agent source evidence link failed");
             }
         }
     }
@@ -1179,6 +1361,77 @@ impl AgentEngine {
         ))
     }
 
+    /// Repair only the publication-contract violations reported by the
+    /// deterministic verifier. No tools are exposed during this pass: the
+    /// model must use the already indexed evidence or explicitly downgrade a
+    /// statement to an assumption/unknown and remove unsupported numbers.
+    async fn recover_verified_answer(
+        &self,
+        model: &str,
+        messages: &[ChatMessage],
+        draft: &str,
+        verification_errors: &str,
+        tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) -> std::result::Result<(ChatMessage, String), MinimaxError> {
+        let mut repair_messages = messages.to_vec();
+        repair_messages.push(ChatMessage::user(format!(
+            "【独立发布校验失败】\n以下是未发布草稿：\n---\n{draft}\n---\n校验器错误：\n{verification_errors}\n\n只基于已有工具消息中的evidence字段修订全文，不得调用工具、猜测或换一个数字规避错误。每条关键结论使用【事实】【计算】【外部】【推断】【假设】【未知】之一；数字后精确写〔证据:evf_xxx〕，确定性计算同时写〔计算引用:calc_xxx〕。无法支持的数字必须删除，无法确认的结论明确写【未知】。保留反方证据、冲突和失效条件。直接输出修订后的完整中文报告，不解释修订过程。"
+        )));
+        let mut request =
+            ChatRequest::new(model.to_string(), repair_messages).with_temperature(0.1);
+        request
+            .extra
+            .insert("reasoning_split".to_string(), Value::Bool(true));
+        request
+            .extra
+            .insert("thinking".to_string(), json!({ "type": "disabled" }));
+        request
+            .extra
+            .insert("max_completion_tokens".to_string(), json!(4096));
+
+        let mut stream = self.backend.chat_stream(&request).await?;
+        let mut text = String::new();
+        let mut reasoning_content = None;
+        let mut reasoning_details = None;
+        while let Some(item) = stream.next().await {
+            let chunk = item?;
+            if let Some(delta) = chunk.raw_delta() {
+                if !delta.is_empty() {
+                    text.push_str(&delta);
+                    send(tx, AgentEvent::TextDelta { text: delta });
+                }
+            }
+            if let Some(delta) = chunk
+                .choices
+                .first()
+                .and_then(|choice| choice.delta.as_ref())
+            {
+                if let Some(reasoning) = delta.reasoning_content.as_ref() {
+                    reasoning_content = Some(reasoning.clone());
+                }
+                if let Some(details) = delta.reasoning_details.as_ref() {
+                    reasoning_details = Some(details.clone());
+                }
+            }
+        }
+        let (_, answer) = astock_minimax::split_reasoning(&text);
+        if answer.trim().is_empty() {
+            return Err(MinimaxError::Parse(
+                "证据校验修订没有产出可见回答".to_string(),
+            ));
+        }
+        Ok((
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: Some(Value::String(text)),
+                reasoning_content,
+                reasoning_details,
+                ..Default::default()
+            },
+            answer,
+        ))
+    }
+
     /// Execute one round of tool calls (bounded concurrency), in call order.
     async fn execute_round(
         &self,
@@ -1286,12 +1539,8 @@ impl AgentEngine {
                         },
                     );
                     return Ok(ToolExec {
-                        ok: false,
                         call_id,
-                        name: name.clone(),
-                        cache_key: String::new(),
-                        source: String::new(),
-                        fetched_at: String::new(),
+                        evidence: None,
                         message_content: json!({
                             "tool": name,
                             "error": error,
@@ -1376,12 +1625,8 @@ impl AgentEngine {
                 },
             );
             return Ok(ToolExec {
-                ok: false,
                 call_id,
-                name: name.clone(),
-                cache_key: String::new(),
-                source: String::new(),
-                fetched_at: String::new(),
+                evidence: None,
                 message_content: json!({ "tool": name, "error": error }).to_string(),
             });
         }
@@ -1446,6 +1691,13 @@ impl AgentEngine {
 
         match outcome {
             Ok(result) => {
+                let evidence = index_tool_evidence(
+                    &name,
+                    &result.cache_key,
+                    &result.source,
+                    &result.fetched_at,
+                    &result.summary_json,
+                );
                 tracing::info!(
                     target: "astock::agent_tool_audit",
                     task_id,
@@ -1474,18 +1726,15 @@ impl AgentEngine {
                     },
                 );
                 Ok(ToolExec {
-                    ok: true,
                     call_id,
-                    name: name.clone(),
-                    cache_key: result.cache_key.clone(),
-                    source: result.source.clone(),
-                    fetched_at: result.fetched_at.clone(),
+                    evidence: Some(evidence.clone()),
                     message_content: json!({
                         "tool": name,
                         "cache_key": result.cache_key,
                         "source": result.source,
                         "fetched_at": result.fetched_at,
                         "summary": result.summary_json,
+                        "evidence": evidence,
                     })
                     .to_string(),
                 })
@@ -1521,12 +1770,8 @@ impl AgentEngine {
                     },
                 );
                 Ok(ToolExec {
-                    ok: false,
                     call_id,
-                    name: name.clone(),
-                    cache_key: String::new(),
-                    source: String::new(),
-                    fetched_at: String::new(),
+                    evidence: None,
                     message_content: json!({
                         "tool": name,
                         "error": error,
@@ -1614,6 +1859,33 @@ impl AgentEngine {
                 state_json: serde_json::to_string(state)?,
                 created_at: now,
                 updated_at: now,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Persist the complete report, including verification findings and exact
+    /// tool/data versions, before the completion event reaches the UI.
+    async fn persist_report(&self, report: &AgentReport) -> Result<()> {
+        let (tool_versions, data_versions) = report_versions(report);
+        let content = json!({
+            "report": report,
+            "tool_versions": tool_versions,
+            "data_versions": data_versions,
+            "verification": &report.research.verification,
+        });
+        self.ctx
+            .storage
+            .reports_insert(StoredReport {
+                id: report.task_id.clone(),
+                kind: if report.research.verification.passed() {
+                    "verified-research".to_string()
+                } else {
+                    "verification-blocked".to_string()
+                },
+                title: format!("AI研究报告 · {}", report.task_id),
+                content_json: serde_json::to_string(&content)?,
+                created_at: report.generated_at,
             })
             .await?;
         Ok(())
@@ -1714,14 +1986,197 @@ fn is_clarification_request(answer: &str) -> bool {
     (1..=3).contains(&question_count) && option_count >= question_count * 2
 }
 
+fn news_revision_ids(messages: &[ChatMessage]) -> BTreeSet<String> {
+    fn collect(value: &Value, output: &mut BTreeSet<String>) {
+        match value {
+            Value::Object(fields) => {
+                if let Some(id) = fields.get("document_revision_id").and_then(Value::as_str) {
+                    if id.starts_with("rev:") {
+                        output.insert(id.to_string());
+                    }
+                }
+                for value in fields.values() {
+                    collect(value, output);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    collect(value, output);
+                }
+            }
+            Value::String(text) => {
+                if let Ok(decoded) = serde_json::from_str::<Value>(text) {
+                    collect(&decoded, output);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut output = BTreeSet::new();
+    for message in messages {
+        if let Some(content) = &message.content {
+            collect(content, &mut output);
+        }
+    }
+    output
+}
+
+fn source_evidence_pairs(messages: &[ChatMessage]) -> BTreeSet<(String, String)> {
+    fn collect(value: &Value, output: &mut BTreeSet<(String, String)>) {
+        match value {
+            Value::Object(fields) => {
+                if let Some(version) = fields.get("source_version_id").and_then(Value::as_str) {
+                    if version.starts_with("srcver:") {
+                        let fact = fields
+                            .get("fact_id")
+                            .and_then(Value::as_str)
+                            .filter(|fact| fact.starts_with("fact:"))
+                            .unwrap_or_default();
+                        output.insert((version.to_string(), fact.to_string()));
+                    }
+                }
+                for value in fields.values() {
+                    collect(value, output);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    collect(value, output);
+                }
+            }
+            Value::String(text) => {
+                if let Ok(decoded) = serde_json::from_str::<Value>(text) {
+                    collect(&decoded, output);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut output = BTreeSet::new();
+    for message in messages {
+        if let Some(content) = &message.content {
+            collect(content, &mut output);
+        }
+    }
+    output
+}
+
+fn contains_discovery_only(messages: &[ChatMessage]) -> bool {
+    messages.iter().any(|message| {
+        message
+            .content
+            .as_ref()
+            .is_some_and(|content| content.to_string().contains("discovery_only"))
+    })
+}
+
+fn contains_primary_source_evidence(messages: &[ChatMessage]) -> bool {
+    fn inspect(value: &Value, has_primary: &mut bool, has_version: &mut bool) {
+        match value {
+            Value::Object(fields) => {
+                *has_primary |= fields
+                    .get("is_primary_source")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                *has_version |= fields
+                    .get("source_version_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|version| version.starts_with("srcver:"));
+                for value in fields.values() {
+                    inspect(value, has_primary, has_version);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    inspect(value, has_primary, has_version);
+                }
+            }
+            Value::String(text) => {
+                if let Ok(decoded) = serde_json::from_str::<Value>(text) {
+                    inspect(&decoded, has_primary, has_version);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    messages.iter().any(|message| {
+        let mut has_primary = false;
+        let mut has_version = false;
+        if let Some(content) = &message.content {
+            inspect(content, &mut has_primary, &mut has_version);
+        }
+        has_primary && has_version
+    })
+}
+
+fn tool_quality_gate_counts(messages: &[ChatMessage]) -> (usize, usize) {
+    fn inspect(value: &Value, blocked: &mut usize, downgraded: &mut usize) {
+        match value {
+            Value::Object(fields) => {
+                if let Some(quality) = fields.get("data_quality").and_then(Value::as_object) {
+                    let deterministic = quality
+                        .get("allow_deterministic_compute")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true);
+                    let high_confidence = quality
+                        .get("allow_high_confidence")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true);
+                    if !deterministic {
+                        *blocked += 1;
+                    } else if !high_confidence {
+                        *downgraded += 1;
+                    }
+                    return;
+                }
+                for child in fields.values() {
+                    inspect(child, blocked, downgraded);
+                }
+            }
+            Value::Array(values) => {
+                for child in values {
+                    inspect(child, blocked, downgraded);
+                }
+            }
+            Value::String(text) => {
+                if let Ok(decoded) = serde_json::from_str::<Value>(text) {
+                    inspect(&decoded, blocked, downgraded);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut blocked = 0;
+    let mut downgraded = 0;
+    for message in messages.iter().filter(|message| message.role == "tool") {
+        if let Some(content) = &message.content {
+            inspect(content, &mut blocked, &mut downgraded);
+        }
+    }
+    (blocked, downgraded)
+}
+
 /// Typical duration shown to the user. This value is deliberately not used as
 /// a deadline: every tool keeps running until it completes or the user cancels
 /// the durable task.
 fn tool_estimated_secs(name: &str) -> u64 {
     match name {
         "scan_market" | "run_backtest" | "iterate_strategy" | "run_joinquant_research" => 180,
-        "get_fundamentals" | "run_valuation" | "compare_stocks" | "research_news"
-        | "search_web" => 60,
+        "get_fundamentals"
+        | "run_valuation"
+        | "analyze_earnings_drivers"
+        | "compare_stocks"
+        | "research_news"
+        | "research_disclosures"
+        | "research_global_transmission"
+        | "analyze_event_price_in"
+        | "research_supply_chain_relations"
+        | "query_graph_as_of"
+        | "search_web"
+        | "fetch_source_document" => 60,
         _ => 45,
     }
 }
@@ -1737,10 +2192,19 @@ fn tool_progress_stage(name: &str, elapsed_ms: u64, estimated_ms: u64) -> &'stat
         "compare_stocks" => "并行获取各标的数据，已完成结果会立即保留",
         "run_full_analysis" => "汇总行情、资金与市场环境并运行信号引擎",
         "get_fundamentals" | "run_valuation" => "读取财务报表并校验关键字段",
+        "analyze_earnings_drivers" => "连接经营驱动、利润表、现金流与估值，并传播参数区间",
         "run_backtest" | "iterate_strategy" => "执行有上限的历史计算与稳健性检验",
         "run_joinquant_research" => "等待聚宽研究环境并执行受限数据模板",
         "research_news" => "并行读取多家财经快讯并核验可用的个股事件",
+        "research_disclosures" => "查询正式披露、修订链、附件与原文核验状态",
+        "research_global_transmission" => "核验海外一级来源、原时区/币种与逐边 A 股传导证据",
+        "analyze_event_price_in" => "逐字段核验事件，并分离基本面影响与市场 price-in",
+        "research_supply_chain_relations" => "抽取并核验供应链关系候选，只使用已审核发布关系",
+        "query_graph_as_of" => "按业务时间与当时知悉时间重建历史图谱快照",
         "search_web" => "通过 MiniMax 联网检索权威来源并保留原始链接",
+        "fetch_source_document" => "正在安全打开原始页面并提取页码、段落、原值与单位",
+        "read_document" => "读取不可变文档版本与字段级证据",
+        "compare_source_evidence" => "逐字段比较来源原值、时点与证据位置",
         "scan_market" => "并行分析候选股票并更新排名",
         _ => "等待数据源返回并执行确定性计算",
     }
@@ -1756,13 +2220,8 @@ struct ToolAuditMeta<'a> {
 }
 
 struct ToolExec {
-    /// Whether the tool succeeded (its evidence joins the report).
-    ok: bool,
     call_id: String,
-    name: String,
-    cache_key: String,
-    source: String,
-    fetched_at: String,
+    evidence: Option<Evidence>,
     message_content: String,
 }
 
@@ -2425,6 +2884,53 @@ mod tests {
     use astock_minimax::{ChatChoice, ChatChunk, ToolCallFunction};
     use astock_storage::StorageConfig;
 
+    #[test]
+    fn extracts_exact_news_revision_ids_from_tool_payloads() {
+        let messages = vec![ChatMessage::tool_result(
+            "call-news".to_string(),
+            json!({
+                "items": [
+                    {"document_revision_id": "rev:abc123", "title": "公告"},
+                    {"document_revision_id": null},
+                    {"document_revision_id": "not-a-revision"}
+                ]
+            })
+            .to_string(),
+        )];
+        assert_eq!(
+            news_revision_ids(&messages),
+            ["rev:abc123".to_string()].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn search_snippets_are_discovery_only_and_source_facts_keep_exact_ids() {
+        let discovery = ChatMessage::tool_result(
+            "search",
+            json!({"verification_status":"discovery_only","fact_eligible":false}).to_string(),
+        );
+        assert!(contains_discovery_only(std::slice::from_ref(&discovery)));
+        assert!(source_evidence_pairs(std::slice::from_ref(&discovery)).is_empty());
+
+        let verified = ChatMessage::tool_result(
+            "source",
+            json!({
+                "source_version_id":"srcver:abc123",
+                "source":{"is_primary_source":true},
+                "facts":[
+                    {"source_version_id":"srcver:abc123","fact_id":"fact:amount","raw_value":"10亿元"},
+                    {"source_version_id":"invalid","fact_id":"fact:ignored"}
+                ]
+            })
+            .to_string(),
+        );
+        let pairs = source_evidence_pairs(std::slice::from_ref(&verified));
+        assert!(pairs.contains(&("srcver:abc123".into(), "".into())));
+        assert!(pairs.contains(&("srcver:abc123".into(), "fact:amount".into())));
+        assert_eq!(pairs.len(), 2);
+        assert!(contains_primary_source_evidence(&[verified]));
+    }
+
     use crate::testing::{EchoTool, NoopMarket, ScriptedChat, ScriptedReply};
     use crate::tools::{AgentTool, ToolResult};
 
@@ -2682,7 +3188,11 @@ mod tests {
             EngineConfig::default(),
         );
         let stream = engine.run_task(spec("parallel-tools"));
-        tokio::time::timeout(std::time::Duration::from_secs(2), barrier.wait())
+        // Full-workspace Windows runs can spend several seconds scheduling
+        // freshly linked test processes. The barrier still proves both tool
+        // futures are polled concurrently; the wider wall-clock guard only
+        // removes host-load flakiness.
+        tokio::time::timeout(std::time::Duration::from_secs(10), barrier.wait())
             .await
             .expect("both tools must reach the barrier concurrently");
         let events = collect(stream).await;
@@ -2817,23 +3327,23 @@ mod tests {
     async fn completes_simple_conversation() {
         let (_dir, storage) = test_storage();
         let chat = Arc::new(ScriptedChat::new("test-model"));
-        chat.push_text("【计算】答案是42");
+        chat.push_text("【未知】当前没有可验证证据");
         let echo = Arc::new(EchoTool::new());
         let engine = build_engine(storage.clone(), chat.clone(), echo);
 
         let events = collect(engine.run_task(spec("t1"))).await;
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::TextDelta { text } if text.contains("答案是42"))));
+        assert!(events.iter().any(
+            |e| matches!(e, AgentEvent::TextDelta { text } if text.contains("没有可验证证据"))
+        ));
         let completed = events.iter().find_map(|e| match e {
             AgentEvent::Completed { report } => Some(report),
             _ => None,
         });
         let report = completed.expect("task should complete");
-        assert!(report.answer.contains("答案是42"));
+        assert!(report.answer.contains("没有可验证证据"));
         assert!(!report.answer.contains("免责声明"));
         assert_eq!(report.conclusions.len(), 1);
-        assert_eq!(report.conclusions[0].grade, "计算");
+        assert_eq!(report.conclusions[0].grade, "未知");
 
         // The task row and the conversation were persisted.
         let record = storage.agent_task_get("t1").await.unwrap().unwrap();
@@ -2848,6 +3358,80 @@ mod tests {
         assert_eq!(
             requests[0].extra.get("reasoning_split"),
             Some(&Value::Bool(true))
+        );
+    }
+
+    #[tokio::test]
+    async fn verifier_repairs_an_unsupported_number_before_publication() {
+        let (_dir, storage) = test_storage();
+        let chat = Arc::new(ScriptedChat::new("test-model"));
+        chat.push_text("【事实】目标价 99 元");
+        chat.push_text("【未知】现有证据不足，无法确认具体目标价");
+        let echo = Arc::new(EchoTool::new());
+        let engine = build_engine(storage.clone(), chat.clone(), echo);
+
+        let events = collect(engine.run_task(spec("t-verify-repair"))).await;
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TextReset { message } if message.contains("证据校验"))));
+        let report = events.iter().find_map(|event| match event {
+            AgentEvent::Completed { report } => Some(report),
+            _ => None,
+        });
+        let report = report.expect("repaired report should be emitted");
+        assert!(report.research.verification.passed());
+        assert!(report.answer.contains("无法确认具体目标价"));
+        assert!(!report.answer.contains("99"));
+        assert_eq!(chat.requests.lock().unwrap().len(), 2);
+        let persisted = storage
+            .reports_get("t-verify-repair")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.kind, "verified-research");
+        assert!(persisted.content_json.contains("tool_versions"));
+        assert!(persisted.content_json.contains("data_versions"));
+        assert!(persisted.content_json.contains("verification"));
+    }
+
+    #[tokio::test]
+    async fn verifier_publishes_safe_empty_result_after_two_failed_repairs() {
+        let (_dir, storage) = test_storage();
+        let chat = Arc::new(ScriptedChat::new("test-model"));
+        chat.push_text("【事实】目标价 99 元");
+        chat.push_text("【事实】目标价 98 元");
+        chat.push_text("【事实】目标价 97 元");
+        let echo = Arc::new(EchoTool::new());
+        let engine = build_engine(storage.clone(), chat.clone(), echo);
+
+        let events = collect(engine.run_task(spec("t-verify-block"))).await;
+        let report = events.iter().find_map(|event| match event {
+            AgentEvent::Completed { report } => Some(report),
+            _ => None,
+        });
+        let report = report.expect("safe fallback report should be emitted");
+        assert!(report.research.verification.passed());
+        assert!(report.answer.contains("本轮暂无可发布结论"));
+        assert!(report.answer.contains("已自动省略"));
+        assert!(!report.answer.contains("97 元"));
+        assert_eq!(chat.requests.lock().unwrap().len(), 3);
+        assert_eq!(
+            storage
+                .agent_task_get("t-verify-block")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "completed"
+        );
+        assert_eq!(
+            storage
+                .reports_get("t-verify-block")
+                .await
+                .unwrap()
+                .unwrap()
+                .kind,
+            "verified-research"
         );
     }
 
@@ -2915,7 +3499,7 @@ mod tests {
     async fn plan_clarification_waits_for_user_instead_of_flashing_into_specialist_review() {
         let (_dir, storage) = test_storage();
         let chat = Arc::new(ScriptedChat::new("main-model"));
-        let clarification = "```astock-questions\n{\"title\":\"请确认\",\"questions\":[{\"id\":\"risk\",\"question\":\"风险偏好？\",\"kind\":\"single\",\"options\":[{\"id\":\"safe\",\"label\":\"保守\"},{\"id\":\"balanced\",\"label\":\"平衡\"}],\"allow_other\":true}]}\n```";
+        let clarification = "你提供的2万元资金约束会影响仓位，请先确认：\n```astock-questions\n{\"title\":\"请确认\",\"questions\":[{\"id\":\"risk\",\"question\":\"风险偏好？\",\"kind\":\"single\",\"options\":[{\"id\":\"safe\",\"label\":\"保守\"},{\"id\":\"balanced\",\"label\":\"平衡\"}],\"allow_other\":true}]}\n```";
         chat.push_text(clarification);
         let echo = Arc::new(EchoTool::new());
         let engine = build_engine(storage.clone(), chat.clone(), echo);
@@ -2934,11 +3518,27 @@ mod tests {
         assert!(!events
             .iter()
             .any(|event| matches!(event, AgentEvent::TextReset { .. })));
-        let answer = events.iter().find_map(|event| match event {
-            AgentEvent::Completed { report } => Some(report.answer.as_str()),
+        let completed = events.iter().find_map(|event| match event {
+            AgentEvent::Completed { report } => Some(report),
             _ => None,
         });
-        assert_eq!(answer, Some(clarification));
+        let completed = completed.expect("clarification report");
+        assert_eq!(completed.answer, clarification);
+        assert_eq!(
+            completed.research.verification.status,
+            VerificationStatus::NotApplicable
+        );
+        assert!(completed.research.verification.findings.is_empty());
+        assert!(completed.research.claims.is_empty());
+        assert_eq!(
+            storage
+                .agent_task_get("t-plan-input")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "completed"
+        );
         assert_eq!(chat.requests.lock().unwrap().len(), 1);
         let stored = storage.conversation_load("t-plan-input").await.unwrap();
         assert!(stored
@@ -3104,25 +3704,32 @@ mod tests {
         assert_eq!(messages[3].role, "tool");
 
         // The second request contains the tool result with merged arguments.
-        let requests = chat.requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
-        let second = &requests[1].messages;
-        let tool_msg = second.iter().find(|m| m.role == "tool").unwrap();
-        let content = tool_msg.content_text().unwrap();
-        assert!(
-            content.contains("\"echo\""),
-            "tool result replayed: {content}"
-        );
-        assert!(content.contains("cache_key"));
-        let assistant_msg = second.iter().find(|m| m.role == "assistant").unwrap();
-        let args = assistant_msg.tool_calls.as_ref().unwrap()[0]
-            .function
-            .as_ref()
-            .unwrap()
-            .arguments
-            .clone()
-            .unwrap();
-        assert_eq!(args, "{\"text\":\"hi\"}", "fragments merged");
+        {
+            let requests = chat.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            let second = &requests[1].messages;
+            let tool_msg = second.iter().find(|m| m.role == "tool").unwrap();
+            let content = tool_msg.content_text().unwrap();
+            assert!(
+                content.contains("\"echo\""),
+                "tool result replayed: {content}"
+            );
+            assert!(content.contains("cache_key"));
+            assert!(content.contains("\"evidence_id\":\"ev_"));
+            assert!(content.contains("\"field_path\""));
+            let assistant_msg = second.iter().find(|m| m.role == "assistant").unwrap();
+            let args = assistant_msg.tool_calls.as_ref().unwrap()[0]
+                .function
+                .as_ref()
+                .unwrap()
+                .arguments
+                .clone()
+                .unwrap();
+            assert_eq!(args, "{\"text\":\"hi\"}", "fragments merged");
+        }
+        let persisted = storage.reports_get("t2").await.unwrap().unwrap();
+        assert!(persisted.content_json.contains("agent-tool-contract-v2"));
+        assert!(persisted.content_json.contains("data_versions"));
     }
 
     #[tokio::test]
