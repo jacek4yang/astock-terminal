@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
+  cancelEventAnalysis,
   errMsg,
+  getEventAnalysisStatus,
   getNewsArchiveRevisions,
   getNewsEventClusterDetail,
   getNewsProviderHealth,
   queryNewsCenter,
   refreshNewsCenter,
   setNewsItemState,
+  startEventAnalysis,
   type ArchivedNewsRevision,
+  type EventAnalysisSnapshot,
   type NewsCenterItem,
   type NewsCenterPage,
   type NewsCenterQuery,
@@ -16,6 +20,7 @@ import {
   type NewsProviderHealthItem,
 } from "../lib/api";
 import { useAgentSession } from "../agentSession";
+import { EventAnalysisPanel } from "../components/EventAnalysisPanel";
 import { ErrorBox, Loading } from "../components/ui";
 
 const CATEGORY = [
@@ -44,6 +49,24 @@ const VERIFICATION_CLASS: Record<string, string> = {
   verified_media: "border-blue-300 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300",
   archived: "border-slate-300 bg-slate-50 text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300",
   discovery_only: "border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300",
+};
+
+const SESSION_ROLE: Record<string, string> = {
+  same_day_premarket: "当日盘前",
+  intraday: "当日盘中",
+  next_trading_day: "下一交易日",
+  historical_only: "仅作历史背景",
+};
+
+const MARKET_PHASE: Record<string, string> = {
+  premarket: "盘前",
+  opening_auction: "开盘集合竞价",
+  morning_trading: "上午连续交易",
+  lunch_break: "午间休市",
+  afternoon_trading: "下午连续交易",
+  closing_auction: "收盘集合竞价",
+  after_close: "收盘后",
+  non_trading_day: "休市日",
 };
 
 const EMPTY_QUERY: NewsCenterQuery = {
@@ -165,6 +188,9 @@ function NewsRow({
         <span className="rounded bg-slate-100 px-1.5 py-0.5 dark:bg-slate-800">{EVENT_LABEL[item.event_type] ?? item.event_type}</span>
         {revision.supersedes_revision_id && <span className="rounded bg-violet-500/10 px-1.5 py-0.5 text-violet-600 dark:text-violet-300">修订版</span>}
         {item.event?.old_republication && <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-amber-600">旧闻重发</span>}
+        <span className={`rounded px-1.5 py-0.5 ${item.effective_session.can_increase_confidence ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "bg-amber-500/10 text-amber-700 dark:text-amber-300"}`} title={item.effective_session.rationale}>
+          影响 {item.effective_session.target_trading_date} · {SESSION_ROLE[item.effective_session.role]}
+        </span>
         {item.event && <span>独立来源 {item.event.independent_sources}</span>}
         {item.event?.conflict_fields.length ? <span className="text-red-600 dark:text-red-300">{item.event.conflict_fields.length} 项冲突</span> : null}
         {verifiedEntities.slice(0, 3).map((link) => <span key={link.link_id} className="rounded bg-blue-500/10 px-1.5 py-0.5 text-blue-600 dark:text-blue-300">{link.final_entity_name}{link.listed_code ? ` ${link.listed_code}` : ""}</span>)}
@@ -189,6 +215,10 @@ function DetailPanel({
   onGraph,
   onAgent,
   onIgnore,
+  eventAnalysis,
+  eventAnalysisError,
+  onRetryEventAnalysis,
+  onCancelEventAnalysis,
 }: {
   item: NewsCenterItem;
   cluster: NewsEventClusterDetail | null;
@@ -199,6 +229,10 @@ function DetailPanel({
   onGraph: () => void;
   onAgent: (priceIn: boolean) => void;
   onIgnore: () => void;
+  eventAnalysis: EventAnalysisSnapshot | null;
+  eventAnalysisError: string | null;
+  onRetryEventAnalysis: () => void;
+  onCancelEventAnalysis: () => void;
 }) {
   const revision = item.revision;
   return (
@@ -225,6 +259,14 @@ function DetailPanel({
           <div><span className="muted">来源等级</span><div>{revision.source_name}</div></div>
           <div><span className="muted">语言</span><div>{revision.language}</div></div>
         </div>
+        <section className={`rounded border p-2 ${item.effective_session.can_increase_confidence ? "border-emerald-200 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950/30" : "border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/30"}`}>
+          <h3 className="font-semibold">交易会话归属</h3>
+          <div className="mt-1">影响交易日：<b>{item.effective_session.target_trading_date}</b> · {SESSION_ROLE[item.effective_session.role]} · {MARKET_PHASE[item.effective_session.phase]}</div>
+          <div className="muted mt-1">最早可用：{item.effective_session.effective_at_china}{item.effective_session.time_uncertain ? " · 发布时间不精确，已保守处理" : ""}</div>
+          <div className="mt-1 leading-5">{item.effective_session.rationale}</div>
+          {!item.effective_session.can_increase_confidence && <div className="mt-1 font-medium text-amber-700 dark:text-amber-300">仅作核验线索/历史背景，不得据此提高仓位或结论置信度。</div>}
+        </section>
+        <EventAnalysisPanel snapshot={eventAnalysis} error={eventAnalysisError} onRetry={onRetryEventAnalysis} onCancel={onCancelEventAnalysis} />
         <div className="flex flex-wrap gap-2">
           <button type="button" className="btn-primary" onClick={() => onAgent(false)}>交给智能助手深度分析</button>
           <button type="button" className="btn" onClick={() => onAgent(true)}>分析是否已被市场交易</button>
@@ -301,6 +343,9 @@ export default function NewsPage() {
   const [cluster, setCluster] = useState<NewsEventClusterDetail | null>(null);
   const [revisions, setRevisions] = useState<ArchivedNewsRevision[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [eventAnalysis, setEventAnalysis] = useState<EventAnalysisSnapshot | null>(null);
+  const [eventAnalysisError, setEventAnalysisError] = useState<string | null>(null);
+  const [eventAnalysisNonce, setEventAnalysisNonce] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -344,6 +389,37 @@ export default function NewsPage() {
     const timer = setInterval(updateHealth, 30_000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (!selected) {
+      setEventAnalysis(null);
+      setEventAnalysisError(null);
+      return;
+    }
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const code = selected.entity_links.find((link) => link.eligible_for_agent && link.listed_code)?.listed_code ?? null;
+    const poll = async (jobId: string) => {
+      try {
+        const snapshot = await getEventAnalysisStatus(jobId);
+        if (disposed) return;
+        setEventAnalysis(snapshot);
+        setEventAnalysisError(null);
+        if (snapshot.running) timer = setTimeout(() => void poll(jobId), 900);
+      } catch (reason) {
+        if (!disposed) setEventAnalysisError(errMsg(reason));
+      }
+    };
+    setEventAnalysis(null);
+    setEventAnalysisError(null);
+    startEventAnalysis(selected.revision.revision_id, code)
+      .then((started) => poll(started.job_id))
+      .catch((reason) => { if (!disposed) setEventAnalysisError(errMsg(reason)); });
+    return () => {
+      disposed = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [selected?.revision.revision_id, eventAnalysisNonce]);
 
   useEffect(() => {
     const timer = setInterval(async () => {
@@ -427,8 +503,8 @@ export default function NewsPage() {
   const handToAgent = (priceIn: boolean) => {
     if (!selected) return;
     const prompt = priceIn
-      ? `基于事件证据 ${selected.revision.revision_id}，分析“${selected.revision.title}”是否已经被市场交易。必须核对事件前异常收益、成交量、板块相对表现、估值变化和反方证据。`
-      : `深度分析资讯“${selected.revision.title}”。精确证据修订号：${selected.revision.revision_id}；事件簇：${selected.event?.cluster_id ?? "尚未聚类"}。请核验原始来源、关联公司、产业链路径、反方证据和失效条件。`;
+      ? `基于不可变事件证据 ${selected.revision.revision_id}，分析“${selected.revision.title}”是否已经被市场交易。先调用“结构化事件与市场定价核验”工具，逐项核对事件前异常收益、成交量、板块相对表现、估值变化、一致预期和历史同类事件；把基本面影响与市场机会分开，缺失项不得猜测。`
+      : `深度分析资讯“${selected.revision.title}”。精确证据修订号：${selected.revision.revision_id}；事件簇：${selected.event?.cluster_id ?? "尚未聚类"}。请先调用“结构化事件与市场定价核验”工具，再核验原始来源、关联公司、产业链路径、反方证据和失效条件。`;
     useAgentSession.getState().setInput(prompt);
     navigate("/agent");
   };
@@ -528,7 +604,27 @@ export default function NewsPage() {
           </footer>
         </section>
 
-        {selected && <DetailPanel item={selected} cluster={cluster} revisions={revisions} loading={detailLoading} onClose={() => setSelected(null)} onStock={(code) => navigate(`/stock/${code}`)} onGraph={() => navigate(`/graph?evidence=${encodeURIComponent(selected.revision.revision_id)}`)} onAgent={handToAgent} onIgnore={() => void updateState(selected, "ignored", true)} />}
+        {selected && <DetailPanel
+          item={selected}
+          cluster={cluster}
+          revisions={revisions}
+          loading={detailLoading}
+          eventAnalysis={eventAnalysis}
+          eventAnalysisError={eventAnalysisError}
+          onRetryEventAnalysis={() => setEventAnalysisNonce((value) => value + 1)}
+          onCancelEventAnalysis={() => {
+            if (!eventAnalysis) return;
+            void cancelEventAnalysis(eventAnalysis.job_id)
+              .then(() => getEventAnalysisStatus(eventAnalysis.job_id))
+              .then(setEventAnalysis)
+              .catch((reason) => setEventAnalysisError(errMsg(reason)));
+          }}
+          onClose={() => setSelected(null)}
+          onStock={(code) => navigate(`/stock/${code}`)}
+          onGraph={() => navigate(`/graph?evidence=${encodeURIComponent(selected.revision.revision_id)}`)}
+          onAgent={handToAgent}
+          onIgnore={() => void updateState(selected, "ignored", true)}
+        />}
       </div>
     </div>
   );

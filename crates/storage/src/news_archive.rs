@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use rusqlite::{params, OptionalExtension, Row};
+use rusqlite::{params, params_from_iter, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -669,6 +669,37 @@ impl Storage {
         .await
     }
 
+    /// Batch-load exact immutable revisions without scanning the archive.
+    pub async fn news_archive_revisions_by_id(
+        &self,
+        revision_ids: &[String],
+    ) -> Result<Vec<ArchivedNewsRevision>> {
+        let mut revision_ids = revision_ids
+            .iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        revision_ids.sort();
+        revision_ids.dedup();
+        revision_ids.truncate(500);
+        if revision_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.run(move |conn| {
+            let placeholders = (1..=revision_ids.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut stmt = conn.prepare(&format!(
+                "{} WHERE r.revision_id IN ({placeholders})",
+                archive_select()
+            ))?;
+            let rows = stmt.query_map(params_from_iter(revision_ids), map_archive_row)?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+        .await
+    }
+
     /// Point-in-time replay. Regardless of the selected sort/filter clock, a
     /// revision is never visible before both first-seen and revision time.
     pub async fn news_archive_as_of(
@@ -1164,6 +1195,19 @@ mod tests {
         assert_eq!(revisions.len(), 2);
         assert_eq!(revisions[0].title, "首次公告");
         assert_eq!(revisions[1].title, "更正公告");
+        let selected = storage
+            .news_archive_revisions_by_id(&[
+                first.revision_id.clone(),
+                second.revision_id.clone(),
+                first.revision_id.clone(),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(
+            selected.len(),
+            2,
+            "batch lookup deduplicates exact revisions"
+        );
         assert_eq!(
             storage
                 .news_revision_snapshot(&first.revision_id)

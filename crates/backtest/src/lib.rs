@@ -40,6 +40,7 @@ pub mod data;
 pub mod engine;
 pub mod exit;
 pub mod metrics;
+pub mod news_event;
 pub mod strategies;
 pub mod strategy;
 pub mod validation;

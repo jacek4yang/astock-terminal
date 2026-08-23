@@ -28,6 +28,10 @@ pub enum Error {
     /// No board matches the given symbol.
     #[error("unknown symbol {0:?}: no board prefix matches")]
     UnknownSymbol(String),
+
+    /// A news clock falls outside chrono's supported timestamp range.
+    #[error("invalid UTC timestamp {0} in news session input")]
+    InvalidTimestamp(i64),
 }
 
 /// Convenience result alias.

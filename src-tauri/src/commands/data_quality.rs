@@ -805,8 +805,7 @@ pub async fn get_data_health_report(
     let continuous_window_satisfied = !rows.is_empty() && coverage_secs >= window_secs * 9 / 10;
     let limitation = (!continuous_window_satisfied).then(|| {
         format!(
-            "真实观测覆盖 {} 秒，尚未达到所选 {} 秒连续窗口；报告不补造历史数据",
-            coverage_secs, window_secs
+            "真实观测覆盖 {coverage_secs} 秒，尚未达到所选 {window_secs} 秒连续窗口；报告不补造历史数据"
         )
     });
     let mut markdown = format!(
