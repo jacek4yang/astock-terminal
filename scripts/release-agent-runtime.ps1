@@ -1,6 +1,6 @@
 #requires -Version 7.2
 
-<#+
+<#
 .SYNOPSIS
 Validates, packages and optionally publishes the immutable Agent Runtime prerelease.
 
@@ -35,6 +35,7 @@ $ReleaseTargetSha = "50fe6da1cf3ea4fb47b18605bc8c095413328168"
 $ApplicationVersion = "5.0.3"
 $RustToolchain = "1.88.0"
 $ReleaseNotesRelativePath = "docs/releases/v5.0.3-agent-runtime.1.md"
+$MainRefspec = "+refs/heads/main:refs/remotes/origin/main"
 
 function Require-Command {
     param([Parameter(Mandatory)][string]$Name)
@@ -115,7 +116,13 @@ if ($Repository -ne $ExpectedRepository) {
 }
 
 Invoke-Native -FilePath "gh" -ArgumentList @("auth", "status", "--hostname", "github.com") -WorkingDirectory $RepositoryRoot
-Invoke-Native -FilePath "git" -ArgumentList @("fetch", "origin", "main", "--tags", "--force") -WorkingDirectory $RepositoryRoot
+$IsShallow = Invoke-Capture -FilePath "git" -ArgumentList @("rev-parse", "--is-shallow-repository") -WorkingDirectory $RepositoryRoot
+if ($IsShallow -eq "true") {
+    Invoke-Native -FilePath "git" -ArgumentList @("fetch", "origin", $MainRefspec, "--unshallow", "--tags", "--force") -WorkingDirectory $RepositoryRoot
+}
+else {
+    Invoke-Native -FilePath "git" -ArgumentList @("fetch", "origin", $MainRefspec, "--tags", "--force") -WorkingDirectory $RepositoryRoot
+}
 
 if (-not (Test-Native -FilePath "git" -ArgumentList @("cat-file", "-e", "$ReleaseTargetSha`^{commit}") -WorkingDirectory $RepositoryRoot)) {
     Invoke-Native -FilePath "git" -ArgumentList @("fetch", "origin", $ReleaseTargetSha) -WorkingDirectory $RepositoryRoot
@@ -158,6 +165,26 @@ try {
         throw "Detached worktree is at $ActualSourceSha instead of $ReleaseTargetSha."
     }
 
+    $TauriConfig = Get-Content -LiteralPath (Join-Path $WorktreePath "src-tauri/tauri.conf.json") -Raw | ConvertFrom-Json
+    $PackageJson = Get-Content -LiteralPath (Join-Path $WorktreePath "ui/package.json") -Raw | ConvertFrom-Json
+    $PackageLock = Get-Content -LiteralPath (Join-Path $WorktreePath "ui/package-lock.json") -Raw | ConvertFrom-Json
+    $CargoManifest = Get-Content -LiteralPath (Join-Path $WorktreePath "Cargo.toml") -Raw
+    if ($TauriConfig.version -ne $ApplicationVersion) {
+        throw "tauri.conf.json version is $($TauriConfig.version), expected $ApplicationVersion."
+    }
+    if ($PackageJson.version -ne $ApplicationVersion) {
+        throw "ui/package.json version is $($PackageJson.version), expected $ApplicationVersion."
+    }
+    if ($PackageLock.version -ne $ApplicationVersion -or $PackageLock.packages."".version -ne $ApplicationVersion) {
+        throw "ui/package-lock.json version does not match $ApplicationVersion."
+    }
+    if ($CargoManifest -notmatch '(?s)\[workspace\.package\].*?version\s*=\s*"5\.0\.3"') {
+        throw "Cargo workspace version does not match $ApplicationVersion."
+    }
+    if (-not $ReleaseTag.StartsWith("v$ApplicationVersion-")) {
+        throw "Release tag $ReleaseTag is not a prerelease of v$ApplicationVersion."
+    }
+
     if (-not (Get-Command "cargo-audit" -ErrorAction SilentlyContinue)) {
         Invoke-Native -FilePath "cargo" -ArgumentList @("install", "cargo-audit", "--locked") -WorkingDirectory $WorktreePath
     }
@@ -176,9 +203,9 @@ try {
     Invoke-Native -FilePath "npm" -ArgumentList @("ci", "--prefix", "ui") -WorkingDirectory $WorktreePath
     Invoke-Native -FilePath "npm" -ArgumentList @("run", "build", "--prefix", "ui") -WorkingDirectory $WorktreePath
     Invoke-Native -FilePath "cargo" -ArgumentList @("+$RustToolchain", "fmt", "--all", "--", "--check") -WorkingDirectory $WorktreePath
-    Invoke-Native -FilePath "cargo" -ArgumentList @("+$RustToolchain", "test", "--workspace") -WorkingDirectory $WorktreePath
-    Invoke-Native -FilePath "cargo" -ArgumentList @("+$RustToolchain", "clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings") -WorkingDirectory $WorktreePath
-    Invoke-Native -FilePath "cargo" -ArgumentList @("+$RustToolchain", "check", "-p", "astock-app") -WorkingDirectory $WorktreePath
+    Invoke-Native -FilePath "cargo" -ArgumentList @("+$RustToolchain", "test", "--workspace", "--locked") -WorkingDirectory $WorktreePath
+    Invoke-Native -FilePath "cargo" -ArgumentList @("+$RustToolchain", "clippy", "--workspace", "--all-targets", "--all-features", "--locked", "--", "-D", "warnings") -WorkingDirectory $WorktreePath
+    Invoke-Native -FilePath "cargo" -ArgumentList @("+$RustToolchain", "check", "-p", "astock-app", "--locked") -WorkingDirectory $WorktreePath
     Invoke-Native -FilePath "npm" -ArgumentList @("test", "--prefix", "ui") -WorkingDirectory $WorktreePath
 
     $TauriCommand = Join-Path $WorktreePath "ui/node_modules/.bin/tauri.cmd"
@@ -255,7 +282,7 @@ try {
         return
     }
 
-    Invoke-Native -FilePath "git" -ArgumentList @("fetch", "origin", "--tags", "--force") -WorkingDirectory $RepositoryRoot
+    Invoke-Native -FilePath "git" -ArgumentList @("fetch", "origin", $MainRefspec, "--tags", "--force") -WorkingDirectory $RepositoryRoot
     if (Test-Native -FilePath "git" -ArgumentList @("rev-parse", "$ReleaseTag`^{commit}") -WorkingDirectory $RepositoryRoot) {
         $ExistingTagSha = Invoke-Capture -FilePath "git" -ArgumentList @("rev-parse", "$ReleaseTag`^{commit}") -WorkingDirectory $RepositoryRoot
         if ($ExistingTagSha -ne $ReleaseTargetSha) {
