@@ -1379,7 +1379,7 @@ impl AgentEngine {
     ) -> std::result::Result<(ChatMessage, String), MinimaxError> {
         let mut repair_messages = messages.to_vec();
         repair_messages.push(ChatMessage::user(format!(
-            "【独立发布校验失败】\n以下是未发布草稿：\n---\n{draft}\n---\n校验器错误：\n{verification_errors}\n\n只基于已有工具消息中的evidence字段修订全文，不得调用工具、猜测或换一个数字规避错误。每条关键结论使用【事实】【计算】【外部】【推断】【假设】【未知】之一；数字后精确写〔证据:evf_xxx〕，确定性计算同时写〔计算引用:calc_xxx〕。无法支持的数字必须删除，无法确认的结论明确写【未知】。保留反方证据、冲突和失效条件。直接输出修订后的完整中文报告，不解释修订过程。"
+            "【独立发布校验失败】\n以下是未发布草稿：\n---\n{draft}\n---\n校验器错误：\n{verification_errors}\n\n只基于已有工具消息中的evidence字段修订全文，不得调用工具、猜测或换一个数字规避错误。每条关键结论使用【事实】【计算】【外部】【推断】【假设】【未知】之一；校验器会自动把正文数字与内部字段匹配，正文不得出现evf_/calc_证据编号、英文工具标识、内部字段名或任何密钥配置名。无法支持的数字必须删除，无法确认的结论明确写【未知】。保留反方证据、冲突和失效条件。直接输出面向普通股民的完整中文报告，不解释修订过程。"
         )));
         let mut request =
             ChatRequest::new(model.to_string(), repair_messages).with_temperature(0.1);
@@ -2220,6 +2220,7 @@ fn tool_estimated_secs(name: &str) -> u64 {
         | "research_news"
         | "research_disclosures"
         | "research_global_transmission"
+        | "research_gold_market"
         | "analyze_event_price_in"
         | "research_supply_chain_relations"
         | "query_graph_as_of"
@@ -2246,6 +2247,7 @@ fn tool_progress_stage(name: &str, elapsed_ms: u64, estimated_ms: u64) -> &'stat
         "research_news" => "并行读取多家财经快讯并核验可用的个股事件",
         "research_disclosures" => "查询正式披露、修订链、附件与原文核验状态",
         "research_global_transmission" => "核验海外一级来源、原时区/币种与逐边 A 股传导证据",
+        "research_gold_market" => "并行核对 COMEX、上海金、阶段走势、黄金新闻与官方机构原文线索",
         "analyze_event_price_in" => "逐字段核验事件，并分离基本面影响与市场 price-in",
         "research_supply_chain_relations" => "抽取并核验供应链关系候选，只使用已审核发布关系",
         "query_graph_as_of" => "按业务时间与当时知悉时间重建历史图谱快照",
@@ -3098,6 +3100,7 @@ mod tests {
             joinquant: None,
             minimax_search: None,
             finance_news: None,
+            global_assets: None,
             iwencai: None,
             progress: None,
         };
@@ -3232,6 +3235,7 @@ mod tests {
             joinquant: None,
             minimax_search: None,
             finance_news: None,
+            global_assets: None,
             iwencai: None,
             progress: None,
         };
@@ -3280,6 +3284,7 @@ mod tests {
             joinquant: None,
             minimax_search: None,
             finance_news: None,
+            global_assets: None,
             iwencai: None,
             progress: None,
         };
@@ -3342,6 +3347,7 @@ mod tests {
             joinquant: None,
             minimax_search: None,
             finance_news: None,
+            global_assets: None,
             iwencai: None,
             progress: None,
         };
@@ -3988,6 +3994,7 @@ mod tests {
             joinquant: None,
             minimax_search: None,
             finance_news: None,
+            global_assets: None,
             iwencai: None,
             progress: None,
         };
@@ -4447,6 +4454,7 @@ mod tests {
                 joinquant: None,
                 minimax_search: None,
                 finance_news: None,
+                global_assets: None,
                 iwencai: None,
                 progress: None,
             };

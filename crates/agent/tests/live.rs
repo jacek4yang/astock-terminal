@@ -84,6 +84,7 @@ async fn live_one_tool_conversation() {
         joinquant: None,
         minimax_search: None,
         finance_news: None,
+        global_assets: None,
         iwencai: None,
         progress: None,
     };
@@ -140,6 +141,7 @@ async fn live_market_data_tool_conversation() {
         joinquant: None,
         minimax_search: None,
         finance_news: None,
+        global_assets: None,
         iwencai: None,
         progress: None,
     };
@@ -169,5 +171,132 @@ async fn live_market_data_tool_conversation() {
             .iter()
             .any(|e| matches!(e, AgentEvent::Completed { .. })),
         "task should complete"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the desktop app's stored MiniMax key and public data endpoints"]
+async fn live_gold_research_uses_real_sources_and_publishes_clean_chinese() {
+    let Some(key) = astock_minimax::KeyStore::new()
+        .load_key()
+        .expect("load the desktop MiniMax credential")
+    else {
+        eprintln!("desktop MiniMax key not configured; skipping");
+        return;
+    };
+    let client = Arc::new(MinimaxClient::new(key));
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(StorageConfig::with_base_dir(dir.path())).unwrap();
+    let market = Arc::new(MarketData::with_storage(storage.clone()));
+    let ctx = ToolContext {
+        market: market.clone(),
+        storage,
+        graph: None,
+        fundamental: None,
+        joinquant: None,
+        minimax_search: Some(client.clone()),
+        finance_news: Some(market.finance_news.clone()),
+        global_assets: Some(market.global_assets.clone()),
+        iwencai: None,
+        progress: None,
+    };
+    let registry = astock_agent::default_registry();
+    let source_result = registry
+        .dispatch(
+            "research_gold_market",
+            json!({
+                "days": 90,
+                "news_limit": 30,
+                "include_official_search": false
+            }),
+            &ctx,
+        )
+        .await
+        .expect("gold source aggregation should succeed");
+    assert!(
+        source_result.summary_json["gold_market"]["quotes"]
+            .as_array()
+            .is_some_and(|quotes| !quotes.is_empty()),
+        "gold research must include a live exchange quote"
+    );
+    assert!(
+        source_result.summary_json["gold_market"]["trend"]["observations"]
+            .as_u64()
+            .is_some_and(|observations| observations >= 20),
+        "gold research must include a usable trend window"
+    );
+    assert!(
+        source_result.summary_json["gold_news"]
+            .as_array()
+            .is_some_and(|headlines| !headlines.is_empty()),
+        "gold research must include at least one matching headline"
+    );
+
+    let engine = AgentEngine::new(
+        client,
+        registry,
+        ctx,
+        EngineConfig {
+            max_rounds: 8,
+            ..Default::default()
+        },
+    );
+    let spec = TaskSpec::new(
+        "live-gold-research",
+        "gold-research",
+        "请分析当前黄金近20个交易日走势、近期黄金利好与利空，并说明对紫金矿业和山东黄金的可能影响。必须先使用黄金行情、财经新闻与官方机构信息，区分事实、推断和未知，用通俗中文回答。",
+    )
+    .with_run_options(
+        "deep",
+        "maximum",
+        vec!["research_gold_market".into()],
+        false,
+    );
+
+    let events: Vec<AgentEvent> = engine.run_task(spec).collect().await;
+    let gold_finished = events.iter().any(|event| {
+        matches!(
+            event,
+            AgentEvent::ToolCallFinished {
+                name,
+                success: true,
+                ..
+            } if name == "research_gold_market"
+        )
+    });
+    assert!(
+        gold_finished,
+        "the Agent must complete the dedicated gold research tool"
+    );
+
+    let answer = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::Completed { report } => Some(report.answer.as_str()),
+            _ => None,
+        })
+        .expect("gold research task should complete");
+    assert!(answer.contains("黄金"));
+    for forbidden in [
+        "证据:ev",
+        "evf_",
+        "calc_",
+        "research_gold_market",
+        "research_news",
+        "research_global_transmission",
+        "status=no_match",
+        "total_documents=",
+        "API_KEY",
+        "_TOKEN",
+        "_SECRET",
+    ] {
+        assert!(
+            !answer.contains(forbidden),
+            "public answer leaked internal marker: {forbidden}"
+        );
+    }
+    eprintln!(
+        "gold Agent smoke test completed; public_answer_chars={}",
+        answer.chars().count()
     );
 }

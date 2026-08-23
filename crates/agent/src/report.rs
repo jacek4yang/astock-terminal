@@ -401,7 +401,11 @@ pub fn assemble_report(
     research.verification = verify_research_report(&research, &evidence, generated_at);
     AgentReport {
         task_id: task_id.to_string(),
-        answer: final_text.trim_end().to_string(),
+        // The verifier and drill-down report keep the model's internal field
+        // references, but the ordinary chat answer is a publication surface.
+        // Never expose evidence addresses, tool identifiers or credential
+        // variable names there.
+        answer: sanitize_public_answer(final_text),
         conclusions,
         evidence,
         generated_at,
@@ -919,6 +923,50 @@ fn remove_reference_markup(text: &str) -> String {
         .into_owned()
 }
 
+/// Convert an internally auditable draft into ordinary user-facing Chinese.
+///
+/// Evidence IDs and configuration variable names remain available in the
+/// structured report/diagnostic layer. They are implementation details and
+/// must never be presented as prose to an ordinary investor.
+pub fn sanitize_public_answer(text: &str) -> String {
+    let mut answer = remove_reference_markup(text);
+    let replacements = [
+        ("research_global_transmission", "海外一手信息检索"),
+        ("fetch_source_document", "原始资料核验"),
+        ("compare_source_evidence", "多来源交叉核验"),
+        ("research_disclosures", "公司公告检索"),
+        ("research_news", "财经新闻检索"),
+        ("search_web", "联网检索"),
+        ("source_version_id", "原始资料版本"),
+        ("document_revision_id", "资讯修订版本"),
+        ("fact_id", "事实记录"),
+        ("status=no_match", "未找到匹配内容"),
+        ("total_documents=0", "暂未取得可核验原文"),
+    ];
+    for (internal, public) in replacements {
+        answer = answer.replace(&format!("`{internal}`"), public);
+        answer = answer.replace(internal, public);
+    }
+    answer = Regex::new(r"(?i)\b(?:evf|ev|calc|claim|data)_[a-z0-9_.-]+\b")
+        .expect("static internal id regex")
+        .replace_all(&answer, "")
+        .into_owned();
+    answer = Regex::new(
+        r"(?i)\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:API_KEY|TOKEN|SECRET|PASSWORD|PWD|USER_AGENT)\b",
+    )
+    .expect("static credential variable regex")
+    .replace_all(&answer, "相应数据源配置")
+    .into_owned();
+    answer = answer
+        .replace("〔〕", "")
+        .replace("【】", "")
+        .replace("[]", "");
+    Regex::new(r"[ \t]+([，。；、：！？])")
+        .expect("static punctuation cleanup regex")
+        .replace_all(answer.trim_end(), "$1")
+        .into_owned()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QuantityKind {
     Plain,
@@ -1157,6 +1205,29 @@ mod tests {
         let report = assemble_report("t1", "结论。【事实】x\n", vec![], 0);
         assert_eq!(report.answer, "结论。【事实】x");
         assert!(!report.answer.contains("免责声明"));
+    }
+
+    #[test]
+    fn public_answer_hides_internal_research_metadata() {
+        let draft = "【推断】金价偏强〔证据:evf_5e298283〕；`research_news` 返回 status=no_match，`research_global_transmission` 返回 total_documents=0，建议配置 BLS_API_KEY 后再调用 fetch_source_document，并核对 source_version_id 与 fact_id。";
+        let answer = sanitize_public_answer(draft);
+        assert!(answer.contains("金价偏强"));
+        assert!(answer.contains("财经新闻检索"));
+        assert!(answer.contains("海外一手信息检索"));
+        assert!(answer.contains("相应数据源配置"));
+        for internal in [
+            "evf_",
+            "research_news",
+            "research_global_transmission",
+            "status=no_match",
+            "total_documents=0",
+            "BLS_API_KEY",
+            "fetch_source_document",
+            "source_version_id",
+            "fact_id",
+        ] {
+            assert!(!answer.contains(internal), "leaked {internal}: {answer}");
+        }
     }
 
     #[test]

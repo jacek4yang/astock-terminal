@@ -233,6 +233,7 @@ fn build_engine(state: &AppState, backend: Arc<MinimaxClient>) -> AgentEngine {
         joinquant: Some(state.market.joinquant.clone()),
         minimax_search: Some(backend.clone()),
         finance_news: Some(state.market.finance_news.clone()),
+        global_assets: Some(state.market.global_assets.clone()),
         iwencai: Some(state.market.iwencai.clone()),
         progress: None,
     };

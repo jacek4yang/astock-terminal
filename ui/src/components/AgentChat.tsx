@@ -167,6 +167,41 @@ export function stripPrivateReasoning(raw: string): string {
   return text;
 }
 
+/**
+ * Final defensive publication boundary for both live streams and historical
+ * conversations. The Rust report applies the same policy; keeping it here
+ * prevents an older saved answer or a partial streaming chunk from briefly
+ * flashing implementation metadata in the chat bubble.
+ */
+export function sanitizeAgentVisibleText(raw: string): string {
+  let text = raw.replace(
+    /(?:\[|〔|【)?(?:证据|计算引用)[:：]\s*[A-Za-z0-9_.-]+(?:\]|〕|】)?/gi,
+    "",
+  );
+  const replacements: Array<[RegExp, string]> = [
+    [/`?research_global_transmission`?/gi, "海外一手信息检索"],
+    [/`?fetch_source_document`?/gi, "原始资料核验"],
+    [/`?compare_source_evidence`?/gi, "多来源交叉核验"],
+    [/`?research_disclosures`?/gi, "公司公告检索"],
+    [/`?research_news`?/gi, "财经新闻检索"],
+    [/`?search_web`?/gi, "联网检索"],
+    [/`?source_version_id`?/gi, "原始资料版本"],
+    [/`?document_revision_id`?/gi, "资讯修订版本"],
+    [/`?fact_id`?/gi, "事实记录"],
+    [/`?status=no_match`?/gi, "未找到匹配内容"],
+    [/`?total_documents=0`?/gi, "暂未取得可核验原文"],
+  ];
+  for (const [pattern, replacement] of replacements) text = text.replace(pattern, replacement);
+  return text
+    .replace(/\b(?:evf|ev|calc|claim|data)_[a-z0-9_.-]+\b/gi, "")
+    .replace(
+      /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:API_KEY|TOKEN|SECRET|PASSWORD|PWD|USER_AGENT)\b/gi,
+      "相应数据源配置",
+    )
+    .replace(/〔〕|【】|\[\]/g, "")
+    .replace(/[ \t]+([，。；、：！？])/g, "$1");
+}
+
 // ==================== 子组件 ====================
 
 const STATUS_LABEL: Record<string, { text: string; cls: string }> = {
@@ -1011,7 +1046,9 @@ function AssistantMsg({
   msg: ChatMsg;
   onClarificationSubmit: (request: ClarificationRequest, draft: ClarificationDraft) => void;
 }) {
-  const answer = stripPrivateReasoning(msg.report ? msg.report.answer : msg.raw);
+  const answer = sanitizeAgentVisibleText(
+    stripPrivateReasoning(msg.report ? msg.report.answer : msg.raw),
+  );
   const clarification = parseClarification(answer);
   const visibleAnswer = clarification ? clarification.displayText : answer;
   const draft = msg.clarificationDraft ?? emptyClarificationDraft();
@@ -1043,7 +1080,9 @@ function AssistantMsg({
           onSubmit={() => onClarificationSubmit(clarification.request, draft)}
         />
       )}
-      {msg.report && !clarification && <ResearchVerificationPanel report={msg.report} />}
+      {msg.report && !clarification && msg.report.research?.verification.status === "failed" && (
+        <ResearchVerificationPanel report={msg.report} />
+      )}
       {msg.report && !clarification && (
         <div className="muted mt-3 rounded border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs dark:border-amber-900/60 dark:bg-amber-950/30">
           免责声明:以上内容由 AI 基于公开数据生成,仅供参考,不构成投资建议。市场有风险,决策需独立。
