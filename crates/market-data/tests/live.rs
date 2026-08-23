@@ -135,6 +135,29 @@ async fn live_kline_quote_search_breadth() {
     println!("live smoke test passed");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live network test"]
+async fn live_csi300_uses_index_market_identity() {
+    let md = MarketData::new();
+    let csi300 = Symbol::new("000300").unwrap();
+    assert!(csi300.is_unambiguous_index());
+
+    // Call the ordinary Agent-facing APIs. They must internally route to
+    // SH index id 1.000300 and unadjusted index bars, not SZ stock 0.000300.
+    let quote = md.quote(&csi300).await.expect("CSI 300 quote failed");
+    assert_eq!(quote.data.name, "沪深300");
+    assert!(quote.data.price > 1_000.0);
+
+    for period in [KlinePeriod::Day, KlinePeriod::Week, KlinePeriod::Month] {
+        let bars = md
+            .kline(&csi300, period, Adjust::Qfq, 30)
+            .await
+            .unwrap_or_else(|error| panic!("CSI 300 {period:?} kline failed: {error}"));
+        assert!(bars.data.len() >= 10, "too few {period:?} index bars");
+        assert!(bars.data.last().is_some_and(|bar| bar.close > 1_000.0));
+    }
+}
+
 /// 复权正确性守护: the two qfq sources (Tencent `qfqday` and EastMoney
 /// `fqt=1`) must agree on 600519, and neither qfq series may contain
 /// adjustment gaps that look like >11% single-day moves on a ±10% main-board

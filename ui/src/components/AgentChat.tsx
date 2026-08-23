@@ -84,7 +84,7 @@ const TOOL_GROUPS = [
   },
   {
     label: "基本面与估值",
-    tools: ["get_fundamentals", "run_valuation"],
+    tools: ["get_fundamentals", "analyze_earnings_drivers", "run_valuation"],
   },
   {
     label: "扫描与横向比较",
@@ -92,7 +92,7 @@ const TOOL_GROUPS = [
   },
   {
     label: "产业链与关系",
-    tools: ["get_industry_chain", "run_supply_chain_shock", "build_relationship_graph"],
+    tools: ["get_industry_chain", "run_supply_chain_shock", "build_relationship_graph", "run_quant_research", "research_supply_chain_relations", "query_graph_as_of"],
   },
   {
     label: "策略实验",
@@ -103,6 +103,8 @@ const TOOL_GROUPS = [
     tools: [
       "research_news",
       "research_disclosures",
+      "research_global_transmission",
+      "analyze_event_price_in",
       "search_web",
       "fetch_source_document",
       "read_document",
@@ -351,10 +353,10 @@ function ToolCard({ tool }: { tool: ToolCallItem }) {
       </div>
       {tool.progressDetail && (
         <div className="muted mt-1 flex flex-wrap justify-between gap-x-3 gap-y-0.5 text-[10px]">
-          <span className="num">已处理 {tool.progressDetail.completed} / {tool.progressDetail.total} 只</span>
+          <span className="num">已处理 {tool.progressDetail.completed} / {tool.progressDetail.total} 项</span>
           <span className="num">成功 {tool.progressDetail.succeeded} · 失败 {tool.progressDetail.failed} · 缓存命中 {tool.progressDetail.cache_hits}</span>
           <span className="num">本轮获取 {tool.progressDetail.records.toLocaleString("zh-CN")} 条上游数据</span>
-          <span className="num">当前并行 {tool.progressDetail.active.length} 只</span>
+          <span className="num">当前并行 {tool.progressDetail.active.length} 项</span>
         </div>
       )}
       {!tool.done && estimatedSeconds != null && (
@@ -404,7 +406,7 @@ function ToolCard({ tool }: { tool: ToolCallItem }) {
                   ["失败", tool.progressDetail.failed],
                   ["缓存命中", tool.progressDetail.cache_hits],
                   ["新获取数据", `${tool.progressDetail.records.toLocaleString("zh-CN")} 条`],
-                  ["当前并行", `${tool.progressDetail.active.length} 只`],
+                  ["当前并行", `${tool.progressDetail.active.length} 项`],
                   ["剩余", `${Math.max(0, tool.progressDetail.total - tool.progressDetail.completed)} 只`],
                 ].map(([metricLabel, value]) => (
                   <div key={metricLabel} className="rounded bg-white/80 px-2 py-1.5 dark:bg-slate-950/50">
@@ -415,7 +417,7 @@ function ToolCard({ tool }: { tool: ToolCallItem }) {
               </div>
               {tool.progressDetail.active.length > 0 && (
                 <details className="mt-2" open>
-                  <summary className="cursor-pointer select-none font-medium">正在处理的股票（{tool.progressDetail.active.length}）</summary>
+                  <summary className="cursor-pointer select-none font-medium">正在处理的项目（{tool.progressDetail.active.length}）</summary>
                   <ul className="mt-1.5 space-y-1">
                     {tool.progressDetail.active.map((item) => (
                       <li key={item.label} className="grid gap-1 rounded bg-white/80 px-2 py-1.5 dark:bg-slate-950/50 sm:grid-cols-[8rem_1fr]">
@@ -883,30 +885,51 @@ function evidenceValue(value: unknown): string {
 /** 可逐层展开的结论—字段证据—校验错误视图。 */
 export function ResearchVerificationPanel({ report }: { report: AgentReport }) {
   const research = report.research;
+  const [expanded, setExpanded] = useState(false);
   if (!research) return null;
+  const failed = research.verification.status === "failed";
+  const notApplicable = research.verification.status === "not_applicable";
+  return (
+    <div
+      className={`mt-3 rounded border ${
+        failed
+          ? "border-red-300 bg-red-50/70 dark:border-red-900 dark:bg-red-950/20"
+          : notApplicable
+            ? "border-blue-200 bg-blue-50/60 dark:border-blue-900/70 dark:bg-blue-950/20"
+            : "border-emerald-200 bg-emerald-50/60 dark:border-emerald-900/70 dark:bg-emerald-950/20"
+      }`}
+    >
+      <button
+        type="button"
+        className="flex w-full cursor-pointer select-none items-center px-3 py-2 text-left text-sm font-semibold"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        <span className="mr-2 text-xs">{expanded ? "▼" : "▶"}</span>
+        {failed
+          ? "报告已被证据校验阻断"
+          : notApplicable
+            ? "正在等待你的选择，尚未发布投资结论"
+            : "结论与证据校验已通过"}
+        <span className="muted ml-2 text-xs font-normal">
+          {research.claims.length} 条结论 · {CONFIDENCE_LABEL[research.confidence] ?? research.confidence} · {research.verification.findings.length} 项校验信息
+        </span>
+      </button>
+      {expanded && <ResearchVerificationDetails report={report} />}
+    </div>
+  );
+}
+
+function ResearchVerificationDetails({ report }: { report: AgentReport }) {
+  const research = report.research!;
   const fields = new Map<string, { snapshot: AgentReport["evidence"][number]; field: AgentEvidenceField }>();
   for (const snapshot of report.evidence) {
     for (const field of snapshot.fields ?? []) {
       fields.set(field.evidence_id, { snapshot, field });
     }
   }
-  const failed = research.verification.status === "failed";
   return (
-    <details
-      className={`mt-3 rounded border ${
-        failed
-          ? "border-red-300 bg-red-50/70 dark:border-red-900 dark:bg-red-950/20"
-          : "border-emerald-200 bg-emerald-50/60 dark:border-emerald-900/70 dark:bg-emerald-950/20"
-      }`}
-      open={failed}
-    >
-      <summary className="cursor-pointer select-none px-3 py-2 text-sm font-semibold">
-        {failed ? "报告已被证据校验阻断" : "结论与证据校验已通过"}
-        <span className="muted ml-2 text-xs font-normal">
-          {research.claims.length} 条结论 · {CONFIDENCE_LABEL[research.confidence] ?? research.confidence} · {research.verification.findings.length} 项校验信息
-        </span>
-      </summary>
-      <div className="space-y-2 border-t border-current/10 p-2.5">
+    <div className="space-y-2 border-t border-current/10 p-2.5">
         {research.claims.length === 0 && (
           <div className="muted text-xs">本回答没有需要单独核验的数字型或分级结论。</div>
         )}
@@ -972,10 +995,9 @@ export function ResearchVerificationPanel({ report }: { report: AgentReport }) {
           ))}
         <div className="muted flex flex-wrap justify-between gap-2 text-[11px]">
           <span>报告协议：{research.schema_version} · 校验器：{research.verification.verifier_version}</span>
-          <button type="button" className="underline" onClick={() => copyDiagnostic(JSON.stringify({ report: research, evidence: report.evidence }, null, 2))}>复制完整校验记录</button>
+          <button type="button" className="underline" onClick={() => copyDiagnostic(JSON.stringify({ report: research, evidence: report.evidence }, null, 2))}>复制当前校验摘要</button>
         </div>
-      </div>
-    </details>
+    </div>
   );
 }
 
@@ -1020,24 +1042,6 @@ function AssistantMsg({
         />
       )}
       {msg.report && !clarification && <ResearchVerificationPanel report={msg.report} />}
-      {msg.report && msg.report.evidence.length > 0 && (
-        <div className="mt-3 rounded border border-slate-200 dark:border-slate-800">
-          <div className="muted border-b border-slate-200 px-2.5 py-1.5 text-xs dark:border-slate-800">
-            <Term label="证据清单" tip="本回答引用的工具数据快照,可按缓存键溯源复核" />(
-            {msg.report.evidence.length})
-          </div>
-          <ul className="divide-y divide-slate-100 dark:divide-slate-800/60">
-            {msg.report.evidence.map((ev, i) => (
-              <li key={ev.evidence_id || i} className="num flex flex-wrap gap-x-3 px-2.5 py-1.5 text-xs">
-                <span className="font-medium">{toolDisplayName(ev.tool)}</span>
-                <span className="muted">数据来源：{sourceDisplayName(ev.source)}</span>
-                <span className="muted">更新时间：{fetchedAtDisplay(ev.fetched_at)}</span>
-                <span className="muted">可核验字段：{ev.fields?.length ?? 0}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
       {msg.report && !clarification && (
         <div className="muted mt-3 rounded border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs dark:border-amber-900/60 dark:bg-amber-950/30">
           免责声明:以上内容由 AI 基于公开数据生成,仅供参考,不构成投资建议。市场有风险,决策需独立。
@@ -1053,6 +1057,13 @@ function AssistantMsg({
 }
 
 // ==================== 对话组件(页面版 / 抽屉版复用) ====================
+
+export function isNearScrollBottom(
+  position: Pick<HTMLElement, "scrollHeight" | "scrollTop" | "clientHeight">,
+  threshold = 96,
+) {
+  return position.scrollHeight - position.scrollTop - position.clientHeight <= threshold;
+}
 
 export default function AgentChat({
   variant = "page",
@@ -1090,17 +1101,39 @@ export default function AgentChat({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [taskDetail, setTaskDetail] = useState<AgentTask | null>(null);
+  const [visibleMessageCount, setVisibleMessageCount] = useState(60);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const shouldFollowLatestRef = useRef(true);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
 
   const running = status === "running";
   const waitingForInput = status === "waiting_input";
+  const visibleMsgs = msgs.slice(-visibleMessageCount);
 
-  // 滚动到底部
+  // 只有用户仍停留在底部附近时才跟随流式输出。向上阅读后不抢滚动位置。
   useEffect(() => {
     const el = scrollRef.current;
+    if (el && shouldFollowLatestRef.current) {
+      el.scrollTop = el.scrollHeight;
+      setShowJumpToLatest(false);
+    }
+  }, [msgs, status, progress]);
+
+  const followLatest = useCallback(() => {
+    shouldFollowLatestRef.current = true;
+    setShowJumpToLatest(false);
+    const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [msgs, status]);
+  }, []);
+
+  const handleMessageScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const nearBottom = isNearScrollBottom(el);
+    shouldFollowLatestRef.current = nearBottom;
+    setShowJumpToLatest((current) => (current === !nearBottom ? current : !nearBottom));
+  }, []);
 
   const refreshTasks = useCallback(async () => {
     try {
@@ -1185,6 +1218,7 @@ export default function AgentChat({
   const send = async (question: string) => {
     const q = question.trim();
     if (!q || running) return;
+    followLatest();
     const session = useAgentSession.getState();
     appendAgentTurn(q);
     // 新会话首轮:把当前查看的股票作为上下文前置(气泡仍只显示用户原文)
@@ -1355,6 +1389,8 @@ export default function AgentChat({
         err: null,
         progress: null,
       });
+      followLatest();
+      setVisibleMessageCount(60);
       setHistoryOpen(false);
     } catch (e) {
       setErr(errMsg(e));
@@ -1365,6 +1401,8 @@ export default function AgentChat({
   const newChat = () => {
     if (running) return;
     resetAgentSession();
+    followLatest();
+    setVisibleMessageCount(60);
     setHistoryOpen(false);
   };
 
@@ -1747,55 +1785,81 @@ export default function AgentChat({
         )}
 
         {/* 消息区 */}
-        <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
-          {running && progress && <ResearchProgress progress={progress} />}
-          {msgs.length === 0 && (
-            <div className="muted py-10 text-center text-sm">
-              向智能助手提问，或点击下方快捷模板开始
-            </div>
-          )}
-          {msgs.map((m) =>
-            m.role === "user" ? (
-              <div key={m.key} className="anim-fade-up flex justify-end">
-                <div className="max-w-2xl whitespace-pre-wrap rounded bg-blue-600 px-3 py-2 text-sm text-white">
-                  {m.raw}
-                </div>
-              </div>
-            ) : (
-              <AssistantMsg
-                key={m.key}
-                msg={m}
-                onClarificationSubmit={(request, draft) =>
-                  submitClarification(m.key, request, draft)
-                }
-              />
-            ),
-          )}
-
-          {status === "suspended" && (
-            <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300">
-              <div className="flex flex-wrap items-center gap-3">
-                <span>
-                  任务已保存，可从中断点继续。
-                  {suspendedMsg?.suspendedAt && (
-                    <>
-                      建议恢复时间:
-                      <span className="num font-medium">{fmtUnix(suspendedMsg.suspendedAt)}</span>。
-                    </>
-                  )}
-                  系统会自动补齐应用退出时未返回的分析结果，避免工具链不匹配错误（错误码 2013）。
-                  {autoResumeOnQuota && " 已开启额度恢复后自动续跑；也可立即手动尝试。"}
-                </span>
-                <button className="btn-primary" onClick={resume}>
-                  继续分析
+        <div className="relative min-h-0 flex-1">
+          <div ref={scrollRef} onScroll={handleMessageScroll} className="h-full space-y-3 overflow-y-auto p-4">
+            {msgs.length > visibleMsgs.length && (
+              <div className="text-center">
+                <button
+                  type="button"
+                  className="btn text-xs"
+                  onClick={() => {
+                    shouldFollowLatestRef.current = false;
+                    setShowJumpToLatest(true);
+                    setVisibleMessageCount((count) => count + 60);
+                  }}
+                >
+                  加载更早消息（还有 {msgs.length - visibleMsgs.length} 条）
                 </button>
               </div>
-            </div>
-          )}
-          {err && (
-            <div className="rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
-              {err}
-            </div>
+            )}
+            {running && progress && <ResearchProgress progress={progress} />}
+            {msgs.length === 0 && (
+              <div className="muted py-10 text-center text-sm">
+                向智能助手提问，或点击下方快捷模板开始
+              </div>
+            )}
+            {visibleMsgs.map((m) =>
+              m.role === "user" ? (
+                <div key={m.key} className="anim-fade-up flex justify-end">
+                  <div className="max-w-2xl whitespace-pre-wrap rounded bg-blue-600 px-3 py-2 text-sm text-white">
+                    {m.raw}
+                  </div>
+                </div>
+              ) : (
+                <AssistantMsg
+                  key={m.key}
+                  msg={m}
+                  onClarificationSubmit={(request, draft) =>
+                    submitClarification(m.key, request, draft)
+                  }
+                />
+              ),
+            )}
+
+            {status === "suspended" && (
+              <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300">
+                <div className="flex flex-wrap items-center gap-3">
+                  <span>
+                    任务已保存，可从中断点继续。
+                    {suspendedMsg?.suspendedAt && (
+                      <>
+                        建议恢复时间:
+                        <span className="num font-medium">{fmtUnix(suspendedMsg.suspendedAt)}</span>。
+                      </>
+                    )}
+                    系统会自动补齐应用退出时未返回的分析结果，避免工具链不匹配错误（错误码 2013）。
+                    {autoResumeOnQuota && " 已开启额度恢复后自动续跑；也可立即手动尝试。"}
+                  </span>
+                  <button className="btn-primary" onClick={resume}>
+                    继续分析
+                  </button>
+                </div>
+              </div>
+            )}
+            {err && (
+              <div className="rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
+                {err}
+              </div>
+            )}
+          </div>
+          {showJumpToLatest && (
+            <button
+              type="button"
+              className="btn absolute bottom-3 right-5 z-10 border-blue-300 bg-white shadow-lg dark:border-blue-800 dark:bg-slate-900"
+              onClick={followLatest}
+            >
+              回到最新内容 ↓
+            </button>
           )}
         </div>
 
@@ -1967,7 +2031,6 @@ export function historyToMsgs(m: AgentMessage, out: ChatMsg[]): ChatMsg[] {
         ...last.tools,
         {
           key: nextAgentKey(),
-          args: m.content,
           ...finished,
           timeline: [
             {

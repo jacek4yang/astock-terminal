@@ -10,6 +10,7 @@ import {
   ResearchVerificationPanel,
   historyToMsgs,
   hasUnansweredClarification,
+  isNearScrollBottom,
   redactDiagnosticValue,
   stripPrivateReasoning,
   taskRunStatus,
@@ -52,6 +53,11 @@ describe("Agent history safety", () => {
     expect(taskRunStatus("running")).toBe("running");
     expect(taskRunStatus("verification_failed")).toBe("failed");
     expect(taskRunStatus("unknown")).toBe("idle");
+  });
+
+  it("only follows streaming output while the reader remains near the bottom", () => {
+    expect(isNearScrollBottom({ scrollHeight: 2_000, scrollTop: 1_420, clientHeight: 500 })).toBe(true);
+    expect(isNearScrollBottom({ scrollHeight: 2_000, scrollTop: 900, clientHeight: 500 })).toBe(false);
   });
 
   it("redacts credentials from nested and plain-text diagnostics", () => {
@@ -182,7 +188,7 @@ describe("Agent history safety", () => {
     expect(submitted.mock.calls[0][0]).toContain("风险偏好？：平衡");
   });
 
-  it("expands a blocked claim into copyable field-level diagnostics", () => {
+  it("lazily expands a blocked claim into copyable field-level diagnostics", async () => {
     const report: AgentReport = {
       task_id: "run-1",
       answer: "报告未通过证据校验",
@@ -249,8 +255,40 @@ describe("Agent history safety", () => {
     };
     render(createElement(ResearchVerificationPanel, { report }));
     expect(screen.getByText("报告已被证据校验阻断")).toBeInTheDocument();
+    expect(screen.queryByText(/最新价为12.3元/)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /报告已被证据校验阻断/ }));
     expect(screen.getByText(/最新价为12.3元/)).toBeInTheDocument();
     expect(screen.getByText(/价格字段已陈旧/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "复制完整校验记录" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "复制当前校验摘要" })).toBeInTheDocument();
+  });
+
+  it("shows clarification as waiting input instead of a failed report", () => {
+    const report: AgentReport = {
+      task_id: "run-waiting",
+      answer: "请先选择你的资金定位。",
+      conclusions: [],
+      generated_at: 1,
+      evidence: [],
+      research: {
+        schema_version: "astock-research-report/v1",
+        as_of: "2026-08-23T09:00:00+08:00",
+        confidence: "low",
+        claims: [],
+        calculations: [],
+        assumptions: [],
+        counter_evidence: [],
+        invalidation: [],
+        unknowns: [],
+        verification: {
+          status: "not_applicable",
+          verifier_version: "report-verifier/v1",
+          verified_at: 1,
+          findings: [],
+        },
+      },
+    };
+    const { container } = render(createElement(ResearchVerificationPanel, { report }));
+    expect(container).toHaveTextContent("正在等待你的选择，尚未发布投资结论");
+    expect(container).not.toHaveTextContent("报告已被证据校验阻断");
   });
 });

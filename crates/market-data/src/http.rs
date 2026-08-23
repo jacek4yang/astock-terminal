@@ -236,16 +236,30 @@ impl HttpClient {
         url: &str,
         params: &[(String, String)],
     ) -> Result<TextResponse, DataError> {
+        self.get_text_with_headers(url, &[], params).await
+    }
+
+    /// GET with explicit per-request headers. This is required by official
+    /// APIs such as SEC EDGAR, whose Fair Access policy requires a declared
+    /// application/contact User-Agent instead of a generic browser identity.
+    pub async fn get_text_with_headers(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        params: &[(String, String)],
+    ) -> Result<TextResponse, DataError> {
         let host = Self::host_key(url);
         self.throttle(&host).await;
 
-        let result = self
+        let mut request = self
             .client_for(url)
             .get(url)
             .header(reqwest::header::USER_AGENT, self.current_ua())
-            .query(params)
-            .send()
-            .await;
+            .query(params);
+        for (key, value) in headers {
+            request = request.header(key, value);
+        }
+        let result = request.send().await;
 
         let resp = match result {
             Ok(r) => r,
@@ -331,6 +345,19 @@ impl HttpClient {
         params: &[(String, String)],
     ) -> Result<serde_json::Value, DataError> {
         let resp = self.get_text(url, params).await?;
+        serde_json::from_str(&resp.body).map_err(|e| DataError::Parse {
+            upstream: Self::host_key(url),
+            message: e.to_string(),
+        })
+    }
+
+    pub async fn get_json_with_headers(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        params: &[(String, String)],
+    ) -> Result<serde_json::Value, DataError> {
+        let resp = self.get_text_with_headers(url, headers, params).await?;
         serde_json::from_str(&resp.body).map_err(|e| DataError::Parse {
             upstream: Self::host_key(url),
             message: e.to_string(),

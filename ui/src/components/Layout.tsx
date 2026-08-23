@@ -28,6 +28,7 @@ const NAV = [
   { to: "/", label: "今日市场", icon: "M3 12h4l3-8 4 16 3-8h4" },
   { to: "/news", label: "资讯中心", icon: "M4 5h16v14H4zM7 9h3m-3 3h10m-10 3h10M13 9h4" },
   { to: "/disclosures", label: "正式披露", icon: "M6 3h9l3 3v15H6zM15 3v4h4M9 11h6m-6 4h6" },
+  { to: "/global", label: "全球传导", icon: "M12 2a10 10 0 1 0 0 20m0-20c3 3 4 6 4 10s-1 7-4 10m-10-10h20M4 7h16M4 17h16" },
   { to: "/agent", label: "智能助手", icon: AGENT_ICON },
   { to: "/watchlist", label: "自选股", icon: "M12 2l3 7h7l-5.5 4.5L18 21l-6-4-6 4 1.5-7.5L2 9h7z" },
   { to: "/scan", label: "智能扫描", icon: "M11 4a7 7 0 1 0 4.9 12L21 21M11 8v3l2 2" },

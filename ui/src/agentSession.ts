@@ -28,10 +28,12 @@ export const DEFAULT_AGENT_TOOLS = [
   "get_watchlist",
   "get_cached_detail",
   "get_fundamentals",
+  "analyze_earnings_drivers",
   "run_valuation",
   "get_industry_chain",
   "run_supply_chain_shock",
   "build_relationship_graph",
+  "run_quant_research",
   "run_backtest",
   "iterate_strategy",
   "run_joinquant_research",
@@ -41,6 +43,10 @@ export const DEFAULT_AGENT_TOOLS = [
   "compare_source_evidence",
   "research_news",
   "research_disclosures",
+  "research_global_transmission",
+  "analyze_event_price_in",
+  "research_supply_chain_relations",
+  "query_graph_as_of",
 ] as const;
 
 export interface ToolCallItem {
@@ -139,6 +145,73 @@ interface AgentSessionState {
 let keySeq = Date.now();
 export const nextAgentKey = () => keySeq++;
 
+const MAX_PERSISTED_MESSAGES = 24;
+const MAX_PERSISTED_TEXT_CHARS = 48_000;
+
+function compactText(value: string | undefined, limit = MAX_PERSISTED_TEXT_CHARS) {
+  if (value == null || value.length <= limit) return value;
+  const half = Math.floor((limit - 48) / 2);
+  return `${value.slice(0, half)}\n\n……较长内容已保存在会话记录中……\n\n${value.slice(-half)}`;
+}
+
+/**
+ * The durable report remains in SQLite. The live chat only needs evidence
+ * fields referenced by published claims; retaining every raw tool field in
+ * WebView memory was the main source of large-session crashes.
+ */
+export function compactAgentReport(report: AgentReport): AgentReport {
+  if (!report.research) return { ...report, evidence: [] };
+  const evidenceIds = new Set(
+    report.research.claims.flatMap((claim) => claim.evidence_ids),
+  );
+  const calculationIds = new Set(
+    report.research.claims.flatMap((claim) => claim.calculation_ids),
+  );
+  const evidence = report.evidence.flatMap((snapshot) => {
+    const fields = (snapshot.fields ?? []).filter((field) =>
+      evidenceIds.has(field.evidence_id),
+    );
+    return evidenceIds.has(snapshot.evidence_id) || fields.length > 0
+      ? [{ ...snapshot, fields }]
+      : [];
+  });
+  return {
+    ...report,
+    evidence,
+    research: {
+      ...report.research,
+      calculations: report.research.calculations.filter((calculation) =>
+        calculationIds.has(calculation.calculation_id),
+      ),
+    },
+  };
+}
+
+/** Small recovery snapshot; the complete conversation is loaded from SQLite. */
+export function compactMessagesForPersistence(messages: ChatMsg[]): ChatMsg[] {
+  return messages.slice(-MAX_PERSISTED_MESSAGES).map((message) => ({
+    ...message,
+    raw: compactText(message.report ? "" : message.raw) ?? "",
+    failed: compactText(message.failed, 4_000),
+    tools: message.tools.slice(-24).map((tool) => ({
+      ...tool,
+      args: compactText(tool.args, 8_000),
+      error: compactText(tool.error, 4_000),
+      stage: compactText(tool.stage, 2_000),
+      timeline: tool.timeline?.slice(-24).map((entry) => ({
+        ...entry,
+        message: compactText(entry.message, 2_000) ?? "",
+      })),
+    })),
+    report: message.report
+      ? {
+          ...compactAgentReport(message.report),
+          answer: compactText(message.report.answer) ?? "",
+        }
+      : undefined,
+  }));
+}
+
 export const useAgentSession = create<AgentSessionState>()(
   persist(
     (set) => ({
@@ -166,8 +239,10 @@ export const useAgentSession = create<AgentSessionState>()(
       setAutoResumeOnQuota: (autoResumeOnQuota) => set({ autoResumeOnQuota }),
     }),
     {
-      name: "astock-agent-session-v2",
-      version: 4,
+      // Avoid parsing legacy multi-megabyte evidence snapshots before a
+      // migration can run; complete conversations remain available in SQLite.
+      name: "astock-agent-session-v3",
+      version: 1,
       storage: createJSONStorage(() => window.localStorage),
       migrate: (persisted, version) => {
         const state = persisted as Partial<AgentSessionState>;
@@ -180,11 +255,11 @@ export const useAgentSession = create<AgentSessionState>()(
         return {
           ...state,
           enabledTools:
-            version < 3 && hadAllLegacyTools ? [...DEFAULT_AGENT_TOOLS] : enabled,
+            version < 1 && hadAllLegacyTools ? [...DEFAULT_AGENT_TOOLS] : enabled,
         } as AgentSessionState;
       },
       partialize: (state) => ({
-        msgs: state.msgs,
+        msgs: compactMessagesForPersistence(state.msgs),
         input: state.input,
         status: state.status,
         compactionCount: state.compactionCount,
@@ -411,7 +486,9 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
         );
         return {
           ...item,
-          report: event.report,
+          // Avoid retaining the final Markdown twice (stream buffer + report).
+          raw: "",
+          report: compactAgentReport(event.report),
           clarificationDraft: hasClarification(event.report.answer)
             ? item.clarificationDraft ?? emptyClarificationDraft()
             : item.clarificationDraft,

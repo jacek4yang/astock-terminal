@@ -24,6 +24,11 @@
 - `resolve_news_evidence_review(task_id, conclusion_key, triggering_revision) -> void` — 显式标记一项结论已经人工复核。
 - `get_news_entity_links(revision_ids) -> [DocumentEntityLink]` — 批量查询资讯原文 span、候选实体、消歧理由、关系链、规则版本、置信度和 Agent 可用状态。
 - `get_entity_link_reviews(limit) -> [EntityLinkReview]` — 查询低置信、歧义或模型提议的待审核实体映射。
+- `relation_extraction_start(request) -> {job_id,estimated_seconds,...}` — 从已核验 `source_version_id` 启动无硬超时的后台供应链关系抽取；模型只可提交带原文 span 的结构化候选。
+- `relation_extraction_status(job_id) -> RelationExtractionSnapshot` — 查询扫描段落、候选、校验、待审核、日志、错误和完整结果；切换页面可恢复。
+- `query_relation_reviews(...) -> RelationReviewPage` — 按状态、材料类型、置信度和分页查询关系审核队列。
+- `review_relation_candidate(request) -> PublicationResult` — 通过/修改/拒绝/合并实体/标记保密或不可推断；理由必填，可在通过后幂等发布。
+- `retract_relation_candidate(candidate_id, reason) -> PublicationResult` — 追加撤回审计；最后一份有效证据撤回后使当前图谱投影失效。
 - `resolve_entity_link_review(link_id, entity_id?, accept, reason) -> bool` — 在候选列表中人工确认或拒绝映射；理由不能为空，接受时仍要求精确修订证据。
 - `fetch_source_document(url) -> SourceDocumentDetail` — 受控读取 HTML/JSON/PDF/正式附件，保存不可变来源版本，并返回原值、原单位、页码/段落/span；访问失败仍持久化 `unverified` 诊断。
 - `get_source_documents(limit) -> [SourceDocumentSummary]` — 查询最近来源、来源层级、一级来源标记、读取状态与失败原因，不发起网络请求。
@@ -56,8 +61,21 @@
 
 ## 深度分析引擎(astock-graph / astock-agent)
 - `graph_subgraph(symbol_or_node, hops?: 1-3, 默认 2) -> {nodes, edges}` — 产业链子图(代码/节点 id/精确名称)
+- `graph_as_of(business_time, knowledge_time, symbol_or_node?, hops?) -> GraphSnapshot` — 按业务时间和系统知悉时间重建可重复快照，返回 `snapshot_id`、不可变 revision、状态、有效置信度、原始/合并后实体和来源。
+- `graph_history_bounds() -> GraphHistoryBounds` — 历史滑块边界、修订总量和当前待复核数量。
+- `graph_edge_timeline(identity_id) -> EdgeRevision[]` — 稳定关系身份下的全部不可变修订。
+- `graph_snapshot_get(snapshot_id) -> GraphSnapshot?` — 按确定性 ID 重放；相同输入无法得到相同 ID 时拒绝。
+- `graph_snapshot_diff(left_business_time, left_knowledge_time, right_business_time, right_knowledge_time) -> GraphSnapshotDiff` — 新增/移除 revision 与发生变化的关系身份。历史研究和事件回测必须显式绑定 knowledge-time 快照。
+- `get_earnings_driver_tree(symbol) -> EarningsDriverTree` — 行业适配的可追溯盈利驱动树、参数快照、三情景、敏感性、Monte Carlo 与隐含假设。
+- `run_earnings_driver_shock(symbol, shocks) -> ShockBridge` — 经营/供应链冲击到收入、毛利、EPS、经营现金流和自由现金流的桥接。
+- `get_earnings_driver_snapshot(snapshot_id) -> EarningsDriverTree` — 回放不可变盈利驱动快照，不重新取数。
 - `supply_chain_shock(subject, direction: "up"|"down"(支持涨/跌), magnitude_pct?) -> ShockJson` — 事件沿供应链传导:一二级受益/受损 + 逻辑链/滞后/置信度
 - `relationship_graph(symbols: string[2-12], window_days?: 60-500, 默认 250) -> GraphJson` — 日收益 Pearson + lead-lag 关系网络
+- `quant_research_start(config: ResearchConfig) -> QuantResearchJobSnapshot` — 启动无硬超时的后台量化研究；配置含股票池、口径、频率、日期、复权、缺失值、窗口、滞后、控制变量、重抽样、FDR 和预算。
+- `quant_research_status(job_id?) -> QuantResearchJobSnapshot?` — 查询行情获取数、关系进度、当前配对、有效 N、预计剩余时间、日志、结果或可复制错误。
+- `quant_research_cancel(job_id) -> bool` — 协作式安全取消；已完成的上游缓存仍保留。
+- `quant_research_snapshot_get(snapshot_id) -> ResearchSnapshot?` — 按不可变编号重放完整配置、数据版本、函数版本、推断与稳健性结果。
+- `quant_research_snapshot_list(limit?) -> QuantSnapshotSummary[]` — 最近研究快照，供历史与 Agent/UI 结果复现。
 - `run_backtest(symbol?, strategy?, params?, pool?, fast?, slow?, entry_n?, exit_n?, bars?: 60-2000, 默认 750) -> BacktestJson` — 日线回测(A 股交易规则),返回绩效/净值曲线/最近 50 笔交易
   - 内置策略 `ma_cross`(默认)/ `turtle` / `buy_hold`:标量参数 fast/slow/entry_n/exit_n 直接传,或经 `params` JSON 对象传(显式标量优先);`symbol` 必填。
   - 注册表单标的策略(如 `zscore_mean_reversion`):`symbol` 必填,参数走 `params` JSON(如 `{"ma_window":20,"z_window":60,"entry_z":-2.0,"exit_z":1.0}`);未知参数键报 `invalid_param`。返回同 BacktestJson 形状并带 `kind: "single"`。

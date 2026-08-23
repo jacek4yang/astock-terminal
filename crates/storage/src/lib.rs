@@ -204,6 +204,19 @@ pub struct AgentTask {
     pub updated_at: i64,
 }
 
+/// Immutable Quant Lab research snapshot (migration v20).
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuantResearchSnapshotRow {
+    pub snapshot_id: String,
+    pub function_version: String,
+    pub metric: String,
+    pub symbols_json: String,
+    pub data_versions_json: String,
+    pub config_json: String,
+    pub snapshot_json: String,
+    pub created_at: i64,
+}
+
 /// One metadata-only event in the append-only Agent tool audit trail.
 ///
 /// Request/response bodies, raw arguments, provider errors and credentials
@@ -419,6 +432,93 @@ impl Storage {
     /// In-memory LRU cache for hot tool results.
     pub fn tool_mem_cache(&self) -> &MemCache<ToolCacheEntry> {
         &self.inner.tool_mem
+    }
+
+    /// Persist a deterministic Quant Lab snapshot. Replaying identical
+    /// inputs is idempotent because snapshot_id hashes all relevant inputs.
+    pub async fn quant_research_snapshot_put(&self, row: QuantResearchSnapshotRow) -> Result<()> {
+        self.run(move |conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO quant_research_snapshots
+                 (snapshot_id,function_version,metric,symbols_json,data_versions_json,
+                  config_json,snapshot_json,created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    row.snapshot_id,
+                    row.function_version,
+                    row.metric,
+                    row.symbols_json,
+                    row.data_versions_json,
+                    row.config_json,
+                    row.snapshot_json,
+                    row.created_at,
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Load a Quant Lab snapshot by its immutable id.
+    pub async fn quant_research_snapshot_get(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<Option<QuantResearchSnapshotRow>> {
+        let snapshot_id = snapshot_id.to_string();
+        self.run(move |conn| {
+            use rusqlite::OptionalExtension;
+            conn.query_row(
+                "SELECT snapshot_id,function_version,metric,symbols_json,data_versions_json,
+                        config_json,snapshot_json,created_at
+                   FROM quant_research_snapshots WHERE snapshot_id=?1",
+                [snapshot_id],
+                |row| {
+                    Ok(QuantResearchSnapshotRow {
+                        snapshot_id: row.get(0)?,
+                        function_version: row.get(1)?,
+                        metric: row.get(2)?,
+                        symbols_json: row.get(3)?,
+                        data_versions_json: row.get(4)?,
+                        config_json: row.get(5)?,
+                        snapshot_json: row.get(6)?,
+                        created_at: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+        .await
+    }
+
+    /// Recent Quant Lab snapshots for the replay/history picker.
+    pub async fn quant_research_snapshot_list(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<QuantResearchSnapshotRow>> {
+        let limit = limit.clamp(1, 100) as i64;
+        self.run(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT snapshot_id,function_version,metric,symbols_json,data_versions_json,
+                        config_json,snapshot_json,created_at
+                   FROM quant_research_snapshots ORDER BY created_at DESC LIMIT ?1",
+            )?;
+            let rows = stmt.query_map([limit], |row| {
+                Ok(QuantResearchSnapshotRow {
+                    snapshot_id: row.get(0)?,
+                    function_version: row.get(1)?,
+                    metric: row.get(2)?,
+                    symbols_json: row.get(3)?,
+                    data_versions_json: row.get(4)?,
+                    config_json: row.get(5)?,
+                    snapshot_json: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into)
+        })
+        .await
     }
 
     // ------------------------------------------------------------------
