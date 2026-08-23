@@ -28,6 +28,7 @@ import ChanlunPanel from "../components/ChanlunPanel";
 import FundFlowPanel from "../components/FundFlowPanel";
 import FundamentalsPanel from "../components/FundamentalsPanel";
 import ValuationPanel from "../components/ValuationPanel";
+import EarningsDriverPanel from "../components/EarningsDriverPanel";
 import CanslimCard from "../components/CanslimCard";
 import OrderBookPanel from "../components/OrderBookPanel";
 import { useAppStore } from "../store";
@@ -503,6 +504,7 @@ export default function StockPage() {
               /* 基本面标签:切换到该标签时才挂载并触发数据请求(懒加载) */
               <div className="h-full space-y-3 overflow-y-auto p-3">
                 <FundamentalsPanel symbol={symbol} />
+                <EarningsDriverPanel symbol={symbol} />
                 <ValuationPanel symbol={symbol} />
               </div>
             )}

@@ -2,13 +2,15 @@ import { createElement, useState } from "react";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { AgentMessage } from "../lib/api";
+import type { AgentMessage, AgentReport } from "../lib/api";
 import { emptyClarificationDraft, formatClarificationAnswer, type ClarificationDraft } from "../lib/agentClarification";
 import {
   buildToolDiagnostic,
   ClarificationCard,
+  ResearchVerificationPanel,
   historyToMsgs,
   hasUnansweredClarification,
+  isNearScrollBottom,
   redactDiagnosticValue,
   stripPrivateReasoning,
   taskRunStatus,
@@ -49,7 +51,13 @@ describe("Agent history safety", () => {
     expect(taskRunStatus("completed")).toBe("completed");
     expect(taskRunStatus("interrupted")).toBe("suspended");
     expect(taskRunStatus("running")).toBe("running");
+    expect(taskRunStatus("verification_failed")).toBe("failed");
     expect(taskRunStatus("unknown")).toBe("idle");
+  });
+
+  it("only follows streaming output while the reader remains near the bottom", () => {
+    expect(isNearScrollBottom({ scrollHeight: 2_000, scrollTop: 1_420, clientHeight: 500 })).toBe(true);
+    expect(isNearScrollBottom({ scrollHeight: 2_000, scrollTop: 900, clientHeight: 500 })).toBe(false);
   });
 
   it("redacts credentials from nested and plain-text diagnostics", () => {
@@ -178,5 +186,109 @@ describe("Agent history safety", () => {
     expect(submitted).toHaveBeenCalledTimes(1);
     expect(submitted.mock.calls[0][0]).toContain("资金定位？：试探性建仓");
     expect(submitted.mock.calls[0][0]).toContain("风险偏好？：平衡");
+  });
+
+  it("lazily expands a blocked claim into copyable field-level diagnostics", async () => {
+    const report: AgentReport = {
+      task_id: "run-1",
+      answer: "报告未通过证据校验",
+      conclusions: [],
+      generated_at: 1,
+      evidence: [{
+        evidence_id: "ev_1",
+        tool: "get_quote",
+        cache_key: "get_quote:300308",
+        source: "tdx",
+        fetched_at: "2026-08-23T09:00:00+08:00",
+        tool_version: "v2",
+        data_version: "data_1",
+        source_tier: "provider",
+        freshness: "stale",
+        blocking: false,
+        fields: [{
+          evidence_id: "evf_price",
+          field_path: "/price",
+          value: 12.3,
+          unit: "cny",
+          currency: "CNY",
+          as_of: "2026-08-23T09:00:00+08:00",
+          freshness: "stale",
+          source_tier: "provider",
+          blocking: false,
+          calculation_id: null,
+        }],
+      }],
+      research: {
+        schema_version: "astock-research-report/v1",
+        as_of: "2026-08-23T09:00:00+08:00",
+        confidence: "blocked",
+        claims: [{
+          claim_id: "claim_1",
+          text: "最新价为12.3元",
+          claim_type: "fact",
+          evidence_ids: ["evf_price"],
+          calculation_ids: [],
+          as_of: "2026-08-23T09:00:00+08:00",
+          confidence: "blocked",
+          assumptions: [],
+          counter_evidence: [],
+          invalidation: [],
+          unknowns: [],
+        }],
+        calculations: [],
+        assumptions: [],
+        counter_evidence: [],
+        invalidation: [],
+        unknowns: [],
+        verification: {
+          status: "failed",
+          verifier_version: "report-verifier/v1",
+          verified_at: 1,
+          findings: [{
+            code: "stale_price",
+            severity: "error",
+            claim_id: "claim_1",
+            message: "价格字段已陈旧，必须重新取行情",
+          }],
+        },
+      },
+    };
+    render(createElement(ResearchVerificationPanel, { report }));
+    expect(screen.getByText("报告已被证据校验阻断")).toBeInTheDocument();
+    expect(screen.queryByText(/最新价为12.3元/)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /报告已被证据校验阻断/ }));
+    expect(screen.getByText(/最新价为12.3元/)).toBeInTheDocument();
+    expect(screen.getByText(/价格字段已陈旧/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "复制当前校验摘要" })).toBeInTheDocument();
+  });
+
+  it("shows clarification as waiting input instead of a failed report", () => {
+    const report: AgentReport = {
+      task_id: "run-waiting",
+      answer: "请先选择你的资金定位。",
+      conclusions: [],
+      generated_at: 1,
+      evidence: [],
+      research: {
+        schema_version: "astock-research-report/v1",
+        as_of: "2026-08-23T09:00:00+08:00",
+        confidence: "low",
+        claims: [],
+        calculations: [],
+        assumptions: [],
+        counter_evidence: [],
+        invalidation: [],
+        unknowns: [],
+        verification: {
+          status: "not_applicable",
+          verifier_version: "report-verifier/v1",
+          verified_at: 1,
+          findings: [],
+        },
+      },
+    };
+    const { container } = render(createElement(ResearchVerificationPanel, { report }));
+    expect(container).toHaveTextContent("正在等待你的选择，尚未发布投资结论");
+    expect(container).not.toHaveTextContent("报告已被证据校验阻断");
   });
 });

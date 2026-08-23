@@ -18,6 +18,7 @@
 //! confidence) is a documented heuristic — see the module docs.
 
 pub mod analysis;
+pub mod bitemporal;
 pub mod engine;
 pub mod enrich;
 pub mod error;
@@ -25,6 +26,10 @@ pub mod model;
 pub mod seed;
 pub mod store;
 
+pub use bitemporal::{
+    EdgeRevision, EdgeRevisionInput, EntityMergeRevision, EvidenceSourceType, GraphHistoryBounds,
+    GraphSnapshot, GraphSnapshotDiff, RelationStatus, SnapshotEdge,
+};
 pub use engine::{Engine, ImpactEntry, ImpactReport, DEFAULT_MAX_HOPS, HOP_CONFIDENCE_DECAY};
 pub use enrich::{apply_industry_map, enrich_from_eastmoney, EnrichSummary};
 pub use error::{Error, Result};
