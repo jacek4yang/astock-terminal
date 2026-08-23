@@ -1,0 +1,21 @@
+{
+  "items": [
+    {
+      "id": "notice-001",
+      "title": "示例公司发布股份回购进展公告",
+      "summary": "离线契约样例，不访问真实上游。",
+      "url": "https://example.com/notices/notice-001",
+      "published_at_ms": 1787421600000,
+      "important": true
+    },
+    {
+      "id": "policy-002",
+      "title": "行业政策例行更新",
+      "summary": "用于验证关键词过滤和增量游标。",
+      "url": "https://example.com/policy/policy-002",
+      "published_at_ms": 1787421540000,
+      "important": false
+    }
+  ],
+  "next_cursor": "fixture-cursor-2"
+}

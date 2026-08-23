@@ -20,10 +20,17 @@ members = [
     "crates/joinquant",
     "crates/security",
     "crates/evaluation",
+    "crates/news-intelligence",
+    "crates/entity-linking",
+    "crates/source-verification",
+    "crates/disclosure",
+    "crates/global-intelligence",
+    "crates/event-intelligence",
+    "crates/relation-extraction",
 ]
 
 [workspace.package]
-version = "5.0.1"
+version = "5.0.2"
 edition = "2021"
 license = "Proprietary"
 rust-version = "1.88"
@@ -45,12 +52,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # time
 chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
+chrono-tz = "0.10"
 # storage
 rusqlite = { version = "0.32", features = ["bundled"] }
 arrow = { version = "54", features = ["prettyprint"] }
 parquet = { version = "54", features = ["arrow"] }
 # utils
-lru = "0.13"
+lru = "0.18.2"
 parking_lot = "0.12"
 dashmap = "6"
 governor = "0.8"
@@ -60,6 +68,7 @@ regex = "1"
 once_cell = "1"
 url = "2"
 sha2 = "0.10"
+flate2 = "1"
 # tests
 proptest = "1"
 

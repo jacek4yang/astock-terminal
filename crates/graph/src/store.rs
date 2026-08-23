@@ -115,6 +115,36 @@ impl GraphStore {
             }
         }
         let now = now_secs();
+        self.upsert_revision_at(crate::bitemporal::EdgeRevisionInput::from_edge(
+            edge.clone(),
+            now,
+        ))
+        .await?;
+        Ok(())
+    }
+
+    /// Persist an explicit immutable bitemporal revision and refresh the
+    /// legacy current projection used by existing propagation analytics.
+    pub async fn upsert_revision_at(
+        &self,
+        input: crate::bitemporal::EdgeRevisionInput,
+    ) -> Result<crate::bitemporal::EdgeRevision> {
+        let edge = input.edge.clone();
+        let recorded_at = input.recorded_at;
+        let status = input.status;
+        let saved = self.record_revision_at(input).await?;
+        let projection_valid_to = if matches!(
+            status,
+            crate::bitemporal::RelationStatus::Contradicted
+                | crate::bitemporal::RelationStatus::Expired
+                | crate::bitemporal::RelationStatus::Revoked
+        ) {
+            Some(recorded_at)
+        } else {
+            edge.valid_to
+        };
+        // `graph_edges` remains a disposable current projection. All history
+        // and evidence lives in graph_edge_revisions.
         self.storage
             .graph_edge_upsert(GraphEdgeRow {
                 id: edge.id,
@@ -126,12 +156,12 @@ impl GraphStore {
                 source_url: edge.source_url.clone(),
                 confidence: edge.confidence,
                 valid_from: edge.valid_from,
-                valid_to: edge.valid_to,
-                created_at: now,
-                updated_at: now,
+                valid_to: projection_valid_to,
+                created_at: recorded_at,
+                updated_at: recorded_at,
             })
             .await?;
-        Ok(())
+        Ok(saved)
     }
 
     /// Persist an event row (id conflict keeps the original).
@@ -185,12 +215,16 @@ impl GraphStore {
 
     /// All edges, ordered by row id.
     pub async fn all_edges(&self) -> Result<Vec<Edge>> {
+        let now = now_secs();
         Ok(self
             .storage
             .graph_edges_all()
             .await?
             .into_iter()
             .map(edge_from)
+            .filter(|edge| {
+                edge.valid_from <= now && edge.valid_to.is_none_or(|valid_to| valid_to > now)
+            })
             .collect())
     }
 
