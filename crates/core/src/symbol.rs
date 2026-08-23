@@ -126,6 +126,16 @@ impl Symbol {
         false
     }
 
+    /// Codes that can be identified as indices without an exchange prefix.
+    ///
+    /// `399xxx` is reserved for Shenzhen indices. `000300` is the CSI 300
+    /// benchmark and has no same-code listed A-share. Other Shanghai `000xxx`
+    /// index codes are deliberately excluded because many collide with
+    /// Shenzhen stocks (for example `000001`).
+    pub fn is_unambiguous_index(&self) -> bool {
+        self.0 == "000300" || self.0.starts_with("399")
+    }
+
     /// EastMoney secid for an index code: `399xxx` → `0.`, else `1.`.
     pub fn index_secid(index_code: &str) -> String {
         if index_code.starts_with("399") {
@@ -231,6 +241,10 @@ mod tests {
         assert_eq!(Symbol::index_secid("399001"), "0.399001");
         assert_eq!(Symbol::index_tencent("000001"), "sh000001");
         assert_eq!(Symbol::index_tencent("399006"), "sz399006");
+        assert!(sym("000300").is_unambiguous_index());
+        assert!(sym("399006").is_unambiguous_index());
+        assert!(!sym("000001").is_unambiguous_index());
+        assert!(!sym("600519").is_unambiguous_index());
     }
 
     #[test]
