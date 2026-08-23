@@ -155,7 +155,12 @@ impl TaskSpec {
             ),
             None => "本轮可使用系统注册的全部工具。".to_string(),
         };
-        format!("【本轮研究控制】\n{mode}\n{depth}\n{tools}")
+        let strategy_gate = if requires_strategy_clarification(&self.prompt) {
+            "\n本轮是信息不足的个人资金策略请求：只输出astock-questions选择框，询问期限、最大回撤、资金性质；不得调用任何工具，等待用户提交后再继续。"
+        } else {
+            ""
+        };
+        format!("【本轮研究控制】\n{mode}\n{depth}\n{tools}{strategy_gate}")
     }
 
     fn conversation_id(&self) -> &str {
@@ -772,11 +777,10 @@ impl AgentEngine {
                     }
                 }
             }
-            // A plan-mode clarification is a user-input boundary, not an
-            // analyst draft. Sending it through the specialist panel used to
-            // trigger TextReset and made the questions flash then disappear.
-            let awaiting_user_input = state.spec.research_mode.as_deref() == Some("plan")
-                && is_clarification_request(&clean_text);
+            // A structured clarification is a user-input boundary in every
+            // research mode, not an analyst draft. Sending it through the
+            // specialist panel used to make the questions flash and vanish.
+            let awaiting_user_input = is_clarification_request(&clean_text);
             let awaiting_specialist_review = calls.is_empty()
                 && !awaiting_user_input
                 && !state.multi_agent_reviewed
@@ -1952,6 +1956,50 @@ fn explicitly_requests_chart(prompt: &str) -> bool {
         .any(|needle| prompt.contains(needle))
 }
 
+fn requires_strategy_clarification(prompt: &str) -> bool {
+    let asks_for_strategy = [
+        "投资策略",
+        "股票策略",
+        "资金配置",
+        "怎么买股票",
+        "股票投资方案",
+    ]
+    .iter()
+    .any(|needle| prompt.contains(needle));
+    let mentions_money = prompt.contains('元') || prompt.contains('万') || prompt.contains("资金");
+    if !asks_for_strategy || !mentions_money {
+        return false;
+    }
+    let has_horizon = [
+        "短线",
+        "中线",
+        "长期",
+        "持有期",
+        "一个月",
+        "三个月",
+        "半年",
+        "一年",
+        "两年",
+        "三年",
+    ]
+    .iter()
+    .any(|needle| prompt.contains(needle));
+    let has_drawdown = ["最大回撤", "保守", "平衡", "稳健", "激进", "风险承受"]
+        .iter()
+        .any(|needle| prompt.contains(needle));
+    let has_capital_role = [
+        "闲置资金",
+        "闲钱",
+        "全部资金",
+        "备用金",
+        "生活费",
+        "可承受亏损",
+    ]
+    .iter()
+    .any(|needle| prompt.contains(needle));
+    !(has_horizon && has_drawdown && has_capital_role)
+}
+
 /// Recognize both the structured selection protocol and the legacy numbered
 /// Markdown format. The latter keeps older/provider-deviating answers from
 /// entering specialist review and disappearing from the UI.
@@ -3118,6 +3166,15 @@ mod tests {
         assert!(!is_clarification_request(
             "1. 关键依据\n- 营收增长\n- 现金流改善\n2. 风险因素\n- 估值偏高"
         ));
+    }
+
+    #[test]
+    fn small_account_strategy_requires_three_material_constraints() {
+        assert!(requires_strategy_clarification("给我2万元的股票投资策略"));
+        assert!(!requires_strategy_clarification(
+            "用2万元闲置资金做一年期稳健股票投资策略，最大回撤不超过10%"
+        ));
+        assert!(!requires_strategy_clarification("分析沪深300的投资价值"));
     }
 
     #[test]

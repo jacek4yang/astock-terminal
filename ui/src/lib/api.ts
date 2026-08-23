@@ -2052,6 +2052,8 @@ export interface AgentToolProgressDetail {
   total: number;
   succeeded: number;
   failed: number;
+  skipped: number;
+  retries: number;
   cache_hits: number;
   records: number;
   active: AgentToolWorkItem[];

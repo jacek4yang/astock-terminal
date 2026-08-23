@@ -354,7 +354,7 @@ function ToolCard({ tool }: { tool: ToolCallItem }) {
       {tool.progressDetail && (
         <div className="muted mt-1 flex flex-wrap justify-between gap-x-3 gap-y-0.5 text-[10px]">
           <span className="num">已处理 {tool.progressDetail.completed} / {tool.progressDetail.total} 项</span>
-          <span className="num">成功 {tool.progressDetail.succeeded} · 失败 {tool.progressDetail.failed} · 缓存命中 {tool.progressDetail.cache_hits}</span>
+          <span className="num">成功 {tool.progressDetail.succeeded} · 跳过 {tool.progressDetail.skipped ?? 0} · 失败 {tool.progressDetail.failed} · 自动重试 {tool.progressDetail.retries ?? 0} · 缓存命中 {tool.progressDetail.cache_hits}</span>
           <span className="num">本轮获取 {tool.progressDetail.records.toLocaleString("zh-CN")} 条上游数据</span>
           <span className="num">当前并行 {tool.progressDetail.active.length} 项</span>
         </div>
@@ -403,7 +403,9 @@ function ToolCard({ tool }: { tool: ToolCallItem }) {
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                 {[
                   ["成功", tool.progressDetail.succeeded],
+                  ["安全跳过", tool.progressDetail.skipped ?? 0],
                   ["失败", tool.progressDetail.failed],
+                  ["自动重试", tool.progressDetail.retries ?? 0],
                   ["缓存命中", tool.progressDetail.cache_hits],
                   ["新获取数据", `${tool.progressDetail.records.toLocaleString("zh-CN")} 条`],
                   ["当前并行", `${tool.progressDetail.active.length} 项`],

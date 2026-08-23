@@ -18,12 +18,15 @@ use crate::provider::DataProvider;
 use crate::providers::fill_pct;
 use astock_core::time::parse_date;
 use astock_core::{
-    Adjust, Bar, DataError, Fetched, KlinePeriod, Quote, Source, StockListItem, Symbol, VolumeUnit,
+    Adjust, Bar, DataError, Fetched, KlinePeriod, MarketBreadth, Quote, Source, StockListItem,
+    Symbol, VolumeUnit,
 };
 use astock_tdx::{
     KlineCategory, Quote as TdxQuote, SecurityBar, SecurityInfo, TdxClient, TdxError,
 };
 use async_trait::async_trait;
+use futures::stream::{self, StreamExt};
+use std::time::Duration;
 use tokio::sync::OnceCell;
 use tracing::debug;
 
@@ -31,6 +34,9 @@ use tracing::debug;
 const MARKET_SH: u8 = 1;
 /// tdx 协议市场号：深圳。
 const MARKET_SZ: u8 = 0;
+const TDX_QUOTE_BATCH: usize = 60;
+const TDX_BREADTH_CONCURRENCY: usize = 6;
+const TDX_BREADTH_ATTEMPTS: usize = 3;
 
 /// TDX adapter. Constructing it is free (no network); the server probe runs
 /// lazily on the first data request.
@@ -95,6 +101,28 @@ impl TdxProvider {
             .into_iter()
             .find(|quote| quote.code == code)
             .ok_or_else(|| DataError::Empty(format!("tdx order book {symbol}")))
+    }
+
+    async fn quote_batch_with_retry(
+        client: &TdxClient,
+        batch: &[(u8, String)],
+    ) -> Result<Vec<TdxQuote>, String> {
+        let refs: Vec<(u8, &str)> = batch
+            .iter()
+            .map(|(market, code)| (*market, code.as_str()))
+            .collect();
+        let mut failures = Vec::new();
+        for attempt in 1..=TDX_BREADTH_ATTEMPTS {
+            match client.quotes(&refs).await {
+                Ok(quotes) if !quotes.is_empty() => return Ok(quotes),
+                Ok(_) => failures.push(format!("attempt {attempt}: empty response")),
+                Err(error) => failures.push(format!("attempt {attempt}: {error}")),
+            }
+            if attempt < TDX_BREADTH_ATTEMPTS {
+                tokio::time::sleep(Duration::from_millis(200 * attempt as u64)).await;
+            }
+        }
+        Err(failures.join(", "))
     }
 }
 
@@ -282,6 +310,83 @@ impl DataProvider for TdxProvider {
             })
             .await?;
         Ok(Fetched::now(items.clone(), Source::Tdx))
+    }
+
+    /// Full-market advance/decline fallback. TDX accepts at most 60 symbols
+    /// per quote request, so batches are bounded, retried independently and
+    /// checked for coverage before the result is accepted.
+    async fn market_breadth(&self) -> Result<Fetched<MarketBreadth>, DataError> {
+        let securities = self.all_a_shares().await?.data;
+        let batches: Vec<Vec<(u8, String)>> = securities
+            .chunks(TDX_QUOTE_BATCH)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .filter_map(|item| {
+                        astock_tdx::protocol::types::auto_market(&item.code)
+                            .map(|market| (market, item.code.clone()))
+                    })
+                    .collect()
+            })
+            .filter(|batch: &Vec<_>| !batch.is_empty())
+            .collect();
+        let client = self.client().await?;
+        let results: Vec<_> = stream::iter(batches)
+            .map(|batch| async move {
+                let requested = batch.len();
+                (
+                    requested,
+                    Self::quote_batch_with_retry(client, &batch).await,
+                )
+            })
+            .buffer_unordered(TDX_BREADTH_CONCURRENCY)
+            .collect()
+            .await;
+
+        let requested: usize = results.iter().map(|(count, _)| *count).sum();
+        let mut quotes = Vec::with_capacity(requested);
+        let mut failures = Vec::new();
+        for (count, result) in results {
+            match result {
+                Ok(mut batch) => quotes.append(&mut batch),
+                Err(error) => failures.push(format!("{count}-stock batch: {error}")),
+            }
+        }
+        let required = requested.saturating_mul(95).div_ceil(100);
+        if quotes.len() < required || quotes.len() < 4_000 {
+            return Err(DataError::AllFailed {
+                op: "tdx market breadth",
+                details: format!(
+                    "coverage {}/{requested}, required {required}; {}",
+                    quotes.len(),
+                    failures.join("; ")
+                ),
+            });
+        }
+
+        let mut up = 0_u32;
+        let mut down = 0_u32;
+        let mut flat = 0_u32;
+        for quote in quotes {
+            if quote.price <= 0.0 || quote.last_close <= 0.0 {
+                flat += 1;
+            } else if quote.price > quote.last_close {
+                up += 1;
+            } else if quote.price < quote.last_close {
+                down += 1;
+            } else {
+                flat += 1;
+            }
+        }
+        Ok(Fetched::now(
+            MarketBreadth {
+                up,
+                down,
+                flat,
+                total: up + down + flat,
+            },
+            Source::Tdx,
+        ))
     }
 }
 

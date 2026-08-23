@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -277,6 +278,8 @@ async fn fetch_analysis_inputs(
             total: 6,
             succeeded: 0,
             failed: 0,
+            skipped: 0,
+            retries: 0,
             cache_hits: 0,
             records: 0,
             active: vec![ToolWorkItem {
@@ -320,6 +323,8 @@ async fn fetch_analysis_inputs(
                 total: 6,
                 succeeded: 1,
                 failed: 0,
+                skipped: 0,
+                retries: 0,
                 cache_hits: 0,
                 records: upstream_records,
                 active: {
@@ -382,6 +387,8 @@ async fn fetch_analysis_inputs(
                 total: 6,
                 succeeded: 1 + succeeded,
                 failed: 3 - succeeded,
+                skipped: 0,
+                retries: 0,
                 cache_hits: 0,
                 records: upstream_records,
                 active: vec![ToolWorkItem {
@@ -724,6 +731,8 @@ impl AgentTool for RunFullAnalysis {
             total: 6,
             succeeded: 5usize.saturating_sub(failed),
             failed,
+            skipped: 0,
+            retries: 0,
             cache_hits: 0,
             records: inputs.upstream_records,
             active: vec![ToolWorkItem {
@@ -749,6 +758,8 @@ impl AgentTool for RunFullAnalysis {
             total: 6,
             succeeded: 6usize.saturating_sub(failed),
             failed,
+            skipped: 0,
+            retries: 0,
             cache_hits: 0,
             records: inputs.upstream_records,
             active: Vec::new(),
@@ -1215,22 +1226,54 @@ impl AgentTool for CompareStocks {
 struct ScanArgs {
     /// 返回评分最高的前N只，默认 10，上限 30
     top: Option<u32>,
-    /// 参与评分的候选股数量（按成交额预筛），默认 50，上限 100
+    /// 参与评分的候选股数量（按成交额预筛）。显式填写时完整执行，上限100
     candidates: Option<u32>,
+    /// interactive=全量OHLCV高效扫描；deep=更多默认候选的深度扫描
+    mode: Option<ScanMode>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum ScanMode {
+    Interactive,
+    Deep,
+}
+
+impl ScanMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Interactive => "interactive",
+            Self::Deep => "deep",
+        }
+    }
 }
 
 /// Minimum turnover (CNY) for a stock to enter the scan candidate pool.
 const SCAN_MIN_AMOUNT: f64 = 5e7;
 /// TTL for per-stock scan rows.
 const SCAN_ROW_TTL: i64 = 300;
+/// Candidate width is never silently reduced. Performance comes from the
+/// reusable OHLCV cache, bounded concurrency and skipping optional enrichment
+/// during broad screening—not from dropping requested stocks.
+const SCAN_INTERACTIVE_DEFAULT: usize = 50;
+const SCAN_INTERACTIVE_MAX: usize = 100;
+const SCAN_DEEP_DEFAULT: usize = 100;
+const SCAN_DEEP_MAX: usize = 100;
+const SCAN_INTERACTIVE_BARS: u32 = 250;
+const SCAN_DEEP_BARS: u32 = 250;
+const SCAN_INTERACTIVE_CONCURRENCY: usize = 10;
+const SCAN_DEEP_CONCURRENCY: usize = 10;
+const SCAN_MAX_ATTEMPTS: usize = 3;
+const SCAN_RETRY_BACKOFF_SECS: [u64; 2] = [1, 3];
 
 /// Whole-market scan: rank candidates by the engine's composite score.
 struct ScanMarket;
 
 struct ScanOneOutcome {
-    row: Value,
+    row: Option<Value>,
     cache_hit: bool,
     records: usize,
+    skip_reason: Option<String>,
 }
 
 #[derive(Default)]
@@ -1239,10 +1282,13 @@ struct ScanProgressState {
     completed: usize,
     succeeded: usize,
     failed: usize,
+    skipped: usize,
+    retries: usize,
     cache_hits: usize,
     records: usize,
     active: BTreeMap<String, String>,
     recent_errors: Vec<String>,
+    recent_skips: Vec<String>,
 }
 
 impl ScanProgressState {
@@ -1252,6 +1298,8 @@ impl ScanProgressState {
             total: self.total,
             succeeded: self.succeeded,
             failed: self.failed,
+            skipped: self.skipped,
+            retries: self.retries,
             cache_hits: self.cache_hits,
             records: self.records,
             active: self
@@ -1273,7 +1321,7 @@ impl AgentTool for ScanMarket {
         "scan_market"
     }
     fn description(&self) -> &'static str {
-        "全市场扫描：按成交额预筛后并行运行信号引擎，返回评分最高的股票"
+        "全市场多源扫描：显式候选数量会完整执行（最多100只），利用逐股缓存、K线预热、并发和三次自动重试提速；新股历史不足时安全跳过"
     }
     fn parameters_schema(&self) -> Value {
         schema_value::<ScanArgs>()
@@ -1281,7 +1329,9 @@ impl AgentTool for ScanMarket {
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
         let args: ScanArgs = parse_args(self.name(), args)?;
         let top = args.top.unwrap_or(10).clamp(1, 30) as usize;
-        let candidates = args.candidates.unwrap_or(50).clamp(1, 100) as usize;
+        let mode = args.mode.unwrap_or(ScanMode::Interactive);
+        let requested_candidates = args.candidates.map(|value| value as usize);
+        let (candidates, history_bars, concurrency) = scan_budget(mode, top, requested_candidates);
 
         let list = ctx.market.all_a_shares().await?;
         let (source, fetched_at) = provenance(&list);
@@ -1324,7 +1374,7 @@ impl AgentTool for ScanMarket {
             .map(|b| to_tech_breadth(&b.data));
         let breadth = Arc::new(breadth);
 
-        let results: Vec<Result<Value>> = futures::stream::iter(pool.into_iter().cloned())
+        let results: Vec<Result<Option<Value>>> = futures::stream::iter(pool.into_iter().cloned())
             .map(|item| {
                 let ctx = ctx.clone();
                 let breadth = breadth.clone();
@@ -1337,30 +1387,78 @@ impl AgentTool for ScanMarket {
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
                         state.active.insert(
                             label.clone(),
-                            "检查5分钟缓存；未命中则获取250根日K并计算指标".to_string(),
+                            format!(
+                                "检查5分钟缓存；未命中则获取{history_bars}根日K并计算指标；上市不足60根将安全跳过"
+                            ),
                         );
                         state.snapshot()
                     };
                     ctx.report_progress(starting);
-                    let outcome = self
-                        .scan_one(&ctx, &item.code, breadth.as_ref().as_ref())
-                        .await;
+                    let mut attempt = 1usize;
+                    let outcome = loop {
+                        match self
+                            .scan_one(
+                                &ctx,
+                                &item.code,
+                                breadth.as_ref().as_ref(),
+                                history_bars,
+                            )
+                            .await
+                        {
+                            Ok(outcome) => break Ok(outcome),
+                            Err(error) if attempt < SCAN_MAX_ATTEMPTS => {
+                                let backoff = SCAN_RETRY_BACKOFF_SECS[attempt - 1];
+                                let retrying = {
+                                    let mut state = progress_state
+                                        .lock()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                    state.retries += 1;
+                                    state.active.insert(
+                                        label.clone(),
+                                        format!(
+                                            "第{}/{}次自动重试：上游暂时失败，{}秒后切换可用来源；错误：{}",
+                                            attempt + 1,
+                                            SCAN_MAX_ATTEMPTS,
+                                            backoff,
+                                            error
+                                        ),
+                                    );
+                                    state.snapshot()
+                                };
+                                ctx.report_progress(retrying);
+                                tokio::time::sleep(Duration::from_secs(backoff)).await;
+                                attempt += 1;
+                            }
+                            Err(error) => break Err(error),
+                        }
+                    };
                     let result = match outcome {
                         Ok(mut outcome) => {
-                            if let Some(obj) = outcome.row.as_object_mut() {
-                                obj.insert("name".into(), json!(item.name));
-                                obj.insert("price".into(), json!(item.price));
-                                obj.insert("pct".into(), json!(item.pct));
-                            }
                             let mut state = progress_state
                                 .lock()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner());
                             state.completed += 1;
-                            state.succeeded += 1;
                             state.cache_hits += usize::from(outcome.cache_hit);
                             state.records += outcome.records;
                             state.active.remove(&label);
-                            Ok(outcome.row)
+                            if let Some(mut row) = outcome.row.take() {
+                                if let Some(obj) = row.as_object_mut() {
+                                    obj.insert("name".into(), json!(item.name));
+                                    obj.insert("price".into(), json!(item.price));
+                                    obj.insert("pct".into(), json!(item.pct));
+                                }
+                                state.succeeded += 1;
+                                Ok(Some(row))
+                            } else {
+                                state.skipped += 1;
+                                if let Some(reason) = outcome.skip_reason {
+                                    state.recent_skips.push(format!("{label}：{reason}"));
+                                    if state.recent_skips.len() > 20 {
+                                        state.recent_skips.remove(0);
+                                    }
+                                }
+                                Ok(None)
+                            }
                         }
                         Err(error) => {
                             let error_text = format!("{label}：{error}");
@@ -1385,7 +1483,7 @@ impl AgentTool for ScanMarket {
                     result
                 }
             })
-            .buffer_unordered(10)
+            .buffer_unordered(concurrency)
             .collect()
             .await;
 
@@ -1393,7 +1491,8 @@ impl AgentTool for ScanMarket {
         let mut failed = 0usize;
         for r in results {
             match r {
-                Ok(row) => scored.push(row),
+                Ok(Some(row)) => scored.push(row),
+                Ok(None) => {}
                 Err(_) => failed += 1,
             }
         }
@@ -1405,18 +1504,40 @@ impl AgentTool for ScanMarket {
         let scanned = scored.len();
         scored.truncate(top);
 
-        let final_progress = progress_state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .snapshot();
+        let (final_progress, skipped_details) = {
+            let state = progress_state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (state.snapshot(), state.recent_skips.clone())
+        };
 
         let summary = json!({
             "criteria": format!("成交额≥{}万元取前{}只候选，按综合评分排序", (SCAN_MIN_AMOUNT / 1e4) as i64, candidates),
+            "mode": mode.as_str(),
+            "requested_candidates": requested_candidates,
+            "effective_candidates": candidates,
+            "history_bars": history_bars,
+            "concurrency": concurrency,
+            "max_attempts_per_stock": SCAN_MAX_ATTEMPTS,
+            "retries": final_progress.retries,
             "scanned": scanned,
             "failed": failed,
+            "skipped": final_progress.skipped,
+            "skipped_details": skipped_details,
             "cache_hits": final_progress.cache_hits,
+            "new_upstream_fetches": final_progress.succeeded.saturating_sub(final_progress.cache_hits),
+            "cache_warmed_stocks": final_progress.succeeded.saturating_sub(final_progress.cache_hits),
+            "upstream_attempts": final_progress.completed.saturating_sub(final_progress.cache_hits) + final_progress.retries,
             "records": final_progress.records,
+            "coverage": {
+                "candidate_pool": final_progress.total,
+                "completed": final_progress.completed,
+                "ranked": final_progress.succeeded,
+                "skipped_for_insufficient_history": final_progress.skipped,
+                "failed_after_retries": final_progress.failed,
+            },
             "errors": final_progress.recent_errors,
+            "recommended_followup": "对排名靠前的候选继续并行调用全面分析、基本面、估值、资金流、公告与新闻工具进行多源交叉核验；初筛不会替代深度尽调",
             "top": scored,
         });
         Ok(ToolResult {
@@ -1426,6 +1547,37 @@ impl AgentTool for ScanMarket {
             source,
             fetched_at,
         })
+    }
+
+    fn cacheable(&self) -> bool {
+        // Candidate membership and realtime turnover change continuously.
+        // Per-stock rows already have a five-minute cache, so rerunning this
+        // lightweight coordinator is both fresher and still inexpensive.
+        false
+    }
+}
+
+fn scan_budget(
+    mode: ScanMode,
+    top: usize,
+    requested_candidates: Option<usize>,
+) -> (usize, u32, usize) {
+    match mode {
+        ScanMode::Interactive => {
+            let requested = requested_candidates.unwrap_or(SCAN_INTERACTIVE_DEFAULT);
+            (
+                requested.clamp(top, SCAN_INTERACTIVE_MAX),
+                SCAN_INTERACTIVE_BARS,
+                SCAN_INTERACTIVE_CONCURRENCY,
+            )
+        }
+        ScanMode::Deep => (
+            requested_candidates
+                .unwrap_or(SCAN_DEEP_DEFAULT)
+                .clamp(top, SCAN_DEEP_MAX),
+            SCAN_DEEP_BARS,
+            SCAN_DEEP_CONCURRENCY,
+        ),
     }
 }
 
@@ -1437,31 +1589,92 @@ impl ScanMarket {
         ctx: &ToolContext,
         code: &str,
         breadth: Option<&tech::Breadth>,
+        history_bars: u32,
     ) -> Result<ScanOneOutcome> {
-        let key = tool_cache_key("scan_stock", &json!({"symbol": code}));
+        let key = tool_cache_key(
+            "scan_stock_v2",
+            &json!({"symbol": code, "history_bars": history_bars}),
+        );
         if let Some(entry) = ctx.storage.tool_cache_get(&key).await? {
             if let Ok(env) = serde_json::from_str::<CacheEnvelope>(&entry.result_json) {
+                if env.summary["_scan_skip"].as_bool() == Some(true) {
+                    return Ok(ScanOneOutcome {
+                        row: None,
+                        cache_hit: true,
+                        records: 0,
+                        skip_reason: env.summary["reason"].as_str().map(str::to_string),
+                    });
+                }
                 return Ok(ScanOneOutcome {
-                    row: env.summary,
+                    row: Some(env.summary),
                     cache_hit: true,
                     records: 0,
+                    skip_reason: None,
                 });
             }
         }
         let symbol = parse_symbol(self.name(), code)?;
-        let inputs = fetch_analysis_inputs(
-            ctx,
-            self.name(),
-            &symbol,
-            astock_core::KlinePeriod::Day,
-            250,
-            false,
-            false,
-        )
-        .await?;
+        let fetched = ctx
+            .market
+            .scan_kline(
+                &symbol,
+                astock_core::KlinePeriod::Day,
+                astock_core::Adjust::Qfq,
+                history_bars,
+            )
+            .await?;
+        let records = fetched.data.len();
+        let (source, fetched_at) = provenance(&fetched);
+        if records < MIN_ANALYSIS_BARS {
+            let reason = format!(
+                "历史行情仅{records}根，不满足至少{MIN_ANALYSIS_BARS}根的可比性要求，已按新股或历史不足跳过"
+            );
+            let env = CacheEnvelope {
+                summary: json!({"_scan_skip": true, "reason": reason, "history_bars": records}),
+                full: None,
+                source,
+                fetched_at,
+            };
+            let now = now_secs();
+            ctx.storage
+                .tool_cache_put(ToolCacheEntry {
+                    cache_key: key,
+                    tool: "scan_stock".to_string(),
+                    params_json: json!({"symbol": code, "skip": "insufficient_history"})
+                        .to_string(),
+                    result_json: serde_json::to_string(&env)?,
+                    data_version: None,
+                    created_at: now,
+                    ttl_seconds: SCAN_ROW_TTL,
+                    accessed_at: now,
+                })
+                .await?;
+            return Ok(ScanOneOutcome {
+                row: None,
+                cache_hit: false,
+                records,
+                skip_reason: Some(reason),
+            });
+        }
+        let klines = to_tech_klines(&fetched.data);
+        let inputs = AnalysisInputs {
+            upstream_records: klines.len(),
+            klines,
+            quote: None,
+            flows: None,
+            index: None,
+            source,
+            fetched_at,
+            context_diagnostics: Vec::new(),
+        };
         let signal = run_engine(&inputs, breadth);
-        let records = inputs.klines.len();
-        let row = comparison_row(code, None, None, &signal);
+        let mut row = comparison_row(code, None, None, &signal);
+        if let Some(object) = row.as_object_mut() {
+            object.insert("data_source".into(), json!(inputs.source.clone()));
+            object.insert("data_time".into(), json!(inputs.fetched_at.clone()));
+            object.insert("history_bars".into(), json!(records));
+            object.insert("cache_warmed".into(), json!(true));
+        }
         let env = CacheEnvelope {
             summary: row.clone(),
             full: None,
@@ -1482,9 +1695,10 @@ impl ScanMarket {
             })
             .await?;
         Ok(ScanOneOutcome {
-            row,
+            row: Some(row),
             cache_hit: false,
             records,
+            skip_reason: None,
         })
     }
 }
@@ -1675,6 +1889,7 @@ pub fn default_registry() -> ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use chrono::{NaiveDate, NaiveDateTime};
@@ -2304,12 +2519,14 @@ mod tests {
             assert_eq!(final_snapshot.completed, 2);
             assert_eq!(final_snapshot.succeeded, 2);
             assert_eq!(final_snapshot.failed, 0);
+            assert_eq!(final_snapshot.skipped, 0);
             assert!(final_snapshot.records >= MIN_ANALYSIS_BARS * 2);
             assert!(final_snapshot.active.is_empty());
             snapshots.len()
         };
 
-        // Second dispatch is served from the read-through cache.
+        // The coordinator reruns against the latest candidate list, while its
+        // per-stock rows are served from the five-minute cache.
         let again = dispatch(
             &registry,
             &ctx,
@@ -2317,27 +2534,144 @@ mod tests {
             json!({"top": 10, "candidates": 50}),
         )
         .await;
-        // Quality age is deliberately recomputed at read time, so crossing a
-        // one-second wall-clock boundary must not make this cache test flaky.
-        let mut first_summary = r.summary_json.clone();
-        let mut cached_summary = again.summary_json.clone();
-        for summary in [&mut first_summary, &mut cached_summary] {
-            let age = summary["data_quality"]["age_secs"].as_u64().unwrap();
-            assert!(age <= 2, "fresh cached scan unexpectedly aged {age}s");
-            summary["data_quality"]
-                .as_object_mut()
-                .unwrap()
-                .remove("age_secs");
-        }
-        assert_eq!(cached_summary, first_summary);
-        assert_eq!(
+        assert_eq!(again.summary_json["scanned"], json!(2));
+        assert_eq!(again.summary_json["cache_hits"], json!(2));
+        assert!(
             progress
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .len(),
-            snapshot_count,
-            "outer tool cache should avoid replaying internal scan work"
+                .len()
+                > snapshot_count,
+            "coordinator should publish a fresh progress run"
         );
+    }
+
+    #[test]
+    fn interactive_scan_preserves_explicit_eighty_candidate_request() {
+        assert_eq!(
+            scan_budget(ScanMode::Interactive, 12, Some(80)),
+            (80, SCAN_INTERACTIVE_BARS, SCAN_INTERACTIVE_CONCURRENCY)
+        );
+        assert_eq!(
+            scan_budget(ScanMode::Deep, 12, Some(80)),
+            (80, SCAN_DEEP_BARS, SCAN_DEEP_CONCURRENCY)
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_market_safely_skips_new_listings_with_short_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(StorageConfig::with_base_dir(dir.path())).unwrap();
+        let mut market = mock_market();
+        market.bars = mock_bars(20);
+        let ctx = ToolContext::new(Arc::new(market), storage);
+        let result = dispatch(
+            &default_registry(),
+            &ctx,
+            "scan_market",
+            json!({"top": 10, "candidates": 80}),
+        )
+        .await;
+        assert_eq!(result.summary_json["effective_candidates"], json!(80));
+        assert_eq!(result.summary_json["scanned"], json!(0));
+        assert_eq!(result.summary_json["skipped"], json!(2));
+        assert_eq!(result.summary_json["failed"], json!(0));
+        assert_eq!(
+            result.summary_json["skipped_details"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(result.summary_json["errors"].as_array().unwrap().is_empty());
+    }
+
+    struct FlakyScanMarket {
+        base: MockMarket,
+        calls: AtomicUsize,
+        failures_before_success: usize,
+    }
+
+    #[async_trait]
+    impl DataProvider for FlakyScanMarket {
+        fn name(&self) -> &'static str {
+            "flaky-scan"
+        }
+
+        async fn scan_kline(
+            &self,
+            _symbol: &Symbol,
+            _period: KlinePeriod,
+            _adjust: Adjust,
+            _count: u32,
+        ) -> std::result::Result<Fetched<Vec<Bar>>, DataError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call < self.failures_before_success {
+                Err(DataError::Timeout("temporary scan outage".into()))
+            } else {
+                Ok(Fetched::now(self.base.bars.clone(), Source::Tencent))
+            }
+        }
+
+        async fn all_a_shares(
+            &self,
+        ) -> std::result::Result<Fetched<Vec<StockListItem>>, DataError> {
+            Ok(Fetched::now(self.base.stocks.clone(), Source::EastMoney))
+        }
+
+        async fn market_breadth(&self) -> std::result::Result<Fetched<MarketBreadth>, DataError> {
+            Ok(Fetched::now(self.base.breadth, Source::EastMoney))
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_market_retries_transient_failures_and_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(StorageConfig::with_base_dir(dir.path())).unwrap();
+        let market = Arc::new(FlakyScanMarket {
+            base: mock_market(),
+            calls: AtomicUsize::new(0),
+            failures_before_success: 2,
+        });
+        let ctx = ToolContext::new(market.clone(), storage);
+        let result = dispatch(
+            &default_registry(),
+            &ctx,
+            "scan_market",
+            json!({"top": 10, "candidates": 80}),
+        )
+        .await;
+
+        assert_eq!(result.summary_json["effective_candidates"], json!(80));
+        assert_eq!(result.summary_json["scanned"], json!(2));
+        assert_eq!(result.summary_json["retries"], json!(2));
+        assert_eq!(result.summary_json["failed"], json!(0));
+        assert_eq!(market.calls.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn scan_market_stops_after_three_attempts_and_reports_final_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(StorageConfig::with_base_dir(dir.path())).unwrap();
+        let mut one_stock = mock_market();
+        one_stock.stocks.truncate(1);
+        let market = Arc::new(FlakyScanMarket {
+            base: one_stock,
+            calls: AtomicUsize::new(0),
+            failures_before_success: usize::MAX,
+        });
+        let ctx = ToolContext::new(market.clone(), storage);
+        let result = dispatch(
+            &default_registry(),
+            &ctx,
+            "scan_market",
+            json!({"top": 1, "candidates": 1}),
+        )
+        .await;
+
+        assert_eq!(result.summary_json["retries"], json!(2));
+        assert_eq!(result.summary_json["failed"], json!(1));
+        assert_eq!(market.calls.load(Ordering::SeqCst), SCAN_MAX_ATTEMPTS);
     }
 
     /// Quotes only for 600519; every other code fails, to exercise the

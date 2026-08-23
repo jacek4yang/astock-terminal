@@ -58,6 +58,16 @@ const FFLOW_FIELDS2: &str = "f51,f52,f53,f54,f55,f56,f57";
 const CLIST_FS: &str = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048";
 const CLIST_PAGE_SIZE: u32 = 100;
 const CLIST_CONCURRENCY: usize = 10;
+/// `push2test` accepts a whole-market page while `push2delay` silently caps
+/// the same request at 100 rows.  Prefer the former for the shared snapshot,
+/// then validate `diff.len() == data.total` before accepting it.
+const MARKET_SNAPSHOT_PAGE_SIZE: u32 = 6_000;
+const MARKET_SNAPSHOT_HOSTS: [&str; 3] = [
+    "https://push2test.eastmoney.com",
+    "https://push2delay.eastmoney.com",
+    "https://push2.eastmoney.com",
+];
+const MIN_COMPLETE_A_SHARE_ROWS: usize = 4_500;
 
 /// One A-share with its EastMoney industry classification (clist `f100`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -74,12 +84,17 @@ pub struct IndustryClassified {
 pub struct EastMoney {
     http: Arc<HttpClient>,
     cache: Arc<TtlCache>,
+    market_snapshot_gate: tokio::sync::Mutex<()>,
 }
 
 impl EastMoney {
     /// Wrap the shared HTTP client and cache.
     pub fn new(http: Arc<HttpClient>, cache: Arc<TtlCache>) -> Self {
-        EastMoney { http, cache }
+        EastMoney {
+            http,
+            cache,
+            market_snapshot_gate: tokio::sync::Mutex::new(()),
+        }
     }
 
     /// EM GET against a host pool with the `ut` token attached.
@@ -169,22 +184,21 @@ impl EastMoney {
     ///   so weekly/monthly bars never matched);
     /// - callers skip this entirely when EM was already the kline source
     ///   (legacy fetched twice).
-    pub async fn enrich(&self, symbol: &Symbol, period: KlinePeriod, count: u32, bars: &mut [Bar]) {
+    pub async fn enrich(
+        &self,
+        symbol: &Symbol,
+        period: KlinePeriod,
+        count: u32,
+        bars: &mut [Bar],
+    ) -> Result<usize, DataError> {
         if bars.is_empty() {
-            return;
+            return Ok(0);
         }
         // Request extra rows so the EM date range covers the other source's.
         let request_count = (count + 60).min(500);
-        let rows = match self
+        let rows = self
             .kline_rows(&symbol.secid(), period, Adjust::None, request_count)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::debug!(%symbol, error = %e, "eastmoney enrichment unavailable");
-                return;
-            }
-        };
+            .await?;
         let mut map: std::collections::HashMap<String, (Option<f64>, Option<f64>)> =
             std::collections::HashMap::new();
         for line in &rows {
@@ -206,6 +220,7 @@ impl EastMoney {
             }
         }
         tracing::debug!(%symbol, matched, total = bars.len(), "eastmoney enrichment merged");
+        Ok(matched)
     }
 
     async fn fetch_clist_page(
@@ -253,18 +268,171 @@ impl EastMoney {
         let mut rows = first;
         if total_pages > 1 {
             let rest: Vec<_> = stream::iter(2..=total_pages)
-                .map(|pn| async move { self.fetch_clist_page(fields, pn).await })
+                .map(|pn| async move { (pn, self.fetch_clist_page(fields, pn).await) })
                 .buffer_unordered(CLIST_CONCURRENCY)
                 .collect()
                 .await;
-            for page in rest {
+            let mut missing_pages = Vec::new();
+            for (page_number, page) in rest {
                 match page {
                     Ok((diff, _)) => rows.extend(diff),
-                    Err(e) => tracing::warn!(error = %e, "clist page failed, continuing"),
+                    Err(error) => {
+                        tracing::warn!(page = page_number, %error, "clist page failed; retrying");
+                        missing_pages.push(page_number);
+                    }
                 }
             }
+            let mut retry_failures = Vec::new();
+            for page_number in missing_pages {
+                tokio::time::sleep(crate::http::RETRY_PAUSE).await;
+                match self.fetch_clist_page(fields, page_number).await {
+                    Ok((diff, _)) => rows.extend(diff),
+                    Err(error) => retry_failures.push(format!("page {page_number}: {error}")),
+                }
+            }
+            if !retry_failures.is_empty() {
+                return Err(DataError::AllFailed {
+                    op: "clist complete pagination",
+                    details: retry_failures.join("; "),
+                });
+            }
+        }
+        if total > 0 && rows.len() < total as usize {
+            return Err(DataError::Empty(format!(
+                "clist incomplete: expected {total} rows, received {}",
+                rows.len()
+            )));
         }
         Ok(rows)
+    }
+
+    /// Fetch one complete A-share snapshot. Each host is an independent retry
+    /// with UA rotation and adaptive host throttling. A partial response is
+    /// never cached as complete; if no host supports the large page we fall
+    /// back to the validated paginated path above.
+    async fn fetch_market_snapshot_rows(
+        &self,
+        fields: &str,
+    ) -> Result<Vec<serde_json::Value>, DataError> {
+        let params = vec![
+            ("po".to_string(), "1".to_string()),
+            ("np".to_string(), "1".to_string()),
+            ("fltt".to_string(), "2".to_string()),
+            ("fields".to_string(), fields.to_string()),
+            ("fs".to_string(), CLIST_FS.to_string()),
+            ("pz".to_string(), MARKET_SNAPSHOT_PAGE_SIZE.to_string()),
+            ("pn".to_string(), "1".to_string()),
+            ("ut".to_string(), EM_TOKEN.to_string()),
+        ];
+        let mut failures = Vec::new();
+        for (attempt, host) in MARKET_SNAPSHOT_HOSTS.iter().enumerate() {
+            if attempt > 0 {
+                self.http.rotate_ua();
+                tokio::time::sleep(crate::http::RETRY_PAUSE * attempt as u32).await;
+            }
+            let url = format!("{host}/api/qt/clist/get");
+            match self.http.get_json(&url, &params).await {
+                Ok(value) => {
+                    let data = value.get("data").unwrap_or(&serde_json::Value::Null);
+                    let total = data.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let rows = clist_diff_rows(data);
+                    if total >= MIN_COMPLETE_A_SHARE_ROWS && rows.len() >= total {
+                        tracing::debug!(
+                            host,
+                            total,
+                            rows = rows.len(),
+                            "complete market snapshot fetched"
+                        );
+                        return Ok(rows);
+                    }
+                    failures.push(format!(
+                        "{host}: incomplete snapshot, expected {total}, received {}",
+                        rows.len()
+                    ));
+                }
+                Err(error) => failures.push(format!("{host}: {error}")),
+            }
+        }
+        tracing::warn!(failures = %failures.join("; "), "large-page market snapshot failed; using complete pagination");
+        self.fetch_clist_all(fields)
+            .await
+            .map_err(|error| DataError::AllFailed {
+                op: "eastmoney complete market snapshot",
+                details: format!(
+                    "large-page retries: {}; pagination: {error}",
+                    failures.join("; ")
+                ),
+            })
+    }
+
+    fn stock_items_from_rows(rows: Vec<serde_json::Value>) -> Vec<StockListItem> {
+        rows.into_iter()
+            .filter_map(|row| {
+                let code = row.get("f12").and_then(|v| v.as_str())?.trim();
+                if code.len() != 6 {
+                    return None;
+                }
+                Some(StockListItem {
+                    code: code.to_string(),
+                    name: row
+                        .get("f14")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string(),
+                    price: row.get("f2").and_then(json_f64),
+                    pct: row.get("f3").and_then(json_f64),
+                    amount: row.get("f6").and_then(json_f64),
+                })
+            })
+            .collect()
+    }
+
+    fn breadth_from_items(items: &[StockListItem]) -> Result<MarketBreadth, DataError> {
+        if items.len() < MIN_COMPLETE_A_SHARE_ROWS {
+            return Err(DataError::Empty(format!(
+                "market breadth incomplete: only {} A-share rows",
+                items.len()
+            )));
+        }
+        let pct_present = items.iter().filter(|item| item.pct.is_some()).count();
+        if pct_present * 10 < items.len() * 9 {
+            return Err(DataError::Empty(format!(
+                "market breadth incomplete: only {pct_present}/{} rows contain change percent",
+                items.len()
+            )));
+        }
+        Ok(count_breadth(items.iter().map(|item| item.pct)))
+    }
+
+    async fn complete_market_snapshot(&self) -> Result<Fetched<Vec<StockListItem>>, DataError> {
+        if let Some(hit) = self
+            .cache
+            .get::<Fetched<Vec<StockListItem>>>("all_a_shares", ttl::ALL_A)
+        {
+            return Ok(hit);
+        }
+        let _guard = self.market_snapshot_gate.lock().await;
+        // A concurrent all-A/breadth request may have warmed the cache while
+        // this caller waited. Re-check before touching any upstream.
+        if let Some(hit) = self
+            .cache
+            .get::<Fetched<Vec<StockListItem>>>("all_a_shares", ttl::ALL_A)
+        {
+            return Ok(hit);
+        }
+        let rows = self.fetch_market_snapshot_rows("f2,f3,f6,f12,f14").await?;
+        let items = Self::stock_items_from_rows(rows);
+        let breadth = Self::breadth_from_items(&items)?;
+        let fetched = Fetched::now(items, Source::EastMoney);
+        let breadth_fetched = Fetched {
+            data: breadth,
+            source: fetched.source,
+            fetched_at: fetched.fetched_at,
+        };
+        self.cache.set("all_a_shares", &fetched);
+        self.cache.set("market_breadth", &breadth_fetched);
+        Ok(fetched)
     }
 
     async fn quote_by_secid(
@@ -712,36 +880,7 @@ impl DataProvider for EastMoney {
     }
 
     async fn all_a_shares(&self) -> Result<Fetched<Vec<StockListItem>>, DataError> {
-        let key = "all_a_shares";
-        if let Some(hit) = self
-            .cache
-            .get::<Fetched<Vec<StockListItem>>>(key, ttl::ALL_A)
-        {
-            return Ok(hit);
-        }
-        let rows = self.fetch_clist_all("f2,f3,f6,f12,f14").await?;
-        let mut items = Vec::with_capacity(rows.len());
-        for d in &rows {
-            let code = d.get("f12").and_then(|v| v.as_str()).unwrap_or("").trim();
-            if code.len() != 6 {
-                continue;
-            }
-            items.push(StockListItem {
-                code: code.to_string(),
-                name: d
-                    .get("f14")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .trim()
-                    .to_string(),
-                price: d.get("f2").and_then(json_f64),
-                pct: d.get("f3").and_then(json_f64),
-                amount: d.get("f6").and_then(json_f64),
-            });
-        }
-        let out = Fetched::now(items, Source::EastMoney);
-        self.cache.set(key, &out);
-        Ok(out)
+        self.complete_market_snapshot().await
     }
 
     async fn market_breadth(&self) -> Result<Fetched<MarketBreadth>, DataError> {
@@ -749,32 +888,15 @@ impl DataProvider for EastMoney {
         if let Some(hit) = self.cache.get::<Fetched<MarketBreadth>>(key, ttl::BREADTH) {
             return Ok(hit);
         }
-        let rows = self.fetch_clist_all("f3").await?;
-        let mut up = 0_u32;
-        let mut down = 0_u32;
-        let mut flat = 0_u32;
-        for d in &rows {
-            match d.get("f3").and_then(json_f64) {
-                Some(pct) if pct > 0.0 => up += 1,
-                Some(pct) if pct < 0.0 => down += 1,
-                _ => flat += 1,
-            }
-        }
-        let total = up + down + flat;
-        if total < 100 {
-            return Err(DataError::Empty(format!(
-                "market breadth: only {total} stocks counted"
-            )));
-        }
-        let out = Fetched::now(
-            MarketBreadth {
-                up,
-                down,
-                flat,
-                total,
-            },
-            Source::EastMoney,
-        );
+        // Reuse the full-market snapshot fetched by the scanner/list page.
+        // On a cold start this fetch also warms that list, so the two tools
+        // never download the same 5,000+ rows independently.
+        let snapshot = self.complete_market_snapshot().await?;
+        let out = Fetched {
+            data: Self::breadth_from_items(&snapshot.data)?,
+            source: snapshot.source,
+            fetched_at: snapshot.fetched_at,
+        };
         self.cache.set(key, &out);
         Ok(out)
     }
@@ -786,6 +908,33 @@ impl DataProvider for EastMoney {
     ) -> Result<Fetched<Vec<Bar>>, DataError> {
         self.index_kline_period(index_secid, KlinePeriod::Day, count)
             .await
+    }
+}
+
+fn clist_diff_rows(data: &serde_json::Value) -> Vec<serde_json::Value> {
+    match data.get("diff") {
+        Some(serde_json::Value::Array(rows)) => rows.clone(),
+        Some(serde_json::Value::Object(rows)) => rows.values().cloned().collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn count_breadth(pcts: impl IntoIterator<Item = Option<f64>>) -> MarketBreadth {
+    let mut up = 0_u32;
+    let mut down = 0_u32;
+    let mut flat = 0_u32;
+    for pct in pcts {
+        match pct {
+            Some(value) if value > 0.0 => up += 1,
+            Some(value) if value < 0.0 => down += 1,
+            _ => flat += 1,
+        }
+    }
+    MarketBreadth {
+        up,
+        down,
+        flat,
+        total: up + down + flat,
     }
 }
 
@@ -851,5 +1000,40 @@ mod tests {
         let p = parse_flow_csv("2025-08-21 09:31,100.0,-50.0,-30.0,60.0,40.0", false).unwrap();
         assert_eq!(p.main_pct, 0.0);
         assert_eq!(p.time.format("%H:%M").to_string(), "09:31");
+    }
+
+    #[test]
+    fn breadth_counts_up_down_flat_and_missing() {
+        let breadth = count_breadth([Some(1.2), Some(-0.3), Some(0.0), None]);
+        assert_eq!(breadth.up, 1);
+        assert_eq!(breadth.down, 1);
+        assert_eq!(breadth.flat, 2);
+        assert_eq!(breadth.total, 4);
+    }
+
+    #[test]
+    fn complete_breadth_rejects_partial_market_snapshot() {
+        let items = vec![
+            StockListItem {
+                code: "600000".to_string(),
+                name: "测试".to_string(),
+                price: Some(10.0),
+                pct: Some(1.0),
+                amount: Some(1_000.0),
+            };
+            MIN_COMPLETE_A_SHARE_ROWS - 1
+        ];
+        assert!(matches!(
+            EastMoney::breadth_from_items(&items),
+            Err(DataError::Empty(message)) if message.contains("incomplete")
+        ));
+    }
+
+    #[test]
+    fn clist_accepts_array_and_object_diff_shapes() {
+        let array = serde_json::json!({"diff": [{"f12": "600000"}]});
+        let object = serde_json::json!({"diff": {"0": {"f12": "600000"}}});
+        assert_eq!(clist_diff_rows(&array).len(), 1);
+        assert_eq!(clist_diff_rows(&object).len(), 1);
     }
 }

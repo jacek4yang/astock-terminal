@@ -6,6 +6,43 @@
 
 use astock_core::{Adjust, KlinePeriod, Symbol};
 use astock_market_data::{DataProvider, MarketData};
+use std::time::{Duration, Instant};
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "live network test"]
+async fn live_market_breadth_cold_fetch_and_cache_hit() {
+    let md = MarketData::new();
+    let cold_started = Instant::now();
+    let cold = md
+        .market_breadth()
+        .await
+        .expect("cold breadth fetch failed");
+    let cold_elapsed = cold_started.elapsed();
+    assert!(cold.data.total >= 4_000, "incomplete breadth: {cold:?}");
+    assert_eq!(
+        cold.data.total,
+        cold.data.up + cold.data.down + cold.data.flat
+    );
+
+    let warm_started = Instant::now();
+    let warm = md
+        .market_breadth()
+        .await
+        .expect("cached breadth fetch failed");
+    let warm_elapsed = warm_started.elapsed();
+    assert_eq!(warm, cold);
+    assert!(
+        warm_elapsed < Duration::from_millis(100),
+        "cache hit took {warm_elapsed:?}"
+    );
+    println!(
+        "breadth source={} total={} cold_ms={} warm_ms={}",
+        cold.source,
+        cold.data.total,
+        cold_elapsed.as_millis(),
+        warm_elapsed.as_millis()
+    );
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "live network test"]

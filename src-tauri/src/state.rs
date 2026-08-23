@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use astock_event_intelligence::EventResearchBundle;
 use astock_fundamental::FundamentalClient;
 use astock_graph::GraphStore;
-use astock_market_data::{EastMoneyF10, MarketData};
+use astock_market_data::{DataProvider, EastMoneyF10, MarketData};
 use astock_minimax::MinimaxClient;
 use astock_relation_extraction::ExtractionRunDetail;
 use astock_storage::{Storage, StorageConfig};
@@ -428,6 +428,29 @@ impl AppState {
             tracing::warn!(%error, "failed to persist security-master bootstrap records");
         }
         let f10 = Arc::new(EastMoneyF10::new(market.http.clone(), market.cache.clone()));
+
+        // Warm the shared full-market snapshot in the background. The same
+        // payload supplies both the A-share list and market breadth, so later
+        // Agent tools hit cache instead of issuing two 5,000+ row downloads.
+        // Startup remains non-blocking and every upstream request retains its
+        // own bounded retry/fallback policy.
+        let warm_market = market.clone();
+        tauri::async_runtime::spawn(async move {
+            let started = std::time::Instant::now();
+            match warm_market.all_a_shares().await {
+                Ok(list) => match warm_market.market_breadth().await {
+                    Ok(breadth) => tracing::info!(
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        stocks = list.data.len(),
+                        source = %breadth.source,
+                        breadth_total = breadth.data.total,
+                        "market overview cache prewarmed"
+                    ),
+                    Err(error) => tracing::warn!(%error, "market breadth cache prewarm failed"),
+                },
+                Err(error) => tracing::warn!(%error, "A-share cache prewarm failed"),
+            }
+        });
 
         // Supply-chain graph over the shared storage; seed the built-in
         // industry-chain graph on first run. Seeding is best-effort: a

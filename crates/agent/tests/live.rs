@@ -3,7 +3,8 @@
 //! Run with: `MINIMAX_TEST_KEY=... cargo test -p astock-agent --test live -- --ignored`
 //! The key is read from the environment only — never hardcoded or logged.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use astock_agent::testing::{EchoTool, NoopMarket};
 use astock_agent::{
@@ -13,6 +14,57 @@ use astock_market_data::MarketData;
 use astock_minimax::{MinimaxClient, SecretKey};
 use astock_storage::{Storage, StorageConfig};
 use futures::StreamExt;
+use serde_json::json;
+
+#[tokio::test]
+#[ignore = "live market scan: hits configured public market-data endpoints"]
+async fn live_full_width_scan_warms_and_reuses_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(StorageConfig::with_base_dir(dir.path())).unwrap();
+    let progress = Arc::new(Mutex::new(Vec::new()));
+    let progress_sink = progress.clone();
+    let ctx = ToolContext::new(Arc::new(MarketData::new()), storage).with_progress_reporter(
+        Arc::new(move |detail| {
+            progress_sink.lock().unwrap().push(detail);
+        }),
+    );
+    let registry = astock_agent::default_registry();
+    let args = json!({"top": 12, "candidates": 80, "mode": "interactive"});
+
+    let started = Instant::now();
+    let first = registry
+        .dispatch("scan_market", args.clone(), &ctx)
+        .await
+        .expect("live full-width scan failed");
+    let first_elapsed = started.elapsed();
+    eprintln!(
+        "first_scan elapsed_ms={} summary={}",
+        first_elapsed.as_millis(),
+        first.summary_json
+    );
+    assert_eq!(first.summary_json["effective_candidates"], json!(80));
+    assert_eq!(first.summary_json["history_bars"], json!(250));
+    assert_eq!(
+        first.summary_json["coverage"]["completed"],
+        first.summary_json["coverage"]["candidate_pool"]
+    );
+
+    let started = Instant::now();
+    let second = registry
+        .dispatch("scan_market", args, &ctx)
+        .await
+        .expect("cached live scan failed");
+    let second_elapsed = started.elapsed();
+    eprintln!(
+        "cached_scan elapsed_ms={} cache_hits={} upstream_fetches={}",
+        second_elapsed.as_millis(),
+        second.summary_json["cache_hits"],
+        second.summary_json["new_upstream_fetches"]
+    );
+    assert_eq!(second.summary_json["new_upstream_fetches"], json!(0));
+    assert!(second.summary_json["cache_hits"].as_u64().unwrap_or(0) > 0);
+    assert!(progress.lock().unwrap().last().is_some());
+}
 
 #[tokio::test]
 #[ignore = "requires MINIMAX_TEST_KEY and network access"]
