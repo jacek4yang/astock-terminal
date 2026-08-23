@@ -31,7 +31,7 @@ $ProgressPreference = "SilentlyContinue"
 
 $ExpectedRepository = "jacek4yang/astock-terminal"
 $ReleaseTag = "v5.0.3-agent-runtime.1"
-$ReleaseTargetSha = "50fe6da1cf3ea4fb47b18605bc8c095413328168"
+$ReleaseTargetSha = "159e3fbecb045b72e858aa631b58be9526941bbc"
 $ApplicationVersion = "5.0.3"
 $RustToolchain = "1.88.0"
 $ReleaseNotesRelativePath = "docs/releases/v5.0.3-agent-runtime.1.md"
