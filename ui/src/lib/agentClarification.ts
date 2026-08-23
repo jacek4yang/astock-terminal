@@ -247,3 +247,32 @@ export function formatClarificationAnswer(
   lines.push("请把这些条件作为本会话已确认前提，继续制定研究计划并执行；不要重复询问已经确认的事项。");
   return lines.join("\n");
 }
+
+/** Provider-facing envelope. The visible prose stays readable while the
+ * structured block makes the latest confirmed constraints durable and
+ * unambiguous across compaction, resume and follow-up turns. */
+export function formatClarificationPayload(
+  request: ClarificationRequest,
+  draft: ClarificationDraft,
+): string {
+  const visible = formatClarificationAnswer(request, draft);
+  const answers = request.questions.map((question) => {
+    const optionIds = draft.selections[question.id] ?? [];
+    const labels = question.options
+      .filter((option) => optionIds.includes(option.id))
+      .map((option) => option.label);
+    const other = draft.other[question.id]?.trim();
+    return {
+      question_id: question.id,
+      question: question.question,
+      option_ids: optionIds,
+      answer: [...labels, ...(other ? [other] : [])].join("；"),
+    };
+  });
+  return `${visible}\n\n\`\`\`astock-answers\n${JSON.stringify({ schema: "astock-answers/v1", answers })}\n\`\`\``;
+}
+
+/** Hide the transport envelope when persisted history is rendered. */
+export function stripClarificationPayload(value: string): string {
+  return value.replace(/\n*```astock-answers\s*[\s\S]*?```\s*$/i, "").trimEnd();
+}

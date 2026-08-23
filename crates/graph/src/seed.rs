@@ -138,18 +138,23 @@ pub fn validate_seed(nodes: &[Node], edges: &[Edge]) -> Vec<String> {
     problems
 }
 
-/// Load the seed graph into storage when (and only when) the graph is
-/// empty. Idempotent: a populated graph is left untouched, and even a
-/// partial previous load converges because all writes are upserts.
+/// Load or converge the built-in seed graph. Existing installations are
+/// updated when a newer release adds nodes; a complete graph is left alone.
+/// The underlying upserts make partial or interrupted upgrades idempotent.
 pub async fn seed_if_empty(store: &GraphStore) -> Result<SeedSummary> {
-    if !store.storage().graph_nodes_all().await?.is_empty() {
+    let (nodes, edges) = parse_seed()?;
+    let existing = store.storage().graph_nodes_all().await?;
+    let complete = !existing.is_empty()
+        && nodes
+            .iter()
+            .all(|expected| existing.iter().any(|node| node.id == expected.id));
+    if complete {
         return Ok(SeedSummary {
             nodes: 0,
             edges: 0,
             skipped: true,
         });
     }
-    let (nodes, edges) = parse_seed()?;
     let problems = validate_seed(&nodes, &edges);
     if !problems.is_empty() {
         return Err(Error::Invalid(format!(
@@ -211,6 +216,14 @@ mod tests {
                 nodes.iter().any(|n| n.id == industry),
                 "missing industry node {industry}"
             );
+        }
+        assert!(nodes.iter().any(|node| node.id == "commodity:gold"));
+        for code in ["601899", "600547", "600489"] {
+            assert!(edges.iter().any(|edge| {
+                edge.src == format!("company:{code}")
+                    && edge.dst == "commodity:gold"
+                    && edge.relation == Relation::Produces
+            }));
         }
     }
 

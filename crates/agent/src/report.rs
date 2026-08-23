@@ -495,6 +495,13 @@ fn build_research_report(text: &str, evidence: &[Evidence], generated_at: i64) -
         }
         let (claim_type, claim_text) = if let Some((grade, claim_text)) = graded {
             (claim_type_from_grade(&grade), claim_text)
+        } else if is_plan_parameter_section(&section) && looks_like_key_claim(line) {
+            // Allocation weights, order sizes and risk budgets are proposed
+            // decision parameters, not observed market facts. Treat table
+            // rows under an explicit plan/scenario heading as assumptions so
+            // the verifier does not demand a provider field for the user's
+            // own capital constraint or a not-yet-executed order.
+            (ClaimType::Assumption, line.to_string())
         } else if looks_like_key_claim(line) {
             (ClaimType::Inference, line.to_string())
         } else {
@@ -887,6 +894,20 @@ fn looks_like_key_claim(line: &str) -> bool {
         || contains_unsupported_absolute(line)
         || lower.contains("target price")
         || line.contains("目标价")
+}
+
+fn is_plan_parameter_section(section: &str) -> bool {
+    [
+        "配置方案",
+        "执行计划",
+        "仓位计划",
+        "分批计划",
+        "三种情景",
+        "情景方案",
+        "风险预算",
+    ]
+    .iter()
+    .any(|needle| section.contains(needle))
 }
 
 fn contains_unsupported_absolute(text: &str) -> bool {
@@ -1308,6 +1329,20 @@ mod tests {
             "{:?}",
             repaired.research.verification.findings
         );
+    }
+
+    #[test]
+    fn execution_plan_parameters_are_assumptions_not_fake_market_facts() {
+        let report = tagged_report(
+            "## 执行计划\n\n| 标的 | 仓位 | 股数 |\n|---|---:|---:|\n| 计划A | 35% | 200股 |",
+            Vec::new(),
+        );
+        assert!(report.research.verification.passed());
+        assert!(report
+            .research
+            .claims
+            .iter()
+            .all(|claim| claim.claim_type == ClaimType::Assumption));
     }
 
     #[test]

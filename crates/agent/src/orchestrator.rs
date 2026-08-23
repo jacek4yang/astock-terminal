@@ -121,12 +121,12 @@ impl TaskSpec {
         mut self,
         research_mode: impl Into<String>,
         reasoning_depth: impl Into<String>,
-        enabled_tools: Vec<String>,
+        enabled_tools: Option<Vec<String>>,
         auto_resume_on_quota: bool,
     ) -> Self {
         self.research_mode = Some(research_mode.into());
         self.reasoning_depth = Some(reasoning_depth.into());
-        self.enabled_tools = Some(enabled_tools);
+        self.enabled_tools = enabled_tools;
         self.auto_resume_on_quota = auto_resume_on_quota;
         self
     }
@@ -136,10 +136,10 @@ impl TaskSpec {
         self
     }
 
-    fn runtime_directive(&self) -> String {
+    fn runtime_directive(&self, messages: &[ChatMessage]) -> String {
         let mode = match self.research_mode.as_deref().unwrap_or("deep") {
             "quick" => "快速模式：只调用回答当前问题必需的工具，优先在较少轮次内给出可核验结论。",
-            "plan" => "计划模式：先判断目标、资金规模、期限、风险承受力和交易限制是否足以决定研究路线。若缺少会实质改变结论的信息，本轮只提出不超过3个具体问题并停止；必须用系统约定的astock-questions结构化选择框，禁止退化成普通Markdown问答列表。用户回答后检查仍未明确的关键项，可继续分批提问。信息充分后先列研究计划，再按计划取证、反证和综合。",
+            "plan" => "计划模式：你是专业、克制、证据优先的投资计划制定助手。只询问尚未确认且会实质改变研究路线的信息，每轮不超过3题；必须用系统约定的astock-questions结构化选择框，禁止退化成普通Markdown问答列表。约束一旦确认就立即列研究计划并取证、反证、量化验证和综合；后续追问用于解释、修订或补证，不得重新启动相同问卷。",
             _ => "深度模式：主动进行多源取证、交叉验证和反方检验，只在证据足以支持结论后完成回答。",
         };
         let depth = match self.reasoning_depth.as_deref().unwrap_or("deep") {
@@ -155,12 +155,19 @@ impl TaskSpec {
             ),
             None => "本轮可使用系统注册的全部工具。".to_string(),
         };
-        let strategy_gate = if requires_strategy_clarification(&self.prompt) {
+        let confirmed = latest_confirmed_constraints(messages);
+        let strategy_gate = if confirmed.is_none() && requires_strategy_clarification(&self.prompt)
+        {
             "\n本轮是信息不足的个人资金策略请求：只输出astock-questions选择框，询问期限、最大回撤、资金性质；不得调用任何工具，等待用户提交后再继续。"
         } else {
             ""
         };
-        format!("【本轮研究控制】\n{mode}\n{depth}\n{tools}{strategy_gate}")
+        let confirmed = confirmed.map_or_else(String::new, |constraints| {
+            format!(
+                "\n【本会话已确认投资约束】\n{constraints}\n以上是用户最后一次提交的有效约束；更早的冲突答案已经作废。不得重复询问这些事项。若用户是在追问现有计划，先直接回答并按需补证；若用户修改约束，以最新表述覆盖旧值。"
+            )
+        });
+        format!("【本轮研究控制】\n{mode}\n{depth}\n{tools}{strategy_gate}{confirmed}")
     }
 
     fn conversation_id(&self) -> &str {
@@ -602,7 +609,7 @@ impl AgentEngine {
             }
             // A transient system control keeps the stored user message clean
             // while applying changed controls on every turn and after resume.
-            let directive = state.spec.runtime_directive();
+            let directive = state.spec.runtime_directive(&messages);
             if let Some(system) = request_messages
                 .iter_mut()
                 .find(|message| message.role == "system")
@@ -1956,6 +1963,35 @@ fn explicitly_requests_chart(prompt: &str) -> bool {
         .any(|needle| prompt.contains(needle))
 }
 
+/// Return the latest durable clarification answer in a conversation. New
+/// clients include an `astock-answers` envelope; the legacy prose prefix is
+/// retained so conversations created by older releases stop looping too.
+/// Only the newest answer is authoritative.
+fn latest_confirmed_constraints(messages: &[ChatMessage]) -> Option<String> {
+    messages.iter().rev().find_map(|message| {
+        if message.role != "user" {
+            return None;
+        }
+        let content = message.content_text()?;
+        let structured = content.contains("```astock-answers");
+        let legacy = content.contains("关于你刚才提出的澄清问题，我的确认如下")
+            && content.contains("作为本会话已确认前提");
+        if !structured && !legacy {
+            return None;
+        }
+        let visible = content
+            .split("```astock-answers")
+            .next()
+            .unwrap_or(&content)
+            .trim();
+        if visible.is_empty() {
+            None
+        } else {
+            Some(visible.chars().take(2_000).collect())
+        }
+    })
+}
+
 fn requires_strategy_clarification(prompt: &str) -> bool {
     let asks_for_strategy = [
         "投资策略",
@@ -3181,6 +3217,22 @@ mod tests {
     }
 
     #[test]
+    fn latest_confirmed_constraints_overrides_legacy_conflicts() {
+        let messages = vec![
+            ChatMessage::user("关于你刚才提出的澄清问题，我的确认如下：\n1. 期限：一年\n请把这些条件作为本会话已确认前提"),
+            ChatMessage::user("关于你刚才提出的澄清问题，我的确认如下：\n1. 期限：1-3个月\n2. 回撤：10%\n3. 资金：闲置资金\n请把这些条件作为本会话已确认前提\n```astock-answers\n{\"schema\":\"v1\"}\n```"),
+        ];
+        let latest = latest_confirmed_constraints(&messages).unwrap();
+        assert!(latest.contains("1-3个月"));
+        assert!(!latest.contains("期限：一年"));
+
+        let directive =
+            TaskSpec::new("t", "chat", "给我2万元的股票投资策略").runtime_directive(&messages);
+        assert!(directive.contains("不得重复询问这些事项"));
+        assert!(!directive.contains("本轮是信息不足的个人资金策略请求"));
+    }
+
+    #[test]
     fn tool_event_contract_exposes_estimate_without_deadline() {
         let event = AgentEvent::ToolCallStarted {
             call_id: "c1".to_string(),
@@ -3567,7 +3619,7 @@ mod tests {
         let echo = Arc::new(EchoTool::new());
         let engine = build_engine(storage.clone(), chat.clone(), echo);
         let task = spec("t-plan-input")
-            .with_run_options("plan", "deep", Vec::new(), true)
+            .with_run_options("plan", "deep", Some(Vec::new()), true)
             .with_specialists(vec![SpecialistRoute {
                 name: "风险审计师".into(),
                 instruction: "检查风险".into(),

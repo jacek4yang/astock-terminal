@@ -70,8 +70,8 @@ pub struct AgentRunOptions {
 impl Default for AgentRunOptions {
     fn default() -> Self {
         Self {
-            research_mode: "deep".to_string(),
-            reasoning_depth: "deep".to_string(),
+            research_mode: "plan".to_string(),
+            reasoning_depth: "maximum".to_string(),
             enabled_tools: None,
             auto_resume_on_quota: true,
         }
@@ -79,7 +79,7 @@ impl Default for AgentRunOptions {
 }
 
 impl AgentRunOptions {
-    fn normalize(self) -> Result<(String, String, Vec<String>, u32, bool), CmdError> {
+    fn normalize(self) -> Result<(String, String, Option<Vec<String>>, u32, bool), CmdError> {
         if !matches!(self.research_mode.as_str(), "quick" | "deep" | "plan") {
             return Err(CmdError::new("invalid_param", "不支持的研究模式"));
         }
@@ -95,9 +95,11 @@ impl AgentRunOptions {
             .into_iter()
             .map(str::to_string)
             .collect();
-        let requested = self.enabled_tools.unwrap_or_else(|| known.clone());
+        let requested = self.enabled_tools;
         let unknown: Vec<&String> = requested
-            .iter()
+            .as_ref()
+            .into_iter()
+            .flatten()
             .filter(|name| !known.contains(name))
             .collect();
         if !unknown.is_empty() {
@@ -110,10 +112,12 @@ impl AgentRunOptions {
             ));
         }
         // Normalize to the registry's stable order and remove duplicates.
-        let enabled = known
-            .into_iter()
-            .filter(|name| requested.contains(name))
-            .collect();
+        let enabled = requested.map(|requested| {
+            known
+                .into_iter()
+                .filter(|name| requested.contains(name))
+                .collect()
+        });
         let mut max_rounds = match self.research_mode.as_str() {
             "quick" => 12,
             "plan" => 40,
@@ -836,9 +840,18 @@ mod tests {
         .unwrap();
         assert_eq!(mode, "plan");
         assert_eq!(depth, "maximum");
-        assert_eq!(tools, vec!["get_quote", "run_backtest"]);
+        assert_eq!(tools, Some(vec!["get_quote".into(), "run_backtest".into()]));
         assert_eq!(rounds, 48);
         assert!(auto_resume);
+    }
+
+    #[test]
+    fn default_run_options_keep_future_tools_enabled() {
+        let (_, _, tools, _, _) = AgentRunOptions::default().normalize().unwrap();
+        assert_eq!(
+            tools, None,
+            "None means every current and future registered tool"
+        );
     }
 
     #[test]

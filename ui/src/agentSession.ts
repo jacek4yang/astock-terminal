@@ -47,6 +47,7 @@ export const DEFAULT_AGENT_TOOLS = [
   "analyze_event_price_in",
   "research_supply_chain_relations",
   "query_graph_as_of",
+  "research_gold_market",
 ] as const;
 
 export interface ToolCallItem {
@@ -130,7 +131,8 @@ interface AgentSessionState {
   pendingQuestions: string[];
   researchMode: AgentResearchMode;
   reasoningDepth: AgentReasoningDepth;
-  enabledTools: string[];
+  /** `null` means every registered tool, including tools added later. */
+  enabledTools: string[] | null;
   autoResumeOnQuota: boolean;
   setInput: (input: string) => void;
   setStatus: (status: RunStatus) => void;
@@ -138,7 +140,7 @@ interface AgentSessionState {
   setMsgs: (msgs: ChatMsg[]) => void;
   setResearchMode: (mode: AgentResearchMode) => void;
   setReasoningDepth: (depth: AgentReasoningDepth) => void;
-  setEnabledTools: (tools: string[]) => void;
+  setEnabledTools: (tools: string[] | null) => void;
   setAutoResumeOnQuota: (enabled: boolean) => void;
 }
 
@@ -225,9 +227,9 @@ export const useAgentSession = create<AgentSessionState>()(
       err: null,
       progress: null,
       pendingQuestions: [],
-      researchMode: "deep",
-      reasoningDepth: "deep",
-      enabledTools: [...DEFAULT_AGENT_TOOLS],
+      researchMode: "plan",
+      reasoningDepth: "maximum",
+      enabledTools: null,
       autoResumeOnQuota: true,
       setInput: (input) => set({ input }),
       setStatus: (status) => set({ status }),
@@ -242,20 +244,21 @@ export const useAgentSession = create<AgentSessionState>()(
       // Avoid parsing legacy multi-megabyte evidence snapshots before a
       // migration can run; complete conversations remain available in SQLite.
       name: "astock-agent-session-v3",
-      version: 1,
+      version: 2,
       storage: createJSONStorage(() => window.localStorage),
       migrate: (persisted, version) => {
         const state = persisted as Partial<AgentSessionState>;
         const enabled = Array.isArray(state.enabledTools) ? state.enabledTools : [];
-        const legacyDefaults = DEFAULT_AGENT_TOOLS.slice(0, 20);
+        const legacyDefaults = DEFAULT_AGENT_TOOLS.filter(
+          (tool) => tool !== "research_gold_market",
+        );
         // Existing users who had the former complete tool set enabled should
         // automatically receive newly installed research capabilities. A
         // customized allowlist remains untouched.
         const hadAllLegacyTools = legacyDefaults.every((tool) => enabled.includes(tool));
         return {
           ...state,
-          enabledTools:
-            version < 1 && hadAllLegacyTools ? [...DEFAULT_AGENT_TOOLS] : enabled,
+          enabledTools: version < 2 && hadAllLegacyTools ? null : state.enabledTools ?? null,
         } as AgentSessionState;
       },
       partialize: (state) => ({

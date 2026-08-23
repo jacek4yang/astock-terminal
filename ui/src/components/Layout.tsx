@@ -26,15 +26,7 @@ const AGENT_ICON = "M12 3v3m0 12v3M3 12h3m12 0h3M8 8h8v8H8zM10.5 11.5h.01M13.5 1
 
 const NAV = [
   { to: "/", label: "今日市场", icon: "M3 12h4l3-8 4 16 3-8h4" },
-  { to: "/news", label: "资讯中心", icon: "M4 5h16v14H4zM7 9h3m-3 3h10m-10 3h10M13 9h4" },
-  { to: "/disclosures", label: "正式披露", icon: "M6 3h9l3 3v15H6zM15 3v4h4M9 11h6m-6 4h6" },
-  { to: "/global", label: "全球传导", icon: "M12 2a10 10 0 1 0 0 20m0-20c3 3 4 6 4 10s-1 7-4 10m-10-10h20M4 7h16M4 17h16" },
   { to: "/agent", label: "智能助手", icon: AGENT_ICON },
-  { to: "/watchlist", label: "自选股", icon: "M12 2l3 7h7l-5.5 4.5L18 21l-6-4-6 4 1.5-7.5L2 9h7z" },
-  { to: "/scan", label: "智能扫描", icon: "M11 4a7 7 0 1 0 4.9 12L21 21M11 8v3l2 2" },
-  { to: "/datahub", label: "数据中心", icon: "M4 19V5m0 14h16M8 15v-4m4 4V8m4 7v-6" },
-  { to: "/backtest", label: "回测实验室", icon: "M9 17v-6M13 17V7M17 17v-3M5 21h14" },
-  { to: "/graph", label: "图谱分析", icon: "M12 5a2 2 0 1 0 0 .01M5 19a2 2 0 1 0 0 .01M19 19a2 2 0 1 0 0 .01M12 7l-5.6 10M12 7l5.6 10M7 19h10" },
   { to: "/settings", label: "设置", icon: "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM4 12h2m12 0h2M12 4v2m0 12v2" },
 ];
 
@@ -283,17 +275,6 @@ export default function Layout() {
                 )}
               </NavLink>
             ))}
-            {currentSymbol && (
-              <NavLink to={`/stock/${currentSymbol}`} className={({ isActive }) => navCls(isActive)}>
-                {({ isActive }) => (
-                  <>
-                    {isActive && <ActiveTick />}
-                    <NavIcon d="M3 17l5-6 4 3 6-8M15 6h6v6" />
-                    {!collapsed && "个股工作台"}
-                  </>
-                )}
-              </NavLink>
-            )}
           </nav>
           <div className={`border-t border-slate-200 py-2 dark:border-slate-800 ${collapsed ? "flex justify-center" : "px-3"}`}>
             <button className="btn w-full justify-center !border-0 !bg-transparent" title={collapsed ? "展开导航" : "收起导航"} onClick={() => setCollapsed((value) => !value)}>

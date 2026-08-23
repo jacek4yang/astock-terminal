@@ -24,6 +24,7 @@ import NewsEventClusters from "../components/NewsEventClusters";
 import SourceEvidenceWorkbench from "../components/SourceEvidenceWorkbench";
 import DataQualityWorkbench from "../components/DataQualityWorkbench";
 import { applyTheme, useAppStore, type Theme, type UiMode } from "../store";
+import { DEFAULT_AGENT_TOOLS, useAgentSession } from "../agentSession";
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -186,6 +187,14 @@ export default function SettingsPage() {
   const mode = useAppStore((s) => s.mode);
   const setTheme = useAppStore((s) => s.setTheme);
   const setMode = useAppStore((s) => s.setMode);
+  const agentResearchMode = useAgentSession((s) => s.researchMode ?? "plan");
+  const agentReasoningDepth = useAgentSession((s) => s.reasoningDepth ?? "maximum");
+  const agentEnabledTools = useAgentSession((s) => s.enabledTools);
+  const agentAutoResume = useAgentSession((s) => s.autoResumeOnQuota ?? true);
+  const setAgentResearchMode = useAgentSession((s) => s.setResearchMode);
+  const setAgentReasoningDepth = useAgentSession((s) => s.setReasoningDepth);
+  const setAgentEnabledTools = useAgentSession((s) => s.setEnabledTools);
+  const setAgentAutoResume = useAgentSession((s) => s.setAutoResumeOnQuota);
 
   const [key, setKey] = useState("");
   const [mmStatus, setMmStatus] = useState<MinimaxStatus | null>(null);
@@ -463,6 +472,68 @@ export default function SettingsPage() {
           </button>
           {modelRoutingMsg && <span className="text-xs text-down">{modelRoutingMsg}</span>}
         </div>
+      </Section>
+
+      <Section title="智能助手默认研究能力">
+        <div className="muted text-xs leading-relaxed">
+          新对话默认作为投资计划研究：先保留用户已确认的资金期限、回撤和资金用途，再调用可用数据源进行取数、计算、反方复核和计划答疑。工具不会因后续升级新增能力而被旧设置意外关闭。
+        </div>
+        <div className="grid gap-2 sm:grid-cols-2">
+          <label className="rounded border border-slate-200 p-2.5 text-xs dark:border-slate-800">
+            <span className="font-medium">默认研究方式</span>
+            <select
+              className="input mt-2 w-full"
+              value={agentResearchMode}
+              onChange={(event) => setAgentResearchMode(event.target.value as "quick" | "deep" | "plan")}
+            >
+              <option value="plan">计划制定（推荐）</option>
+              <option value="deep">深度研究</option>
+              <option value="quick">快速问答</option>
+            </select>
+          </label>
+          <label className="rounded border border-slate-200 p-2.5 text-xs dark:border-slate-800">
+            <span className="font-medium">默认思考深度</span>
+            <select
+              className="input mt-2 w-full"
+              value={agentReasoningDepth}
+              onChange={(event) => setAgentReasoningDepth(event.target.value as "standard" | "deep" | "maximum")}
+            >
+              <option value="maximum">极深（推荐）</option>
+              <option value="deep">深入</option>
+              <option value="standard">标准</option>
+            </select>
+          </label>
+        </div>
+        <div className="rounded border border-slate-200 p-2.5 text-xs dark:border-slate-800">
+          <div className="flex flex-wrap items-center gap-3">
+            <div>
+              <div className="font-medium">研究工具默认全开</div>
+              <div className="muted mt-1">
+                {agentEnabledTools === null
+                  ? `已开启全部 ${DEFAULT_AGENT_TOOLS.length} 项当前工具，并自动包含未来新增工具`
+                  : `当前为自定义范围：${agentEnabledTools.length} / ${DEFAULT_AGENT_TOOLS.length} 项`}
+              </div>
+            </div>
+            <button className="btn-primary ml-auto" type="button" onClick={() => setAgentEnabledTools(null)}>
+              全部开启
+            </button>
+          </div>
+          <div className="muted mt-2 leading-relaxed">
+            包含行情、K 线、技术指标、全市场扫描、基本面、估值、聚宽固定研究模板、公告、财经新闻、全球传导、黄金市场、产业链、量化与回测。工具仍受来源许可、只读权限、缓存和访问频率治理约束。
+          </div>
+        </div>
+        <label className="flex cursor-pointer items-start gap-2 rounded border border-slate-200 p-2.5 text-xs dark:border-slate-800">
+          <input
+            className="mt-0.5"
+            type="checkbox"
+            checked={agentAutoResume}
+            onChange={(event) => setAgentAutoResume(event.target.checked)}
+          />
+          <span>
+            <span className="font-medium">额度窗口恢复后自动继续重要任务</span>
+            <span className="muted mt-1 block">额度耗尽时安全挂起，不丢失计划上下文；下一轮可用额度到来后从持久化状态继续。</span>
+          </span>
+        </label>
       </Section>
 
       <Section title="访问频率与重试治理">
