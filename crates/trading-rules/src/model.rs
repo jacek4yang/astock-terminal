@@ -162,6 +162,12 @@ pub struct CalendarRules {
     /// weekend dates in the list are harmless.
     #[serde(default)]
     pub holidays: Vec<NaiveDate>,
+    /// Official exchange notice used to verify this calendar snapshot.
+    #[serde(default)]
+    pub source_url: Option<String>,
+    /// Date on which the embedded holiday snapshot was last checked.
+    #[serde(default)]
+    pub verified_at: Option<NaiveDate>,
     /// Free-form note.
     #[serde(default)]
     pub note: Option<String>,

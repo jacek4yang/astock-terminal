@@ -1,0 +1,45 @@
+{
+  "source_name": "内置公开实体别名基准 v1",
+  "source_url": "https://www.cninfo.com.cn/",
+  "entities": [
+    {"id":"listed:cn:600519","kind":"listed_security","name":"贵州茅台","code":"600519","market":"A","aliases":[{"text":"贵州茅台酒股份有限公司","kind":"legal_name"},{"text":"贵州茅台","kind":"short_name"},{"text":"Kweichow Moutai","kind":"english_name"}],"context":["白酒","茅台酒"]},
+    {"id":"brand:moutai","kind":"brand","name":"茅台","aliases":[{"text":"茅台","kind":"brand_name"},{"text":"茅台酒","kind":"brand_name"}],"context":["白酒","飞天","酱香"]},
+    {"id":"subsidiary:maotai-sales","kind":"subsidiary","name":"贵州茅台酒销售有限公司","parent":"listed:cn:600519","aliases":[{"text":"贵州茅台酒销售有限公司","kind":"legal_name"},{"text":"茅台销售公司","kind":"short_name"}],"context":["经销","销售"]},
+
+    {"id":"listed:cn:300750","kind":"listed_security","name":"宁德时代","code":"300750","market":"A","aliases":[{"text":"宁德时代新能源科技股份有限公司","kind":"legal_name"},{"text":"宁德时代","kind":"short_name"},{"text":"CATL","kind":"english_name"}],"context":["动力电池","锂电池"]},
+    {"id":"subsidiary:catl-germany","kind":"subsidiary","name":"德国时代新能源科技有限公司","parent":"listed:cn:300750","aliases":[{"text":"德国时代新能源","kind":"short_name"},{"text":"德国时代","kind":"short_name"}],"context":["电池","欧洲","工厂"]},
+
+    {"id":"listed:cn:002594","kind":"listed_security","name":"比亚迪","code":"002594","market":"A","aliases":[{"text":"比亚迪股份有限公司","kind":"legal_name"},{"text":"比亚迪","kind":"short_name"},{"text":"BYD","kind":"english_name"}],"context":["新能源汽车","刀片电池"]},
+    {"id":"brand:denza","kind":"brand","name":"腾势","aliases":[{"text":"腾势","kind":"brand_name"},{"text":"DENZA","kind":"english_name"}],"context":["汽车","车型","新能源"]},
+
+    {"id":"listed:cn:000333","kind":"listed_security","name":"美的集团","code":"000333","market":"A","aliases":[{"text":"美的集团股份有限公司","kind":"legal_name"},{"text":"美的集团","kind":"short_name"},{"text":"Midea","kind":"english_name"}],"context":["家电","空调"]},
+    {"id":"brand:little-swan","kind":"brand","name":"小天鹅","aliases":[{"text":"小天鹅","kind":"brand_name"}],"context":["洗衣机","家电"]},
+    {"id":"listed:cn:000651","kind":"listed_security","name":"格力电器","code":"000651","market":"A","aliases":[{"text":"珠海格力电器股份有限公司","kind":"legal_name"},{"text":"格力电器","kind":"short_name"},{"text":"GREE","kind":"english_name"}],"context":["空调","家电"]},
+    {"id":"listed:cn:601318","kind":"listed_security","name":"中国平安","code":"601318","market":"A","aliases":[{"text":"中国平安保险(集团)股份有限公司","kind":"legal_name"},{"text":"中国平安","kind":"short_name"}],"context":["保险","金融"]},
+    {"id":"listed:cn:600036","kind":"listed_security","name":"招商银行","code":"600036","market":"A","aliases":[{"text":"招商银行股份有限公司","kind":"legal_name"},{"text":"招商银行","kind":"short_name"},{"text":"招行","kind":"short_name"}],"context":["银行","零售金融"]},
+    {"id":"listed:cn:000858","kind":"listed_security","name":"五粮液","code":"000858","market":"A","aliases":[{"text":"宜宾五粮液股份有限公司","kind":"legal_name"},{"text":"五粮液","kind":"short_name"}],"context":["白酒","浓香"]},
+    {"id":"listed:cn:601899","kind":"listed_security","name":"紫金矿业","code":"601899","market":"A","aliases":[{"text":"紫金矿业集团股份有限公司","kind":"legal_name"},{"text":"紫金矿业","kind":"short_name"}],"context":["黄金","铜矿"]},
+    {"id":"listed:cn:688981","kind":"listed_security","name":"中芯国际","code":"688981","market":"A","aliases":[{"text":"中芯国际集成电路制造有限公司","kind":"legal_name"},{"text":"中芯国际","kind":"short_name"},{"text":"SMIC","kind":"english_name"}],"context":["晶圆","芯片","代工"]},
+    {"id":"listed:cn:300308","kind":"listed_security","name":"中际旭创","code":"300308","market":"A","aliases":[{"text":"中际旭创股份有限公司","kind":"legal_name"},{"text":"中际旭创","kind":"short_name"}],"context":["光模块","算力"]},
+
+    {"id":"listed:cn:601360","kind":"listed_security","name":"三六零","code":"601360","market":"A","aliases":[{"text":"三六零安全科技股份有限公司","kind":"legal_name"},{"text":"三六零","kind":"short_name"},{"text":"江南嘉捷","kind":"former_name","valid_to":1519833600}],"context":["网络安全","搜索"]},
+    {"id":"listed:cn:601633","kind":"listed_security","name":"长城汽车","code":"601633","market":"A","aliases":[{"text":"长城汽车股份有限公司","kind":"legal_name"},{"text":"长城汽车","kind":"short_name"},{"text":"长城","kind":"short_name"}],"context":["汽车","SUV","新能源车"]},
+    {"id":"listed:cn:600084","kind":"listed_security","name":"中信尼雅","code":"600084","market":"A","aliases":[{"text":"中信尼雅葡萄酒股份有限公司","kind":"legal_name"},{"text":"中信尼雅","kind":"short_name"},{"text":"长城","kind":"brand_name"}],"context":["葡萄酒","红酒","酒庄"]},
+
+    {"id":"legal:us:apple","kind":"legal_entity","name":"苹果公司","market":"US","aliases":[{"text":"苹果公司","kind":"legal_name"},{"text":"Apple","kind":"english_name"}],"context":["iPhone","消费电子","供应链"]},
+    {"id":"product:iphone","kind":"product","name":"iPhone","aliases":[{"text":"iPhone","kind":"canonical"},{"text":"苹果手机","kind":"alias"}],"context":["手机","苹果"]},
+    {"id":"industry:semiconductor","kind":"industry","name":"半导体","aliases":[{"text":"半导体","kind":"canonical"},{"text":"集成电路","kind":"alias"}],"context":["芯片","晶圆"]},
+    {"id":"commodity:copper","kind":"commodity","name":"铜","aliases":[{"text":"铜","kind":"canonical"},{"text":"电解铜","kind":"alias"}],"context":["有色金属","铜价"]},
+    {"id":"region:eu","kind":"region","name":"欧盟","aliases":[{"text":"欧盟","kind":"canonical"},{"text":"European Union","kind":"english_name"}],"context":["欧洲","委员会"]},
+    {"id":"policy:carbon-neutral","kind":"policy","name":"碳达峰碳中和政策","aliases":[{"text":"双碳","kind":"alias"},{"text":"碳达峰碳中和","kind":"canonical"}],"context":["政策","减排"]}
+  ],
+  "relations": [
+    {"from":"brand:moutai","to":"listed:cn:600519","type":"brand_of","confidence":0.99,"source":"贵州茅台公司资料"},
+    {"from":"subsidiary:maotai-sales","to":"listed:cn:600519","type":"subsidiary_of","confidence":0.99,"source":"贵州茅台公司资料"},
+    {"from":"subsidiary:catl-germany","to":"listed:cn:300750","type":"subsidiary_of","confidence":0.99,"source":"宁德时代公司资料"},
+    {"from":"brand:denza","to":"listed:cn:002594","type":"brand_of","confidence":0.95,"source":"比亚迪公司资料"},
+    {"from":"brand:little-swan","to":"listed:cn:000333","type":"brand_of","confidence":0.99,"source":"美的集团公司资料"},
+    {"from":"product:iphone","to":"legal:us:apple","type":"product_of","confidence":0.99,"source":"Apple 产品资料"},
+    {"from":"listed:cn:300308","to":"legal:us:apple","type":"supplier_lead","confidence":0.70,"source":"公开供应链研究线索"}
+  ]
+}

@@ -28,6 +28,7 @@ pub mod report;
 pub mod testing;
 pub mod tools;
 
+pub use astock_security::{InvocationOrigin, ToolPermissionDomain};
 pub use backend::{ChatBackend, ChatChunkStream};
 pub use builtin::default_registry;
 pub use error::{AgentError, Result};
@@ -35,7 +36,11 @@ pub use orchestrator::{
     compact_history, AgentEngine, AgentEvent, EngineConfig, SpecialistRoute, SuspendReason,
     TaskSpec, TaskStream, SNAPSHOT_MARKER,
 };
-pub use report::{AgentReport, Conclusion, Evidence};
+pub use report::{
+    AgentReport, CalculationRecord, ClaimConfidence, ClaimType, Conclusion, Evidence,
+    EvidenceField, ResearchClaim, ResearchReport, VerificationFinding, VerificationResult,
+    VerificationSeverity, VerificationStatus,
+};
 pub use tools::{
     AgentTool, ToolContext, ToolProgressDetail, ToolRegistry, ToolResult, ToolWorkItem,
 };
