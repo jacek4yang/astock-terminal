@@ -16,8 +16,9 @@ import {
   type FundFlow,
   type SignalJson,
   type ChanlunDailyJson,
+  type FieldProvenance,
 } from "../lib/api";
-import { fmtPct, fmtVolume, fmtYiWan, fmtNum, pctClass } from "../lib/format";
+import { finiteNumber, fmtPct, fmtVolume, fmtYiWan, fmtNum, pctClass } from "../lib/format";
 import { sourceDisplayName } from "../lib/agentLabels";
 import { Loading, ErrorBox, Stat, Term, useMinLoading } from "../components/ui";
 import KlineChart, { type SubIndicator } from "../components/KlineChart";
@@ -27,6 +28,7 @@ import ChanlunPanel from "../components/ChanlunPanel";
 import FundFlowPanel from "../components/FundFlowPanel";
 import FundamentalsPanel from "../components/FundamentalsPanel";
 import ValuationPanel from "../components/ValuationPanel";
+import EarningsDriverPanel from "../components/EarningsDriverPanel";
 import CanslimCard from "../components/CanslimCard";
 import OrderBookPanel from "../components/OrderBookPanel";
 import { useAppStore } from "../store";
@@ -88,6 +90,46 @@ function DegradeBox({ text, onRetry }: { text: string; onRetry?: () => void }) {
         )}
       </div>
     </div>
+  );
+}
+
+function QuoteEvidence({
+  field,
+  label,
+  value,
+  provenance,
+  children,
+}: {
+  field: string;
+  label: string;
+  value: unknown;
+  provenance?: FieldProvenance;
+  children: React.ReactNode;
+}) {
+  return (
+    <details className="group relative inline-block">
+      <summary className="cursor-pointer list-none border-b border-dotted border-slate-400/70" title="点击查看字段来源和更新时间">
+        {children}
+      </summary>
+      <div className="absolute left-0 top-full z-50 mt-1 w-72 rounded-lg border border-slate-200 bg-white p-3 text-left text-xs font-normal text-slate-700 shadow-xl dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+        <div className="mb-2 font-medium">{label} · 字段详情</div>
+        <div className="space-y-1">
+          <div>内部字段：<span className="num">{field}</span></div>
+          <div>原始值：<span className="num break-all">{value == null ? "暂无" : String(value)}</span></div>
+          <div>来源：{sourceDisplayName(provenance?.source)}</div>
+          <div>数据时点：<span className="num">{provenance?.as_of ?? "未知"}</span></div>
+          <div>获取时间：<span className="num">{provenance?.fetched_at ?? "未知"}</span></div>
+          <div>质量：{provenance?.quality ?? "未声明"}{provenance?.stale ? <span className="text-up"> · 已陈旧</span> : ""}</div>
+          {provenance?.missing_reason && <div className="text-amber-600 dark:text-amber-300">缺失原因：{provenance.missing_reason}</div>}
+        </div>
+        <button
+          className="btn mt-2"
+          onClick={() => navigator.clipboard.writeText(JSON.stringify({ field, label, value, provenance }, null, 2))}
+        >
+          复制字段诊断信息
+        </button>
+      </div>
+    </details>
   );
 }
 
@@ -298,19 +340,20 @@ export default function StockPage() {
                 </span>
               </div>
               <div className="flex items-baseline gap-2">
-                <span className={"num text-2xl font-bold " + pctClass(q.pct)}>
-                  {q.price.toFixed(2)}
-                </span>
-                <span className={"num text-sm " + pctClass(q.pct)}>
-                  {q.change >= 0 ? "+" : ""}
-                  {q.change.toFixed(2)} {fmtPct(q.pct)}
-                </span>
+                <QuoteEvidence field="price" label="最新价" value={q.price} provenance={q.field_provenance?.price}>
+                  <span className={"num text-2xl font-bold " + pctClass(q.pct)}>{fmtNum(q.price)}</span>
+                </QuoteEvidence>
+                <QuoteEvidence field="change,pct" label="涨跌额与涨跌幅" value={{ change: q.change, pct: q.pct }} provenance={q.field_provenance?.pct ?? q.field_provenance?.change}>
+                  <span className={"num text-sm " + pctClass(q.pct)}>
+                    {(finiteNumber(q.change) ?? 0) >= 0 ? "+" : ""}{fmtNum(q.change)} {fmtPct(q.pct)}
+                  </span>
+                </QuoteEvidence>
               </div>
             </div>
-            <Stat label="今开" value={fmtNum(q.open)} />
-            <Stat label="最高" value={<span className="text-up">{fmtNum(q.high)}</span>} />
-            <Stat label="最低" value={<span className="text-down">{fmtNum(q.low)}</span>} />
-            <Stat label="昨收" value={fmtNum(q.pre_close)} />
+            <Stat label="今开" value={<QuoteEvidence field="open" label="今开" value={q.open} provenance={q.field_provenance?.open}>{fmtNum(q.open)}</QuoteEvidence>} />
+            <Stat label="最高" value={<QuoteEvidence field="high" label="最高" value={q.high} provenance={q.field_provenance?.high}><span className="text-up">{fmtNum(q.high)}</span></QuoteEvidence>} />
+            <Stat label="最低" value={<QuoteEvidence field="low" label="最低" value={q.low} provenance={q.field_provenance?.low}><span className="text-down">{fmtNum(q.low)}</span></QuoteEvidence>} />
+            <Stat label="昨收" value={<QuoteEvidence field="pre_close" label="昨收" value={q.pre_close} provenance={q.field_provenance?.pre_close}>{fmtNum(q.pre_close)}</QuoteEvidence>} />
             <Stat
               label={<Term label="量比" tip="当日每分钟均量 ÷ 过去5日每分钟均量,>1 说明放量" />}
               value={signal ? fmtNum(signal.volume_price.volume_ratio) : "暂无"}
@@ -318,13 +361,11 @@ export default function StockPage() {
             <Stat
               label={<Term label="换手" tip="当日成交量占流通股的比例,反映交投活跃度" />}
               value={
-                <span title={q.field_provenance?.turnover?.missing_reason ?? undefined}>
-                  {fmtPct(q.turnover, 2, false)}
-                </span>
+                <QuoteEvidence field="turnover" label="换手率" value={q.turnover} provenance={q.field_provenance?.turnover}>{fmtPct(q.turnover, 2, false)}</QuoteEvidence>
               }
             />
-            <Stat label="成交量" value={fmtVolume(q.volume)} />
-            <Stat label="成交额" value={fmtYiWan(q.amount)} />
+            <Stat label="成交量" value={<QuoteEvidence field="volume" label="成交量" value={q.volume} provenance={q.field_provenance?.volume}>{fmtVolume(q.volume)}</QuoteEvidence>} />
+            <Stat label="成交额" value={<QuoteEvidence field="amount" label="成交额" value={q.amount} provenance={q.field_provenance?.amount}>{fmtYiWan(q.amount)}</QuoteEvidence>} />
             <div className="ml-auto flex items-center gap-2">
               <label className="muted flex cursor-pointer items-center gap-1.5 text-xs">
                 <input
@@ -463,6 +504,7 @@ export default function StockPage() {
               /* 基本面标签:切换到该标签时才挂载并触发数据请求(懒加载) */
               <div className="h-full space-y-3 overflow-y-auto p-3">
                 <FundamentalsPanel symbol={symbol} />
+                <EarningsDriverPanel symbol={symbol} />
                 <ValuationPanel symbol={symbol} />
               </div>
             )}

@@ -15,7 +15,7 @@
 //! - a per-provider [`CircuitBreaker`] skips providers whose circuit is Open
 //!   (e.g. the WAF-blocked Tencent endpoint) instead of paying the failing
 //!   attempt on every request — see [`crate::breaker`];
-//! - single-flight request coalescing: concurrent identical kline/quote
+//! - single-flight request coalescing: concurrent identical stock/index kline and quote
 //!   calls share one in-flight upstream request (the stock page fires 3+
 //!   identical kline fetches for the K线图 / 信号卡 / 缠论 views);
 //! - `tracing::debug!` timing for every upstream attempt
@@ -93,6 +93,7 @@ struct Inner {
     tdx: Arc<TdxProvider>,
     security_master: Arc<SecurityMaster>,
     kline_inflight: DashMap<String, SharedKline>,
+    index_kline_inflight: DashMap<String, SharedKline>,
     quote_inflight: DashMap<String, SharedQuote>,
 }
 
@@ -118,6 +119,7 @@ impl Inner {
             tdx,
             security_master,
             kline_inflight: DashMap::new(),
+            index_kline_inflight: DashMap::new(),
             quote_inflight: DashMap::new(),
         })
     }
@@ -347,6 +349,10 @@ fn kline_cache_key(symbol: &Symbol, period: KlinePeriod, adjust: Adjust, count: 
     format!("kline_{symbol}_{count}_{period:?}_{adjust:?}")
 }
 
+fn index_kline_cache_key(index_secid: &str, period: KlinePeriod, count: u32) -> String {
+    format!("index_kline_{index_secid}_{period:?}_{count}")
+}
+
 /// Composite market-data facade: kline failover + breaker + single-flight,
 /// everything else delegated to EastMoney.
 pub struct MarketData {
@@ -527,6 +533,70 @@ impl MarketData {
         })
         .await
     }
+
+    async fn index_kline_period_pipeline(
+        &self,
+        index_secid: &str,
+        period: KlinePeriod,
+        count: u32,
+    ) -> KlineOutcome {
+        let cache_key = index_kline_cache_key(index_secid, period, count);
+        if let Some(hit) = self.cache.get::<Fetched<Vec<Bar>>>(&cache_key, ttl::KLINE) {
+            return Ok(hit);
+        }
+
+        let eastmoney = self.eastmoney.clone();
+        let tencent = self.tencent.clone();
+        let cache = self.cache.clone();
+        let index_secid = index_secid.to_string();
+        let sf_key = format!("index_kline|{index_secid}|{period:?}|{count}");
+        single_flight(&self.inner.index_kline_inflight, sf_key, move || {
+            async move {
+                let fetched = match eastmoney
+                    .index_kline_period(&index_secid, period, count)
+                    .await
+                {
+                    Ok(Fetched {
+                        data,
+                        source,
+                        fetched_at,
+                    }) => Fetched {
+                        data: filter_valid_index_bars(&index_secid, data),
+                        source,
+                        fetched_at,
+                    },
+                    Err(error) => {
+                        debug!(%error, %index_secid, ?period, "EM index kline failed, trying tencent");
+                        let index_code = index_secid.split('.').next_back().unwrap_or(&index_secid);
+                        let bars = tencent
+                            .index_kline_period(index_code, period, count)
+                            .await?;
+                        let validated = filter_valid_index_bars(&index_secid, bars);
+                        let required = (count as usize).min(10);
+                        if validated.len() < required {
+                            return Err(DataError::Empty(format!(
+                                "index kline {index_secid}: {} bars",
+                                validated.len()
+                            )));
+                        }
+                        Fetched::now(validated, Source::Tencent)
+                    }
+                };
+                if fetched.data.is_empty() {
+                    return Err(DataError::Empty(format!(
+                        "index kline {index_secid}: 0 bars"
+                    )));
+                }
+                cache.set(
+                    &index_kline_cache_key(&index_secid, period, count),
+                    &fetched,
+                );
+                Ok(fetched)
+            }
+            .boxed()
+        })
+        .await
+    }
 }
 
 #[async_trait]
@@ -542,6 +612,11 @@ impl DataProvider for MarketData {
         adjust: Adjust,
         count: u32,
     ) -> KlineOutcome {
+        if symbol.is_unambiguous_index() {
+            return self
+                .index_kline_period_pipeline(&Symbol::index_secid(symbol.code()), period, count)
+                .await;
+        }
         self.kline_pipeline(symbol, period, adjust, count).await
     }
 
@@ -551,10 +626,18 @@ impl DataProvider for MarketData {
         // itself fails over through the breaker-gated chain (tdx → eastmoney;
         // tencent/sina answer NoProvider and are skipped).
         let inner = self.inner.clone();
+        let eastmoney = self.eastmoney.clone();
         let symbol = symbol.clone();
         let sf_key = format!("quote|{symbol}");
         single_flight(&self.inner.quote_inflight, sf_key, move || {
-            async move { inner.fetch_quote(&symbol).await }.boxed()
+            async move {
+                if symbol.is_unambiguous_index() {
+                    eastmoney.index_quote(symbol.code()).await
+                } else {
+                    inner.fetch_quote(&symbol).await
+                }
+            }
+            .boxed()
         })
         .await
     }
@@ -631,37 +714,8 @@ impl DataProvider for MarketData {
         index_secid: &str,
         count: u32,
     ) -> Result<Fetched<Vec<Bar>>, DataError> {
-        // EastMoney first (fqt=0, daily); Tencent plain `day` key as fallback.
-        match self.eastmoney.index_kline(index_secid, count).await {
-            Ok(Fetched {
-                data,
-                source,
-                fetched_at,
-            }) => {
-                let validated = filter_valid_index_bars(index_secid, data);
-                Ok(Fetched {
-                    data: validated,
-                    source,
-                    fetched_at,
-                })
-            }
-            Err(e) => {
-                debug!(error = %e, index_secid, "EM index kline failed, trying tencent");
-                let index_code = index_secid.split('.').next_back().unwrap_or(index_secid);
-                let bars = self.tencent.index_kline(index_code, count).await?;
-                let validated = filter_valid_index_bars(index_secid, bars);
-                // Accept short answers when the caller asked for few bars
-                // (e.g. index cards request only the last 2 bars).
-                let required = (count as usize).min(10);
-                if validated.len() < required {
-                    return Err(DataError::Empty(format!(
-                        "index kline {index_secid}: {} bars",
-                        validated.len()
-                    )));
-                }
-                Ok(Fetched::now(validated, Source::Tencent))
-            }
-        }
+        self.index_kline_period_pipeline(index_secid, KlinePeriod::Day, count)
+            .await
     }
 }
 

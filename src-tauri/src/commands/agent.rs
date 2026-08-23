@@ -141,7 +141,8 @@ pub struct AgentTaskSummary {
     pub conversation_id: String,
     /// Task kind, e.g. "chat".
     pub kind: String,
-    /// Lifecycle status: running / suspended / completed / failed / cancelled.
+    /// Lifecycle status: running / suspended / completed /
+    /// verification_failed / failed / cancelled.
     pub status: String,
     /// Creation time, unix seconds.
     pub created_at: i64,

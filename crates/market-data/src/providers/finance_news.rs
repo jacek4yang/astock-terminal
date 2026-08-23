@@ -7,6 +7,7 @@
 use crate::cache::TtlCache;
 use crate::http::HttpClient;
 use astock_core::DataError;
+use astock_entity_linking::EntityLinkSummary;
 use astock_news_intelligence::ClusterExplanation;
 use astock_security::UrlSecurityPolicy;
 use astock_storage::Storage;
@@ -23,8 +24,9 @@ use std::time::Duration;
 use super::em_datacenter::{EmDataCenter, NoticeNode};
 use super::news_ingest::{
     bounded_raw, classify_data_error, ConfiguredJsonNewsProvider, JsonNewsProviderConfig,
-    NewsCapabilities, NewsDeliveryMode, NewsIngestOutcome, NewsIngestRequest, NewsIngestor,
-    NewsPage, NewsProvider, NewsProviderError, NewsProviderHealth, NewsTrustTier,
+    NewsCapabilities, NewsDeliveryMode, NewsIngestOutcome, NewsIngestProgressReporter,
+    NewsIngestRequest, NewsIngestor, NewsPage, NewsProvider, NewsProviderError, NewsProviderHealth,
+    NewsTrustTier,
 };
 
 pub const NEWSNOW_ENDPOINT: &str = "https://newsnow.busiyi.world/api/s";
@@ -41,6 +43,90 @@ pub const FINANCE_NEWS_SOURCES: &[(&str, &str, u64)] = &[
     ("xueqiu-hotstock", "雪球热门股票", 120),
     ("wallstreetcn-news", "华尔街见闻最新资讯", 1_800),
 ];
+
+pub const DEFAULT_FINANCE_NEWS_SOURCES: &[&str] = &[
+    "cls-telegraph",
+    "jin10",
+    "wallstreetcn-quick",
+    "mktnews-flash",
+    "gelonghui",
+];
+
+/// Tolerant source selection used at every public finance-news boundary.
+/// Models and ordinary users naturally submit Chinese display names or short
+/// aliases; those must never abort a larger research run. Unknown values stay
+/// observable, while an entirely unusable selection falls back to defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinanceNewsSourceSelection {
+    pub sources: Vec<String>,
+    pub ignored_sources: Vec<String>,
+    pub used_default: bool,
+}
+
+pub fn normalize_finance_news_sources(requested: Option<&[String]>) -> FinanceNewsSourceSelection {
+    let mut sources = Vec::new();
+    let mut ignored_sources = Vec::new();
+    if let Some(requested) = requested {
+        for raw in requested.iter().take(32) {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Some(source) = finance_news_source_alias(trimmed) {
+                if !sources.iter().any(|current| current == source) {
+                    sources.push(source.to_string());
+                }
+            } else if !ignored_sources.iter().any(|current| current == trimmed) {
+                ignored_sources.push(trimmed.to_string());
+            }
+        }
+    }
+    let used_default = sources.is_empty();
+    if used_default {
+        sources.extend(
+            DEFAULT_FINANCE_NEWS_SOURCES
+                .iter()
+                .map(|value| value.to_string()),
+        );
+    }
+    FinanceNewsSourceSelection {
+        sources,
+        ignored_sources,
+        used_default,
+    }
+}
+
+fn finance_news_source_alias(raw: &str) -> Option<&'static str> {
+    let normalized = raw
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-")
+        .split_whitespace()
+        .collect::<String>();
+    match normalized.as_str() {
+        "cls" | "cls-telegraph" | "财联社" | "财联社电报" => Some("cls-telegraph"),
+        "jin10" | "jin-10" | "金十" | "金十数据" => Some("jin10"),
+        "wallstreetcn" | "wallstreetcn-quick" | "wscn" | "华尔街见闻" | "华尔街见闻快讯" => {
+            Some("wallstreetcn-quick")
+        }
+        "wallstreetcn-news" | "华尔街见闻资讯" | "华尔街见闻新闻" | "华尔街见闻最新资讯" => {
+            Some("wallstreetcn-news")
+        }
+        "mktnews" | "mktnews-flash" | "mktnews快讯" => Some("mktnews-flash"),
+        "gelonghui" | "格隆汇" | "格隆汇事件" => Some("gelonghui"),
+        "xueqiu" | "xueqiu-hotstock" | "xueqiu-hot-stock" | "雪球" | "雪球热股" | "雪球热门"
+        | "雪球热门股票" => Some("xueqiu-hotstock"),
+        _ => None,
+    }
+}
+
+fn newsnow_per_channel_limit(final_limit: usize, channels: usize) -> usize {
+    final_limit
+        .clamp(1, 100)
+        .div_ceil(channels.max(1))
+        .saturating_mul(3)
+        .clamp(1, 100)
+}
 
 static TAGS: Lazy<Regex> = Lazy::new(|| Regex::new(r"<[^>]{0,400}>").expect("tag regex"));
 
@@ -78,6 +164,11 @@ pub struct FinanceNewsItem {
     pub old_republication: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cluster_explanation: Option<ClusterExplanation>,
+    /// Only rule-validated, evidence-backed entity mappings are exposed to Agent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entity_links: Vec<EntityLinkSummary>,
+    #[serde(default)]
+    pub entity_review_required: bool,
     /// Bounded original provider row for offline re-parsing/audit. Agent strips
     /// this field before model context to avoid needless prompt expansion.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -111,6 +202,19 @@ pub struct FinanceNewsProvider {
 impl FinanceNewsProvider {
     pub fn new(http: Arc<HttpClient>, cache: Arc<TtlCache>) -> Self {
         Self::build(http, cache, None, None)
+    }
+
+    /// Build the facade from explicit provider plugins. This is useful for
+    /// commercial provider extensions and deterministic end-to-end tests;
+    /// the same validation, rate limits, retries, circuit breakers and
+    /// persistence rules still apply.
+    pub fn from_providers(
+        providers: Vec<Arc<dyn NewsProvider>>,
+        storage: Option<Storage>,
+    ) -> Result<Self, NewsProviderError> {
+        Ok(Self {
+            ingestor: NewsIngestor::new(providers, storage)?,
+        })
     }
 
     pub fn with_storage(
@@ -187,23 +291,7 @@ impl FinanceNewsProvider {
         sources: &[String],
         per_source: usize,
     ) -> Result<FinanceNewsBatch, DataError> {
-        if sources.is_empty() || sources.len() > FINANCE_NEWS_SOURCES.len() {
-            return Err(DataError::Empty(
-                "finance news sources must contain 1-7 entries".to_string(),
-            ));
-        }
-        let mut unique = Vec::new();
-        for source in sources {
-            let source = source.trim().to_ascii_lowercase();
-            if source_meta(&source).is_none() {
-                return Err(DataError::Empty(format!(
-                    "unsupported finance news source: {source}"
-                )));
-            }
-            if !unique.contains(&source) {
-                unique.push(source);
-            }
-        }
+        let selection = normalize_finance_news_sources(Some(sources));
         let selected = self
             .ingestor
             .provider_ids()
@@ -214,7 +302,7 @@ impl FinanceNewsProvider {
             .ingestor
             .ingest(
                 NewsIngestRequest {
-                    source_ids: unique,
+                    source_ids: selection.sources,
                     limit: per_source.clamp(1, 100),
                     ..Default::default()
                 },
@@ -233,6 +321,19 @@ impl FinanceNewsProvider {
         keyword: Option<&str>,
         limit: usize,
     ) -> Result<FinanceNewsBatch, DataError> {
+        self.research_with_progress(sources, symbol, keyword, limit, None)
+            .await
+    }
+
+    pub async fn research_with_progress(
+        &self,
+        sources: &[String],
+        symbol: Option<&str>,
+        keyword: Option<&str>,
+        limit: usize,
+        progress: Option<NewsIngestProgressReporter>,
+    ) -> Result<FinanceNewsBatch, DataError> {
+        let selection = normalize_finance_news_sources(Some(sources));
         let selected = symbol.is_none().then(|| {
             self.ingestor
                 .provider_ids()
@@ -242,15 +343,16 @@ impl FinanceNewsProvider {
         });
         let outcome = self
             .ingestor
-            .ingest(
+            .ingest_with_progress(
                 NewsIngestRequest {
-                    source_ids: sources.to_vec(),
+                    source_ids: selection.sources,
                     symbol: symbol.map(ToString::to_string),
                     keyword: keyword.map(ToString::to_string),
                     limit: limit.clamp(1, 200),
                     ..Default::default()
                 },
                 selected.as_deref(),
+                progress,
             )
             .await;
         outcome_to_batch(outcome)
@@ -276,10 +378,17 @@ fn outcome_to_batch(outcome: NewsIngestOutcome) -> Result<FinanceNewsBatch, Data
         stale_sources: outcome.stale_providers,
         errors: outcome.errors.iter().map(ToString::to_string).collect(),
     };
-    if batch.items.is_empty() {
+    if batch.items.is_empty()
+        && batch.successful_sources.is_empty()
+        && batch.stale_sources.is_empty()
+    {
         Err(DataError::AllFailed {
             op: "finance news",
-            details: batch.errors.join("; "),
+            details: if batch.errors.is_empty() {
+                "资讯来源注册表为空或全部被筛选/停用".into()
+            } else {
+                batch.errors.join("; ")
+            },
         })
     } else {
         Ok(batch)
@@ -430,19 +539,24 @@ impl NewsProvider for NewsNowProvider {
         } else {
             request.source_ids
         };
+        let total_channels = sources.len();
+        // `request.limit` is the final provider budget, not a multiplier for
+        // every channel. A small over-fetch keeps important/keyword filtering
+        // useful without turning 15 requested rows into 75 archive jobs.
+        let per_channel = newsnow_per_channel_limit(request.limit, total_channels);
         let outcomes = stream::iter(sources.into_iter().map(|source| async move {
-            self.fetch_source(&source, request.limit.clamp(1, 100))
-                .await
+            let result = self.fetch_source(&source, per_channel).await;
+            (source, result)
         }))
         .buffer_unordered(MAX_CONCURRENT)
         .collect::<Vec<_>>()
         .await;
         let mut items = Vec::new();
-        let mut last_error = None;
+        let mut errors = Vec::new();
         let mut http_status = None;
         let mut etag = None;
         let mut last_modified = None;
-        for outcome in outcomes {
+        for (source, outcome) in outcomes {
             match outcome {
                 Ok(snapshot) => {
                     items.extend(snapshot.items);
@@ -450,19 +564,43 @@ impl NewsProvider for NewsNowProvider {
                     etag = etag.or(snapshot.etag);
                     last_modified = last_modified.or(snapshot.last_modified);
                 }
-                Err(error) => last_error = Some(error),
+                Err(error) => errors.push((source, error)),
             }
         }
         if items.is_empty() {
-            return Err(last_error.unwrap_or_else(|| {
-                NewsProviderError::new(
+            if errors.is_empty() {
+                return Err(NewsProviderError::new(
                     &self.capabilities.provider_id,
                     super::news_ingest::NewsErrorKind::Empty,
                     "所有 NewsNow 频道均为空",
                     false,
-                )
-            }));
+                ));
+            }
+            let retryable = errors.iter().all(|(_, error)| error.retryable);
+            let kind = errors
+                .first()
+                .map(|(_, error)| error.kind)
+                .unwrap_or(super::news_ingest::NewsErrorKind::Empty);
+            let details = errors
+                .iter()
+                .map(|(source, error)| format!("{source} [{:?}]: {}", error.kind, error.message))
+                .collect::<Vec<_>>()
+                .join("；");
+            return Err(NewsProviderError::new(
+                &self.capabilities.provider_id,
+                kind,
+                format!("{}/{} 个频道失败：{details}", errors.len(), total_channels),
+                retryable,
+            ));
         }
+        items.sort_by(|left, right| {
+            right
+                .published_at_ms
+                .unwrap_or_default()
+                .cmp(&left.published_at_ms.unwrap_or_default())
+                .then_with(|| left.rank.cmp(&right.rank))
+        });
+        items.truncate(request.limit.clamp(1, 100));
         let next_cursor = items.first().map(|item| item.id.clone());
         Ok(NewsPage {
             items,
@@ -470,6 +608,7 @@ impl NewsProvider for NewsNowProvider {
             http_status,
             etag,
             last_modified,
+            diagnostics: errors.into_iter().map(|(_, error)| error).collect(),
         })
     }
 }
@@ -552,6 +691,8 @@ impl NewsProvider for OfficialAnnouncementProvider {
                 independent_source_count: 1,
                 old_republication: false,
                 cluster_explanation: None,
+                entity_links: Vec::new(),
+                entity_review_required: false,
                 raw_payload: serde_json::to_value(&row)
                     .ok()
                     .as_ref()
@@ -564,6 +705,7 @@ impl NewsProvider for OfficialAnnouncementProvider {
             http_status: Some(200),
             etag: None,
             last_modified: None,
+            diagnostics: Vec::new(),
         })
     }
 }
@@ -642,6 +784,8 @@ fn normalize_item(
         independent_source_count: 1,
         old_republication: false,
         cluster_explanation: None,
+        entity_links: Vec::new(),
+        entity_review_required: false,
         raw_payload: bounded_raw(raw),
     })
 }
@@ -672,6 +816,8 @@ impl FinanceNewsItem {
             independent_source_count: 1,
             old_republication: false,
             cluster_explanation: None,
+            entity_links: Vec::new(),
+            entity_review_required: false,
             raw_payload: None,
         }
     }
@@ -760,5 +906,58 @@ mod tests {
             .map(|row| row.0)
             .collect::<HashSet<_>>();
         assert_eq!(ids.len(), FINANCE_NEWS_SOURCES.len());
+    }
+
+    #[test]
+    fn source_aliases_are_normalized_and_unknown_values_do_not_abort() {
+        let requested = vec![
+            "财联社".to_string(),
+            "金十数据".to_string(),
+            "华尔街见闻".to_string(),
+            "CLS".to_string(),
+            "不存在的来源".to_string(),
+        ];
+        let selection = normalize_finance_news_sources(Some(&requested));
+        assert_eq!(
+            selection.sources,
+            vec!["cls-telegraph", "jin10", "wallstreetcn-quick"]
+        );
+        assert_eq!(selection.ignored_sources, vec!["不存在的来源"]);
+        assert!(!selection.used_default);
+    }
+
+    #[test]
+    fn entirely_unknown_source_selection_falls_back_to_defaults() {
+        let requested = vec!["模型刚发明的来源".to_string()];
+        let selection = normalize_finance_news_sources(Some(&requested));
+        assert!(selection.used_default);
+        assert_eq!(selection.sources.len(), DEFAULT_FINANCE_NEWS_SOURCES.len());
+        assert_eq!(selection.ignored_sources, requested);
+    }
+
+    #[test]
+    fn final_limit_is_not_multiplied_by_channel_count() {
+        assert_eq!(newsnow_per_channel_limit(15, 5), 9);
+        assert_eq!(newsnow_per_channel_limit(1, 7), 3);
+        assert_eq!(newsnow_per_channel_limit(100, 1), 100);
+    }
+
+    #[test]
+    fn healthy_no_match_is_not_misreported_as_provider_outage() {
+        let batch = outcome_to_batch(NewsIngestOutcome {
+            successful_providers: vec!["fixture".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(batch.items.is_empty());
+        assert_eq!(batch.successful_sources, vec!["fixture"]);
+    }
+
+    #[test]
+    fn empty_registry_error_is_never_blank() {
+        let error = outcome_to_batch(NewsIngestOutcome::default()).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("资讯来源注册表"));
+        assert!(!message.ends_with(": "));
     }
 }

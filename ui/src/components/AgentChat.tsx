@@ -14,7 +14,9 @@ import {
   minimaxStatus,
   NOT_TAURI_MSG,
   type AgentConversation,
+  type AgentEvidenceField,
   type AgentMessage,
+  type AgentReport,
   type AgentTask,
 } from "../lib/api";
 import Markdown from "./Markdown";
@@ -82,7 +84,7 @@ const TOOL_GROUPS = [
   },
   {
     label: "基本面与估值",
-    tools: ["get_fundamentals", "run_valuation"],
+    tools: ["get_fundamentals", "analyze_earnings_drivers", "run_valuation"],
   },
   {
     label: "扫描与横向比较",
@@ -90,7 +92,7 @@ const TOOL_GROUPS = [
   },
   {
     label: "产业链与关系",
-    tools: ["get_industry_chain", "run_supply_chain_shock", "build_relationship_graph"],
+    tools: ["get_industry_chain", "run_supply_chain_shock", "build_relationship_graph", "run_quant_research", "research_supply_chain_relations", "query_graph_as_of"],
   },
   {
     label: "策略实验",
@@ -98,7 +100,17 @@ const TOOL_GROUPS = [
   },
   {
     label: "外部研究数据",
-    tools: ["research_news", "search_web", "run_joinquant_research"],
+    tools: [
+      "research_news",
+      "research_disclosures",
+      "research_global_transmission",
+      "analyze_event_price_in",
+      "search_web",
+      "fetch_source_document",
+      "read_document",
+      "compare_source_evidence",
+      "run_joinquant_research",
+    ],
   },
 ] as const;
 
@@ -123,6 +135,8 @@ export function taskRunStatus(status: string): RunStatus {
     case "failed":
     case "cancelled":
       return status;
+    case "verification_failed":
+      return "failed";
     default:
       return "idle";
   }
@@ -161,6 +175,7 @@ const STATUS_LABEL: Record<string, { text: string; cls: string }> = {
   suspended: { text: "已挂起", cls: "bg-amber-500/10 text-amber-600 dark:text-amber-400" },
   completed: { text: "已完成", cls: "bg-down/10 text-down" },
   failed: { text: "失败", cls: "bg-up/10 text-up" },
+  verification_failed: { text: "证据校验未通过", cls: "bg-up/10 text-up" },
   cancelled: { text: "已取消", cls: "bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300" },
   queued: { text: "排队中", cls: "bg-blue-600/10 text-blue-600 dark:text-blue-400" },
   starting: { text: "启动中", cls: "bg-blue-600/10 text-blue-600 dark:text-blue-400" },
@@ -338,10 +353,10 @@ function ToolCard({ tool }: { tool: ToolCallItem }) {
       </div>
       {tool.progressDetail && (
         <div className="muted mt-1 flex flex-wrap justify-between gap-x-3 gap-y-0.5 text-[10px]">
-          <span className="num">已处理 {tool.progressDetail.completed} / {tool.progressDetail.total} 只</span>
+          <span className="num">已处理 {tool.progressDetail.completed} / {tool.progressDetail.total} 项</span>
           <span className="num">成功 {tool.progressDetail.succeeded} · 失败 {tool.progressDetail.failed} · 缓存命中 {tool.progressDetail.cache_hits}</span>
           <span className="num">本轮获取 {tool.progressDetail.records.toLocaleString("zh-CN")} 条上游数据</span>
-          <span className="num">当前并行 {tool.progressDetail.active.length} 只</span>
+          <span className="num">当前并行 {tool.progressDetail.active.length} 项</span>
         </div>
       )}
       {!tool.done && estimatedSeconds != null && (
@@ -391,7 +406,7 @@ function ToolCard({ tool }: { tool: ToolCallItem }) {
                   ["失败", tool.progressDetail.failed],
                   ["缓存命中", tool.progressDetail.cache_hits],
                   ["新获取数据", `${tool.progressDetail.records.toLocaleString("zh-CN")} 条`],
-                  ["当前并行", `${tool.progressDetail.active.length} 只`],
+                  ["当前并行", `${tool.progressDetail.active.length} 项`],
                   ["剩余", `${Math.max(0, tool.progressDetail.total - tool.progressDetail.completed)} 只`],
                 ].map(([metricLabel, value]) => (
                   <div key={metricLabel} className="rounded bg-white/80 px-2 py-1.5 dark:bg-slate-950/50">
@@ -402,7 +417,7 @@ function ToolCard({ tool }: { tool: ToolCallItem }) {
               </div>
               {tool.progressDetail.active.length > 0 && (
                 <details className="mt-2" open>
-                  <summary className="cursor-pointer select-none font-medium">正在处理的股票（{tool.progressDetail.active.length}）</summary>
+                  <summary className="cursor-pointer select-none font-medium">正在处理的项目（{tool.progressDetail.active.length}）</summary>
                   <ul className="mt-1.5 space-y-1">
                     {tool.progressDetail.active.map((item) => (
                       <li key={item.label} className="grid gap-1 rounded bg-white/80 px-2 py-1.5 dark:bg-slate-950/50 sm:grid-cols-[8rem_1fr]">
@@ -829,6 +844,163 @@ export function hasUnansweredClarification(messages: ChatMsg[]): boolean {
   return false;
 }
 
+const CLAIM_TYPE_LABEL: Record<string, string> = {
+  fact: "事实",
+  calculation: "计算",
+  external: "外部信息",
+  inference: "推断",
+  assumption: "假设",
+  unknown: "未知",
+};
+
+const CONFIDENCE_LABEL: Record<string, string> = {
+  high: "高置信",
+  medium: "中等置信",
+  low: "低置信",
+  blocked: "已阻断",
+};
+
+const FINDING_LABEL: Record<string, string> = {
+  missing_reference: "证据引用不存在",
+  missing_calculation: "计算引用不存在",
+  unsupported_claim: "结论缺少证据",
+  unsupported_number: "数字无法复现",
+  unit_mismatch: "单位或币种不一致",
+  blocked_evidence: "证据质量阻断",
+  stale_price: "价格已经陈旧",
+  discovery_is_not_evidence: "搜索摘要不能作为事实",
+  unsupported_absolute_language: "绝对化表述无依据",
+};
+
+function evidenceValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value == null) return "空值";
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/** 可逐层展开的结论—字段证据—校验错误视图。 */
+export function ResearchVerificationPanel({ report }: { report: AgentReport }) {
+  const research = report.research;
+  const [expanded, setExpanded] = useState(false);
+  if (!research) return null;
+  const failed = research.verification.status === "failed";
+  const notApplicable = research.verification.status === "not_applicable";
+  return (
+    <div
+      className={`mt-3 rounded border ${
+        failed
+          ? "border-red-300 bg-red-50/70 dark:border-red-900 dark:bg-red-950/20"
+          : notApplicable
+            ? "border-blue-200 bg-blue-50/60 dark:border-blue-900/70 dark:bg-blue-950/20"
+            : "border-emerald-200 bg-emerald-50/60 dark:border-emerald-900/70 dark:bg-emerald-950/20"
+      }`}
+    >
+      <button
+        type="button"
+        className="flex w-full cursor-pointer select-none items-center px-3 py-2 text-left text-sm font-semibold"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        <span className="mr-2 text-xs">{expanded ? "▼" : "▶"}</span>
+        {failed
+          ? "报告已被证据校验阻断"
+          : notApplicable
+            ? "正在等待你的选择，尚未发布投资结论"
+            : "结论与证据校验已通过"}
+        <span className="muted ml-2 text-xs font-normal">
+          {research.claims.length} 条结论 · {CONFIDENCE_LABEL[research.confidence] ?? research.confidence} · {research.verification.findings.length} 项校验信息
+        </span>
+      </button>
+      {expanded && <ResearchVerificationDetails report={report} />}
+    </div>
+  );
+}
+
+function ResearchVerificationDetails({ report }: { report: AgentReport }) {
+  const research = report.research!;
+  const fields = new Map<string, { snapshot: AgentReport["evidence"][number]; field: AgentEvidenceField }>();
+  for (const snapshot of report.evidence) {
+    for (const field of snapshot.fields ?? []) {
+      fields.set(field.evidence_id, { snapshot, field });
+    }
+  }
+  return (
+    <div className="space-y-2 border-t border-current/10 p-2.5">
+        {research.claims.length === 0 && (
+          <div className="muted text-xs">本回答没有需要单独核验的数字型或分级结论。</div>
+        )}
+        {research.claims.map((claim, index) => {
+          const claimFindings = research.verification.findings.filter(
+            (finding) => finding.claim_id === claim.claim_id,
+          );
+          const referenced = claim.evidence_ids.map((id) => ({ id, found: fields.get(id) }));
+          return (
+            <details key={claim.claim_id} className="rounded border border-slate-200 bg-white/60 dark:border-slate-800 dark:bg-slate-950/30">
+              <summary className="cursor-pointer px-2.5 py-2 text-sm">
+                <span className="mr-2 font-semibold">结论 {index + 1}</span>
+                <span className="mr-2 rounded bg-slate-200/70 px-1.5 py-0.5 text-xs dark:bg-slate-800">
+                  {CLAIM_TYPE_LABEL[claim.claim_type] ?? claim.claim_type}
+                </span>
+                <span className={`mr-2 text-xs ${claim.confidence === "blocked" ? "text-red-600 dark:text-red-300" : "muted"}`}>
+                  {CONFIDENCE_LABEL[claim.confidence] ?? claim.confidence}
+                </span>
+                {claim.text}
+              </summary>
+              <div className="space-y-2 border-t border-slate-200 px-2.5 py-2 text-xs dark:border-slate-800">
+                {claimFindings.map((finding, findingIndex) => (
+                  <div key={`${finding.code}-${findingIndex}`} className="flex items-start justify-between gap-2 rounded border border-red-200 bg-red-50 px-2 py-1.5 text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
+                    <span><b>{FINDING_LABEL[finding.code] ?? finding.code}：</b>{finding.message}</span>
+                    <button type="button" className="shrink-0 underline" onClick={() => copyDiagnostic(`${finding.code}: ${finding.message}`)}>复制诊断</button>
+                  </div>
+                ))}
+                {referenced.length > 0 ? referenced.map(({ id, found }) => (
+                  <details key={id} className="rounded border border-slate-200 px-2 py-1.5 dark:border-slate-800">
+                    <summary className="cursor-pointer">
+                      {found ? `${toolDisplayName(found.snapshot.tool)} · ${found.field.field_path}` : `引用不存在 · ${id}`}
+                    </summary>
+                    {found ? (
+                      <div className="mt-1.5 grid gap-1 border-t border-slate-200 pt-1.5 dark:border-slate-800 sm:grid-cols-2">
+                        <div><span className="muted">原始值：</span><span className="num break-all">{evidenceValue(found.field.value)}</span></div>
+                        <div><span className="muted">单位/币种：</span>{found.field.unit ?? "未声明"}{found.field.currency ? ` · ${found.field.currency}` : ""}</div>
+                        <div><span className="muted">来源：</span>{sourceDisplayName(found.snapshot.source)}（{found.field.source_tier}）</div>
+                        <div><span className="muted">数据时间：</span>{fetchedAtDisplay(found.field.as_of)}</div>
+                        <div><span className="muted">新鲜度：</span>{found.field.freshness}{found.field.blocking ? " · 已阻断" : ""}</div>
+                        <div><span className="muted">字段证据：</span><button type="button" className="num break-all underline" onClick={() => copyDiagnostic(id)}>{id}</button></div>
+                        <div className="sm:col-span-2"><span className="muted">缓存定位：</span><button type="button" className="num break-all underline" onClick={() => copyDiagnostic(found.snapshot.cache_key)}>{found.snapshot.cache_key}</button></div>
+                      </div>
+                    ) : (
+                      <div className="mt-1 text-red-600 dark:text-red-300">该编号不在本报告的证据目录中。</div>
+                    )}
+                  </details>
+                )) : (
+                  <div className="muted">无字段级证据引用{claim.calculation_ids.length ? `；计算引用：${claim.calculation_ids.join("、")}` : ""}</div>
+                )}
+                {claim.counter_evidence.length > 0 && <div><b>反方证据：</b>{claim.counter_evidence.join("；")}</div>}
+                {claim.invalidation.length > 0 && <div><b>失效条件：</b>{claim.invalidation.join("；")}</div>}
+                {claim.unknowns.length > 0 && <div><b>仍未知：</b>{claim.unknowns.join("；")}</div>}
+              </div>
+            </details>
+          );
+        })}
+        {research.verification.findings
+          .filter((finding) => finding.claim_id == null)
+          .map((finding, index) => (
+            <div key={`${finding.code}-${index}`} className="rounded border border-amber-200 px-2 py-1.5 text-xs dark:border-amber-900">
+              {FINDING_LABEL[finding.code] ?? finding.code}：{finding.message}
+            </div>
+          ))}
+        <div className="muted flex flex-wrap justify-between gap-2 text-[11px]">
+          <span>报告协议：{research.schema_version} · 校验器：{research.verification.verifier_version}</span>
+          <button type="button" className="underline" onClick={() => copyDiagnostic(JSON.stringify({ report: research, evidence: report.evidence }, null, 2))}>复制当前校验摘要</button>
+        </div>
+    </div>
+  );
+}
+
 /** 助手消息气泡 */
 function AssistantMsg({
   msg,
@@ -869,23 +1041,7 @@ function AssistantMsg({
           onSubmit={() => onClarificationSubmit(clarification.request, draft)}
         />
       )}
-      {msg.report && msg.report.evidence.length > 0 && (
-        <div className="mt-3 rounded border border-slate-200 dark:border-slate-800">
-          <div className="muted border-b border-slate-200 px-2.5 py-1.5 text-xs dark:border-slate-800">
-            <Term label="证据清单" tip="本回答引用的工具数据快照,可按缓存键溯源复核" />(
-            {msg.report.evidence.length})
-          </div>
-          <ul className="divide-y divide-slate-100 dark:divide-slate-800/60">
-            {msg.report.evidence.map((ev, i) => (
-              <li key={i} className="num flex flex-wrap gap-x-3 px-2.5 py-1.5 text-xs">
-                <span className="font-medium">{toolDisplayName(ev.tool)}</span>
-                <span className="muted">数据来源：{sourceDisplayName(ev.source)}</span>
-                <span className="muted">更新时间：{fetchedAtDisplay(ev.fetched_at)}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      {msg.report && !clarification && <ResearchVerificationPanel report={msg.report} />}
       {msg.report && !clarification && (
         <div className="muted mt-3 rounded border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs dark:border-amber-900/60 dark:bg-amber-950/30">
           免责声明:以上内容由 AI 基于公开数据生成,仅供参考,不构成投资建议。市场有风险,决策需独立。
@@ -901,6 +1057,13 @@ function AssistantMsg({
 }
 
 // ==================== 对话组件(页面版 / 抽屉版复用) ====================
+
+export function isNearScrollBottom(
+  position: Pick<HTMLElement, "scrollHeight" | "scrollTop" | "clientHeight">,
+  threshold = 96,
+) {
+  return position.scrollHeight - position.scrollTop - position.clientHeight <= threshold;
+}
 
 export default function AgentChat({
   variant = "page",
@@ -938,17 +1101,39 @@ export default function AgentChat({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [taskDetail, setTaskDetail] = useState<AgentTask | null>(null);
+  const [visibleMessageCount, setVisibleMessageCount] = useState(60);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const shouldFollowLatestRef = useRef(true);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
 
   const running = status === "running";
   const waitingForInput = status === "waiting_input";
+  const visibleMsgs = msgs.slice(-visibleMessageCount);
 
-  // 滚动到底部
+  // 只有用户仍停留在底部附近时才跟随流式输出。向上阅读后不抢滚动位置。
   useEffect(() => {
     const el = scrollRef.current;
+    if (el && shouldFollowLatestRef.current) {
+      el.scrollTop = el.scrollHeight;
+      setShowJumpToLatest(false);
+    }
+  }, [msgs, status, progress]);
+
+  const followLatest = useCallback(() => {
+    shouldFollowLatestRef.current = true;
+    setShowJumpToLatest(false);
+    const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [msgs, status]);
+  }, []);
+
+  const handleMessageScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const nearBottom = isNearScrollBottom(el);
+    shouldFollowLatestRef.current = nearBottom;
+    setShowJumpToLatest((current) => (current === !nearBottom ? current : !nearBottom));
+  }, []);
 
   const refreshTasks = useCallback(async () => {
     try {
@@ -1033,6 +1218,7 @@ export default function AgentChat({
   const send = async (question: string) => {
     const q = question.trim();
     if (!q || running) return;
+    followLatest();
     const session = useAgentSession.getState();
     appendAgentTurn(q);
     // 新会话首轮:把当前查看的股票作为上下文前置(气泡仍只显示用户原文)
@@ -1203,6 +1389,8 @@ export default function AgentChat({
         err: null,
         progress: null,
       });
+      followLatest();
+      setVisibleMessageCount(60);
       setHistoryOpen(false);
     } catch (e) {
       setErr(errMsg(e));
@@ -1213,6 +1401,8 @@ export default function AgentChat({
   const newChat = () => {
     if (running) return;
     resetAgentSession();
+    followLatest();
+    setVisibleMessageCount(60);
     setHistoryOpen(false);
   };
 
@@ -1595,55 +1785,81 @@ export default function AgentChat({
         )}
 
         {/* 消息区 */}
-        <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
-          {running && progress && <ResearchProgress progress={progress} />}
-          {msgs.length === 0 && (
-            <div className="muted py-10 text-center text-sm">
-              向智能助手提问，或点击下方快捷模板开始
-            </div>
-          )}
-          {msgs.map((m) =>
-            m.role === "user" ? (
-              <div key={m.key} className="anim-fade-up flex justify-end">
-                <div className="max-w-2xl whitespace-pre-wrap rounded bg-blue-600 px-3 py-2 text-sm text-white">
-                  {m.raw}
-                </div>
-              </div>
-            ) : (
-              <AssistantMsg
-                key={m.key}
-                msg={m}
-                onClarificationSubmit={(request, draft) =>
-                  submitClarification(m.key, request, draft)
-                }
-              />
-            ),
-          )}
-
-          {status === "suspended" && (
-            <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300">
-              <div className="flex flex-wrap items-center gap-3">
-                <span>
-                  任务已保存，可从中断点继续。
-                  {suspendedMsg?.suspendedAt && (
-                    <>
-                      建议恢复时间:
-                      <span className="num font-medium">{fmtUnix(suspendedMsg.suspendedAt)}</span>。
-                    </>
-                  )}
-                  系统会自动补齐应用退出时未返回的分析结果，避免工具链不匹配错误（错误码 2013）。
-                  {autoResumeOnQuota && " 已开启额度恢复后自动续跑；也可立即手动尝试。"}
-                </span>
-                <button className="btn-primary" onClick={resume}>
-                  继续分析
+        <div className="relative min-h-0 flex-1">
+          <div ref={scrollRef} onScroll={handleMessageScroll} className="h-full space-y-3 overflow-y-auto p-4">
+            {msgs.length > visibleMsgs.length && (
+              <div className="text-center">
+                <button
+                  type="button"
+                  className="btn text-xs"
+                  onClick={() => {
+                    shouldFollowLatestRef.current = false;
+                    setShowJumpToLatest(true);
+                    setVisibleMessageCount((count) => count + 60);
+                  }}
+                >
+                  加载更早消息（还有 {msgs.length - visibleMsgs.length} 条）
                 </button>
               </div>
-            </div>
-          )}
-          {err && (
-            <div className="rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
-              {err}
-            </div>
+            )}
+            {running && progress && <ResearchProgress progress={progress} />}
+            {msgs.length === 0 && (
+              <div className="muted py-10 text-center text-sm">
+                向智能助手提问，或点击下方快捷模板开始
+              </div>
+            )}
+            {visibleMsgs.map((m) =>
+              m.role === "user" ? (
+                <div key={m.key} className="anim-fade-up flex justify-end">
+                  <div className="max-w-2xl whitespace-pre-wrap rounded bg-blue-600 px-3 py-2 text-sm text-white">
+                    {m.raw}
+                  </div>
+                </div>
+              ) : (
+                <AssistantMsg
+                  key={m.key}
+                  msg={m}
+                  onClarificationSubmit={(request, draft) =>
+                    submitClarification(m.key, request, draft)
+                  }
+                />
+              ),
+            )}
+
+            {status === "suspended" && (
+              <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300">
+                <div className="flex flex-wrap items-center gap-3">
+                  <span>
+                    任务已保存，可从中断点继续。
+                    {suspendedMsg?.suspendedAt && (
+                      <>
+                        建议恢复时间:
+                        <span className="num font-medium">{fmtUnix(suspendedMsg.suspendedAt)}</span>。
+                      </>
+                    )}
+                    系统会自动补齐应用退出时未返回的分析结果，避免工具链不匹配错误（错误码 2013）。
+                    {autoResumeOnQuota && " 已开启额度恢复后自动续跑；也可立即手动尝试。"}
+                  </span>
+                  <button className="btn-primary" onClick={resume}>
+                    继续分析
+                  </button>
+                </div>
+              </div>
+            )}
+            {err && (
+              <div className="rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
+                {err}
+              </div>
+            )}
+          </div>
+          {showJumpToLatest && (
+            <button
+              type="button"
+              className="btn absolute bottom-3 right-5 z-10 border-blue-300 bg-white shadow-lg dark:border-blue-800 dark:bg-slate-900"
+              onClick={followLatest}
+            >
+              回到最新内容 ↓
+            </button>
           )}
         </div>
 
@@ -1815,7 +2031,6 @@ export function historyToMsgs(m: AgentMessage, out: ChatMsg[]): ChatMsg[] {
         ...last.tools,
         {
           key: nextAgentKey(),
-          args: m.content,
           ...finished,
           timeline: [
             {
