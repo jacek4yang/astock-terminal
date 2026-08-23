@@ -144,16 +144,69 @@ interface AgentSessionState {
   setAutoResumeOnQuota: (enabled: boolean) => void;
 }
 
+type QuotaSuspendReason = {
+  kind: "quota_exhausted";
+  reset_at_unix: number | null;
+};
+
+type RuntimeSuspendReason = {
+  kind: "transient_failure";
+  error: string;
+  attempts: number;
+};
+
+type AgentSuspendReason = QuotaSuspendReason | RuntimeSuspendReason;
+type RuntimeSuspendedEvent = { type: "suspended"; reason: RuntimeSuspendReason };
+
+/**
+ * The backend keeps runtime suspension wire-compatible with the older
+ * `type=suspended` event. Extend the generated API union locally until every
+ * previously installed UI version has crossed that compatibility boundary.
+ */
+export type RuntimeAwareAgentStreamEnvelope = Omit<AgentStreamEnvelope, "event"> & {
+  event: AgentStreamEnvelope["event"] | RuntimeSuspendedEvent;
+};
+
 let keySeq = Date.now();
 export const nextAgentKey = () => keySeq++;
 
 const MAX_PERSISTED_MESSAGES = 24;
 const MAX_PERSISTED_TEXT_CHARS = 48_000;
+const MAX_RUNTIME_ERROR_CHARS = 1_200;
+const RUNTIME_SUSPENSION_PREFIX = "### 后台任务已挂起";
 
 function compactText(value: string | undefined, limit = MAX_PERSISTED_TEXT_CHARS) {
   if (value == null || value.length <= limit) return value;
   const half = Math.floor((limit - 48) / 2);
   return `${value.slice(0, half)}\n\n……较长内容已保存在会话记录中……\n\n${value.slice(-half)}`;
+}
+
+function redactRuntimeError(value: string): string {
+  const safe = value
+    .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, "Bearer [已隐藏敏感信息]")
+    .replace(
+      /((?:api[-_ ]?key|token|secret|password|authorization|cookie|credential)\s*[=:]\s*)[^\s,;]+/gi,
+      "$1[已隐藏敏感信息]",
+    )
+    .trim();
+  if (!safe) return "上游服务没有返回可用的终态。";
+  return safe.length <= MAX_RUNTIME_ERROR_CHARS
+    ? safe
+    : `${safe.slice(0, MAX_RUNTIME_ERROR_CHARS)}…`;
+}
+
+export function isRuntimeSuspensionNotice(raw: string): boolean {
+  return raw.trimStart().startsWith(RUNTIME_SUSPENSION_PREFIX);
+}
+
+export function formatRuntimeSuspensionNotice(reason: RuntimeSuspendReason): string {
+  const attempts = Math.max(0, Math.trunc(reason.attempts));
+  const attemptText = attempts > 0 ? ` **${attempts} 次**` : "多次";
+  const quotedError = redactRuntimeError(reason.error)
+    .split(/\r?\n/)
+    .map((line) => `> ${line}`)
+    .join("\n");
+  return `${RUNTIME_SUSPENSION_PREFIX}\n\n系统已自动恢复${attemptText}，但上游连接仍不稳定。最近完整检查点、已完成的工具结果和证据均已保存；点击下方“继续分析”可从检查点再次尝试，不会重新执行已经完成的步骤。\n\n**最近错误**\n\n${quotedError}`;
 }
 
 /**
@@ -331,7 +384,7 @@ export function patchClarificationDraft(
 }
 
 /** Stable channel callback: it lives outside any route component. */
-export function handleAgentEnvelope(message: AgentStreamEnvelope) {
+export function handleAgentEnvelope(message: RuntimeAwareAgentStreamEnvelope) {
   const state = useAgentSession.getState();
   if (message.seq <= state.lastSeq && state.taskId === message.run_id) return;
   useAgentSession.setState({
@@ -363,8 +416,9 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
       useAgentSession.setState({ status: "running" });
       patchLastAssistant((item) => ({
         ...item,
-        raw: item.raw + event.text,
+        raw: isRuntimeSuspensionNotice(item.raw) ? event.text : item.raw + event.text,
         suspendedAt: undefined,
+        failed: undefined,
       }));
       break;
     case "text_reset":
@@ -378,32 +432,38 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
       {
       const startedAt = Date.now();
       const initialStage = "检查本地缓存并选择可用数据源";
-      patchLastAssistant((item) => ({
-        ...item,
-        tools: [
-          ...item.tools,
-          {
-            key: nextAgentKey(),
-            callId: event.call_id,
-            name: event.name,
-            args:
-              event.args == null
-                ? undefined
-                : typeof event.args === "string"
-                  ? event.args
-                  : JSON.stringify(event.args),
-            done: false,
-            startedAt,
-            position: event.position,
-            total: event.total,
-            estimatedMs: event.estimated_ms,
-            stage: initialStage,
-            timeline: [
-              { at: startedAt, kind: "started", message: initialStage, elapsedMs: 0 },
-            ],
-          },
-        ],
-      }));
+      patchLastAssistant((item) => {
+        const wasRuntimeSuspended = isRuntimeSuspensionNotice(item.raw);
+        return {
+          ...item,
+          raw: wasRuntimeSuspended ? "" : item.raw,
+          failed: wasRuntimeSuspended ? undefined : item.failed,
+          suspendedAt: undefined,
+          tools: [
+            ...item.tools,
+            {
+              key: nextAgentKey(),
+              callId: event.call_id,
+              name: event.name,
+              args:
+                event.args == null
+                  ? undefined
+                  : typeof event.args === "string"
+                    ? event.args
+                    : JSON.stringify(event.args),
+              done: false,
+              startedAt,
+              position: event.position,
+              total: event.total,
+              estimatedMs: event.estimated_ms,
+              stage: initialStage,
+              timeline: [
+                { at: startedAt, kind: "started", message: initialStage, elapsedMs: 0 },
+              ],
+            },
+          ],
+        };
+      });
       break;
       }
     case "tool_call_progress":
@@ -467,13 +527,28 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
       });
       break;
       }
-    case "suspended":
-      useAgentSession.setState({ status: "suspended" });
-      patchLastAssistant((item) => ({
-        ...item,
-        suspendedAt: event.reason.reset_at_unix ?? undefined,
-      }));
+    case "suspended": {
+      const reason = event.reason as AgentSuspendReason;
+      useAgentSession.setState({ status: "suspended", progress: null });
+      if (reason.kind === "transient_failure") {
+        patchLastAssistant((item) => ({
+          ...item,
+          raw: formatRuntimeSuspensionNotice(reason),
+          suspendedAt: undefined,
+          failed: undefined,
+          done: false,
+        }));
+      } else {
+        patchLastAssistant((item) => ({
+          ...item,
+          raw: isRuntimeSuspensionNotice(item.raw) ? "" : item.raw,
+          suspendedAt: reason.reset_at_unix ?? undefined,
+          failed: undefined,
+          done: false,
+        }));
+      }
       break;
+    }
     case "completed":
       useAgentSession.setState({
         status: hasClarification(event.report.answer)
@@ -496,6 +571,7 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
             ? item.clarificationDraft ?? emptyClarificationDraft()
             : item.clarificationDraft,
           suspendedAt: undefined,
+          failed: undefined,
           done: true,
           tools: item.tools.map((tool) => {
             const evidence = tool.cacheKey ? evidenceByCache.get(tool.cacheKey) : undefined;
@@ -508,7 +584,12 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
       break;
     case "failed":
       useAgentSession.setState({ status: "failed", progress: null });
-      patchLastAssistant((item) => ({ ...item, failed: event.error, done: true }));
+      patchLastAssistant((item) => ({
+        ...item,
+        raw: isRuntimeSuspensionNotice(item.raw) ? "" : item.raw,
+        failed: event.error,
+        done: true,
+      }));
       break;
   }
 }

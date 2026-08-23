@@ -4,7 +4,9 @@ import {
   appendAgentTurn,
   compactAgentReport,
   compactMessagesForPersistence,
+  formatRuntimeSuspensionNotice,
   handleAgentEnvelope,
+  isRuntimeSuspensionNotice,
   resetAgentSession,
   useAgentSession,
 } from "./agentSession";
@@ -116,6 +118,94 @@ describe("persistent Agent session channel", () => {
       },
     });
     expect(tools[1].timeline?.map((entry) => entry.kind)).toEqual(["started", "progress"]);
+  });
+
+  it("surfaces a resumable runtime suspension and replaces the notice after recovery", () => {
+    appendAgentTurn("研究黄金股");
+    handleAgentEnvelope({
+      run_id: "run-runtime-suspended",
+      conversation_id: "conv-runtime-suspended",
+      seq: 1,
+      event: {
+        type: "progress",
+        phase: "reasoning",
+        message: "正在综合证据",
+        round: 3,
+        max_rounds: 48,
+        completed: null,
+        total: null,
+      },
+    });
+    handleAgentEnvelope({
+      run_id: "run-runtime-suspended",
+      conversation_id: "conv-runtime-suspended",
+      seq: 2,
+      event: {
+        type: "suspended",
+        reason: {
+          kind: "transient_failure",
+          error: "network error: connection reset; authorization=must-not-leak",
+          attempts: 3,
+        },
+      },
+    });
+
+    let state = useAgentSession.getState();
+    expect(state.status).toBe("suspended");
+    expect(state.progress).toBeNull();
+    let assistant = state.msgs.at(-1)!;
+    expect(isRuntimeSuspensionNotice(assistant.raw)).toBe(true);
+    expect(assistant.raw).toContain("自动恢复 **3 次**");
+    expect(assistant.raw).toContain("connection reset");
+    expect(assistant.raw).not.toContain("must-not-leak");
+    expect(assistant.raw).toContain("[已隐藏敏感信息]");
+    expect(assistant.suspendedAt).toBeUndefined();
+    expect(assistant.failed).toBeUndefined();
+    expect(assistant.done).toBe(false);
+
+    handleAgentEnvelope({
+      run_id: "run-runtime-suspended",
+      conversation_id: "conv-runtime-suspended",
+      seq: 3,
+      event: { type: "text_delta", text: "恢复后的完整答案" },
+    });
+    state = useAgentSession.getState();
+    assistant = state.msgs.at(-1)!;
+    expect(state.status).toBe("running");
+    expect(assistant.raw).toBe("恢复后的完整答案");
+    expect(isRuntimeSuspensionNotice(assistant.raw)).toBe(false);
+  });
+
+  it("keeps quota suspension timestamps distinct from runtime failures", () => {
+    appendAgentTurn("继续已有任务");
+    handleAgentEnvelope({
+      run_id: "run-quota-suspended",
+      conversation_id: "conv-quota-suspended",
+      seq: 1,
+      event: {
+        type: "suspended",
+        reason: { kind: "quota_exhausted", reset_at_unix: 1_800_000_000 },
+      },
+    });
+
+    const state = useAgentSession.getState();
+    const assistant = state.msgs.at(-1)!;
+    expect(state.status).toBe("suspended");
+    expect(assistant.suspendedAt).toBe(1_800_000_000);
+    expect(assistant.raw).toBe("");
+    expect(isRuntimeSuspensionNotice(assistant.raw)).toBe(false);
+  });
+
+  it("formats runtime suspension diagnostics with a bounded safe error", () => {
+    const notice = formatRuntimeSuspensionNotice({
+      kind: "transient_failure",
+      error: `Bearer top-secret\n${"x".repeat(2_000)}`,
+      attempts: 2,
+    });
+    expect(notice).toContain("自动恢复 **2 次**");
+    expect(notice).toContain("Bearer [已隐藏敏感信息]");
+    expect(notice).not.toContain("top-secret");
+    expect(notice.length).toBeLessThan(1_700);
   });
 
   it("compacts repeated heartbeat diagnostics while retaining the first entry", () => {
