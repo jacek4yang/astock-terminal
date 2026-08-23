@@ -1094,7 +1094,7 @@ fn snapshot_hash(
     let canonical = serde_json::to_vec(&(RESEARCH_FUNCTION_VERSION, config, versions, results))
         .map_err(|e| QuantError::InvalidInput(format!("serialize research snapshot: {e}")))?;
     let digest = Sha256::digest(canonical);
-    Ok(format!("qrs-{:x}", digest))
+    Ok(format!("qrs-{digest:x}"))
 }
 
 fn deterministic_indices(n: usize, limit: usize) -> Vec<usize> {
