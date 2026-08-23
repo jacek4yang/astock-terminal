@@ -191,7 +191,7 @@ jobs:
           grep -Fx "source_commit=$RELEASE_TARGET_SHA" dist/BUILD-METADATA.txt
           (cd dist && sha256sum --check SHA256SUMS)
 
-          git fetch origin main --force
+          git fetch origin "+refs/heads/main:refs/remotes/origin/main" --force
           git fetch --tags --force
           git cat-file -e "$RELEASE_TARGET_SHA^{commit}"
           git merge-base --is-ancestor "$RELEASE_TARGET_SHA" origin/main
