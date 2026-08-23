@@ -45,8 +45,8 @@ use astock_graph::{
     Engine as GraphEngine, Event, GraphStore, ImpactEntry, ImpactReport, Node, Relation,
 };
 use astock_market_data::{
-    DataProvider, FinanceNewsBatch, JoinQuantProvider, NewsIngestProgressReporter, NewsTrustTier,
-    FINANCE_NEWS_SOURCES,
+    normalize_finance_news_sources, DataProvider, FinanceNewsBatch, JoinQuantProvider,
+    NewsIngestProgressReporter, NewsTrustTier,
 };
 use astock_quant::research::{
     FdrMethod, InputValueMode, MissingValuePolicy, ResearchConfig, ResearchFrequency,
@@ -1045,7 +1045,7 @@ struct ResearchNewsArgs {
     keyword: Option<String>,
     /// 可选股票代码或名称；配置问财接口时会并行补充公告、新闻与结构化事件
     stock: Option<String>,
-    /// 公共来源标识；省略时使用财联社、金十、华尔街见闻、MKTNews 与格隆汇
+    /// 公共来源标识或中文名称；未知值会被跳过，全部无效时自动使用默认来源
     sources: Option<Vec<String>>,
     /// 最终最多返回条数，默认 50、最大 100
     limit: Option<usize>,
@@ -1088,31 +1088,9 @@ impl AgentTool for ResearchNews {
             .finance_news
             .as_deref()
             .ok_or_else(|| tool_err(self.name(), "财经快讯聚合器未装配"))?;
-        let sources = args.sources.unwrap_or_else(|| {
-            [
-                "cls-telegraph",
-                "jin10",
-                "wallstreetcn-quick",
-                "mktnews-flash",
-                "gelonghui",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect()
-        });
-        let known = FINANCE_NEWS_SOURCES
-            .iter()
-            .map(|row| row.0)
-            .collect::<HashSet<_>>();
-        if sources.iter().any(|source| !known.contains(source.trim())) {
-            return Err(invalid_args(
-                self.name(),
-                format!(
-                    "包含不支持的快讯来源；可选：{}",
-                    known.into_iter().collect::<Vec<_>>().join("、")
-                ),
-            ));
-        }
+        let requested_sources = args.sources.clone().unwrap_or_default();
+        let source_selection = normalize_finance_news_sources(args.sources.as_deref());
+        let sources = source_selection.sources.clone();
         let limit = args.limit.unwrap_or(50).clamp(1, 100);
         let rules =
             RuleSet::load(None).map_err(|error| tool_err(self.name(), error.to_string()))?;
@@ -1175,16 +1153,37 @@ impl AgentTool for ResearchNews {
                     failed: update.failed,
                     cache_hits: 0,
                     records: update.records,
-                    active: vec![ToolWorkItem {
-                        label: update.current_provider,
-                        stage: update.current_status,
-                    }],
+                    active: if update.active.is_empty()
+                        && update.current_provider == "资讯合并与条件匹配"
+                    {
+                        vec![ToolWorkItem {
+                            label: update.current_provider,
+                            stage: update.current_status,
+                        }]
+                    } else {
+                        update
+                            .active
+                            .into_iter()
+                            .map(|item| ToolWorkItem {
+                                label: format!("{}（{}）", item.display_name, item.provider_id),
+                                stage: format!(
+                                    "{}；尝试 {}/{}；已处理 {}/{} 条；本来源耗时 {:.1} 秒",
+                                    item.status,
+                                    item.attempt,
+                                    item.max_attempts,
+                                    item.records_processed,
+                                    item.records_total,
+                                    item.elapsed_ms as f64 / 1_000.0
+                                ),
+                            })
+                            .collect()
+                    },
                     recent_errors: update.recent_errors,
                 });
             }) as NewsIngestProgressReporter
         });
         let news_future =
-            provider.research_with_progress(&sources, stock, keyword, 100, news_progress);
+            provider.research_with_progress(&sources, stock, keyword, limit, news_progress);
         let event_future = async {
             match (stock, ctx.iwencai.as_deref()) {
                 (Some(stock), Some(iwencai)) if iwencai.available() => {
@@ -1356,6 +1355,17 @@ impl AgentTool for ResearchNews {
             "successful_sources": batch.successful_sources,
             "stale_sources": batch.stale_sources,
             "source_errors": batch.errors,
+            "source_selection": {
+                "requested": requested_sources,
+                "selected": sources,
+                "ignored": source_selection.ignored_sources.clone(),
+                "used_default": source_selection.used_default,
+                "note": if source_selection.ignored_sources.is_empty() {
+                    Value::Null
+                } else {
+                    json!("无法识别的来源已跳过，其余来源继续执行；全部无法识别时自动使用默认来源")
+                },
+            },
             "provider_health": provider_health,
             "iwencai_stock_evidence": iwencai,
             "governance": {
@@ -1376,6 +1386,7 @@ impl AgentTool for ResearchNews {
             "successful_sources": full["successful_sources"],
             "stale_sources": full["stale_sources"],
             "source_errors": full["source_errors"],
+            "source_selection": full["source_selection"],
             "iwencai_stock_evidence": full["iwencai_stock_evidence"],
             "warning": full["warning"],
             "session_policy": full["session_policy"],
@@ -5023,6 +5034,42 @@ mod tests {
         assert!(snapshots
             .last()
             .is_some_and(|snapshot| !snapshot.recent_errors.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn research_news_accepts_chinese_aliases_and_skips_unknown_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(StorageConfig::with_base_dir(dir.path())).unwrap();
+        let provider = FinanceNewsProvider::from_providers(
+            vec![Arc::new(FailingNewsProvider::new())],
+            Some(storage.clone()),
+        )
+        .unwrap();
+        let mut ctx = deep_ctx(storage, None);
+        ctx.finance_news = Some(Arc::new(provider));
+        let result = crate::default_registry()
+            .dispatch(
+                "research_news",
+                json!({
+                    "sources": ["财联社", "金十", "华尔街见闻", "不存在的来源"],
+                    "limit": 15
+                }),
+                &ctx,
+            )
+            .await
+            .expect("display names and one unknown value must not abort the tool");
+        assert_eq!(
+            result.summary_json["source_selection"]["selected"],
+            json!(["cls-telegraph", "jin10", "wallstreetcn-quick"])
+        );
+        assert_eq!(
+            result.summary_json["source_selection"]["ignored"],
+            json!(["不存在的来源"])
+        );
+        assert_eq!(
+            result.summary_json["source_selection"]["used_default"],
+            json!(false)
+        );
     }
 
     #[tokio::test]

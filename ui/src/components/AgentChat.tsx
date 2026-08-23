@@ -353,10 +353,10 @@ function ToolCard({ tool }: { tool: ToolCallItem }) {
       </div>
       {tool.progressDetail && (
         <div className="muted mt-1 flex flex-wrap justify-between gap-x-3 gap-y-0.5 text-[10px]">
-          <span className="num">已处理 {tool.progressDetail.completed} / {tool.progressDetail.total} 只</span>
+          <span className="num">已处理 {tool.progressDetail.completed} / {tool.progressDetail.total} 项</span>
           <span className="num">成功 {tool.progressDetail.succeeded} · 失败 {tool.progressDetail.failed} · 缓存命中 {tool.progressDetail.cache_hits}</span>
           <span className="num">本轮获取 {tool.progressDetail.records.toLocaleString("zh-CN")} 条上游数据</span>
-          <span className="num">当前并行 {tool.progressDetail.active.length} 只</span>
+          <span className="num">当前并行 {tool.progressDetail.active.length} 项</span>
         </div>
       )}
       {!tool.done && estimatedSeconds != null && (
@@ -406,7 +406,7 @@ function ToolCard({ tool }: { tool: ToolCallItem }) {
                   ["失败", tool.progressDetail.failed],
                   ["缓存命中", tool.progressDetail.cache_hits],
                   ["新获取数据", `${tool.progressDetail.records.toLocaleString("zh-CN")} 条`],
-                  ["当前并行", `${tool.progressDetail.active.length} 只`],
+                  ["当前并行", `${tool.progressDetail.active.length} 项`],
                   ["剩余", `${Math.max(0, tool.progressDetail.total - tool.progressDetail.completed)} 只`],
                 ].map(([metricLabel, value]) => (
                   <div key={metricLabel} className="rounded bg-white/80 px-2 py-1.5 dark:bg-slate-950/50">
@@ -417,7 +417,7 @@ function ToolCard({ tool }: { tool: ToolCallItem }) {
               </div>
               {tool.progressDetail.active.length > 0 && (
                 <details className="mt-2" open>
-                  <summary className="cursor-pointer select-none font-medium">正在处理的股票（{tool.progressDetail.active.length}）</summary>
+                  <summary className="cursor-pointer select-none font-medium">正在处理的项目（{tool.progressDetail.active.length}）</summary>
                   <ul className="mt-1.5 space-y-1">
                     {tool.progressDetail.active.map((item) => (
                       <li key={item.label} className="grid gap-1 rounded bg-white/80 px-2 py-1.5 dark:bg-slate-950/50 sm:grid-cols-[8rem_1fr]">

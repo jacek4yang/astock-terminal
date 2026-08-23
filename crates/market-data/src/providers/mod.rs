@@ -28,14 +28,15 @@ pub use em_datacenter::{
     SuspendRow, ZtPoolRow,
 };
 pub use finance_news::{
-    FinanceNewsBatch, FinanceNewsItem, FinanceNewsProvider, FINANCE_NEWS_SOURCES,
+    normalize_finance_news_sources, FinanceNewsBatch, FinanceNewsItem, FinanceNewsProvider,
+    FinanceNewsSourceSelection, DEFAULT_FINANCE_NEWS_SOURCES, FINANCE_NEWS_SOURCES,
 };
 pub use iwencai_openapi::{IwencaiOpenApi, StockEvents, WencaiRows};
 pub use joinquant::JoinQuantProvider;
 pub use news_ingest::{
     ConfiguredJsonNewsProvider, JsonNewsProviderConfig, NewsCapabilities, NewsDeliveryMode,
-    NewsErrorKind, NewsIngestProgress, NewsIngestProgressReporter, NewsIngestRequest, NewsProvider,
-    NewsProviderError, NewsProviderHealth, NewsTrustTier,
+    NewsErrorKind, NewsIngestProgress, NewsIngestProgressReporter, NewsIngestRequest,
+    NewsIngestWorkItem, NewsProvider, NewsProviderError, NewsProviderHealth, NewsTrustTier,
 };
 pub use sec_edgar::{SecEdgarProvider, SecFiling};
 pub use sina::SinaKline;

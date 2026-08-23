@@ -5,7 +5,7 @@
 //! persistent cursors, last-good fallback, manual disable and health metrics.
 //! It never treats a public aggregator as authoritative evidence.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -32,6 +32,7 @@ use super::finance_news::FinanceNewsItem;
 const MAX_CONCURRENT_PROVIDERS: usize = 4;
 const MAX_RETRIES: u32 = 2;
 const RETRY_BASE: Duration = Duration::from_millis(250);
+const PROVIDER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 const FAILURE_THRESHOLD: u32 = 3;
 const BASE_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_COOLDOWN: Duration = Duration::from_secs(30 * 60);
@@ -311,6 +312,18 @@ pub struct NewsIngestOutcome {
 
 /// Detailed, non-sensitive progress for one multi-provider news request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NewsIngestWorkItem {
+    pub provider_id: String,
+    pub display_name: String,
+    pub status: String,
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub elapsed_ms: u64,
+    pub records_processed: usize,
+    pub records_total: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NewsIngestProgress {
     pub completed: usize,
     pub total: usize,
@@ -319,10 +332,176 @@ pub struct NewsIngestProgress {
     pub records: usize,
     pub current_provider: String,
     pub current_status: String,
+    pub active: Vec<NewsIngestWorkItem>,
+    pub latest_activity_at_ms: i64,
     pub recent_errors: Vec<String>,
 }
 
 pub type NewsIngestProgressReporter = Arc<dyn Fn(NewsIngestProgress) + Send + Sync>;
+
+#[derive(Debug)]
+struct ActiveNewsWork {
+    display_name: String,
+    status: String,
+    attempt: u32,
+    records_processed: usize,
+    records_total: usize,
+    started: Instant,
+}
+
+struct NewsProgressTracker {
+    reporter: NewsIngestProgressReporter,
+    state: Mutex<NewsProgressState>,
+}
+
+struct NewsProgressState {
+    total: usize,
+    completed: usize,
+    succeeded: usize,
+    failed: usize,
+    records: usize,
+    active: BTreeMap<String, ActiveNewsWork>,
+    recent_errors: Vec<String>,
+}
+
+impl NewsProgressTracker {
+    fn new(providers: &[Arc<dyn NewsProvider>], reporter: NewsIngestProgressReporter) -> Arc<Self> {
+        let active = providers
+            .iter()
+            .map(|provider| {
+                let capabilities = provider.capabilities();
+                (
+                    capabilities.provider_id.clone(),
+                    ActiveNewsWork {
+                        display_name: capabilities.display_name.clone(),
+                        status: "等待调度".into(),
+                        attempt: 0,
+                        records_processed: 0,
+                        records_total: 0,
+                        started: Instant::now(),
+                    },
+                )
+            })
+            .collect();
+        let tracker = Arc::new(Self {
+            reporter,
+            state: Mutex::new(NewsProgressState {
+                total: providers.len(),
+                completed: 0,
+                succeeded: 0,
+                failed: 0,
+                records: 0,
+                active,
+                recent_errors: Vec::new(),
+            }),
+        });
+        tracker.emit(
+            "资讯采集调度器",
+            format!("已创建 {} 个并行来源任务", providers.len()),
+        );
+        tracker
+    }
+
+    fn update(
+        &self,
+        provider_id: &str,
+        status: impl Into<String>,
+        attempt: u32,
+        records_processed: usize,
+        records_total: usize,
+    ) {
+        let status = status.into();
+        {
+            let mut state = self.state.lock();
+            if let Some(work) = state.active.get_mut(provider_id) {
+                work.status.clone_from(&status);
+                work.attempt = attempt;
+                work.records_processed = records_processed;
+                work.records_total = records_total;
+            }
+        }
+        self.emit(provider_id, status);
+    }
+
+    fn complete(
+        &self,
+        provider_id: &str,
+        succeeded: bool,
+        stale: bool,
+        records: usize,
+        errors: impl IntoIterator<Item = String>,
+    ) {
+        let status = if succeeded {
+            if stale {
+                "来源失败，已使用最后成功快照"
+            } else {
+                "来源采集、归档和关联处理完成"
+            }
+        } else {
+            "来源失败，已释放并发槽并继续其他来源"
+        };
+        {
+            let mut state = self.state.lock();
+            state.active.remove(provider_id);
+            state.completed += 1;
+            if succeeded {
+                state.succeeded += 1;
+                state.records += records;
+            } else {
+                state.failed += 1;
+            }
+            for error in errors {
+                if !error.trim().is_empty() {
+                    state.recent_errors.push(error);
+                }
+            }
+            if state.recent_errors.len() > 20 {
+                let remove = state.recent_errors.len() - 20;
+                state.recent_errors.drain(0..remove);
+            }
+        }
+        self.emit(provider_id, status.into());
+    }
+
+    fn emit(&self, current_provider: impl Into<String>, current_status: String) {
+        let current_provider = current_provider.into();
+        let snapshot = {
+            let state = self.state.lock();
+            let active_records = state
+                .active
+                .values()
+                .map(|work| work.records_processed)
+                .sum::<usize>();
+            NewsIngestProgress {
+                completed: state.completed,
+                total: state.total,
+                succeeded: state.succeeded,
+                failed: state.failed,
+                records: state.records + active_records,
+                current_provider,
+                current_status,
+                active: state
+                    .active
+                    .iter()
+                    .map(|(provider_id, work)| NewsIngestWorkItem {
+                        provider_id: provider_id.clone(),
+                        display_name: work.display_name.clone(),
+                        status: work.status.clone(),
+                        attempt: work.attempt,
+                        max_attempts: MAX_RETRIES + 1,
+                        elapsed_ms: work.started.elapsed().as_millis().min(u128::from(u64::MAX))
+                            as u64,
+                        records_processed: work.records_processed,
+                        records_total: work.records_total,
+                    })
+                    .collect(),
+                latest_activity_at_ms: now_secs().saturating_mul(1_000),
+                recent_errors: state.recent_errors.iter().rev().take(5).cloned().collect(),
+            }
+        };
+        (self.reporter)(snapshot);
+    }
+}
 
 pub struct NewsIngestor {
     providers: Vec<Arc<dyn NewsProvider>>,
@@ -331,6 +510,7 @@ pub struct NewsIngestor {
     last_good: DashMap<String, NewsPage>,
     storage: Option<Storage>,
     entity_linker: Option<Arc<EntityLinker>>,
+    provider_attempt_timeout: Duration,
 }
 
 impl NewsIngestor {
@@ -364,7 +544,14 @@ impl NewsIngestor {
             last_good: DashMap::new(),
             storage,
             entity_linker,
+            provider_attempt_timeout: PROVIDER_ATTEMPT_TIMEOUT,
         })
+    }
+
+    #[cfg(test)]
+    fn with_attempt_timeout_for_tests(mut self, timeout: Duration) -> Self {
+        self.provider_attempt_timeout = timeout;
+        self
     }
 
     pub fn provider_ids(&self) -> Vec<String> {
@@ -409,17 +596,21 @@ impl NewsIngestor {
                 ..Default::default()
             };
         }
+        let tracker = progress.map(|reporter| NewsProgressTracker::new(&providers, reporter));
         let mut pending = FuturesUnordered::new();
         for provider in providers {
-            pending.push(self.fetch_named(provider, request.clone()));
+            pending.push(self.fetch_named(provider, request.clone(), tracker.clone()));
         }
         let mut outcome = NewsIngestOutcome::default();
-        let mut completed = 0usize;
-        let mut failed_providers = 0usize;
         while let Some((provider_id, result)) = pending.next().await {
-            completed += 1;
             match result {
                 Ok((page, stale)) => {
+                    let records = page.items.len();
+                    let diagnostics = page
+                        .diagnostics
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>();
                     if stale {
                         outcome.stale_providers.push(provider_id.clone());
                     } else {
@@ -427,61 +618,27 @@ impl NewsIngestor {
                     }
                     outcome.errors.extend(page.diagnostics.iter().cloned());
                     outcome.items.extend(page.items);
-                    if let Some(reporter) = &progress {
-                        reporter(NewsIngestProgress {
-                            completed,
-                            total,
-                            succeeded: outcome.successful_providers.len()
-                                + outcome.stale_providers.len(),
-                            // Channel-level diagnostics do not turn a provider
-                            // with usable records into a failed provider.
-                            failed: failed_providers,
-                            records: outcome.items.len(),
-                            current_provider: provider_id,
-                            current_status: if stale {
-                                "使用最后成功快照".into()
-                            } else {
-                                "采集完成".into()
-                            },
-                            recent_errors: outcome
-                                .errors
-                                .iter()
-                                .rev()
-                                .take(5)
-                                .map(ToString::to_string)
-                                .collect(),
-                        });
+                    if let Some(tracker) = &tracker {
+                        tracker.complete(&provider_id, true, stale, records, diagnostics);
                     }
                 }
                 Err(error) => {
-                    failed_providers += 1;
                     let message = error.to_string();
                     outcome.errors.push(error);
-                    if let Some(reporter) = &progress {
-                        reporter(NewsIngestProgress {
-                            completed,
-                            total,
-                            succeeded: outcome.successful_providers.len()
-                                + outcome.stale_providers.len(),
-                            failed: failed_providers,
-                            records: outcome.items.len(),
-                            current_provider: provider_id,
-                            current_status: "采集失败，继续使用其他来源".into(),
-                            recent_errors: std::iter::once(message)
-                                .chain(
-                                    outcome
-                                        .errors
-                                        .iter()
-                                        .rev()
-                                        .skip(1)
-                                        .take(4)
-                                        .map(ToString::to_string),
-                                )
-                                .collect(),
-                        });
+                    if let Some(tracker) = &tracker {
+                        tracker.complete(&provider_id, false, false, 0, [message]);
                     }
                 }
             }
+        }
+        if let Some(tracker) = &tracker {
+            tracker.emit(
+                "资讯合并与条件匹配",
+                format!(
+                    "正在对 {} 条上游记录去重、排序并匹配检索条件",
+                    outcome.items.len()
+                ),
+            );
         }
         let mut seen = HashSet::new();
         let cluster_counts = outcome
@@ -562,6 +719,7 @@ impl NewsIngestor {
                     })
             });
         }
+        outcome.items.truncate(request.limit.clamp(1, 200));
         outcome
     }
 
@@ -569,15 +727,17 @@ impl NewsIngestor {
         &self,
         provider: Arc<dyn NewsProvider>,
         request: NewsIngestRequest,
+        progress: Option<Arc<NewsProgressTracker>>,
     ) -> (String, Result<(NewsPage, bool), NewsProviderError>) {
         let id = provider.capabilities().provider_id.clone();
-        (id, self.fetch_one(provider, request).await)
+        (id, self.fetch_one(provider, request, progress).await)
     }
 
     async fn fetch_one(
         &self,
         provider: Arc<dyn NewsProvider>,
         mut request: NewsIngestRequest,
+        progress: Option<Arc<NewsProgressTracker>>,
     ) -> Result<(NewsPage, bool), NewsProviderError> {
         let capabilities = provider.capabilities().clone();
         let provider_id = capabilities.provider_id.clone();
@@ -610,7 +770,10 @@ impl NewsIngestor {
         if request.cursor.is_none() {
             request.cursor = self.load_cursor(&provider_id).await;
         }
-        self.wait_rate_limit(&capabilities).await;
+        self.wait_rate_limit(&capabilities, progress.as_ref()).await;
+        if let Some(progress) = &progress {
+            progress.update(&provider_id, "等待可用的采集并发槽", 0, 0, 0);
+        }
         let _permit = self.permits.acquire().await.map_err(|_| {
             NewsProviderError::new(
                 &provider_id,
@@ -622,13 +785,56 @@ impl NewsIngestor {
         let started = Instant::now();
         let mut final_error = None;
         for attempt in 0..=MAX_RETRIES {
+            let attempt_number = attempt + 1;
             let attempt_started = Instant::now();
             self.mark_attempt(&provider_id);
-            match provider.fetch(request.clone()).await {
+            if let Some(progress) = &progress {
+                progress.update(
+                    &provider_id,
+                    format!("正在访问上游，第 {attempt_number}/{} 次", MAX_RETRIES + 1),
+                    attempt_number,
+                    0,
+                    0,
+                );
+            }
+            let fetched = match tokio::time::timeout(
+                self.provider_attempt_timeout,
+                provider.fetch(request.clone()),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(NewsProviderError::new(
+                    &provider_id,
+                    NewsErrorKind::Timeout,
+                    format!(
+                        "单次来源访问超过 {} 秒，已中止本次尝试并释放资源",
+                        self.provider_attempt_timeout.as_secs_f64()
+                    ),
+                    true,
+                )),
+            };
+            match fetched {
                 Ok(mut page) => {
+                    let records = page.items.len();
+                    if let Some(progress) = &progress {
+                        progress.update(
+                            &provider_id,
+                            format!("已获取 {records} 条上游数据，开始保存可审计证据"),
+                            attempt_number,
+                            0,
+                            records,
+                        );
+                    }
                     self.mark_success(&provider_id, started.elapsed());
-                    self.persist_success(&capabilities, &mut page, started.elapsed())
-                        .await;
+                    self.persist_success(
+                        &capabilities,
+                        &mut page,
+                        started.elapsed(),
+                        progress.as_ref(),
+                        attempt_number,
+                    )
+                    .await;
                     self.persist_runtime_state(&provider_id).await;
                     self.last_good.insert(provider_id.clone(), page.clone());
                     return Ok((page, false));
@@ -647,7 +853,21 @@ impl NewsIngestor {
                     if !retryable || attempt == MAX_RETRIES {
                         break;
                     }
-                    tokio::time::sleep(RETRY_BASE * 2_u32.pow(attempt)).await;
+                    let delay = RETRY_BASE * 2_u32.pow(attempt);
+                    if let (Some(progress), Some(error)) = (&progress, final_error.as_ref()) {
+                        progress.update(
+                            &provider_id,
+                            format!(
+                                "本次访问失败（{:?}），{:.1} 秒后自动重试",
+                                error.kind,
+                                delay.as_secs_f64()
+                            ),
+                            attempt_number,
+                            0,
+                            0,
+                        );
+                    }
+                    tokio::time::sleep(delay).await;
                 }
             }
         }
@@ -722,12 +942,24 @@ impl NewsIngestor {
         capabilities: &NewsCapabilities,
         page: &mut NewsPage,
         elapsed: Duration,
+        progress: Option<&Arc<NewsProgressTracker>>,
+        attempt: u32,
     ) {
         let Some(storage) = &self.storage else {
+            if let Some(progress) = progress {
+                progress.update(
+                    &capabilities.provider_id,
+                    format!("已获取 {} 条数据；本次无需本地归档", page.items.len()),
+                    attempt,
+                    page.items.len(),
+                    page.items.len(),
+                );
+            }
             return;
         };
         let observed_at = now_secs();
-        for item in &mut page.items {
+        let total = page.items.len();
+        for (index, item) in page.items.iter_mut().enumerate() {
             let canonical_url = if item.url.trim().is_empty() {
                 format!("urn:astock-news:{}:{}", item.provider_id, item.id)
             } else {
@@ -840,6 +1072,18 @@ impl NewsIngestor {
                     %error,
                     "news archive write failed; live result remains available"
                 ),
+            }
+            let processed = index + 1;
+            if let Some(progress) = progress
+                .filter(|_| processed == 1 || processed == total || processed.is_multiple_of(5))
+            {
+                progress.update(
+                    &capabilities.provider_id,
+                    format!("正在保存证据并建立事件/实体关联：{processed}/{total} 条"),
+                    attempt,
+                    processed,
+                    total,
+                );
             }
         }
         let provider_id = &capabilities.provider_id;
@@ -986,7 +1230,11 @@ impl NewsIngestor {
         }
     }
 
-    async fn wait_rate_limit(&self, capabilities: &NewsCapabilities) {
+    async fn wait_rate_limit(
+        &self,
+        capabilities: &NewsCapabilities,
+        progress: Option<&Arc<NewsProgressTracker>>,
+    ) {
         let delay = self
             .runtime
             .get(&capabilities.provider_id)
@@ -1002,6 +1250,18 @@ impl NewsIngestor {
                 delay
             });
         if let Some(delay) = delay {
+            if let Some(progress) = progress {
+                progress.update(
+                    &capabilities.provider_id,
+                    format!(
+                        "遵守来源访问频率，预计等待 {:.1} 秒后发起请求",
+                        delay.as_secs_f64()
+                    ),
+                    0,
+                    0,
+                    0,
+                );
+            }
             tokio::time::sleep(delay).await;
         }
     }
@@ -1059,7 +1319,7 @@ impl NewsIngestor {
         let capabilities = provider.capabilities().clone();
         self.mark_success(provider_id, Duration::ZERO);
         let mut page = page;
-        self.persist_success(&capabilities, &mut page, Duration::ZERO)
+        self.persist_success(&capabilities, &mut page, Duration::ZERO, None, 0)
             .await;
         self.persist_runtime_state(provider_id).await;
         self.last_good.insert(provider_id.to_string(), page);
@@ -1507,6 +1767,29 @@ mod tests {
         }
     }
 
+    struct HangingProvider {
+        capabilities: NewsCapabilities,
+    }
+
+    impl HangingProvider {
+        fn new(id: &str) -> Self {
+            Self {
+                capabilities: FakeProvider::new(id, 0, NewsTrustTier::LicensedMedia).capabilities,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl NewsProvider for HangingProvider {
+        fn capabilities(&self) -> &NewsCapabilities {
+            &self.capabilities
+        }
+
+        async fn fetch(&self, _request: NewsIngestRequest) -> Result<NewsPage, NewsProviderError> {
+            std::future::pending().await
+        }
+    }
+
     #[tokio::test]
     async fn aggregator_outage_does_not_block_official_and_independent_sources() {
         let ingestor = NewsIngestor::new(
@@ -1645,6 +1928,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn five_hanging_providers_time_out_independently_and_progress_finishes() {
+        let providers = (0..5)
+            .map(|index| {
+                Arc::new(HangingProvider::new(&format!("hanging-{index}"))) as Arc<dyn NewsProvider>
+            })
+            .collect();
+        let ingestor = NewsIngestor::new(providers, None)
+            .unwrap()
+            .with_attempt_timeout_for_tests(Duration::from_millis(20));
+        let snapshots = Arc::new(Mutex::new(Vec::<NewsIngestProgress>::new()));
+        let sink = Arc::clone(&snapshots);
+        let started = Instant::now();
+        let outcome = ingestor
+            .ingest_with_progress(
+                NewsIngestRequest {
+                    limit: 15,
+                    ..Default::default()
+                },
+                None,
+                Some(Arc::new(move |progress| sink.lock().push(progress))),
+            )
+            .await;
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert!(outcome.items.is_empty());
+        assert_eq!(outcome.errors.len(), 5);
+        assert!(outcome
+            .errors
+            .iter()
+            .all(|error| error.kind == NewsErrorKind::Timeout));
+        let health = ingestor.health().await;
+        assert_eq!(health.iter().map(|row| row.attempts).sum::<u64>(), 15);
+        let snapshots = snapshots.lock();
+        assert!(snapshots.iter().any(|snapshot| snapshot
+            .active
+            .iter()
+            .any(|work| work.status.contains("重试"))));
+        let final_progress = snapshots.last().unwrap();
+        assert_eq!(final_progress.completed, 5);
+        assert_eq!(final_progress.failed, 5);
+        assert!(final_progress.active.is_empty());
+        assert!(!final_progress.recent_errors.is_empty());
+    }
+
+    #[tokio::test]
     async fn cursor_and_last_good_snapshot_survive_runtime_restart() {
         let temp = tempfile::tempdir().unwrap();
         let storage = Storage::open(StorageConfig::with_base_dir(temp.path())).unwrap();
@@ -1761,7 +2088,8 @@ mod tests {
         assert_eq!(final_progress.completed, 1);
         assert_eq!(final_progress.records, 1);
         assert_eq!(final_progress.failed, 0);
-        assert_eq!(final_progress.current_provider, "topics");
+        assert_eq!(final_progress.current_provider, "资讯合并与条件匹配");
+        assert!(final_progress.active.is_empty());
     }
 
     #[test]

@@ -44,6 +44,90 @@ pub const FINANCE_NEWS_SOURCES: &[(&str, &str, u64)] = &[
     ("wallstreetcn-news", "华尔街见闻最新资讯", 1_800),
 ];
 
+pub const DEFAULT_FINANCE_NEWS_SOURCES: &[&str] = &[
+    "cls-telegraph",
+    "jin10",
+    "wallstreetcn-quick",
+    "mktnews-flash",
+    "gelonghui",
+];
+
+/// Tolerant source selection used at every public finance-news boundary.
+/// Models and ordinary users naturally submit Chinese display names or short
+/// aliases; those must never abort a larger research run. Unknown values stay
+/// observable, while an entirely unusable selection falls back to defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinanceNewsSourceSelection {
+    pub sources: Vec<String>,
+    pub ignored_sources: Vec<String>,
+    pub used_default: bool,
+}
+
+pub fn normalize_finance_news_sources(requested: Option<&[String]>) -> FinanceNewsSourceSelection {
+    let mut sources = Vec::new();
+    let mut ignored_sources = Vec::new();
+    if let Some(requested) = requested {
+        for raw in requested.iter().take(32) {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Some(source) = finance_news_source_alias(trimmed) {
+                if !sources.iter().any(|current| current == source) {
+                    sources.push(source.to_string());
+                }
+            } else if !ignored_sources.iter().any(|current| current == trimmed) {
+                ignored_sources.push(trimmed.to_string());
+            }
+        }
+    }
+    let used_default = sources.is_empty();
+    if used_default {
+        sources.extend(
+            DEFAULT_FINANCE_NEWS_SOURCES
+                .iter()
+                .map(|value| value.to_string()),
+        );
+    }
+    FinanceNewsSourceSelection {
+        sources,
+        ignored_sources,
+        used_default,
+    }
+}
+
+fn finance_news_source_alias(raw: &str) -> Option<&'static str> {
+    let normalized = raw
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-")
+        .split_whitespace()
+        .collect::<String>();
+    match normalized.as_str() {
+        "cls" | "cls-telegraph" | "财联社" | "财联社电报" => Some("cls-telegraph"),
+        "jin10" | "jin-10" | "金十" | "金十数据" => Some("jin10"),
+        "wallstreetcn" | "wallstreetcn-quick" | "wscn" | "华尔街见闻" | "华尔街见闻快讯" => {
+            Some("wallstreetcn-quick")
+        }
+        "wallstreetcn-news" | "华尔街见闻资讯" | "华尔街见闻新闻" | "华尔街见闻最新资讯" => {
+            Some("wallstreetcn-news")
+        }
+        "mktnews" | "mktnews-flash" | "mktnews快讯" => Some("mktnews-flash"),
+        "gelonghui" | "格隆汇" | "格隆汇事件" => Some("gelonghui"),
+        "xueqiu" | "xueqiu-hotstock" | "xueqiu-hot-stock" | "雪球" | "雪球热股" | "雪球热门"
+        | "雪球热门股票" => Some("xueqiu-hotstock"),
+        _ => None,
+    }
+}
+
+fn newsnow_per_channel_limit(final_limit: usize, channels: usize) -> usize {
+    final_limit
+        .clamp(1, 100)
+        .div_ceil(channels.max(1))
+        .saturating_mul(3)
+        .clamp(1, 100)
+}
+
 static TAGS: Lazy<Regex> = Lazy::new(|| Regex::new(r"<[^>]{0,400}>").expect("tag regex"));
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -207,23 +291,7 @@ impl FinanceNewsProvider {
         sources: &[String],
         per_source: usize,
     ) -> Result<FinanceNewsBatch, DataError> {
-        if sources.is_empty() || sources.len() > FINANCE_NEWS_SOURCES.len() {
-            return Err(DataError::Empty(
-                "finance news sources must contain 1-7 entries".to_string(),
-            ));
-        }
-        let mut unique = Vec::new();
-        for source in sources {
-            let source = source.trim().to_ascii_lowercase();
-            if source_meta(&source).is_none() {
-                return Err(DataError::Empty(format!(
-                    "unsupported finance news source: {source}"
-                )));
-            }
-            if !unique.contains(&source) {
-                unique.push(source);
-            }
-        }
+        let selection = normalize_finance_news_sources(Some(sources));
         let selected = self
             .ingestor
             .provider_ids()
@@ -234,7 +302,7 @@ impl FinanceNewsProvider {
             .ingestor
             .ingest(
                 NewsIngestRequest {
-                    source_ids: unique,
+                    source_ids: selection.sources,
                     limit: per_source.clamp(1, 100),
                     ..Default::default()
                 },
@@ -265,6 +333,7 @@ impl FinanceNewsProvider {
         limit: usize,
         progress: Option<NewsIngestProgressReporter>,
     ) -> Result<FinanceNewsBatch, DataError> {
+        let selection = normalize_finance_news_sources(Some(sources));
         let selected = symbol.is_none().then(|| {
             self.ingestor
                 .provider_ids()
@@ -276,7 +345,7 @@ impl FinanceNewsProvider {
             .ingestor
             .ingest_with_progress(
                 NewsIngestRequest {
-                    source_ids: sources.to_vec(),
+                    source_ids: selection.sources,
                     symbol: symbol.map(ToString::to_string),
                     keyword: keyword.map(ToString::to_string),
                     limit: limit.clamp(1, 200),
@@ -471,10 +540,12 @@ impl NewsProvider for NewsNowProvider {
             request.source_ids
         };
         let total_channels = sources.len();
+        // `request.limit` is the final provider budget, not a multiplier for
+        // every channel. A small over-fetch keeps important/keyword filtering
+        // useful without turning 15 requested rows into 75 archive jobs.
+        let per_channel = newsnow_per_channel_limit(request.limit, total_channels);
         let outcomes = stream::iter(sources.into_iter().map(|source| async move {
-            let result = self
-                .fetch_source(&source, request.limit.clamp(1, 100))
-                .await;
+            let result = self.fetch_source(&source, per_channel).await;
             (source, result)
         }))
         .buffer_unordered(MAX_CONCURRENT)
@@ -522,6 +593,14 @@ impl NewsProvider for NewsNowProvider {
                 retryable,
             ));
         }
+        items.sort_by(|left, right| {
+            right
+                .published_at_ms
+                .unwrap_or_default()
+                .cmp(&left.published_at_ms.unwrap_or_default())
+                .then_with(|| left.rank.cmp(&right.rank))
+        });
+        items.truncate(request.limit.clamp(1, 100));
         let next_cursor = items.first().map(|item| item.id.clone());
         Ok(NewsPage {
             items,
@@ -827,6 +906,40 @@ mod tests {
             .map(|row| row.0)
             .collect::<HashSet<_>>();
         assert_eq!(ids.len(), FINANCE_NEWS_SOURCES.len());
+    }
+
+    #[test]
+    fn source_aliases_are_normalized_and_unknown_values_do_not_abort() {
+        let requested = vec![
+            "财联社".to_string(),
+            "金十数据".to_string(),
+            "华尔街见闻".to_string(),
+            "CLS".to_string(),
+            "不存在的来源".to_string(),
+        ];
+        let selection = normalize_finance_news_sources(Some(&requested));
+        assert_eq!(
+            selection.sources,
+            vec!["cls-telegraph", "jin10", "wallstreetcn-quick"]
+        );
+        assert_eq!(selection.ignored_sources, vec!["不存在的来源"]);
+        assert!(!selection.used_default);
+    }
+
+    #[test]
+    fn entirely_unknown_source_selection_falls_back_to_defaults() {
+        let requested = vec!["模型刚发明的来源".to_string()];
+        let selection = normalize_finance_news_sources(Some(&requested));
+        assert!(selection.used_default);
+        assert_eq!(selection.sources.len(), DEFAULT_FINANCE_NEWS_SOURCES.len());
+        assert_eq!(selection.ignored_sources, requested);
+    }
+
+    #[test]
+    fn final_limit_is_not_multiplied_by_channel_count() {
+        assert_eq!(newsnow_per_channel_limit(15, 5), 9);
+        assert_eq!(newsnow_per_channel_limit(1, 7), 3);
+        assert_eq!(newsnow_per_channel_limit(100, 1), 100);
     }
 
     #[test]
