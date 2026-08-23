@@ -163,11 +163,10 @@ impl ToolRegistry {
 
 /// Canonicalize semantically equivalent argument envelopes before hashing.
 ///
-/// This intentionally performs only transformations that are safe for the
-/// current typed tools: object `null` is equivalent to an omitted `Option`,
-/// surrounding whitespace is insignificant, and documented period/adjustment
-/// aliases map to their canonical values. Array order is preserved because it
-/// can be meaningful for comparison and source-priority tools.
+/// Only fields with a stable Agent tool contract are normalized. Opaque
+/// strings such as formulas, source text, URLs and provider-specific queries
+/// are preserved byte-for-byte. Array order is preserved because it can be
+/// meaningful for comparison and source-priority tools.
 pub fn canonicalize_cache_args(value: Value) -> Value {
     fn normalize(value: Value, key: Option<&str>) -> Value {
         match value {
@@ -198,7 +197,7 @@ pub fn canonicalize_cache_args(value: Value) -> Value {
 fn normalize_string(key: Option<&str>, value: &str) -> String {
     let trimmed = value.trim();
     match key.unwrap_or_default() {
-        "symbol" | "code" => trimmed
+        "symbol" | "code" | "symbols" => trimmed
             .chars()
             .filter(|character| !character.is_whitespace())
             .collect::<String>()
@@ -218,7 +217,7 @@ fn normalize_string(key: Option<&str>, value: &str) -> String {
             "" | "raw" => "none".to_string(),
             other => other.to_string(),
         },
-        _ => trimmed.to_string(),
+        _ => value.to_string(),
     }
 }
 
@@ -306,6 +305,16 @@ mod tests {
     }
 
     #[test]
+    fn opaque_strings_are_not_rewritten_for_cache_hits() {
+        let args = json!({
+            "formula": "  close > ma(close, 20)  ",
+            "url": " https://example.com/a?x=1 ",
+            "query": "  gold reserve policy  "
+        });
+        assert_eq!(canonicalize_cache_args(args.clone()), args);
+    }
+
+    #[test]
     fn expensive_tools_receive_larger_deadlock_budgets() {
         assert!(tool_runtime_budget("scan_market") > tool_runtime_budget("get_quote"));
         assert!(tool_runtime_budget("research_news") > tool_runtime_budget("get_kline"));
@@ -320,7 +329,7 @@ mod tests {
         let ctx = ToolContext::new(Arc::new(NoopMarket), storage);
 
         let calls = (0..16).map(|_| {
-            registry.dispatch("echo", json!({"text": " same request "}), &ctx)
+            registry.dispatch("echo", json!({"text": "same request"}), &ctx)
         });
         let results = futures::future::join_all(calls).await;
         assert!(results.iter().all(|result| result.is_ok()));
