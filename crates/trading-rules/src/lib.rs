@@ -14,6 +14,7 @@
 //! ```
 
 pub mod exit;
+pub mod news_session;
 
 mod error;
 mod model;
@@ -22,6 +23,11 @@ pub use error::{Error, Result};
 pub use model::{
     AuctionPhase, AuctionWindows, BoardRule, BoardRules, CalendarRules, CallAuctionWindow, FeeKind,
     FeeRule, FeeSide, RuleSetData, TradeCost, TradeSide, Window,
+};
+pub use news_session::{
+    classify_news_session, eligible_for_target_session, publication_precision_from_source,
+    target_trading_date_at, EffectiveMarketPhase, EffectiveNewsSession, EffectiveSessionRole,
+    NewsEvidenceUse, NewsSessionInput, PublicationPrecision,
 };
 
 use std::collections::HashSet;

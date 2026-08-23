@@ -5,10 +5,12 @@
 //! persistent cursors, last-good fallback, manual disable and health metrics.
 //! It never treats a public aggregator as authoritative evidence.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use astock_entity_linking::{EntityLinker, LinkStatus};
+use astock_news_intelligence::{canonicalize_url, NewsEventClusterer};
 use astock_security::{redact_text, UrlSecurityPolicy};
 use astock_storage::{
     EvidenceTimestamp, NewsArchiveInput, NewsObservationInput, NewsProviderArchiveState, Storage,
@@ -30,6 +32,7 @@ use super::finance_news::FinanceNewsItem;
 const MAX_CONCURRENT_PROVIDERS: usize = 4;
 const MAX_RETRIES: u32 = 2;
 const RETRY_BASE: Duration = Duration::from_millis(250);
+const PROVIDER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 const FAILURE_THRESHOLD: u32 = 3;
 const BASE_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_COOLDOWN: Duration = Duration::from_secs(30 * 60);
@@ -124,6 +127,34 @@ fn valid_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
+/// Split a natural-language research query into bounded OR terms. Requiring
+/// the entire string `"短线 题材 龙头 板块轮动"` to occur verbatim caused a
+/// healthy provider response to be misreported as a provider outage.
+fn search_terms(query: &str) -> Vec<String> {
+    let normalized = query.trim().to_lowercase();
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+    let terms = normalized
+        .split(|character: char| {
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    ',' | '，' | ';' | '；' | '/' | '、' | '|' | '（' | '）' | '(' | ')'
+                )
+        })
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .take(12)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if terms.is_empty() {
+        vec![normalized]
+    } else {
+        terms
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewsIngestRequest {
     pub source_ids: Vec<String>,
@@ -144,6 +175,10 @@ pub struct NewsPage {
     pub etag: Option<String>,
     #[serde(default)]
     pub last_modified: Option<String>,
+    /// Non-fatal provider/channel failures retained when a provider still
+    /// returned usable rows. This keeps partial success observable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<NewsProviderError>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -275,12 +310,207 @@ pub struct NewsIngestOutcome {
     pub errors: Vec<NewsProviderError>,
 }
 
+/// Detailed, non-sensitive progress for one multi-provider news request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NewsIngestWorkItem {
+    pub provider_id: String,
+    pub display_name: String,
+    pub status: String,
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub elapsed_ms: u64,
+    pub records_processed: usize,
+    pub records_total: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NewsIngestProgress {
+    pub completed: usize,
+    pub total: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub records: usize,
+    pub current_provider: String,
+    pub current_status: String,
+    pub active: Vec<NewsIngestWorkItem>,
+    pub latest_activity_at_ms: i64,
+    pub recent_errors: Vec<String>,
+}
+
+pub type NewsIngestProgressReporter = Arc<dyn Fn(NewsIngestProgress) + Send + Sync>;
+
+#[derive(Debug)]
+struct ActiveNewsWork {
+    display_name: String,
+    status: String,
+    attempt: u32,
+    records_processed: usize,
+    records_total: usize,
+    started: Instant,
+}
+
+struct NewsProgressTracker {
+    reporter: NewsIngestProgressReporter,
+    state: Mutex<NewsProgressState>,
+}
+
+struct NewsProgressState {
+    total: usize,
+    completed: usize,
+    succeeded: usize,
+    failed: usize,
+    records: usize,
+    active: BTreeMap<String, ActiveNewsWork>,
+    recent_errors: Vec<String>,
+}
+
+impl NewsProgressTracker {
+    fn new(providers: &[Arc<dyn NewsProvider>], reporter: NewsIngestProgressReporter) -> Arc<Self> {
+        let active = providers
+            .iter()
+            .map(|provider| {
+                let capabilities = provider.capabilities();
+                (
+                    capabilities.provider_id.clone(),
+                    ActiveNewsWork {
+                        display_name: capabilities.display_name.clone(),
+                        status: "等待调度".into(),
+                        attempt: 0,
+                        records_processed: 0,
+                        records_total: 0,
+                        started: Instant::now(),
+                    },
+                )
+            })
+            .collect();
+        let tracker = Arc::new(Self {
+            reporter,
+            state: Mutex::new(NewsProgressState {
+                total: providers.len(),
+                completed: 0,
+                succeeded: 0,
+                failed: 0,
+                records: 0,
+                active,
+                recent_errors: Vec::new(),
+            }),
+        });
+        tracker.emit(
+            "资讯采集调度器",
+            format!("已创建 {} 个并行来源任务", providers.len()),
+        );
+        tracker
+    }
+
+    fn update(
+        &self,
+        provider_id: &str,
+        status: impl Into<String>,
+        attempt: u32,
+        records_processed: usize,
+        records_total: usize,
+    ) {
+        let status = status.into();
+        {
+            let mut state = self.state.lock();
+            if let Some(work) = state.active.get_mut(provider_id) {
+                work.status.clone_from(&status);
+                work.attempt = attempt;
+                work.records_processed = records_processed;
+                work.records_total = records_total;
+            }
+        }
+        self.emit(provider_id, status);
+    }
+
+    fn complete(
+        &self,
+        provider_id: &str,
+        succeeded: bool,
+        stale: bool,
+        records: usize,
+        errors: impl IntoIterator<Item = String>,
+    ) {
+        let status = if succeeded {
+            if stale {
+                "来源失败，已使用最后成功快照"
+            } else {
+                "来源采集、归档和关联处理完成"
+            }
+        } else {
+            "来源失败，已释放并发槽并继续其他来源"
+        };
+        {
+            let mut state = self.state.lock();
+            state.active.remove(provider_id);
+            state.completed += 1;
+            if succeeded {
+                state.succeeded += 1;
+                state.records += records;
+            } else {
+                state.failed += 1;
+            }
+            for error in errors {
+                if !error.trim().is_empty() {
+                    state.recent_errors.push(error);
+                }
+            }
+            if state.recent_errors.len() > 20 {
+                let remove = state.recent_errors.len() - 20;
+                state.recent_errors.drain(0..remove);
+            }
+        }
+        self.emit(provider_id, status.into());
+    }
+
+    fn emit(&self, current_provider: impl Into<String>, current_status: String) {
+        let current_provider = current_provider.into();
+        let snapshot = {
+            let state = self.state.lock();
+            let active_records = state
+                .active
+                .values()
+                .map(|work| work.records_processed)
+                .sum::<usize>();
+            NewsIngestProgress {
+                completed: state.completed,
+                total: state.total,
+                succeeded: state.succeeded,
+                failed: state.failed,
+                records: state.records + active_records,
+                current_provider,
+                current_status,
+                active: state
+                    .active
+                    .iter()
+                    .map(|(provider_id, work)| NewsIngestWorkItem {
+                        provider_id: provider_id.clone(),
+                        display_name: work.display_name.clone(),
+                        status: work.status.clone(),
+                        attempt: work.attempt,
+                        max_attempts: MAX_RETRIES + 1,
+                        elapsed_ms: work.started.elapsed().as_millis().min(u128::from(u64::MAX))
+                            as u64,
+                        records_processed: work.records_processed,
+                        records_total: work.records_total,
+                    })
+                    .collect(),
+                latest_activity_at_ms: now_secs().saturating_mul(1_000),
+                recent_errors: state.recent_errors.iter().rev().take(5).cloned().collect(),
+            }
+        };
+        (self.reporter)(snapshot);
+    }
+}
+
 pub struct NewsIngestor {
     providers: Vec<Arc<dyn NewsProvider>>,
     runtime: DashMap<String, Mutex<ProviderRuntime>>,
     permits: Semaphore,
     last_good: DashMap<String, NewsPage>,
     storage: Option<Storage>,
+    entity_linker: Option<Arc<EntityLinker>>,
+    provider_attempt_timeout: Duration,
 }
 
 impl NewsIngestor {
@@ -304,13 +534,24 @@ impl NewsIngestor {
                 Mutex::new(ProviderRuntime::default()),
             );
         }
+        let entity_linker = storage
+            .as_ref()
+            .map(|storage| Arc::new(EntityLinker::new(storage.clone())));
         Ok(Self {
             providers,
             runtime,
             permits: Semaphore::new(MAX_CONCURRENT_PROVIDERS),
             last_good: DashMap::new(),
             storage,
+            entity_linker,
+            provider_attempt_timeout: PROVIDER_ATTEMPT_TIMEOUT,
         })
+    }
+
+    #[cfg(test)]
+    fn with_attempt_timeout_for_tests(mut self, timeout: Duration) -> Self {
+        self.provider_attempt_timeout = timeout;
+        self
     }
 
     pub fn provider_ids(&self) -> Vec<String> {
@@ -325,6 +566,15 @@ impl NewsIngestor {
         request: NewsIngestRequest,
         selected: Option<&[String]>,
     ) -> NewsIngestOutcome {
+        self.ingest_with_progress(request, selected, None).await
+    }
+
+    pub async fn ingest_with_progress(
+        &self,
+        request: NewsIngestRequest,
+        selected: Option<&[String]>,
+        progress: Option<NewsIngestProgressReporter>,
+    ) -> NewsIngestOutcome {
         let selected = selected.map(|ids| ids.iter().cloned().collect::<HashSet<_>>());
         let providers = self
             .providers
@@ -336,30 +586,101 @@ impl NewsIngestor {
             })
             .cloned()
             .collect::<Vec<_>>();
+        let total = providers.len();
+        if total == 0 {
+            return NewsIngestOutcome {
+                errors: vec![NewsProviderError::configuration(
+                    "provider-registry",
+                    "没有可用于本次查询的已启用资讯来源；请检查来源配置和筛选条件",
+                )],
+                ..Default::default()
+            };
+        }
+        let tracker = progress.map(|reporter| NewsProgressTracker::new(&providers, reporter));
         let mut pending = FuturesUnordered::new();
         for provider in providers {
-            pending.push(self.fetch_named(provider, request.clone()));
-        }
-        let mut rows = Vec::new();
-        while let Some(row) = pending.next().await {
-            rows.push(row);
+            pending.push(self.fetch_named(provider, request.clone(), tracker.clone()));
         }
         let mut outcome = NewsIngestOutcome::default();
-        for (provider_id, result) in rows {
+        while let Some((provider_id, result)) = pending.next().await {
             match result {
                 Ok((page, stale)) => {
+                    let records = page.items.len();
+                    let diagnostics = page
+                        .diagnostics
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>();
                     if stale {
-                        outcome.stale_providers.push(provider_id);
+                        outcome.stale_providers.push(provider_id.clone());
                     } else {
-                        outcome.successful_providers.push(provider_id);
+                        outcome.successful_providers.push(provider_id.clone());
                     }
+                    outcome.errors.extend(page.diagnostics.iter().cloned());
                     outcome.items.extend(page.items);
+                    if let Some(tracker) = &tracker {
+                        tracker.complete(&provider_id, true, stale, records, diagnostics);
+                    }
                 }
-                Err(error) => outcome.errors.push(error),
+                Err(error) => {
+                    let message = error.to_string();
+                    outcome.errors.push(error);
+                    if let Some(tracker) = &tracker {
+                        tracker.complete(&provider_id, false, false, 0, [message]);
+                    }
+                }
             }
         }
+        if let Some(tracker) = &tracker {
+            tracker.emit(
+                "资讯合并与条件匹配",
+                format!(
+                    "正在对 {} 条上游记录去重、排序并匹配检索条件",
+                    outcome.items.len()
+                ),
+            );
+        }
         let mut seen = HashSet::new();
-        outcome.items.retain(|item| seen.insert(item.id.clone()));
+        let cluster_counts = outcome
+            .items
+            .iter()
+            .filter_map(|item| {
+                item.event_cluster_id
+                    .as_ref()
+                    .map(|cluster| (cluster.clone(), item.independent_source_count))
+            })
+            .fold(
+                std::collections::HashMap::<String, usize>::new(),
+                |mut counts, (cluster, count)| {
+                    counts
+                        .entry(cluster)
+                        .and_modify(|current| *current = (*current).max(count))
+                        .or_insert(count);
+                    counts
+                },
+            );
+        for item in &mut outcome.items {
+            if let Some(cluster) = &item.event_cluster_id {
+                item.independent_source_count = cluster_counts.get(cluster).copied().unwrap_or(1);
+            }
+        }
+        outcome.items.sort_by(|left, right| {
+            trust_rank(left.trust_tier)
+                .cmp(&trust_rank(right.trust_tier))
+                .then_with(|| {
+                    right
+                        .published_at_ms
+                        .unwrap_or_default()
+                        .cmp(&left.published_at_ms.unwrap_or_default())
+                })
+        });
+        outcome.items.retain(|item| {
+            seen.insert(
+                item.event_cluster_id
+                    .clone()
+                    .unwrap_or_else(|| format!("document:{}", item.id)),
+            )
+        });
         outcome.items.sort_by(|left, right| {
             right
                 .published_at_ms
@@ -367,6 +688,38 @@ impl NewsIngestor {
                 .cmp(&left.published_at_ms.unwrap_or_default())
                 .then_with(|| left.rank.cmp(&right.rank))
         });
+        let mut entity_queries = BTreeSet::new();
+        if let Some(linker) = &self.entity_linker {
+            for query in [request.symbol.as_deref(), request.keyword.as_deref()]
+                .into_iter()
+                .flatten()
+                .map(str::trim)
+                .filter(|query| !query.is_empty())
+            {
+                if let Ok(ids) = linker.resolve_query(query).await {
+                    entity_queries.extend(ids);
+                }
+            }
+        }
+        if request.symbol.is_some() || request.keyword.is_some() {
+            let raw_queries = [request.symbol.as_deref(), request.keyword.as_deref()]
+                .into_iter()
+                .flatten()
+                .flat_map(search_terms)
+                .collect::<Vec<_>>();
+            outcome.items.retain(|item| {
+                let text = format!("{} {}", item.title, item.summary).to_lowercase();
+                raw_queries.iter().any(|query| text.contains(query))
+                    || item.entity_links.iter().any(|link| {
+                        entity_queries.contains(&link.entity_id)
+                            || link.related_listed.iter().any(|related| {
+                                entity_queries.contains(&related.entity_id)
+                                    || raw_queries.iter().any(|query| query == &related.code)
+                            })
+                    })
+            });
+        }
+        outcome.items.truncate(request.limit.clamp(1, 200));
         outcome
     }
 
@@ -374,15 +727,17 @@ impl NewsIngestor {
         &self,
         provider: Arc<dyn NewsProvider>,
         request: NewsIngestRequest,
+        progress: Option<Arc<NewsProgressTracker>>,
     ) -> (String, Result<(NewsPage, bool), NewsProviderError>) {
         let id = provider.capabilities().provider_id.clone();
-        (id, self.fetch_one(provider, request).await)
+        (id, self.fetch_one(provider, request, progress).await)
     }
 
     async fn fetch_one(
         &self,
         provider: Arc<dyn NewsProvider>,
         mut request: NewsIngestRequest,
+        progress: Option<Arc<NewsProgressTracker>>,
     ) -> Result<(NewsPage, bool), NewsProviderError> {
         let capabilities = provider.capabilities().clone();
         let provider_id = capabilities.provider_id.clone();
@@ -415,7 +770,10 @@ impl NewsIngestor {
         if request.cursor.is_none() {
             request.cursor = self.load_cursor(&provider_id).await;
         }
-        self.wait_rate_limit(&capabilities).await;
+        self.wait_rate_limit(&capabilities, progress.as_ref()).await;
+        if let Some(progress) = &progress {
+            progress.update(&provider_id, "等待可用的采集并发槽", 0, 0, 0);
+        }
         let _permit = self.permits.acquire().await.map_err(|_| {
             NewsProviderError::new(
                 &provider_id,
@@ -427,13 +785,56 @@ impl NewsIngestor {
         let started = Instant::now();
         let mut final_error = None;
         for attempt in 0..=MAX_RETRIES {
+            let attempt_number = attempt + 1;
             let attempt_started = Instant::now();
             self.mark_attempt(&provider_id);
-            match provider.fetch(request.clone()).await {
+            if let Some(progress) = &progress {
+                progress.update(
+                    &provider_id,
+                    format!("正在访问上游，第 {attempt_number}/{} 次", MAX_RETRIES + 1),
+                    attempt_number,
+                    0,
+                    0,
+                );
+            }
+            let fetched = match tokio::time::timeout(
+                self.provider_attempt_timeout,
+                provider.fetch(request.clone()),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(NewsProviderError::new(
+                    &provider_id,
+                    NewsErrorKind::Timeout,
+                    format!(
+                        "单次来源访问超过 {} 秒，已中止本次尝试并释放资源",
+                        self.provider_attempt_timeout.as_secs_f64()
+                    ),
+                    true,
+                )),
+            };
+            match fetched {
                 Ok(mut page) => {
+                    let records = page.items.len();
+                    if let Some(progress) = &progress {
+                        progress.update(
+                            &provider_id,
+                            format!("已获取 {records} 条上游数据，开始保存可审计证据"),
+                            attempt_number,
+                            0,
+                            records,
+                        );
+                    }
                     self.mark_success(&provider_id, started.elapsed());
-                    self.persist_success(&capabilities, &mut page, started.elapsed())
-                        .await;
+                    self.persist_success(
+                        &capabilities,
+                        &mut page,
+                        started.elapsed(),
+                        progress.as_ref(),
+                        attempt_number,
+                    )
+                    .await;
                     self.persist_runtime_state(&provider_id).await;
                     self.last_good.insert(provider_id.clone(), page.clone());
                     return Ok((page, false));
@@ -452,7 +853,21 @@ impl NewsIngestor {
                     if !retryable || attempt == MAX_RETRIES {
                         break;
                     }
-                    tokio::time::sleep(RETRY_BASE * 2_u32.pow(attempt)).await;
+                    let delay = RETRY_BASE * 2_u32.pow(attempt);
+                    if let (Some(progress), Some(error)) = (&progress, final_error.as_ref()) {
+                        progress.update(
+                            &provider_id,
+                            format!(
+                                "本次访问失败（{:?}），{:.1} 秒后自动重试",
+                                error.kind,
+                                delay.as_secs_f64()
+                            ),
+                            attempt_number,
+                            0,
+                            0,
+                        );
+                    }
+                    tokio::time::sleep(delay).await;
                 }
             }
         }
@@ -527,16 +942,28 @@ impl NewsIngestor {
         capabilities: &NewsCapabilities,
         page: &mut NewsPage,
         elapsed: Duration,
+        progress: Option<&Arc<NewsProgressTracker>>,
+        attempt: u32,
     ) {
         let Some(storage) = &self.storage else {
+            if let Some(progress) = progress {
+                progress.update(
+                    &capabilities.provider_id,
+                    format!("已获取 {} 条数据；本次无需本地归档", page.items.len()),
+                    attempt,
+                    page.items.len(),
+                    page.items.len(),
+                );
+            }
             return;
         };
         let observed_at = now_secs();
-        for item in &mut page.items {
+        let total = page.items.len();
+        for (index, item) in page.items.iter_mut().enumerate() {
             let canonical_url = if item.url.trim().is_empty() {
                 format!("urn:astock-news:{}:{}", item.provider_id, item.id)
             } else {
-                item.url.clone()
+                canonicalize_url(&item.url)
             };
             let raw_snapshot = (item.trust_tier == NewsTrustTier::FirstPartyDisclosure)
                 .then(|| {
@@ -592,13 +1019,71 @@ impl NewsIngestor {
                 })
                 .await;
             match archived {
-                Ok(saved) => item.document_revision_id = Some(saved.revision_id),
+                Ok(saved) => {
+                    item.document_revision_id = Some(saved.revision_id.clone());
+                    match NewsEventClusterer::new(storage.clone())
+                        .assign_revision(&saved.revision_id)
+                        .await
+                    {
+                        Ok(assignment) => {
+                            item.event_cluster_id = Some(assignment.cluster_id);
+                            item.event_relationship = Some(
+                                serde_json::to_string(&assignment.relationship)
+                                    .unwrap_or_else(|_| "\"follow_up\"".into())
+                                    .trim_matches('"')
+                                    .to_string(),
+                            );
+                            item.event_relationship_name =
+                                Some(assignment.relationship.chinese_name().into());
+                            item.independent_source_count = assignment.independent_sources as usize;
+                            item.old_republication = assignment.old_republication;
+                            item.cluster_explanation = Some(assignment.explanation);
+                        }
+                        Err(error) => tracing::warn!(
+                            provider = capabilities.provider_id,
+                            item = item.id,
+                            %error,
+                            "news event clustering failed; archived revision remains available"
+                        ),
+                    }
+                    if let Some(linker) = &self.entity_linker {
+                        match linker.link_revision(&saved.revision_id).await {
+                            Ok(links) => {
+                                item.entity_review_required = links
+                                    .iter()
+                                    .any(|link| link.status == LinkStatus::PendingReview);
+                                item.entity_links = links
+                                    .iter()
+                                    .filter_map(|link| link.agent_summary())
+                                    .collect();
+                            }
+                            Err(error) => tracing::warn!(
+                                provider = capabilities.provider_id,
+                                item = item.id,
+                                %error,
+                                "news entity linking failed; archived revision remains available"
+                            ),
+                        }
+                    }
+                }
                 Err(error) => tracing::warn!(
                     provider = capabilities.provider_id,
                     item = item.id,
                     %error,
                     "news archive write failed; live result remains available"
                 ),
+            }
+            let processed = index + 1;
+            if let Some(progress) = progress
+                .filter(|_| processed == 1 || processed == total || processed.is_multiple_of(5))
+            {
+                progress.update(
+                    &capabilities.provider_id,
+                    format!("正在保存证据并建立事件/实体关联：{processed}/{total} 条"),
+                    attempt,
+                    processed,
+                    total,
+                );
             }
         }
         let provider_id = &capabilities.provider_id;
@@ -745,7 +1230,11 @@ impl NewsIngestor {
         }
     }
 
-    async fn wait_rate_limit(&self, capabilities: &NewsCapabilities) {
+    async fn wait_rate_limit(
+        &self,
+        capabilities: &NewsCapabilities,
+        progress: Option<&Arc<NewsProgressTracker>>,
+    ) {
         let delay = self
             .runtime
             .get(&capabilities.provider_id)
@@ -761,6 +1250,18 @@ impl NewsIngestor {
                 delay
             });
         if let Some(delay) = delay {
+            if let Some(progress) = progress {
+                progress.update(
+                    &capabilities.provider_id,
+                    format!(
+                        "遵守来源访问频率，预计等待 {:.1} 秒后发起请求",
+                        delay.as_secs_f64()
+                    ),
+                    0,
+                    0,
+                    0,
+                );
+            }
             tokio::time::sleep(delay).await;
         }
     }
@@ -818,7 +1319,7 @@ impl NewsIngestor {
         let capabilities = provider.capabilities().clone();
         self.mark_success(provider_id, Duration::ZERO);
         let mut page = page;
-        self.persist_success(&capabilities, &mut page, Duration::ZERO)
+        self.persist_success(&capabilities, &mut page, Duration::ZERO, None, 0)
             .await;
         self.persist_runtime_state(provider_id).await;
         self.last_good.insert(provider_id.to_string(), page);
@@ -913,6 +1414,15 @@ fn public_endpoint(endpoint: &str) -> String {
         .next()
         .unwrap_or(endpoint)
         .to_string()
+}
+
+fn trust_rank(tier: NewsTrustTier) -> u8 {
+    match tier {
+        NewsTrustTier::FirstPartyDisclosure => 0,
+        NewsTrustTier::LicensedMedia => 1,
+        NewsTrustTier::PublicAggregator => 2,
+        NewsTrustTier::SearchLead => 3,
+    }
 }
 
 fn error_kind_token(kind: NewsErrorKind) -> String {
@@ -1064,19 +1574,12 @@ fn parse_generic_page(
                 false,
             )
         })?;
-    let mut items = rows
+    let items = rows
         .iter()
         .take(request.limit.clamp(1, 200))
         .enumerate()
         .filter_map(|(index, raw)| normalize_generic_item(capabilities, raw, index + 1))
         .collect::<Vec<_>>();
-    if let Some(keyword) = request.keyword.as_deref().filter(|value| !value.is_empty()) {
-        let keyword = keyword.to_lowercase();
-        items.retain(|item| {
-            item.title.to_lowercase().contains(&keyword)
-                || item.summary.to_lowercase().contains(&keyword)
-        });
-    }
     let next_cursor = value
         .get("next_cursor")
         .and_then(Value::as_str)
@@ -1146,6 +1649,14 @@ fn normalize_generic_item(
         license: capabilities.license.clone(),
         parser_version: capabilities.parser_version.clone(),
         document_revision_id: None,
+        event_cluster_id: None,
+        event_relationship: None,
+        event_relationship_name: None,
+        independent_source_count: 1,
+        old_republication: false,
+        cluster_explanation: None,
+        entity_links: Vec::new(),
+        entity_review_required: false,
         raw_payload: bounded_raw(raw),
     })
 }
@@ -1175,7 +1686,13 @@ pub(crate) fn classify_data_error(
     let (kind, retryable) = match error {
         DataError::RateLimited(_) => (NewsErrorKind::RateLimited, true),
         DataError::Timeout(_) => (NewsErrorKind::Timeout, true),
-        DataError::Network { .. } | DataError::WafBlocked(_) => (NewsErrorKind::Network, true),
+        DataError::Network { ref message, .. } if message.starts_with("HTTP 4") => {
+            // Authentication/WAF/client-policy failures do not recover by
+            // immediately replaying the same request three times.
+            (NewsErrorKind::Network, false)
+        }
+        DataError::Network { .. } => (NewsErrorKind::Network, true),
+        DataError::WafBlocked(_) => (NewsErrorKind::Network, false),
         DataError::Parse { .. } => (NewsErrorKind::Parse, false),
         DataError::Empty(_) | DataError::AllFailed { .. } => (NewsErrorKind::Empty, false),
         DataError::NoProvider(_) => (NewsErrorKind::Configuration, false),
@@ -1245,7 +1762,31 @@ mod tests {
                 http_status: Some(200),
                 etag: Some("fixture-etag".into()),
                 last_modified: None,
+                diagnostics: Vec::new(),
             })
+        }
+    }
+
+    struct HangingProvider {
+        capabilities: NewsCapabilities,
+    }
+
+    impl HangingProvider {
+        fn new(id: &str) -> Self {
+            Self {
+                capabilities: FakeProvider::new(id, 0, NewsTrustTier::LicensedMedia).capabilities,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl NewsProvider for HangingProvider {
+        fn capabilities(&self) -> &NewsCapabilities {
+            &self.capabilities
+        }
+
+        async fn fetch(&self, _request: NewsIngestRequest) -> Result<NewsPage, NewsProviderError> {
+            std::future::pending().await
         }
     }
 
@@ -1297,6 +1838,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_event_from_two_sources_is_counted_once_with_source_diversity() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open(StorageConfig::with_base_dir(temp.path())).unwrap();
+        let mut official =
+            FakeProvider::new("official-dedupe", 0, NewsTrustTier::FirstPartyDisclosure);
+        official.title = "紫金矿业601899拟回购股份".into();
+        let mut licensed = FakeProvider::new("licensed-dedupe", 0, NewsTrustTier::LicensedMedia);
+        licensed.title = "紫金矿业601899拟回购股份".into();
+        let ingestor =
+            NewsIngestor::new(vec![Arc::new(official), Arc::new(licensed)], Some(storage)).unwrap();
+        let outcome = ingestor
+            .ingest(
+                NewsIngestRequest {
+                    limit: 10,
+                    ..Default::default()
+                },
+                None,
+            )
+            .await;
+        assert_eq!(
+            outcome.items.len(),
+            1,
+            "same event must not be double-counted"
+        );
+        assert_eq!(outcome.items[0].independent_source_count, 2);
+        assert!(outcome.items[0].event_cluster_id.is_some());
+        assert_eq!(
+            outcome.items[0].trust_tier,
+            NewsTrustTier::FirstPartyDisclosure,
+            "representative prefers first-party evidence"
+        );
+    }
+
+    #[tokio::test]
+    async fn entity_linking_finds_brand_news_for_listed_parent_query() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open(StorageConfig::with_base_dir(temp.path())).unwrap();
+        let mut provider = FakeProvider::new("brand-news", 0, NewsTrustTier::LicensedMedia);
+        provider.title = "腾势发布新能源新车型".into();
+        let ingestor = NewsIngestor::new(vec![Arc::new(provider)], Some(storage)).unwrap();
+        let outcome = ingestor
+            .ingest(
+                NewsIngestRequest {
+                    keyword: Some("比亚迪".into()),
+                    limit: 10,
+                    ..Default::default()
+                },
+                None,
+            )
+            .await;
+        assert_eq!(outcome.items.len(), 1);
+        assert!(outcome.items[0]
+            .entity_links
+            .iter()
+            .any(|link| link.entity_id == "brand:denza"));
+        assert!(outcome.items[0].entity_links.iter().any(|link| link
+            .related_listed
+            .iter()
+            .any(|related| related.code == "002594" && related.eligible_for_agent)));
+    }
+
+    #[tokio::test]
     async fn transient_failure_retries_and_health_exposes_metrics() {
         let ingestor = NewsIngestor::new(
             vec![Arc::new(FakeProvider::new(
@@ -1322,6 +1925,50 @@ mod tests {
         assert_eq!(health[0].failures, 1);
         assert!((health[0].failure_rate - 0.5).abs() < f64::EPSILON);
         assert!(health[0].last_latency_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn five_hanging_providers_time_out_independently_and_progress_finishes() {
+        let providers = (0..5)
+            .map(|index| {
+                Arc::new(HangingProvider::new(&format!("hanging-{index}"))) as Arc<dyn NewsProvider>
+            })
+            .collect();
+        let ingestor = NewsIngestor::new(providers, None)
+            .unwrap()
+            .with_attempt_timeout_for_tests(Duration::from_millis(20));
+        let snapshots = Arc::new(Mutex::new(Vec::<NewsIngestProgress>::new()));
+        let sink = Arc::clone(&snapshots);
+        let started = Instant::now();
+        let outcome = ingestor
+            .ingest_with_progress(
+                NewsIngestRequest {
+                    limit: 15,
+                    ..Default::default()
+                },
+                None,
+                Some(Arc::new(move |progress| sink.lock().push(progress))),
+            )
+            .await;
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert!(outcome.items.is_empty());
+        assert_eq!(outcome.errors.len(), 5);
+        assert!(outcome
+            .errors
+            .iter()
+            .all(|error| error.kind == NewsErrorKind::Timeout));
+        let health = ingestor.health().await;
+        assert_eq!(health.iter().map(|row| row.attempts).sum::<u64>(), 15);
+        let snapshots = snapshots.lock();
+        assert!(snapshots.iter().any(|snapshot| snapshot
+            .active
+            .iter()
+            .any(|work| work.status.contains("重试"))));
+        let final_progress = snapshots.last().unwrap();
+        assert_eq!(final_progress.completed, 5);
+        assert_eq!(final_progress.failed, 5);
+        assert!(final_progress.active.is_empty());
+        assert!(!final_progress.recent_errors.is_empty());
     }
 
     #[tokio::test]
@@ -1407,8 +2054,63 @@ mod tests {
         assert_eq!(disabled.errors[0].kind, NewsErrorKind::Disabled);
     }
 
+    #[tokio::test]
+    async fn empty_provider_selection_has_actionable_error() {
+        let ingestor = NewsIngestor::new(Vec::new(), None).unwrap();
+        let outcome = ingestor.ingest(NewsIngestRequest::default(), None).await;
+        assert!(outcome.items.is_empty());
+        assert_eq!(outcome.errors.len(), 1);
+        assert_eq!(outcome.errors[0].provider_id, "provider-registry");
+        assert!(!outcome.errors[0].message.trim().is_empty());
+    }
+
+    #[tokio::test]
+    async fn natural_language_terms_match_individually_and_report_progress() {
+        let mut provider = FakeProvider::new("topics", 0, NewsTrustTier::LicensedMedia);
+        provider.title = "新能源板块轮动与龙头跟踪".into();
+        let ingestor = NewsIngestor::new(vec![Arc::new(provider)], None).unwrap();
+        let snapshots = Arc::new(Mutex::new(Vec::<NewsIngestProgress>::new()));
+        let sink = Arc::clone(&snapshots);
+        let outcome = ingestor
+            .ingest_with_progress(
+                NewsIngestRequest {
+                    keyword: Some("短线 题材 龙头 板块轮动".into()),
+                    limit: 30,
+                    ..Default::default()
+                },
+                None,
+                Some(Arc::new(move |progress| sink.lock().push(progress))),
+            )
+            .await;
+        assert_eq!(outcome.items.len(), 1);
+        let snapshots = snapshots.lock();
+        let final_progress = snapshots.last().unwrap();
+        assert_eq!(final_progress.completed, 1);
+        assert_eq!(final_progress.records, 1);
+        assert_eq!(final_progress.failed, 0);
+        assert_eq!(final_progress.current_provider, "资讯合并与条件匹配");
+        assert!(final_progress.active.is_empty());
+    }
+
     #[test]
-    fn generic_provider_contract_parses_offline_fixture_with_provenance() {
+    fn http_403_and_waf_are_not_immediately_retried() {
+        let forbidden = classify_data_error(
+            "news",
+            astock_core::DataError::Network {
+                host: "example.com".into(),
+                message: "HTTP 403 Forbidden".into(),
+            },
+        );
+        assert!(!forbidden.retryable);
+        let waf = classify_data_error(
+            "news",
+            astock_core::DataError::WafBlocked("challenge".into()),
+        );
+        assert!(!waf.retryable);
+    }
+
+    #[test]
+    fn generic_provider_contract_preserves_candidates_for_post_link_filtering() {
         let fixture: Value =
             serde_json::from_str(include_str!("../../tests/fixtures/news/generic_feed.json"))
                 .unwrap();
@@ -1424,7 +2126,7 @@ mod tests {
             &fixture,
         )
         .unwrap();
-        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items.len(), 2);
         assert_eq!(page.next_cursor.as_deref(), Some("fixture-cursor-2"));
         assert_eq!(page.items[0].license, "fixture-license");
         assert_eq!(page.items[0].parser_version, "fixture-v1");

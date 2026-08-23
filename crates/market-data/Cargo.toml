@@ -10,6 +10,8 @@ astock-tdx = { path = "../tdx" }
 astock-joinquant = { path = "../joinquant" }
 astock-security = { path = "../security" }
 astock-storage = { path = "../storage" }
+astock-news-intelligence = { path = "../news-intelligence" }
+astock-entity-linking = { path = "../entity-linking" }
 tokio.workspace = true
 reqwest.workspace = true
 futures.workspace = true

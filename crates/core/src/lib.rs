@@ -10,6 +10,7 @@ pub mod error;
 pub mod flow;
 pub mod period;
 pub mod provenance;
+pub mod quality;
 pub mod quote;
 pub mod search;
 pub mod security;
@@ -25,6 +26,12 @@ pub use error::DataError;
 pub use flow::FundFlowPoint;
 pub use period::{Adjust, KlinePeriod};
 pub use provenance::{DataQuality, Fetched, FieldProvenance, Source};
+pub use quality::{
+    reconcile_numeric, AccountingScope, AdjustmentBasis, ConfidenceCeiling, Currency, DataEnvelope,
+    DataQualitySummary, DataUnit, DatasetKind, FreshnessPolicy, FreshnessState, NumericObservation,
+    QualityFlag, QualityFlagCode, QualitySeverity, ReconciliationResult, ReconciliationStatus,
+    ReconciliationTolerance, SessionRule,
+};
 pub use quote::{MinuteData, MinutePoint, Quote};
 pub use search::{MarketBreadth, SearchResult, StockListItem};
 pub use security::{board_for, AssetType, Board, SecurityMasterRecord};

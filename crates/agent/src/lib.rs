@@ -36,7 +36,11 @@ pub use orchestrator::{
     compact_history, AgentEngine, AgentEvent, EngineConfig, SpecialistRoute, SuspendReason,
     TaskSpec, TaskStream, SNAPSHOT_MARKER,
 };
-pub use report::{AgentReport, Conclusion, Evidence};
+pub use report::{
+    AgentReport, CalculationRecord, ClaimConfidence, ClaimType, Conclusion, Evidence,
+    EvidenceField, ResearchClaim, ResearchReport, VerificationFinding, VerificationResult,
+    VerificationSeverity, VerificationStatus,
+};
 pub use tools::{
     AgentTool, ToolContext, ToolProgressDetail, ToolRegistry, ToolResult, ToolWorkItem,
 };

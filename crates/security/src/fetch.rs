@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use reqwest::header::{
-    ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, LOCATION,
+    ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, LOCATION, USER_AGENT,
 };
 use reqwest::{redirect::Policy, StatusCode};
 use thiserror::Error;
@@ -66,6 +66,8 @@ pub enum SafeFetchError {
     Mime(String),
     #[error("响应超过大小上限 {limit} 字节（已读取 {actual} 字节）")]
     TooLarge { limit: usize, actual: usize },
+    #[error("请求头不合法：{0}")]
+    InvalidHeader(String),
 }
 
 #[derive(Debug, Clone)]
@@ -87,15 +89,34 @@ impl SafeFetcher {
     /// DNS-resolved, checked for private/reserved addresses and pinned to the
     /// validated IP to close the usual validation/connect DNS-rebinding gap.
     pub async fn fetch(&self, raw_url: &str) -> Result<SafeFetchResult, SafeFetchError> {
+        self.fetch_with_user_agent(raw_url, None).await
+    }
+
+    /// Same bounded/SSRF-safe fetch path with an optional declared User-Agent.
+    /// The only override is User-Agent, preventing callers from injecting
+    /// authorization or cookie headers into redirect chains.
+    pub async fn fetch_with_user_agent(
+        &self,
+        raw_url: &str,
+        user_agent: Option<&str>,
+    ) -> Result<SafeFetchResult, SafeFetchError> {
+        let user_agent = user_agent
+            .map(reqwest::header::HeaderValue::from_str)
+            .transpose()
+            .map_err(|error| SafeFetchError::InvalidHeader(error.to_string()))?;
         let mut current = raw_url.to_string();
         let mut redirects = Vec::new();
         for redirect_count in 0..=self.limits.max_redirects {
             let resolved = self.policy.validate_resolved(&current).await?;
             let (client, requested_url) = self.client_for(&resolved)?;
-            let response = client
+            let mut request = client
                 .get(requested_url.clone())
                 .header(ACCEPT, self.limits.allowed_mime.join(", "))
-                .header(ACCEPT_ENCODING, "identity")
+                .header(ACCEPT_ENCODING, "identity");
+            if let Some(value) = &user_agent {
+                request = request.header(USER_AGENT, value.clone());
+            }
+            let response = request
                 .send()
                 .await
                 .map_err(|error| SafeFetchError::Request(error.to_string()))?;
