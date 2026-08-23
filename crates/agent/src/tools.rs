@@ -13,10 +13,10 @@
 #[path = "tools_legacy.rs"]
 mod legacy;
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use dashmap::DashMap;
 use serde_json::Value;
 use tokio::sync::OnceCell;
 
@@ -34,12 +34,17 @@ enum SharedToolOutcome {
     Failure(String),
 }
 
+type SharedFlight = Arc<OnceCell<SharedToolOutcome>>;
+type FlightMap = HashMap<String, SharedFlight>;
+
 /// A tool registry with cache-key normalization, request coalescing and a
 /// final safety deadline around every deterministic tool invocation.
 #[derive(Clone)]
 pub struct ToolRegistry {
     inner: legacy::ToolRegistry,
-    flights: Arc<DashMap<String, Arc<OnceCell<SharedToolOutcome>>>>,
+    /// The mutex protects only short map lookups/removals. It is never held
+    /// across tool execution or any other await point.
+    flights: Arc<Mutex<FlightMap>>,
 }
 
 impl Default for ToolRegistry {
@@ -53,7 +58,7 @@ impl ToolRegistry {
     pub fn new(tools: Vec<Arc<dyn AgentTool>>) -> Self {
         Self {
             inner: legacy::ToolRegistry::new(tools),
-            flights: Arc::new(DashMap::new()),
+            flights: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -94,6 +99,32 @@ impl ToolRegistry {
         self.inner.is_empty()
     }
 
+    fn lock_flights(&self) -> MutexGuard<'_, FlightMap> {
+        // A previous panic must not permanently disable every future Agent
+        // request. Recovering the contained map is safe because entries are
+        // immutable Arcs whose initialization remains guarded by OnceCell.
+        self.flights
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn get_or_create_flight(&self, cache_key: &str) -> SharedFlight {
+        self.lock_flights()
+            .entry(cache_key.to_string())
+            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .clone()
+    }
+
+    fn remove_flight_if_idle(&self, cache_key: &str, flight: &SharedFlight) {
+        let mut flights = self.lock_flights();
+        let removable = flights.get(cache_key).is_some_and(|current| {
+            Arc::ptr_eq(current, flight) && Arc::strong_count(current) <= 2
+        });
+        if removable {
+            flights.remove(cache_key);
+        }
+    }
+
     /// Dispatch a tool through the durable read-through cache.
     ///
     /// Identical calls share one per-key [`OnceCell`]. The leader performs the
@@ -111,11 +142,7 @@ impl ToolRegistry {
 
         let args = canonicalize_cache_args(args);
         let cache_key = legacy::tool_cache_key(name, &args);
-        let flight = self
-            .flights
-            .entry(cache_key.clone())
-            .or_insert_with(|| Arc::new(OnceCell::new()))
-            .clone();
+        let flight = self.get_or_create_flight(&cache_key);
         let queued_at = Instant::now();
         let budget = tool_runtime_budget(name);
 
@@ -147,9 +174,7 @@ impl ToolRegistry {
         // references mean concurrent waiters still rely on this cell; the final
         // caller removes the idle entry. A newly arriving success request then
         // reads SQLite, while a later failure may make a fresh bounded attempt.
-        if Arc::strong_count(&flight) <= 2 {
-            self.flights.remove(&cache_key);
-        }
+        self.remove_flight_if_idle(&cache_key, &flight);
 
         match outcome {
             SharedToolOutcome::Success(result) => Ok(result),
@@ -341,6 +366,16 @@ mod tests {
         assert!(results
             .iter()
             .all(|result| result.as_ref().unwrap().summary_json["echo"] == json!("same request")));
+
+        let cached = registry
+            .dispatch("echo", json!({"text": "same request"}), &ctx)
+            .await;
+        assert!(cached.is_ok());
+        assert_eq!(
+            echo.calls.load(Ordering::SeqCst),
+            1,
+            "a completed flight must be removed so the durable cache serves the next call"
+        );
     }
 
     struct FailingTool {
@@ -385,5 +420,13 @@ mod tests {
         let results = futures::future::join_all(calls).await;
         assert!(results.iter().all(Result::is_err));
         assert_eq!(failing.calls.load(Ordering::SeqCst), 1);
+
+        let retry = registry.dispatch("always_fail", json!({}), &ctx).await;
+        assert!(retry.is_err());
+        assert_eq!(
+            failing.calls.load(Ordering::SeqCst),
+            2,
+            "failed flights must be removed so a later bounded attempt can retry"
+        );
     }
 }
