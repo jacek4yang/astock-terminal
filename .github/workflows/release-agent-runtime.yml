@@ -106,11 +106,11 @@ jobs:
         run: cargo check -p astock-app
       - name: Run frontend tests
         run: npm test --prefix ui
-      - name: Ensure dependency lockfiles are unchanged
-        run: git diff --exit-code -- Cargo.lock ui/package-lock.json
       - name: Build MSI and NSIS installers
         shell: pwsh
         run: .\ui\node_modules\.bin\tauri.cmd build
+      - name: Ensure dependency lockfiles are unchanged
+        run: git diff --exit-code -- Cargo.lock ui/package-lock.json
       - name: Collect installers and generate SHA256SUMS
         shell: pwsh
         run: |
