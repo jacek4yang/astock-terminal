@@ -15,21 +15,183 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::channel::mpsc;
 use futures::{Stream, StreamExt};
+use serde::Serialize;
 use serde_json::Value;
 
 use astock_storage::{AgentTask, Storage};
 
 use crate::backend::ChatBackend;
 use crate::error::{AgentError, Result};
-use crate::tools::{ToolContext, ToolRegistry};
+use crate::report::AgentReport;
+use crate::tools::{ToolContext, ToolProgressDetail, ToolRegistry};
 
 pub use legacy::{
-    compact_history, AgentEvent, EngineConfig, SpecialistRoute, SuspendReason, TaskSpec,
-    SNAPSHOT_MARKER,
+    compact_history, EngineConfig, SpecialistRoute, SuspendReason, TaskSpec, SNAPSHOT_MARKER,
 };
 
 /// A boxed event stream for one supervised task.
 pub type TaskStream = Pin<Box<dyn Stream<Item = AgentEvent> + Send>>;
+
+/// Why the runtime supervisor stopped automatic recovery while preserving a
+/// resumable durable checkpoint.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RuntimeSuspendReason {
+    TransientFailure { error: String, attempts: u32 },
+}
+
+/// Public Agent event contract. Existing events retain their wire shape. The
+/// runtime-only suspended variant intentionally serializes with the existing
+/// `type=suspended` envelope, allowing older UI builds to show the normal
+/// resume affordance while its reason remains distinguishable in diagnostics.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentEvent {
+    Progress {
+        phase: String,
+        message: String,
+        round: u32,
+        max_rounds: u32,
+        completed: Option<usize>,
+        total: Option<usize>,
+    },
+    ContextCompacted {
+        before_chars: usize,
+        after_chars: usize,
+        retained_messages: usize,
+    },
+    TextDelta {
+        text: String,
+    },
+    TextReset {
+        message: String,
+    },
+    ToolCallStarted {
+        call_id: String,
+        name: String,
+        args: Value,
+        position: usize,
+        total: usize,
+        estimated_ms: u64,
+    },
+    ToolCallProgress {
+        call_id: String,
+        name: String,
+        elapsed_ms: u64,
+        estimated_ms: u64,
+        stage: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<ToolProgressDetail>,
+    },
+    ToolCallFinished {
+        call_id: String,
+        name: String,
+        cache_key: String,
+        elapsed_ms: u64,
+        success: bool,
+        source: Option<String>,
+        fetched_at: Option<String>,
+        error: Option<String>,
+    },
+    Suspended {
+        reason: SuspendReason,
+    },
+    #[serde(rename = "suspended")]
+    RuntimeSuspended {
+        reason: RuntimeSuspendReason,
+    },
+    Completed {
+        report: Box<AgentReport>,
+    },
+    Failed {
+        error: String,
+    },
+}
+
+impl From<legacy::AgentEvent> for AgentEvent {
+    fn from(event: legacy::AgentEvent) -> Self {
+        match event {
+            legacy::AgentEvent::Progress {
+                phase,
+                message,
+                round,
+                max_rounds,
+                completed,
+                total,
+            } => Self::Progress {
+                phase,
+                message,
+                round,
+                max_rounds,
+                completed,
+                total,
+            },
+            legacy::AgentEvent::ContextCompacted {
+                before_chars,
+                after_chars,
+                retained_messages,
+            } => Self::ContextCompacted {
+                before_chars,
+                after_chars,
+                retained_messages,
+            },
+            legacy::AgentEvent::TextDelta { text } => Self::TextDelta { text },
+            legacy::AgentEvent::TextReset { message } => Self::TextReset { message },
+            legacy::AgentEvent::ToolCallStarted {
+                call_id,
+                name,
+                args,
+                position,
+                total,
+                estimated_ms,
+            } => Self::ToolCallStarted {
+                call_id,
+                name,
+                args,
+                position,
+                total,
+                estimated_ms,
+            },
+            legacy::AgentEvent::ToolCallProgress {
+                call_id,
+                name,
+                elapsed_ms,
+                estimated_ms,
+                stage,
+                detail,
+            } => Self::ToolCallProgress {
+                call_id,
+                name,
+                elapsed_ms,
+                estimated_ms,
+                stage,
+                detail,
+            },
+            legacy::AgentEvent::ToolCallFinished {
+                call_id,
+                name,
+                cache_key,
+                elapsed_ms,
+                success,
+                source,
+                fetched_at,
+                error,
+            } => Self::ToolCallFinished {
+                call_id,
+                name,
+                cache_key,
+                elapsed_ms,
+                success,
+                source,
+                fetched_at,
+                error,
+            },
+            legacy::AgentEvent::Suspended { reason } => Self::Suspended { reason },
+            legacy::AgentEvent::Completed { report } => Self::Completed { report },
+            legacy::AgentEvent::Failed { error } => Self::Failed { error },
+        }
+    }
+}
 
 /// Durable Agent engine with bounded automatic recovery around the original
 /// tool-calling state machine.
@@ -113,6 +275,7 @@ impl AgentEngine {
             loop {
                 let mut retry_reason = None;
                 while let Some(event) = stream.next().await {
+                    let event = AgentEvent::from(event);
                     match event {
                         AgentEvent::Failed { error } if is_retryable_runtime_error(&error) => {
                             retry_reason = Some(error);
@@ -120,6 +283,7 @@ impl AgentEngine {
                         }
                         terminal @ (AgentEvent::Completed { .. }
                         | AgentEvent::Suspended { .. }
+                        | AgentEvent::RuntimeSuspended { .. }
                         | AgentEvent::Failed { .. }) => {
                             let _ = tx.unbounded_send(terminal);
                             return;
@@ -141,7 +305,12 @@ impl AgentEngine {
                         engine.max_runtime_retries
                     );
                     let _ = engine.mark_runtime_suspended(&task_id, &error).await;
-                    let _ = tx.unbounded_send(AgentEvent::Failed { error });
+                    let _ = tx.unbounded_send(AgentEvent::RuntimeSuspended {
+                        reason: RuntimeSuspendReason::TransientFailure {
+                            error,
+                            attempts: attempt,
+                        },
+                    });
                     return;
                 }
                 attempt += 1;
@@ -166,11 +335,14 @@ impl AgentEngine {
                 {
                     return;
                 }
+                let delay = runtime_retry_delay(attempt);
                 let _ = tx.unbounded_send(AgentEvent::Progress {
-                    phase: "recovering".to_string(),
+                    // Existing UIs already render this phase as the preparation
+                    // step; the message carries the explicit recovery detail.
+                    phase: "preparing".to_string(),
                     message: format!(
-                        "检测到可恢复的临时故障，{} 秒后继续：{}",
-                        runtime_retry_delay(attempt).as_secs(),
+                        "检测到可恢复的临时故障，{} 秒后从检查点继续：{}",
+                        delay.as_secs(),
                         compact_error(&reason)
                     ),
                     round,
@@ -178,14 +350,25 @@ impl AgentEngine {
                     completed: Some(attempt as usize),
                     total: Some(engine.max_runtime_retries as usize),
                 });
-                tokio::time::sleep(runtime_retry_delay(attempt)).await;
+                tokio::time::sleep(delay).await;
 
                 match engine.inner.resume_task(&task_id).await {
                     Ok(next) => stream = next,
-                    Err(error) => {
+                    Err(error) if is_retryable_runtime_error(&error.to_string()) => {
                         let error = format!("自动恢复任务失败: {error}");
                         let _ = engine.mark_runtime_suspended(&task_id, &error).await;
-                        let _ = tx.unbounded_send(AgentEvent::Failed { error });
+                        let _ = tx.unbounded_send(AgentEvent::RuntimeSuspended {
+                            reason: RuntimeSuspendReason::TransientFailure {
+                                error,
+                                attempts: attempt,
+                            },
+                        });
+                        return;
+                    }
+                    Err(error) => {
+                        let _ = tx.unbounded_send(AgentEvent::Failed {
+                            error: format!("自动恢复任务失败: {error}"),
+                        });
                         return;
                     }
                 }
@@ -339,6 +522,19 @@ mod tests {
         assert_eq!(runtime_retry_delay(1), Duration::from_secs(1));
         assert_eq!(runtime_retry_delay(3), Duration::from_secs(4));
         assert_eq!(runtime_retry_delay(100), Duration::from_secs(16));
+    }
+
+    #[test]
+    fn runtime_suspension_uses_backward_compatible_wire_type() {
+        let value = serde_json::to_value(AgentEvent::RuntimeSuspended {
+            reason: RuntimeSuspendReason::TransientFailure {
+                error: "temporary".to_string(),
+                attempts: 3,
+            },
+        })
+        .unwrap();
+        assert_eq!(value["type"], "suspended");
+        assert_eq!(value["reason"]["kind"], "transient_failure");
     }
 
     #[tokio::test(start_paused = true)]
