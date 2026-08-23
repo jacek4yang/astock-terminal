@@ -33,7 +33,6 @@ tracing.workspace = true
 chrono.workspace = true
 regex.workspace = true
 rusqlite.workspace = true
-dashmap.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
