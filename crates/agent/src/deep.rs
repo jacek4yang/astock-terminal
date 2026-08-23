@@ -1051,8 +1051,8 @@ struct ResearchNewsArgs {
     limit: Option<usize>,
     /// 是否只保留上游标记的重要快讯
     important_only: Option<bool>,
-    /// 目标 A 股交易日（YYYY-MM-DD）；省略时根据当前中国时间、交易日历和
-    /// 15:00 边界自动计算。
+    /// 研究日期（YYYY-MM-DD）；允许周末/节假日。非交易日资讯自动归入下一个
+    /// A 股交易会话；省略时根据当前中国时间、交易日历和 15:00 边界计算。
     target_trading_date: Option<String>,
     /// 显式历史研究时可包含其他会话；默认 false，避免旧新闻无限进入上下文。
     include_historical: Option<bool>,
@@ -1096,17 +1096,19 @@ impl AgentTool for ResearchNews {
             RuleSet::load(None).map_err(|error| tool_err(self.name(), error.to_string()))?;
         let live_target = target_trading_date_at(&rules, now_secs())
             .map_err(|error| tool_err(self.name(), error.to_string()))?;
-        let target_trading_date = research_date(
+        let requested_date = research_date(
             self.name(),
             args.target_trading_date.as_deref(),
             live_target,
         )?;
-        if !rules.is_trading_day(target_trading_date) {
-            return Err(invalid_args(
-                self.name(),
-                format!("目标日期 {target_trading_date} 不是 A 股交易日"),
-            ));
-        }
+        // News and policy releases are natural-day data. A weekend/holiday
+        // request is valid and belongs to the next effective A-share session;
+        // rejecting it made Sunday research fail before any provider ran.
+        let target_trading_date = if rules.is_trading_day(requested_date) {
+            requested_date
+        } else {
+            rules.next_trading_day(requested_date)
+        };
         let include_historical = args.include_historical.unwrap_or(false);
         let keyword = args
             .keyword
@@ -1351,6 +1353,12 @@ impl AgentTool for ResearchNews {
             "status": if degraded { "degraded" } else if headlines.is_empty() { "no_match" } else { "ok" },
             "keyword": keyword,
             "target_trading_date": target_trading_date,
+            "requested_date": requested_date,
+            "date_normalization": if requested_date == target_trading_date {
+                Value::Null
+            } else {
+                json!(format!("{requested_date} 为非交易日，资讯归入下一交易会话 {target_trading_date}"))
+            },
             "headlines": headlines,
             "successful_sources": batch.successful_sources,
             "stale_sources": batch.stale_sources,
@@ -1382,6 +1390,8 @@ impl AgentTool for ResearchNews {
             "status": full["status"],
             "keyword": full["keyword"],
             "target_trading_date": full["target_trading_date"],
+            "requested_date": full["requested_date"],
+            "date_normalization": full["date_normalization"],
             "headlines": full["headlines"].as_array().map(|rows| rows.iter().take(40).cloned().collect::<Vec<_>>()).unwrap_or_default(),
             "successful_sources": full["successful_sources"],
             "stale_sources": full["stale_sources"],
@@ -5070,6 +5080,35 @@ mod tests {
             result.summary_json["source_selection"]["used_default"],
             json!(false)
         );
+    }
+
+    #[tokio::test]
+    async fn research_news_maps_weekend_to_the_next_effective_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(StorageConfig::with_base_dir(dir.path())).unwrap();
+        let provider = FinanceNewsProvider::from_providers(
+            vec![Arc::new(FailingNewsProvider::new())],
+            Some(storage.clone()),
+        )
+        .unwrap();
+        let mut ctx = deep_ctx(storage, None);
+        ctx.finance_news = Some(Arc::new(provider));
+        let result = crate::default_registry()
+            .dispatch(
+                "research_news",
+                json!({"target_trading_date": "2026-08-23", "limit": 5}),
+                &ctx,
+            )
+            .await
+            .expect("weekend news research must not fail argument validation");
+        assert_eq!(result.summary_json["requested_date"], json!("2026-08-23"));
+        assert_eq!(
+            result.summary_json["target_trading_date"],
+            json!("2026-08-24")
+        );
+        assert!(result.summary_json["date_normalization"]
+            .as_str()
+            .is_some_and(|message| message.contains("下一交易会话")));
     }
 
     #[tokio::test]

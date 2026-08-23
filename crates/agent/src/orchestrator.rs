@@ -3395,7 +3395,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verifier_blocks_publication_after_two_failed_repairs() {
+    async fn verifier_publishes_safe_empty_result_after_two_failed_repairs() {
         let (_dir, storage) = test_storage();
         let chat = Arc::new(ScriptedChat::new("test-model"));
         chat.push_text("【事实】目标价 99 元");
@@ -3409,12 +3409,10 @@ mod tests {
             AgentEvent::Completed { report } => Some(report),
             _ => None,
         });
-        let report = report.expect("blocked report still carries diagnostics");
-        assert_eq!(
-            report.research.verification.status,
-            VerificationStatus::Failed
-        );
-        assert!(report.answer.contains("报告未通过证据校验"));
+        let report = report.expect("safe fallback report should be emitted");
+        assert!(report.research.verification.passed());
+        assert!(report.answer.contains("本轮暂无可发布结论"));
+        assert!(report.answer.contains("已自动省略"));
         assert!(!report.answer.contains("97 元"));
         assert_eq!(chat.requests.lock().unwrap().len(), 3);
         assert_eq!(
@@ -3424,7 +3422,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .status,
-            "verification_failed"
+            "completed"
         );
         assert_eq!(
             storage
@@ -3433,7 +3431,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .kind,
-            "verification-blocked"
+            "verified-research"
         );
     }
 

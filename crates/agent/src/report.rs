@@ -428,14 +428,20 @@ pub fn verified_subset_answer(report: &AgentReport) -> Option<String> {
         .iter()
         .filter(|claim| !blocked_claims.contains(claim.claim_id.as_str()))
         .collect::<Vec<_>>();
-    if kept.is_empty() {
+    if report.research.claims.is_empty() {
         return None;
     }
 
     let omitted = report.research.claims.len().saturating_sub(kept.len());
-    let mut answer = String::from(
-        "## 已通过证据校验的部分结论\n\n以下仅保留可由现有字段级证据复现的内容；未通过校验的数字和表述不会作为决策依据。\n",
-    );
+    let mut answer = if kept.is_empty() {
+        String::from(
+            "## 本轮暂无可发布结论\n\n现有草稿中的关键数字或表述未能通过字段级证据复现，因此不会将其作为决策依据。\n",
+        )
+    } else {
+        String::from(
+            "## 已通过证据校验的部分结论\n\n以下仅保留可由现有字段级证据复现的内容；未通过校验的数字和表述不会作为决策依据。\n",
+        )
+    };
     for claim in kept {
         let grade = match claim.claim_type {
             ClaimType::Fact => "事实",
@@ -1205,6 +1211,26 @@ mod tests {
         assert!(fallback.contains("最新价 10 元"));
         assert!(!fallback.contains("目标价 99 元"));
         assert!(fallback.contains("已自动省略"));
+        let repaired = tagged_report(&fallback, items);
+        assert!(
+            repaired.research.verification.passed(),
+            "{:?}",
+            repaired.research.verification.findings
+        );
+    }
+
+    #[test]
+    fn verified_subset_returns_safe_answer_when_every_claim_is_blocked() {
+        let items = evidence(
+            json!({"price": 10.0, "data_quality": {"freshness": "fresh", "allow_deterministic_compute": true}}),
+        );
+        let report = tagged_report("【事实】目标价 99 元", items.clone());
+        assert!(!report.research.verification.passed());
+
+        let fallback = verified_subset_answer(&report).expect("safe empty result");
+        assert!(fallback.contains("本轮暂无可发布结论"));
+        assert!(fallback.contains("1 条草稿结论"));
+        assert!(!fallback.contains("目标价 99 元"));
         let repaired = tagged_report(&fallback, items);
         assert!(
             repaired.research.verification.passed(),

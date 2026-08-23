@@ -42,6 +42,12 @@ fn provenance<T>(f: &Fetched<T>) -> (String, String) {
     (f.source.to_string(), f.fetched_at.to_rfc3339())
 }
 
+fn now_rfc3339() -> String {
+    chrono::DateTime::from_timestamp(now_secs(), 0)
+        .map(|value| value.to_rfc3339())
+        .unwrap_or_default()
+}
+
 pub(crate) fn parse_symbol(tool: &str, raw: &str) -> Result<Symbol> {
     Symbol::new(raw).map_err(|e| AgentError::InvalidArgs {
         tool: tool.to_string(),
@@ -275,7 +281,11 @@ async fn fetch_analysis_inputs(
             records: 0,
             active: vec![ToolWorkItem {
                 label: format!("{} 日 K 线", symbol.code()),
-                stage: format!("正在获取并校验 {count} 根复权行情；失败时自动切换备用来源"),
+                stage: if symbol.is_unambiguous_index() {
+                    format!("正在获取并校验 {count} 根指数行情；指数不复权，失败时自动切换备用来源")
+                } else {
+                    format!("正在获取并校验 {count} 根复权行情；失败时自动切换备用来源")
+                },
             }],
             recent_errors: Vec::new(),
         });
@@ -303,6 +313,7 @@ async fn fetch_analysis_inputs(
         // These three sources are independent. Running them sequentially made
         // a comparison pay the sum of every upstream latency for every stock;
         // joining them bounds the context phase by the slowest one instead.
+        let index_symbol = symbol.is_unambiguous_index();
         if detailed_progress {
             ctx.report_progress(ToolProgressDetail {
                 completed: 1,
@@ -311,42 +322,59 @@ async fn fetch_analysis_inputs(
                 failed: 0,
                 cache_hits: 0,
                 records: upstream_records,
-                active: vec![
-                    ToolWorkItem {
+                active: {
+                    let mut items = vec![ToolWorkItem {
                         label: format!("{} 实时行情", symbol.code()),
                         stage: "正在读取价格、涨跌幅和成交状态".into(),
-                    },
-                    ToolWorkItem {
-                        label: format!("{} 资金流", symbol.code()),
-                        stage: "正在读取最近 30 日主力资金流向".into(),
-                    },
-                    ToolWorkItem {
+                    }];
+                    if !index_symbol {
+                        items.push(ToolWorkItem {
+                            label: format!("{} 资金流", symbol.code()),
+                            stage: "正在读取最近 30 日主力资金流向".into(),
+                        });
+                    }
+                    items.push(ToolWorkItem {
                         label: "上证指数环境".into(),
                         stage: format!("正在读取并校验 {count} 根指数 K 线"),
-                    },
-                ],
+                    });
+                    items
+                },
                 recent_errors: Vec::new(),
             });
         }
-        let (quote_result, flows_result, index_result) = tokio::join!(
-            ctx.market.quote(symbol),
-            ctx.market.fund_flow_daily(symbol, 30),
-            ctx.market.index_kline("1.000001", count),
-        );
+        let (quote_result, flows_result, index_result) = if index_symbol {
+            let (quote, index) = tokio::join!(
+                ctx.market.quote(symbol),
+                ctx.market.index_kline("1.000001", count),
+            );
+            (quote, None, index)
+        } else {
+            let (quote, flows, index) = tokio::join!(
+                ctx.market.quote(symbol),
+                ctx.market.fund_flow_daily(symbol, 30),
+                ctx.market.index_kline("1.000001", count),
+            );
+            (quote, Some(flows), index)
+        };
         let succeeded = usize::from(quote_result.is_ok())
-            + usize::from(flows_result.is_ok())
+            + flows_result
+                .as_ref()
+                .map_or(1, |result| usize::from(result.is_ok()))
             + usize::from(index_result.is_ok());
         if let Err(error) = &quote_result {
             context_diagnostics.push(format!("实时行情暂不可用：{error}"));
         }
-        if let Err(error) = &flows_result {
+        if let Some(Err(error)) = &flows_result {
             context_diagnostics.push(format!("资金流暂不可用：{error}"));
         }
         if let Err(error) = &index_result {
             context_diagnostics.push(format!("指数环境暂不可用：{error}"));
         }
         upstream_records += quote_result.as_ref().map_or(0, |_| 1);
-        upstream_records += flows_result.as_ref().map_or(0, |value| value.data.len());
+        upstream_records += flows_result
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .map_or(0, |value| value.data.len());
         upstream_records += index_result.as_ref().map_or(0, |value| value.data.len());
         if detailed_progress {
             ctx.report_progress(ToolProgressDetail {
@@ -366,7 +394,7 @@ async fn fetch_analysis_inputs(
         (
             quote_result.ok().map(|q| to_tech_quote(&q.data)),
             flows_result
-                .ok()
+                .and_then(|result| result.ok())
                 .map(|f| f.data.iter().map(to_tech_flow).collect::<Vec<_>>()),
             index_result.ok().map(|f| to_tech_klines(&f.data)),
         )
@@ -415,7 +443,7 @@ impl AgentTool for GetQuote {
         "get_quote"
     }
     fn description(&self) -> &'static str {
-        "获取个股实时行情快照（最新价、涨跌幅、量能）"
+        "获取股票或明确指数的实时行情快照（最新价、涨跌幅、量能）；000300 自动识别为沪深300指数"
     }
     fn parameters_schema(&self) -> Value {
         schema_value::<SymbolArgs>()
@@ -481,7 +509,7 @@ impl AgentTool for GetKline {
         "get_kline"
     }
     fn description(&self) -> &'static str {
-        "获取历史K线，返回窗口统计与最近若干根（完整数据入缓存）"
+        "获取股票或明确指数的历史K线，指数自动使用正确市场且不做复权；返回窗口统计与最近若干根（完整数据入缓存）"
     }
     fn parameters_schema(&self) -> Value {
         schema_value::<KlineArgs>()
@@ -490,7 +518,12 @@ impl AgentTool for GetKline {
         let args: KlineArgs = parse_args(self.name(), args)?;
         let symbol = parse_symbol(self.name(), &args.symbol)?;
         let period = parse_period(args.period.as_deref())?;
-        let adjust = parse_adjust(args.adjust.as_deref())?;
+        let requested_adjust = parse_adjust(args.adjust.as_deref())?;
+        let adjust = if symbol.is_unambiguous_index() {
+            astock_core::Adjust::None
+        } else {
+            requested_adjust
+        };
         let count = args.count.unwrap_or(120).clamp(1, 500);
         let fetched = ctx.market.kline(&symbol, period, adjust, count).await?;
         if fetched.data.is_empty() {
@@ -509,6 +542,11 @@ impl AgentTool for GetKline {
             "symbol": symbol.code(),
             "period": format!("{period:?}"),
             "adjust": format!("{adjust:?}"),
+            "adjust_note": if symbol.is_unambiguous_index() && requested_adjust != astock_core::Adjust::None {
+                Some("指数不适用复权，已自动改为未复权")
+            } else {
+                None
+            },
             "stats": bar_stats(bars),
             "columns": ["date", "open", "close", "high", "low", "volume_lots"],
             "tail": tail,
@@ -883,6 +921,22 @@ impl AgentTool for GetFundFlow {
         let args: FundFlowArgs = parse_args(self.name(), args)?;
         let symbol = parse_symbol(self.name(), &args.symbol)?;
         let days = args.days.unwrap_or(10).clamp(1, 60);
+        if symbol.is_unambiguous_index() {
+            let summary = json!({
+                "status": "not_applicable",
+                "symbol": symbol.code(),
+                "reason": "指数不适用个股主力资金流口径；请改用市场宽度、指数行情和市场状态分析",
+                "columns": ["date", "main_net_wan", "main_pct"],
+                "rows": [],
+            });
+            return Ok(ToolResult {
+                summary_json: summary.clone(),
+                full_json: Some(summary),
+                cache_key: String::new(),
+                source: "not_applicable".into(),
+                fetched_at: now_rfc3339(),
+            });
+        }
         let fetched = ctx.market.fund_flow_daily(&symbol, days).await?;
         let (source, fetched_at) = provenance(&fetched);
         Ok(ToolResult {
@@ -2073,6 +2127,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn index_full_analysis_skips_stock_only_fund_flow_without_an_error() {
+        let (_dir, ctx) = test_ctx();
+        let snapshots = Arc::new(std::sync::Mutex::new(Vec::<ToolProgressDetail>::new()));
+        let sink = Arc::clone(&snapshots);
+        let ctx = ctx.with_progress_reporter(Arc::new(move |detail| {
+            sink.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(detail);
+        }));
+        let result = dispatch(
+            &default_registry(),
+            &ctx,
+            "run_full_analysis",
+            json!({"symbol": "000300"}),
+        )
+        .await;
+        assert_eq!(result.summary_json["data_diagnostics"], json!([]));
+        let snapshots = snapshots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(snapshots.iter().all(|snapshot| snapshot
+            .active
+            .iter()
+            .all(|item| !item.label.contains("资金流"))));
+        assert_eq!(snapshots.last().unwrap().failed, 0);
+    }
+
+    #[tokio::test]
     async fn run_chanlun_daily_and_minute() {
         let (_dir, ctx) = test_ctx();
         let registry = default_registry();
@@ -2137,6 +2219,24 @@ mod tests {
         // Mock: last three days are inflows.
         assert_eq!(r.summary_json["streak_days"], json!(3));
         assert_eq!(r.summary_json["streak_direction"], json!("净流入"));
+    }
+
+    #[tokio::test]
+    async fn index_fund_flow_is_explicitly_not_applicable_instead_of_failed() {
+        let (_dir, ctx) = test_ctx();
+        let registry = default_registry();
+        let result = dispatch(
+            &registry,
+            &ctx,
+            "get_fund_flow",
+            json!({"symbol": "000300", "days": 10}),
+        )
+        .await;
+        assert_eq!(result.summary_json["status"], json!("not_applicable"));
+        assert_eq!(result.summary_json["symbol"], json!("000300"));
+        assert!(result.summary_json["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("指数")));
     }
 
     #[tokio::test]
