@@ -1122,13 +1122,13 @@ pub fn compare_fingerprints(
         reasons.push("关键主体、事件动作与时间窗口一致".into());
     }
     if simhash_similarity >= 0.82 {
-        reasons.push(format!("SimHash 相似度 {:.2}", simhash_similarity));
+        reasons.push(format!("SimHash 相似度 {simhash_similarity:.2}"));
     }
     if minhash_similarity >= 0.65 {
-        reasons.push(format!("MinHash 相似度 {:.2}", minhash_similarity));
+        reasons.push(format!("MinHash 相似度 {minhash_similarity:.2}"));
     }
     if semantic_similarity >= 0.78 {
-        reasons.push(format!("中文语义向量相似度 {:.2}", semantic_similarity));
+        reasons.push(format!("中文语义向量相似度 {semantic_similarity:.2}"));
     }
     if !entities_compatible {
         separation_reasons.push("关键主体完全不同".into());

@@ -1163,6 +1163,198 @@ pub(crate) const MIGRATIONS: &[(u32, &str)] = &[
         ON relation_publications(projection_key,status,published_at DESC);
     "#,
     ),
+    (
+        18,
+        r#"
+    -- Bitemporal graph: stable relation identities are separated from
+    -- immutable evidence revisions. Business validity and system knowledge
+    -- time can therefore be queried independently without overwriting history.
+    CREATE TABLE IF NOT EXISTS graph_edge_identities (
+        identity_id    TEXT PRIMARY KEY,
+        src            TEXT NOT NULL REFERENCES graph_nodes(id),
+        dst            TEXT NOT NULL REFERENCES graph_nodes(id),
+        relation       TEXT NOT NULL,
+        product_scope  TEXT NOT NULL DEFAULT '',
+        region_scope   TEXT NOT NULL DEFAULT '',
+        created_at     INTEGER NOT NULL,
+        UNIQUE(src,dst,relation,product_scope,region_scope)
+    );
+    CREATE INDEX IF NOT EXISTS idx_graph_edge_identity_nodes
+        ON graph_edge_identities(src,dst,relation);
+
+    CREATE TABLE IF NOT EXISTS graph_edge_revisions (
+        revision_id          TEXT PRIMARY KEY,
+        identity_id          TEXT NOT NULL REFERENCES graph_edge_identities(identity_id),
+        revision_no          INTEGER NOT NULL,
+        weight               REAL NOT NULL CHECK(weight BETWEEN 0 AND 1),
+        confidence           REAL NOT NULL CHECK(confidence BETWEEN 0 AND 1),
+        disclosed_share      REAL,
+        source_type          TEXT NOT NULL,
+        source_name          TEXT NOT NULL,
+        source_url           TEXT NOT NULL DEFAULT '',
+        evidence_version     TEXT NOT NULL,
+        status               TEXT NOT NULL CHECK(status IN
+                              ('candidate','verified','active','stale','contradicted','expired','revoked')),
+        valid_from           INTEGER NOT NULL,
+        valid_to             INTEGER,
+        observed_at          INTEGER NOT NULL,
+        recorded_at          INTEGER NOT NULL,
+        superseded_at        INTEGER,
+        revalidate_after     INTEGER NOT NULL,
+        decay_half_life_days INTEGER NOT NULL,
+        supersedes_revision_id TEXT REFERENCES graph_edge_revisions(revision_id),
+        metadata_json        TEXT NOT NULL DEFAULT '{}',
+        UNIQUE(identity_id,revision_no),
+        CHECK(valid_to IS NULL OR valid_to > valid_from),
+        CHECK(superseded_at IS NULL OR superseded_at >= recorded_at)
+    );
+    CREATE INDEX IF NOT EXISTS idx_graph_revision_asof
+        ON graph_edge_revisions(recorded_at,superseded_at,valid_from,valid_to,status);
+    CREATE INDEX IF NOT EXISTS idx_graph_revision_identity
+        ON graph_edge_revisions(identity_id,revision_no DESC);
+    CREATE INDEX IF NOT EXISTS idx_graph_revision_revalidate
+        ON graph_edge_revisions(revalidate_after,status);
+
+    CREATE TABLE IF NOT EXISTS graph_revalidation_events (
+        event_id            TEXT PRIMARY KEY,
+        identity_id         TEXT NOT NULL REFERENCES graph_edge_identities(identity_id),
+        revision_id         TEXT NOT NULL REFERENCES graph_edge_revisions(revision_id),
+        trigger_type        TEXT NOT NULL,
+        related_identity_id TEXT REFERENCES graph_edge_identities(identity_id),
+        status              TEXT NOT NULL DEFAULT 'pending'
+                            CHECK(status IN ('pending','completed','dismissed')),
+        reason              TEXT NOT NULL,
+        created_at          INTEGER NOT NULL,
+        resolved_at         INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_graph_revalidation_pending
+        ON graph_revalidation_events(status,created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS graph_entity_merges (
+        merge_id       TEXT PRIMARY KEY,
+        from_node_id   TEXT NOT NULL REFERENCES graph_nodes(id),
+        to_node_id     TEXT NOT NULL REFERENCES graph_nodes(id),
+        valid_from     INTEGER NOT NULL,
+        valid_to       INTEGER,
+        recorded_at   INTEGER NOT NULL,
+        superseded_at INTEGER,
+        reason         TEXT NOT NULL,
+        CHECK(from_node_id <> to_node_id),
+        CHECK(valid_to IS NULL OR valid_to > valid_from),
+        CHECK(superseded_at IS NULL OR superseded_at >= recorded_at)
+    );
+    CREATE INDEX IF NOT EXISTS idx_graph_entity_merge_asof
+        ON graph_entity_merges(from_node_id,recorded_at,superseded_at,valid_from,valid_to);
+
+    CREATE TABLE IF NOT EXISTS graph_snapshot_records (
+        snapshot_id       TEXT PRIMARY KEY,
+        business_time     INTEGER NOT NULL,
+        knowledge_time    INTEGER NOT NULL,
+        revision_ids_json TEXT NOT NULL,
+        merge_ids_json    TEXT NOT NULL DEFAULT '[]',
+        created_at        INTEGER NOT NULL
+    );
+
+    -- Preserve legacy data without pretending that process startup was a
+    -- business-valid date. Values within five seconds of row creation came
+    -- from the old seed loader and are migrated as unknown/always (0).
+    INSERT OR IGNORE INTO graph_edge_identities
+        (identity_id,src,dst,relation,product_scope,region_scope,created_at)
+    SELECT 'legacy:' || id,src,dst,relation,'','',created_at
+      FROM graph_edges;
+
+    INSERT OR IGNORE INTO graph_edge_revisions
+        (revision_id,identity_id,revision_no,weight,confidence,disclosed_share,
+         source_type,source_name,source_url,evidence_version,status,
+         valid_from,valid_to,observed_at,recorded_at,superseded_at,
+         revalidate_after,decay_half_life_days,supersedes_revision_id,metadata_json)
+    SELECT 'legacy-rev:' || id,'legacy:' || id,1,weight,confidence,NULL,
+           CASE
+             WHEN source_name LIKE '%年报%' THEN 'annual_report'
+             WHEN source_name LIKE '%招股%' THEN 'prospectus'
+             ELSE 'legacy'
+           END,
+           source_name,source_url,'legacy-graph-edge:' || id,'active',
+           CASE WHEN ABS(valid_from-created_at) <= 5 THEN 0 ELSE valid_from END,
+           valid_to,created_at,created_at,NULL,
+           created_at + CASE
+             WHEN source_name LIKE '%年报%' THEN 34560000
+             WHEN source_name LIKE '%招股%' THEN 34560000
+             ELSE 15552000
+           END,
+           CASE
+             WHEN source_name LIKE '%年报%' OR source_name LIKE '%招股%' THEN 730
+             ELSE 365
+           END,
+           NULL,'{"migrated_from":"graph_edges"}'
+      FROM graph_edges;
+    "#,
+    ),
+    (
+        19,
+        r#"
+    -- Immutable earnings-driver snapshots bind every forecast, scenario and
+    -- valuation to one exact statement/assumption parameter set.
+    CREATE TABLE IF NOT EXISTS earnings_driver_snapshots (
+        snapshot_id           TEXT PRIMARY KEY,
+        parameter_snapshot_id TEXT NOT NULL,
+        symbol                TEXT NOT NULL,
+        model_version         TEXT NOT NULL,
+        report_period         TEXT,
+        knowledge_time        INTEGER NOT NULL,
+        tree_json             TEXT NOT NULL,
+        created_at            INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_earnings_driver_symbol
+        ON earnings_driver_snapshots(symbol,knowledge_time DESC);
+    CREATE INDEX IF NOT EXISTS idx_earnings_driver_parameter_snapshot
+        ON earnings_driver_snapshots(parameter_snapshot_id);
+
+    CREATE TABLE IF NOT EXISTS earnings_driver_shock_bridges (
+        bridge_id             TEXT PRIMARY KEY,
+        base_snapshot_id      TEXT NOT NULL REFERENCES earnings_driver_snapshots(snapshot_id),
+        evidence_version_ids_json TEXT NOT NULL DEFAULT '[]',
+        shocks_json           TEXT NOT NULL,
+        bridge_json           TEXT NOT NULL,
+        created_at            INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_earnings_driver_bridge_base
+        ON earnings_driver_shock_bridges(base_snapshot_id,created_at DESC);
+    "#,
+    ),
+    (
+        20,
+        r#"
+    -- Reproducible Quant Lab results. The snapshot body includes the exact
+    -- data/function versions, preprocessing conventions, inference budget,
+    -- multiple-testing method and all stability slices.
+    CREATE TABLE IF NOT EXISTS quant_research_snapshots (
+        snapshot_id       TEXT PRIMARY KEY,
+        function_version  TEXT NOT NULL,
+        metric            TEXT NOT NULL,
+        symbols_json      TEXT NOT NULL,
+        data_versions_json TEXT NOT NULL,
+        config_json       TEXT NOT NULL,
+        snapshot_json     TEXT NOT NULL,
+        created_at        INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_quant_research_created
+        ON quant_research_snapshots(created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS quant_research_jobs (
+        job_id             TEXT PRIMARY KEY,
+        status             TEXT NOT NULL,
+        phase              TEXT NOT NULL,
+        progress_json      TEXT NOT NULL,
+        snapshot_id        TEXT REFERENCES quant_research_snapshots(snapshot_id),
+        error              TEXT,
+        created_at         INTEGER NOT NULL,
+        updated_at         INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_quant_research_jobs_updated
+        ON quant_research_jobs(updated_at DESC);
+    "#,
+    ),
 ];
 
 /// Current unix time in seconds. All timestamps in this crate are stored as
@@ -1342,6 +1534,15 @@ mod tests {
             "relation_candidate_evidence",
             "relation_candidate_reviews",
             "relation_publications",
+            "graph_edge_identities",
+            "graph_edge_revisions",
+            "graph_revalidation_events",
+            "graph_entity_merges",
+            "graph_snapshot_records",
+            "earnings_driver_snapshots",
+            "earnings_driver_shock_bridges",
+            "quant_research_snapshots",
+            "quant_research_jobs",
         ] {
             let count: i64 = conn
                 .query_row(
@@ -1391,5 +1592,57 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fetched_at, 0);
+    }
+
+    #[test]
+    fn migration_v18_preserves_legacy_edge_and_removes_fake_startup_validity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.db");
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            for &(number, sql) in MIGRATIONS.iter().take_while(|(n, _)| *n <= 17) {
+                let tx = conn.transaction().unwrap();
+                tx.execute_batch(sql).unwrap();
+                tx.commit().unwrap();
+                conn.pragma_update(None, "user_version", number).unwrap();
+            }
+            for (id, code) in [("company:a", "600001"), ("company:b", "600002")] {
+                conn.execute(
+                    "INSERT INTO graph_nodes
+                     (id,kind,name,code,meta_json,created_at,updated_at)
+                     VALUES (?1,'company',?1,?2,'{}',1000,1000)",
+                    rusqlite::params![id, code],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO graph_edges
+                 (src,dst,relation,weight,source_name,source_url,confidence,
+                  valid_from,valid_to,created_at,updated_at)
+                 VALUES ('company:a','company:b','supplies',0.3,'公司年报2024',
+                         'https://example.com',0.9,1000,NULL,1000,1000)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        drop(db);
+        let conn = Connection::open(&path).unwrap();
+        let (identity_count, revision_count, valid_from, source_type): (i64, i64, i64, String) =
+            conn.query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM graph_edge_identities),
+                   (SELECT COUNT(*) FROM graph_edge_revisions),
+                   valid_from,source_type
+                 FROM graph_edge_revisions LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(identity_count, 1);
+        assert_eq!(revision_count, 1);
+        assert_eq!(valid_from, 0, "startup time must not become business time");
+        assert_eq!(source_type, "annual_report");
     }
 }

@@ -19,6 +19,8 @@ import {
 import { ErrorBox, LoadBar, Term } from "../components/ui";
 import Markdown from "../components/Markdown";
 import RelationReviewWorkbench from "../components/RelationReviewWorkbench";
+import GraphHistoryWorkbench from "../components/GraphHistoryWorkbench";
+import QuantResearchWorkbench from "../components/QuantResearchWorkbench";
 import { useAppStore } from "../store";
 
 // ==================== 常量 ====================
@@ -950,7 +952,9 @@ function RelationshipView() {
 const TABS = [
   { key: "chain", label: "产业链地图" },
   { key: "rel", label: "关系网络" },
+  { key: "quant", label: "量化实验室" },
   { key: "review", label: "关系抽取与审核" },
+  { key: "history", label: "历史图谱与时间线" },
 ] as const;
 
 export default function GraphPage() {
@@ -986,8 +990,14 @@ export default function GraphPage() {
       <div className={"flex min-h-0 flex-1 flex-col " + (tab === "rel" ? "" : "hidden")}>
         <RelationshipView />
       </div>
+      <div className={"flex min-h-0 flex-1 flex-col " + (tab === "quant" ? "" : "hidden")}>
+        <QuantResearchWorkbench />
+      </div>
       <div className={"flex min-h-0 flex-1 flex-col " + (tab === "review" ? "" : "hidden")}>
         <RelationReviewWorkbench />
+      </div>
+      <div className={"flex min-h-0 flex-1 flex-col " + (tab === "history" ? "" : "hidden")}>
+        <GraphHistoryWorkbench />
       </div>
     </div>
   );
