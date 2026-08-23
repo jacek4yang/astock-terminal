@@ -16,6 +16,12 @@ astock-graph = { path = "../graph" }
 astock-quant = { path = "../quant" }
 astock-backtest = { path = "../backtest" }
 astock-trading-rules = { path = "../trading-rules" }
+astock-security = { path = "../security" }
+astock-source-verification = { path = "../source-verification" }
+astock-disclosure = { path = "../disclosure" }
+astock-global-intelligence = { path = "../global-intelligence" }
+astock-event-intelligence = { path = "../event-intelligence" }
+astock-relation-extraction = { path = "../relation-extraction" }
 tokio.workspace = true
 futures.workspace = true
 async-trait.workspace = true
@@ -25,6 +31,8 @@ schemars.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 chrono.workspace = true
+regex.workspace = true
+rusqlite.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

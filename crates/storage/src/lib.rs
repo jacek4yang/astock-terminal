@@ -23,12 +23,16 @@ mod db;
 mod error;
 mod maintenance;
 mod memcache;
+mod news_archive;
+mod quality;
 mod timeseries;
 
 pub use config::StorageConfig;
 pub use error::{Error, Result};
 pub use maintenance::{disk_free_bytes, CacheStats, CleanupPolicy, CleanupReport};
 pub use memcache::MemCache;
+pub use news_archive::*;
+pub use quality::*;
 pub use timeseries::{BarRow, FundFlowRow};
 
 use std::path::PathBuf;
@@ -189,7 +193,8 @@ pub struct AgentTask {
     pub id: String,
     /// Task kind, e.g. "analysis".
     pub kind: String,
-    /// Lifecycle status: "running" | "suspended" | "completed" | "failed" | "cancelled".
+    /// Lifecycle status: "running" | "suspended" | "completed" |
+    /// "verification_failed" | "failed" | "cancelled".
     pub status: String,
     /// JSON-encoded workflow state (task spec, round counter, evidence).
     pub state_json: String,
@@ -197,6 +202,48 @@ pub struct AgentTask {
     pub created_at: i64,
     /// Last update time, unix seconds.
     pub updated_at: i64,
+}
+
+/// Immutable Quant Lab research snapshot (migration v20).
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuantResearchSnapshotRow {
+    pub snapshot_id: String,
+    pub function_version: String,
+    pub metric: String,
+    pub symbols_json: String,
+    pub data_versions_json: String,
+    pub config_json: String,
+    pub snapshot_json: String,
+    pub created_at: i64,
+}
+
+/// One metadata-only event in the append-only Agent tool audit trail.
+///
+/// Request/response bodies, raw arguments, provider errors and credentials
+/// are intentionally absent. `args_fingerprint` is a one-way digest used to
+/// correlate retries without retaining sensitive input.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AgentToolAudit {
+    /// SQLite sequence id; `None` before insertion.
+    pub id: Option<i64>,
+    /// Durable Agent task id.
+    pub task_id: String,
+    /// Stable tool-call id within the task.
+    pub call_id: String,
+    /// Registered tool name.
+    pub tool: String,
+    /// Immutable permission domain assigned by the tool registry.
+    pub permission_domain: String,
+    /// Invocation origin, e.g. `model_plan` or `explicit_user`.
+    pub origin: String,
+    /// One-way digest of canonicalized arguments.
+    pub args_fingerprint: String,
+    /// Lifecycle event: requested|denied|succeeded|failed|invalid_arguments.
+    pub event: String,
+    /// Runtime when this is a terminal event.
+    pub elapsed_ms: Option<i64>,
+    /// Event time, unix seconds.
+    pub created_at: i64,
 }
 
 /// A supply-chain graph node row (migration v3).
@@ -385,6 +432,93 @@ impl Storage {
     /// In-memory LRU cache for hot tool results.
     pub fn tool_mem_cache(&self) -> &MemCache<ToolCacheEntry> {
         &self.inner.tool_mem
+    }
+
+    /// Persist a deterministic Quant Lab snapshot. Replaying identical
+    /// inputs is idempotent because snapshot_id hashes all relevant inputs.
+    pub async fn quant_research_snapshot_put(&self, row: QuantResearchSnapshotRow) -> Result<()> {
+        self.run(move |conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO quant_research_snapshots
+                 (snapshot_id,function_version,metric,symbols_json,data_versions_json,
+                  config_json,snapshot_json,created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    row.snapshot_id,
+                    row.function_version,
+                    row.metric,
+                    row.symbols_json,
+                    row.data_versions_json,
+                    row.config_json,
+                    row.snapshot_json,
+                    row.created_at,
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Load a Quant Lab snapshot by its immutable id.
+    pub async fn quant_research_snapshot_get(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<Option<QuantResearchSnapshotRow>> {
+        let snapshot_id = snapshot_id.to_string();
+        self.run(move |conn| {
+            use rusqlite::OptionalExtension;
+            conn.query_row(
+                "SELECT snapshot_id,function_version,metric,symbols_json,data_versions_json,
+                        config_json,snapshot_json,created_at
+                   FROM quant_research_snapshots WHERE snapshot_id=?1",
+                [snapshot_id],
+                |row| {
+                    Ok(QuantResearchSnapshotRow {
+                        snapshot_id: row.get(0)?,
+                        function_version: row.get(1)?,
+                        metric: row.get(2)?,
+                        symbols_json: row.get(3)?,
+                        data_versions_json: row.get(4)?,
+                        config_json: row.get(5)?,
+                        snapshot_json: row.get(6)?,
+                        created_at: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+        .await
+    }
+
+    /// Recent Quant Lab snapshots for the replay/history picker.
+    pub async fn quant_research_snapshot_list(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<QuantResearchSnapshotRow>> {
+        let limit = limit.clamp(1, 100) as i64;
+        self.run(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT snapshot_id,function_version,metric,symbols_json,data_versions_json,
+                        config_json,snapshot_json,created_at
+                   FROM quant_research_snapshots ORDER BY created_at DESC LIMIT ?1",
+            )?;
+            let rows = stmt.query_map([limit], |row| {
+                Ok(QuantResearchSnapshotRow {
+                    snapshot_id: row.get(0)?,
+                    function_version: row.get(1)?,
+                    metric: row.get(2)?,
+                    symbols_json: row.get(3)?,
+                    data_versions_json: row.get(4)?,
+                    config_json: row.get(5)?,
+                    snapshot_json: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into)
+        })
+        .await
     }
 
     // ------------------------------------------------------------------
@@ -938,6 +1072,59 @@ impl Storage {
         .await
     }
 
+    /// Append a metadata-only Agent tool audit event.
+    pub async fn agent_tool_audit_append(&self, audit: AgentToolAudit) -> Result<i64> {
+        self.run(move |conn| {
+            conn.execute(
+                "INSERT INTO agent_tool_audit
+                 (task_id, call_id, tool, permission_domain, origin,
+                  args_fingerprint, event, elapsed_ms, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    audit.task_id,
+                    audit.call_id,
+                    audit.tool,
+                    audit.permission_domain,
+                    audit.origin,
+                    audit.args_fingerprint,
+                    audit.event,
+                    audit.elapsed_ms,
+                    audit.created_at,
+                ],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+        .await
+    }
+
+    /// List a task's tool audit events in execution order.
+    pub async fn agent_tool_audit_list(&self, task_id: &str) -> Result<Vec<AgentToolAudit>> {
+        let task_id = task_id.to_string();
+        self.run(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, task_id, call_id, tool, permission_domain, origin,
+                        args_fingerprint, event, elapsed_ms, created_at
+                 FROM agent_tool_audit WHERE task_id = ?1 ORDER BY id ASC",
+            )?;
+            let rows = stmt.query_map(params![task_id], |row| {
+                Ok(AgentToolAudit {
+                    id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    call_id: row.get(2)?,
+                    tool: row.get(3)?,
+                    permission_domain: row.get(4)?,
+                    origin: row.get(5)?,
+                    args_fingerprint: row.get(6)?,
+                    event: row.get(7)?,
+                    elapsed_ms: row.get(8)?,
+                    created_at: row.get(9)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+        .await
+    }
+
     // ------------------------------------------------------------------
     // predictions
     // ------------------------------------------------------------------
@@ -1019,7 +1206,12 @@ impl Storage {
         self.run(move |conn| {
             conn.execute(
                 "INSERT INTO reports (id, kind, title, content_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(id) DO UPDATE SET
+                    kind = excluded.kind,
+                    title = excluded.title,
+                    content_json = excluded.content_json,
+                    created_at = excluded.created_at",
                 params![
                     report.id,
                     report.kind,
@@ -1029,6 +1221,29 @@ impl Storage {
                 ],
             )?;
             Ok(())
+        })
+        .await
+    }
+
+    /// Load one persisted report by its stable task id.
+    pub async fn reports_get(&self, id: &str) -> Result<Option<Report>> {
+        let id = id.to_string();
+        self.run(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, kind, title, content_json, created_at
+                 FROM reports WHERE id = ?1",
+            )?;
+            let mut rows = stmt.query(params![id])?;
+            Ok(match rows.next()? {
+                Some(row) => Some(Report {
+                    id: row.get(0)?,
+                    kind: row.get(1)?,
+                    title: row.get(2)?,
+                    content_json: row.get(3)?,
+                    created_at: row.get(4)?,
+                }),
+                None => None,
+            })
         })
         .await
     }
@@ -1810,6 +2025,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn verified_report_roundtrip_and_update() {
+        let (_dir, storage) = test_storage();
+        storage
+            .reports_insert(Report {
+                id: "run-1".into(),
+                kind: "verification-blocked".into(),
+                title: "报告".into(),
+                content_json: "{\"verification\":\"failed\"}".into(),
+                created_at: 1,
+            })
+            .await
+            .unwrap();
+        storage
+            .reports_insert(Report {
+                id: "run-1".into(),
+                kind: "verified-research".into(),
+                title: "报告（修订）".into(),
+                content_json: "{\"verification\":\"passed\",\"tool_versions\":{},\"data_versions\":{}}".into(),
+                created_at: 2,
+            })
+            .await
+            .unwrap();
+        let report = storage.reports_get("run-1").await.unwrap().unwrap();
+        assert_eq!(report.kind, "verified-research");
+        assert_eq!(report.created_at, 2);
+        assert!(report.content_json.contains("tool_versions"));
+    }
+
+    #[tokio::test]
     async fn predictions_lifecycle() {
         let (_dir, storage) = test_storage();
         storage
@@ -1866,6 +2110,37 @@ mod tests {
         let list = storage.agent_task_list().await.unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, "t1");
+    }
+
+    #[tokio::test]
+    async fn agent_tool_audit_is_append_only_metadata() {
+        let (_dir, storage) = test_storage();
+        for event in ["requested", "succeeded"] {
+            storage
+                .agent_tool_audit_append(AgentToolAudit {
+                    id: None,
+                    task_id: "t1".into(),
+                    call_id: "call-1".into(),
+                    tool: "search_web".into(),
+                    permission_domain: "read_only_network".into(),
+                    origin: "model_plan".into(),
+                    args_fingerprint: "sha256:opaque".into(),
+                    event: event.into(),
+                    elapsed_ms: (event == "succeeded").then_some(123),
+                    created_at: now_secs(),
+                })
+                .await
+                .unwrap();
+        }
+        let rows = storage.agent_tool_audit_list("t1").await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].event, "requested");
+        assert_eq!(rows[1].elapsed_ms, Some(123));
+        assert!(storage
+            .agent_tool_audit_list("other")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

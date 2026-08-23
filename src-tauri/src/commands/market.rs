@@ -275,7 +275,40 @@ pub async fn get_quote(
     symbol: String,
 ) -> Result<astock_core::Quote, CmdError> {
     let symbol = parse_symbol(&symbol)?;
-    let fetched = state.market.quote(&symbol).await?;
+    let started = std::time::Instant::now();
+    let fetched = match state.market.quote(&symbol).await {
+        Ok(fetched) => fetched,
+        Err(error) => {
+            let _ = super::data_quality::persist_quality_failure(
+                &state,
+                astock_core::DatasetKind::RealtimeQuote,
+                "market_failover",
+                Some(symbol.code().to_string()),
+                "get_quote",
+                started.elapsed().as_millis() as u64,
+                error.to_string(),
+            )
+            .await;
+            return Err(error.into());
+        }
+    };
+    let provider = fetched.source.to_string();
+    let source_url = match provider.as_str() {
+        "eastmoney" => Some("https://push2.eastmoney.com".to_string()),
+        "tencent" => Some("https://web.ifzq.gtimg.cn".to_string()),
+        "sina" => Some("https://money.finance.sina.com.cn".to_string()),
+        _ => None,
+    };
+    super::data_quality::persist_quote_source(
+        &state,
+        symbol.code(),
+        &provider,
+        source_url,
+        "get_quote",
+        Some(started.elapsed().as_millis() as u64),
+        &fetched,
+    )
+    .await?;
     if let Some(record) = state.market.security_master.get(symbol.code()) {
         state.storage.securities_upsert(vec![record]).await?;
     }
@@ -358,6 +391,73 @@ pub async fn get_provider_health(
     state: State<'_, AppState>,
 ) -> Result<Vec<astock_market_data::ProviderHealth>, CmdError> {
     Ok(state.market.provider_health())
+}
+
+/// Detailed health and declared capabilities for each pluggable news source.
+/// Reading this snapshot never contacts an upstream service.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_news_provider_health(
+    state: State<'_, AppState>,
+) -> Result<Vec<astock_market_data::NewsProviderHealth>, CmdError> {
+    Ok(state.market.finance_news.provider_health().await)
+}
+
+/// Persistently enable or disable one news source. Manual disable is strict:
+/// stale data from the source will not participate in later research.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn set_news_provider_enabled(
+    state: State<'_, AppState>,
+    provider_id: String,
+    enabled: bool,
+) -> Result<(), CmdError> {
+    state
+        .market
+        .finance_news
+        .set_provider_enabled(&provider_id, enabled)
+        .await
+        .map_err(|error| {
+            CmdError::new(
+                format!("news_provider_{:?}", error.kind).to_ascii_lowercase(),
+                error.message,
+            )
+        })
+}
+
+/// Query latest durable news revisions after an application restart.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_news_archive_recent(
+    state: State<'_, AppState>,
+    limit: usize,
+) -> Result<Vec<astock_storage::ArchivedNewsRevision>, CmdError> {
+    Ok(state.storage.news_archive_recent(limit).await?)
+}
+
+/// Query the immutable revision chain for one source document.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_news_archive_revisions(
+    state: State<'_, AppState>,
+    document_id: String,
+) -> Result<Vec<astock_storage::ArchivedNewsRevision>, CmdError> {
+    Ok(state.storage.news_archive_revisions(&document_id).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn check_news_archive_integrity(state: State<'_, AppState>) -> Result<String, CmdError> {
+    Ok(state.storage.news_archive_integrity_check().await?)
+}
+
+/// Recent provider fetch/parse observations for drill-down diagnostics.
+/// Raw evidence bodies are never returned through this command.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_news_ingest_observations(
+    state: State<'_, AppState>,
+    provider_id: Option<String>,
+    limit: usize,
+) -> Result<Vec<astock_storage::NewsIngestObservation>, CmdError> {
+    Ok(state
+        .storage
+        .news_ingest_observations(provider_id.as_deref(), limit)
+        .await?)
 }
 
 /// Intraday minute (分时) series for the current session.

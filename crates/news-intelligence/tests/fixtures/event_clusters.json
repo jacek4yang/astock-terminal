@@ -1,0 +1,9 @@
+[
+  {"id":"a1","title":"紫金矿业拟回购股份","summary":"紫金矿业601899拟回购不超过10亿元股份","url":"https://official.example/a","source_id":"official","event_time_utc":1800000000,"first_seen_time_utc":1800000060,"group":"a"},
+  {"id":"a2","title":"紫金矿业：拟斥资不超10亿元回购","summary":"601899公告拟回购公司股份","url":"https://media.example/a","source_id":"licensed","event_time_utc":1800000000,"first_seen_time_utc":1800000120,"group":"a"},
+  {"id":"a3","title":"一图看懂紫金矿业回购公告","summary":"摘要：紫金矿业601899回购上限10亿元","url":"https://summary.example/a","source_id":"public","event_time_utc":1800000000,"first_seen_time_utc":1800000180,"group":"a"},
+  {"id":"b1","title":"招商轮船发布业绩预告","summary":"招商轮船601872预计净利润增长20%","url":"https://official.example/b","source_id":"official","event_time_utc":1800000000,"first_seen_time_utc":1800000060,"group":"b"},
+  {"id":"b2","title":"招商轮船净利润预计增长20%","summary":"601872披露业绩预告","url":"https://media.example/b","source_id":"licensed","event_time_utc":1800000000,"first_seen_time_utc":1800000120,"group":"b"},
+  {"id":"c1","title":"沃森生物终止一项临床试验","summary":"沃森生物300142公告终止临床试验","url":"https://official.example/c","source_id":"official","event_time_utc":1800000000,"first_seen_time_utc":1800000060,"group":"c"},
+  {"id":"d1","title":"有色金属行业政策更新","summary":"监管部门发布行业政策","url":"https://policy.example/d","source_id":"official","event_time_utc":1800000000,"first_seen_time_utc":1800000060,"group":"d"}
+]

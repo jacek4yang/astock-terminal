@@ -216,6 +216,911 @@ export interface ProviderHealthItem {
 
 export const getProviderHealth = () => cmd<ProviderHealthItem[]>("get_provider_health");
 
+export type DatasetKind =
+  | "realtime_quote"
+  | "intraday_minute"
+  | "daily_kline"
+  | "weekly_kline"
+  | "monthly_kline"
+  | "fund_flow"
+  | "fundamentals"
+  | "valuation"
+  | "announcement"
+  | "news"
+  | "knowledge_graph"
+  | "macro"
+  | "backtest"
+  | "search_discovery"
+  | "other";
+
+export interface QualityFlag {
+  code: string;
+  severity: "info" | "warning" | "blocking";
+  field: string | null;
+  message: string;
+}
+
+export interface DataQualitySummary {
+  dataset: DatasetKind;
+  dataset_name: string;
+  freshness: "fresh" | "stale" | "expired";
+  age_secs: number;
+  expected_cadence_secs: number;
+  stale_after_secs: number;
+  hard_expiry_secs: number;
+  quality_flags: QualityFlag[];
+  confidence_ceiling: "high" | "medium" | "low" | "blocked";
+  allow_high_confidence: boolean;
+  allow_deterministic_compute: boolean;
+}
+
+export interface QualityObservation {
+  observation_id: number | null;
+  dataset: DatasetKind;
+  provider: string;
+  entity_key: string | null;
+  operation: string;
+  success: boolean;
+  latency_ms: number | null;
+  summary: DataQualitySummary;
+  missing_fields: number;
+  conflicts: number;
+  error_kind: string | null;
+  recorded_at: number;
+}
+
+export interface DatasetSlo {
+  dataset: DatasetKind;
+  dataset_name: string;
+  provider: string;
+  observations: number;
+  successes: number;
+  error_rate: number;
+  latency_p50_ms: number | null;
+  latency_p95_ms: number | null;
+  last_success_at: number | null;
+  consecutive_stale: number;
+  missing_fields: number;
+  conflicts: number;
+  current_freshness: "fresh" | "stale" | "expired";
+  expected_cadence_secs: number;
+  stale_after_secs: number;
+  hard_expiry_secs: number;
+  latest_quality_flags: QualityFlag[];
+}
+
+export interface FieldLineageRecord {
+  lineage_id: number | null;
+  dataset: DatasetKind;
+  entity_key: string;
+  field_path: string;
+  source: string;
+  source_url: string | null;
+  event_time: number | null;
+  as_of_time: number | null;
+  publish_time: number | null;
+  fetched_at: number;
+  parser_version: string;
+  schema_version: string;
+  license: string;
+  unit: string | null;
+  currency: string | null;
+  adjustment: string;
+  revision: string | null;
+  accounting_scope: string;
+  quality_flags: QualityFlag[];
+  created_at: number;
+}
+
+export interface NumericObservation {
+  provider: string;
+  field: string;
+  value: number;
+  unit: string;
+  currency: string | null;
+  adjustment: string;
+  accounting_scope: string;
+  as_of_time: string | null;
+}
+
+export interface ReconciliationResult {
+  field: string;
+  left: NumericObservation;
+  right: NumericObservation;
+  absolute_diff: number;
+  relative_diff: number;
+  tolerance: { absolute: number; relative: number };
+  status: "matched" | "within_tolerance" | "conflict" | "incompatible_contract";
+  explanation: string;
+  quality_flags: QualityFlag[];
+}
+
+export interface ReconciliationAudit {
+  reconciliation_id: number | null;
+  dataset: DatasetKind;
+  entity_key: string;
+  result: ReconciliationResult;
+  blocking: boolean;
+  compared_at: number;
+}
+
+export interface QuoteReconciliationReport {
+  symbol: string;
+  compared_at: number;
+  results: ReconciliationResult[];
+  failures: { provider: string; error: string }[];
+  blocking: boolean;
+  comparable_sources: number;
+  limitation: string | null;
+}
+
+export interface ValuationReconciliationReport {
+  symbol: string;
+  compared_at: number;
+  results: ReconciliationResult[];
+  failures: { provider: string; error: string }[];
+  blocking: boolean;
+  comparable_sources: number;
+  limitation: string | null;
+}
+
+export interface DataHealthReport {
+  generated_at: number;
+  window_secs: number;
+  actual_observations: number;
+  coverage_start: number | null;
+  coverage_end: number | null;
+  coverage_secs: number;
+  continuous_window_satisfied: boolean;
+  rows: DatasetSlo[];
+  markdown: string;
+  limitation: string | null;
+}
+
+export const getDataQualitySlo = (windowSecs: number) =>
+  cmd<DatasetSlo[]>("get_data_quality_slo", { window_secs: windowSecs });
+export const getDataQualityObservations = (
+  dataset: DatasetKind | null,
+  provider: string | null,
+  limit = 100,
+) => cmd<QualityObservation[]>("get_data_quality_observations", { dataset, provider, limit });
+export const getFieldLineage = (
+  dataset: DatasetKind | null,
+  entityKey: string | null,
+  limit = 100,
+) => cmd<FieldLineageRecord[]>("get_field_lineage", { dataset, entity_key: entityKey, limit });
+export const getDataReconciliations = (
+  dataset: DatasetKind | null,
+  entityKey: string | null,
+  limit = 100,
+) => cmd<ReconciliationAudit[]>("get_data_reconciliations", { dataset, entity_key: entityKey, limit });
+export const reconcileQuoteSources = (symbol: string) =>
+  cmd<QuoteReconciliationReport>("reconcile_quote_sources", { symbol });
+export const reconcileValuationSources = (symbol: string) =>
+  cmd<ValuationReconciliationReport>("reconcile_valuation_sources", { symbol });
+export const getDataHealthReport = (windowSecs: number) =>
+  cmd<DataHealthReport>("get_data_health_report", { window_secs: windowSecs });
+
+export type NewsTrustTier =
+  | "first_party_disclosure"
+  | "licensed_media"
+  | "public_aggregator"
+  | "search_lead";
+
+export type NewsDeliveryMode = "push_stream" | "scheduled_index" | "published_incremental";
+
+/** 可插拔资讯来源的能力、调度约束与运行状态。读取快照不会访问上游。 */
+export interface NewsProviderHealthItem {
+  provider_id: string;
+  display_name: string;
+  enabled: boolean;
+  circuit_state: "closed" | "open" | string;
+  trust_tier: NewsTrustTier;
+  trust_tier_name: string;
+  modes: NewsDeliveryMode[];
+  license: string;
+  endpoint: string;
+  min_refresh_secs: number;
+  rate_limit_per_minute: number;
+  last_success_at: number | null;
+  last_latency_ms: number | null;
+  attempts: number;
+  failures: number;
+  failure_rate: number;
+  stale: boolean;
+  cursor_present: boolean;
+  cooldown_remaining_secs: number | null;
+  last_error_kind: string | null;
+  archived_documents: number;
+  archived_revisions: number;
+  archive_last_observed_at: number | null;
+  stale_age_secs: number | null;
+}
+
+export interface EvidenceTimestamp {
+  utc: number | null;
+  original: string | null;
+}
+
+export interface ArchivedNewsRevision {
+  document_id: string;
+  canonical_url: string;
+  source_id: string;
+  source_name: string;
+  license: string;
+  content_type: string;
+  language: string;
+  parser_version: string;
+  content_hash: string;
+  current_revision_id: string | null;
+  document_first_seen_time_utc: number;
+  last_observed_at: number;
+  retention_class: string;
+  revision_id: string;
+  revision_hash: string;
+  title: string;
+  factual_summary: string;
+  supersedes_revision_id: string | null;
+  event_time: EvidenceTimestamp;
+  publish_time: EvidenceTimestamp;
+  first_seen_time_utc: number;
+  revision_time: EvidenceTimestamp;
+  raw_snapshot_hash: string | null;
+}
+
+export interface NewsUserState {
+  document_id: string;
+  is_read: boolean;
+  pinned: boolean;
+  favorite: boolean;
+  ignored: boolean;
+  updated_at: number;
+}
+
+export interface NewsCenterEventMeta {
+  cluster_id: string;
+  independent_sources: number;
+  old_republication: boolean;
+  conflict_fields: string[];
+  status: string;
+}
+
+export type EffectiveSessionRole =
+  | "same_day_premarket"
+  | "intraday"
+  | "next_trading_day"
+  | "historical_only";
+
+export type EffectiveMarketPhase =
+  | "premarket"
+  | "opening_auction"
+  | "morning_trading"
+  | "lunch_break"
+  | "afternoon_trading"
+  | "closing_auction"
+  | "after_close"
+  | "non_trading_day";
+
+export interface EffectiveNewsSession {
+  target_trading_date: string;
+  role: EffectiveSessionRole;
+  phase: EffectiveMarketPhase;
+  effective_at_utc: number;
+  effective_at_china: string;
+  publication_precision: "exact_time" | "date_only" | "missing";
+  time_uncertain: boolean;
+  evidence_use: "decision_evidence" | "verification_lead" | "historical_context";
+  can_increase_confidence: boolean;
+  rationale: string;
+  rules_version: string;
+}
+
+export interface NewsCenterItem {
+  revision: ArchivedNewsRevision;
+  user_state: NewsUserState;
+  important: boolean;
+  importance_reason: string;
+  event_type: string;
+  verification: string;
+  verification_name: string;
+  event: NewsCenterEventMeta | null;
+  entity_links: DocumentEntityLink[];
+  effective_session: EffectiveNewsSession;
+}
+
+export interface NewsCenterSourceFacet {
+  source_id: string;
+  source_name: string;
+  count: number;
+}
+
+export interface NewsCenterPage {
+  items: NewsCenterItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  has_more: boolean;
+  generated_at: number;
+  newest_first_seen: number | null;
+  newest_observed_at: number | null;
+  archive_age_secs: number | null;
+  source_facets: NewsCenterSourceFacet[];
+}
+
+export interface NewsCenterQuery {
+  keyword: string;
+  category: string;
+  source_id: string;
+  importance: string;
+  entity_keywords: string[];
+  event_type: string;
+  language: string;
+  verification: string;
+  user_state: string;
+  from_utc: number | null;
+  to_utc: number | null;
+  page: number;
+  page_size: number;
+}
+
+export interface NewsRefreshResult {
+  items: unknown[];
+  successful_sources: string[];
+  stale_sources: string[];
+  errors: string[];
+}
+
+export interface NewsIngestObservation {
+  observation_id: number;
+  document_id: string | null;
+  revision_id: string | null;
+  provider_id: string;
+  endpoint: string;
+  fetched_at: number;
+  http_status: number | null;
+  etag: string | null;
+  last_modified: string | null;
+  latency_ms: number | null;
+  parse_status: string;
+  parse_error: string | null;
+  raw_evidence_hash: string | null;
+  raw_evidence_present: boolean;
+}
+
+export type DocumentRelationship =
+  | "first_publication"
+  | "reprint"
+  | "summary"
+  | "follow_up"
+  | "commentary"
+  | "correction"
+  | "retraction"
+  | "duplicate_fetch";
+
+export interface SimilarityFeatures {
+  same_url: boolean;
+  same_content: boolean;
+  title_exact: boolean;
+  simhash_similarity: number;
+  minhash_similarity: number;
+  semantic_similarity: number;
+  entity_overlap: number;
+  action_overlap: number;
+  time_proximity: number;
+}
+
+export interface ClusterExplanation {
+  score: number;
+  merge_threshold: number;
+  reasons: string[];
+  separation_reasons: string[];
+  features: SimilarityFeatures;
+}
+
+export interface NewsEventCluster {
+  cluster_id: string;
+  canonical_title: string;
+  event_time_utc: number | null;
+  first_seen_time_utc: number;
+  primary_revision_id: string;
+  first_source_id: string;
+  independent_sources: number;
+  evidence_diversity: number;
+  latest_revision_id: string;
+  conflict_fields: string[];
+  model_version: string;
+  status: string;
+  merged_into_cluster_id: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface NewsEventClusterMember {
+  cluster_id: string;
+  revision_id: string;
+  relationship: DocumentRelationship;
+  merge_score: number;
+  explanation: ClusterExplanation;
+  old_republication: boolean;
+  assigned_by: string;
+  model_version: string;
+  active: boolean;
+  created_at: number;
+}
+
+export interface NewsEventConflict {
+  cluster_id: string;
+  field_name: string;
+  values: string[];
+  authoritative_revision_id: string | null;
+  status: string;
+}
+
+export interface NewsEventClusterDetail {
+  cluster: NewsEventCluster;
+  members: NewsEventClusterMember[];
+  revisions: ArchivedNewsRevision[];
+  conflicts: NewsEventConflict[];
+}
+
+export interface EventEntityRef {
+  entity_id: string;
+  name: string;
+  listed_code: string | null;
+  role: string;
+}
+
+export interface EventFieldEvidence {
+  evidence_id: string;
+  event_id: string;
+  field_name: string;
+  provenance: string;
+  source_revision_id: string | null;
+  source_version_id: string | null;
+  quote_original: string | null;
+  quote_zh: string | null;
+  location: unknown;
+  observed_at: number;
+  confidence_bps: number;
+}
+
+export interface StructuredEvent {
+  event_id: string;
+  source_revision_id: string;
+  kind: string;
+  title: string;
+  subjects: EventEntityRef[];
+  objects: EventEntityRef[];
+  amount_text: string | null;
+  quantity_text: string | null;
+  unit_original: string | null;
+  currency_original: string | null;
+  baseline_period: string | null;
+  starts_at: number | null;
+  ends_at: number | null;
+  region: string | null;
+  conditions: string[];
+  official_effective: boolean | null;
+  reversibility: string;
+  impact_horizon: string;
+  lifecycle: string;
+  catalyst_path: string[];
+  validation_dates: number[];
+  invalidation_conditions: string[];
+  missing_fields: string[];
+  evidence: EventFieldEvidence[];
+  extraction_version: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface EventMetricContribution {
+  metric: string;
+  available: boolean;
+  value_bps: number | null;
+  score_contribution: number;
+  explanation: string;
+}
+
+export interface EventMarketAssessment {
+  assessment_id: string;
+  event_id: string;
+  security_code: string;
+  as_of_date: string;
+  fundamental: { direction: string; impact_bps: number | null; quantifiable: boolean; rationale: string; provenance: string };
+  market_opportunity: { price_in_state: string; opportunity: string; price_in_score: number | null; rationale: string; no_trade_directive: string };
+  expectation_gap: { structured_impact_bps: number | null; consensus_impact_bps: number | null; gap_bps: number | null; quantifiable: boolean; rationale: string };
+  diagnostics: {
+    pre_stock_return_bps: number | null;
+    pre_benchmark_return_bps: number | null;
+    pre_abnormal_return_bps: number | null;
+    sector_relative_bps: number | null;
+    abnormal_volume_bps: number | null;
+    valuation_change_bps: number | null;
+    historical_median_post_bps: number | null;
+    historical_sample_count: number;
+    components: EventMetricContribution[];
+  };
+  missing_inputs: string[];
+  data_versions: unknown;
+  created_at: number;
+}
+
+export interface EventResearchBundle {
+  event: StructuredEvent;
+  timeline: Array<{ transition_id: string; event_id: string; from_status: string; to_status: string; reason: string; evidence_id: string | null; transitioned_at: number }>;
+  assessment: EventMarketAssessment | null;
+  calibration: { ontology_kind: string; sample_count: number; median_post_abnormal_return_bps: number | null; positive_sample_ratio_bps: number | null; data_versions: string[] };
+}
+
+export interface EventAnalysisSnapshot {
+  job_id: string;
+  revision_id: string;
+  security_code: string | null;
+  running: boolean;
+  status: string;
+  phase: string;
+  progress: number;
+  current_item: string;
+  estimated_remaining_seconds: number | null;
+  recent_logs: string[];
+  result: EventResearchBundle | null;
+  error: string | null;
+  started_at: number;
+  updated_at: number;
+}
+
+export interface EventAnalysisStartResponse {
+  job_id: string;
+  started: boolean;
+  reused: boolean;
+  estimated_seconds: number;
+  note: string;
+}
+
+export interface AgentConclusionReview {
+  task_id: string;
+  conclusion_key: string;
+  triggering_revision: string;
+  trigger_relation: string;
+  status: string;
+  created_at: number;
+  reviewed_at: number | null;
+}
+
+export type EntityKind =
+  | "legal_entity"
+  | "listed_security"
+  | "subsidiary"
+  | "brand"
+  | "person"
+  | "product"
+  | "industry"
+  | "commodity"
+  | "region"
+  | "policy";
+
+export interface RelatedListedEntity {
+  entity_id: string;
+  code: string;
+  name: string;
+  relation_path: string[];
+  confidence: number;
+  eligible_for_agent: boolean;
+}
+
+export interface EntityLinkCandidate {
+  entity_id: string;
+  canonical_name: string;
+  entity_kind: EntityKind;
+  listed_code: string | null;
+  matched_name_type: string;
+  score: number;
+  reasons: string[];
+  related_listed: RelatedListedEntity[];
+}
+
+export interface DocumentEntityLink {
+  link_id: string;
+  revision_id: string;
+  span_start: number;
+  span_end: number;
+  span_text: string;
+  candidates: EntityLinkCandidate[];
+  final_entity_id: string | null;
+  final_entity_name: string | null;
+  final_entity_kind: EntityKind | null;
+  listed_code: string | null;
+  confidence: number;
+  reasons: string[];
+  linker_version: string;
+  evidence_revision_id: string;
+  status: "accepted" | "pending_review" | "rejected";
+  proposed_by_model: boolean;
+  eligible_for_agent: boolean;
+}
+
+export interface EntityLinkReview {
+  review_id: number;
+  link: DocumentEntityLink;
+  proposed_entity_id: string | null;
+  decision: string;
+  reason: string | null;
+  created_at: number;
+}
+
+export type SourceAuthority =
+  | "regulatory_exchange_government"
+  | "company_disclosure"
+  | "licensed_media"
+  | "aggregator"
+  | "social_lead"
+  | "unknown";
+
+export interface SourceDocumentSummary {
+  source_document_id: string;
+  canonical_url: string;
+  current_version_id: string | null;
+  authority: SourceAuthority;
+  authority_name: string;
+  is_primary_source: boolean;
+  access_status: string;
+  failure_kind: string | null;
+  failure_message: string | null;
+  first_fetched_at: number;
+  last_fetched_at: number;
+}
+
+export interface SourceScores {
+  reliability: number;
+  independence: number;
+  freshness: number;
+  note: string;
+}
+
+export interface SourceVersion {
+  source_version_id: string;
+  source_document_id: string;
+  canonical_url: string;
+  content_hash: string;
+  extracted_hash: string;
+  media_type: string;
+  title: string | null;
+  published_at: number | null;
+  fetched_at: number;
+  parser_version: string;
+  supersedes_version_id: string | null;
+  scores: SourceScores;
+  authority: SourceAuthority;
+  authority_name: string;
+  is_primary_source: boolean;
+  prompt_injection_detected: boolean;
+}
+
+export interface SourceSegment {
+  segment_id: string;
+  source_version_id: string;
+  page_number: number | null;
+  paragraph_index: number;
+  selector: string | null;
+  span_start: number;
+  span_end: number;
+  text: string;
+  text_hash: string;
+}
+
+export interface FactEvidence {
+  fact_id: string;
+  source_version_id: string;
+  segment_id: string;
+  fact_type: string;
+  field_name: string;
+  subject: string | null;
+  raw_value: string;
+  normalized_value: number | null;
+  original_unit: string | null;
+  normalized_unit: string | null;
+  page_number: number | null;
+  paragraph_index: number;
+  span_start: number;
+  span_end: number;
+}
+
+export interface SourceDocumentDetail {
+  document: SourceDocumentSummary;
+  version: SourceVersion | null;
+  segments: SourceSegment[];
+  facts: FactEvidence[];
+  verification_note: string;
+}
+
+export interface EvidenceConflict {
+  field_name: string;
+  values: FactEvidence[];
+  note: string;
+}
+
+export const getNewsProviderHealth = () =>
+  cmd<NewsProviderHealthItem[]>("get_news_provider_health");
+
+export const setNewsProviderEnabled = (providerId: string, enabled: boolean) =>
+  cmd<void>("set_news_provider_enabled", { provider_id: providerId, enabled });
+
+export const getNewsArchiveRecent = (limit = 100) =>
+  cmd<ArchivedNewsRevision[]>("get_news_archive_recent", { limit });
+
+export const getNewsArchiveRevisions = (documentId: string) =>
+  cmd<ArchivedNewsRevision[]>("get_news_archive_revisions", { document_id: documentId });
+
+export const checkNewsArchiveIntegrity = () => cmd<string>("check_news_archive_integrity");
+
+export const getNewsIngestObservations = (providerId: string, limit = 10) =>
+  cmd<NewsIngestObservation[]>("get_news_ingest_observations", {
+    provider_id: providerId,
+    limit,
+  });
+
+export const queryNewsCenter = (query: NewsCenterQuery) =>
+  cmd<NewsCenterPage>("query_news_center", { query });
+
+export const refreshNewsCenter = (
+  sources: string[] = [],
+  keyword: string | null = null,
+  symbol: string | null = null,
+  limit = 100,
+) => cmd<NewsRefreshResult>("refresh_news_center", { sources, keyword, symbol, limit });
+
+export const setNewsItemState = (
+  documentId: string,
+  action: "read" | "pinned" | "favorite" | "ignored",
+  value: boolean,
+) => cmd<NewsUserState>("set_news_item_state", {
+  document_id: documentId,
+  action,
+  value,
+});
+
+export const getNewsEventClusters = (limit = 50) =>
+  cmd<NewsEventCluster[]>("get_news_event_clusters", { limit });
+
+export const getNewsEventClusterDetail = (clusterId: string) =>
+  cmd<NewsEventClusterDetail>("get_news_event_cluster_detail", { cluster_id: clusterId });
+
+export const mergeNewsEventClusters = (fromClusterId: string, toClusterId: string, reason: string) =>
+  cmd<NewsEventClusterDetail>("merge_news_event_clusters", {
+    from_cluster_id: fromClusterId,
+    to_cluster_id: toClusterId,
+    reason,
+  });
+
+export const splitNewsEventRevision = (revisionId: string, reason: string) =>
+  cmd<NewsEventClusterDetail>("split_news_event_revision", { revision_id: revisionId, reason });
+
+export const startEventAnalysis = (
+  revisionId: string,
+  securityCode: string | null = null,
+  structuredImpactBps: number | null = null,
+  consensusImpactBps: number | null = null,
+) => cmd<EventAnalysisStartResponse>("event_analysis_start", {
+  request: {
+    revision_id: revisionId,
+    security_code: securityCode,
+    structured_impact_bps: structuredImpactBps,
+    consensus_impact_bps: consensusImpactBps,
+  },
+});
+
+export const getEventAnalysisStatus = (jobId: string) =>
+  cmd<EventAnalysisSnapshot>("event_analysis_status", { job_id: jobId });
+
+export const cancelEventAnalysis = (jobId: string) =>
+  cmd<{ cancelled: boolean }>("event_analysis_cancel", { job_id: jobId });
+
+export type RelationDocumentKind =
+  | "annual_report" | "semi_annual_report" | "prospectus" | "investor_relations"
+  | "product_manual" | "tender" | "major_contract" | "patent"
+  | "regulatory_approval" | "capacity_eia" | "customs_industry" | "other";
+export type SupplyRelationType =
+  | "supplies" | "customer_of" | "produces" | "consumes" | "won_bid"
+  | "contract_with" | "patent_for" | "approved_for" | "capacity_for";
+export interface RelationEvidence {
+  evidence_id: string; source_version_id: string; segment_id: string; page_number: number | null;
+  paragraph_index: number; span_start: number; span_end: number; quote_original: string;
+  independent_group: string; polarity: string;
+}
+export interface RelationValidationCheck { field: string; passed: boolean; detail: string }
+export interface RelationCandidate {
+  candidate_id: string; run_id: string; source_version_id: string; document_kind: RelationDocumentKind;
+  subject_text: string; object_text: string; relation: SupplyRelationType; product_text: string | null;
+  amount_text: string | null; share_bps: number | null; report_period: string | null; region: string | null;
+  subject_entity_id: string | null; object_entity_id: string | null;
+  subject_parent_entity_id: string | null; object_parent_entity_id: string | null;
+  disclosure_mode: string; confidence_bps: number; validation_status: string; validation: RelationValidationCheck[];
+  review_status: string; confidential: boolean; non_inferable: boolean; candidate_version: number;
+  proposed_by_model: boolean; publication_status: string | null; eligible_for_agent: boolean;
+  evidence: RelationEvidence[]; created_at: number; updated_at: number;
+}
+export interface RelationExtractionRun {
+  run_id: string; source_version_id: string; document_kind: RelationDocumentKind; extractor_kind: string;
+  model_id: string | null; model_version: string | null; schema_version: string; input_hash: string;
+  status: string; candidate_count: number; validation_errors: number; started_at: number;
+  completed_at: number | null; error: string | null;
+}
+export interface RelationExtractionRunDetail {
+  run: RelationExtractionRun; source_title: string | null; source_url: string;
+  candidates: RelationCandidate[]; diagnostics: string[];
+}
+export interface RelationExtractionSnapshot {
+  job_id: string; source_version_id: string; running: boolean; status: string; phase: string;
+  progress: number; current_item: string; segments_scanned: number; candidates_found: number;
+  validated: number; needs_review: number; estimated_remaining_seconds: number | null;
+  recent_logs: string[]; result: RelationExtractionRunDetail | null; error: string | null;
+  started_at: number; updated_at: number;
+}
+export interface RelationReviewPage { items: RelationCandidate[]; total: number; page: number; page_size: number; total_pages: number }
+export interface RelationReviewRequest {
+  candidate_id: string; decision: "accepted" | "modified" | "rejected" | "confidential" | "non_inferable" | "merge_entity";
+  reviewer: string; reason: string; subject_text: string | null; object_text: string | null;
+  relation: SupplyRelationType | null; product_text: string | null; merged_entity_id: string | null;
+  confidential: boolean; non_inferable: boolean; publish: boolean;
+  dataset_split: "train" | "dev" | "test" | null; training_eligible: boolean;
+}
+export interface RelationPublicationResult { candidate_id: string; publication_id: string | null; projection_key: string | null; status: string; note: string }
+export const startRelationExtraction = (sourceVersionId: string, documentKind: RelationDocumentKind) =>
+  cmd<{ job_id: string; started: boolean; reused: boolean; estimated_seconds: number; note: string }>("relation_extraction_start", { request: { source_version_id: sourceVersionId, document_kind: documentKind, model_id: null, model_version: null, model_candidates: [] } });
+export const getRelationExtractionStatus = (jobId: string) =>
+  cmd<RelationExtractionSnapshot>("relation_extraction_status", { job_id: jobId });
+export const cancelRelationExtraction = (jobId: string) => cmd<boolean>("relation_extraction_cancel", { job_id: jobId });
+export const queryRelationReviews = (status: string, documentKind: RelationDocumentKind | null, minConfidenceBps: number, page: number, pageSize: number) =>
+  cmd<RelationReviewPage>("query_relation_reviews", { status, document_kind: documentKind, min_confidence_bps: minConfidenceBps, page, page_size: pageSize });
+export const reviewRelationCandidate = (request: RelationReviewRequest) =>
+  cmd<RelationPublicationResult>("review_relation_candidate", { request });
+export const retractRelationCandidate = (candidateId: string, reason: string) =>
+  cmd<RelationPublicationResult>("retract_relation_candidate", { candidate_id: candidateId, reason });
+
+export const getPendingNewsEvidenceReviews = (limit = 50) =>
+  cmd<AgentConclusionReview[]>("get_pending_news_evidence_reviews", { limit });
+
+export const resolveNewsEvidenceReview = (
+  taskId: string,
+  conclusionKey: string,
+  triggeringRevision: string,
+) => cmd<boolean>("resolve_news_evidence_review", {
+  task_id: taskId,
+  conclusion_key: conclusionKey,
+  triggering_revision: triggeringRevision,
+});
+
+export const getNewsEntityLinks = (revisionIds: string[]) =>
+  cmd<DocumentEntityLink[]>("get_news_entity_links", { revision_ids: revisionIds });
+
+export const getEntityLinkReviews = (limit = 50) =>
+  cmd<EntityLinkReview[]>("get_entity_link_reviews", { limit });
+
+export const resolveEntityLinkReview = (
+  linkId: string,
+  entityId: string | null,
+  accept: boolean,
+  reason: string,
+) => cmd<boolean>("resolve_entity_link_review", {
+  link_id: linkId,
+  entity_id: entityId,
+  accept,
+  reason,
+});
+
+export const fetchSourceDocument = (url: string) =>
+  cmd<SourceDocumentDetail>("fetch_source_document", { url });
+
+export const getSourceDocuments = (limit = 100) =>
+  cmd<SourceDocumentSummary[]>("get_source_documents", { limit });
+
+export const getSourceDocument = (sourceVersionId: string) =>
+  cmd<SourceDocumentDetail>("get_source_document", { source_version_id: sourceVersionId });
+
+export const compareSourceEvidence = (sourceVersionIds: string[]) =>
+  cmd<EvidenceConflict[]>("compare_source_evidence", { source_version_ids: sourceVersionIds });
+
 // ==================== 分析引擎 ====================
 
 export interface TradePlan {
@@ -642,6 +1547,7 @@ export interface ValuationHistoryPoint {
 
 /** get_valuation 返回;各 section 可能整体缺失 */
 export interface ValuationJson {
+  parameter_snapshot_id: string;
   current: ValuationCurrent | null;
   percentile: ValuationPercentile | null;
   dcf: DcfValuation | null;
@@ -651,6 +1557,168 @@ export interface ValuationJson {
 export const getFundamentals = (symbol: string) =>
   cmd<FundamentalsJson>("get_fundamentals", { symbol });
 export const getValuation = (symbol: string) => cmd<ValuationJson>("get_valuation", { symbol });
+
+export type DriverValueOrigin =
+  | "historical_fact"
+  | "management_guidance"
+  | "market_consensus"
+  | "user_assumption"
+  | "agent_assumption"
+  | "industry_prior";
+
+export interface DriverEvidence {
+  source_version_id: string;
+  source_name: string;
+  report_period: string | null;
+  announced_date: string | null;
+  locator: string;
+  unit: string;
+  confidence_low: number;
+  confidence_high: number;
+}
+
+export interface DriverParameter {
+  id: string;
+  name: string;
+  category: string;
+  value: number | null;
+  low: number | null;
+  high: number | null;
+  unit: string;
+  origin: DriverValueOrigin;
+  report_period: string | null;
+  confidence: number;
+  evidence: DriverEvidence[];
+  note: string;
+}
+
+export interface DriverFormulaNode {
+  id: string;
+  name: string;
+  formula: string;
+  parameter_ids: string[];
+  unit: string;
+  historical_value: number | null;
+  forecast_low: number | null;
+  forecast_base: number | null;
+  forecast_high: number | null;
+}
+
+export interface DriverBranch {
+  id: string;
+  label: string;
+  dimension: string;
+  formula: string;
+  status: string;
+  parameter_ids: string[];
+  children: DriverBranch[];
+}
+
+export interface DriverScenario {
+  scenario: "bear" | "base" | "bull" | string;
+  revenue: number;
+  gross_profit: number;
+  operating_profit: number;
+  tax: number;
+  minority_profit: number;
+  parent_net_profit: number;
+  eps: number | null;
+  operating_cash_flow: number;
+  capex: number;
+  free_cash_flow: number;
+}
+
+export interface DriverSensitivityCell {
+  revenue_growth: number;
+  gross_margin: number;
+  eps: number | null;
+  free_cash_flow: number;
+}
+
+export interface EarningsDriverTree {
+  snapshot_id: string;
+  parameter_snapshot_id: string;
+  model_version: string;
+  symbol: string;
+  company_name: string | null;
+  industry: string | null;
+  industry_template: string;
+  industry_template_label: string;
+  revenue_formula: string;
+  cost_formula: string;
+  report_period: string | null;
+  knowledge_time: number;
+  golden_template_reviewed: boolean;
+  parameters: DriverParameter[];
+  revenue_tree: DriverBranch;
+  cost_tree: DriverBranch;
+  formula_nodes: DriverFormulaNode[];
+  scenarios: DriverScenario[];
+  sensitivity: DriverSensitivityCell[];
+  monte_carlo: {
+    samples: number;
+    seed: number;
+    eps_p10: number | null;
+    eps_p50: number | null;
+    eps_p90: number | null;
+    fcf_p10: number;
+    fcf_p50: number;
+    fcf_p90: number;
+    method: string;
+  } | null;
+  implied_assumption: {
+    current_price: number | null;
+    implied_fcf_growth: number | null;
+    search_low: number;
+    search_high: number;
+    wacc: number;
+    terminal_growth: number;
+    explanation: string;
+  };
+  quality: {
+    exact_eps_available: boolean;
+    model_completeness: number;
+    missing_core_drivers: string[];
+    refusal_reason: string | null;
+    warnings: string[];
+  };
+  provenance_legend: Record<string, string>;
+}
+
+export interface DriverShockInput {
+  kind: string;
+  magnitude: number;
+  lag_months: number;
+  pass_through?: number | null;
+  evidence_version_id?: string | null;
+  note?: string | null;
+}
+
+export interface EarningsShockBridge {
+  base_snapshot_id: string;
+  shocked_snapshot_id: string;
+  shocks: DriverShockInput[];
+  base: DriverScenario | null;
+  shocked: DriverScenario | null;
+  delta: {
+    revenue: number;
+    gross_profit: number;
+    operating_profit: number;
+    parent_net_profit: number;
+    eps: number | null;
+    operating_cash_flow: number;
+    free_cash_flow: number;
+  } | null;
+  changed_parameters: DriverParameter[];
+  warnings: string[];
+}
+
+export const getEarningsDriverTree = (symbol: string) =>
+  cmd<EarningsDriverTree>("get_earnings_driver_tree", { symbol });
+export const getEarningsDriverSnapshot = (snapshotId: string) =>
+  cmd<EarningsDriverTree>("get_earnings_driver_snapshot", { snapshot_id: snapshotId });
+export const runEarningsDriverShock = (symbol: string, shocks: DriverShockInput[]) =>
+  cmd<EarningsShockBridge>("run_earnings_driver_shock", { symbol, shocks });
 
 // ==================== 扫描 ====================
 
@@ -843,6 +1911,20 @@ export interface AgentTask {
   created_at: number;
   /** unix 秒 */
   updated_at: number;
+  prompt: string | null;
+  research_mode: string | null;
+  reasoning_depth: string | null;
+  model: string | null;
+  round: number;
+  max_rounds: number | null;
+  /** null 表示使用系统默认的完整工具集。 */
+  enabled_tools: string[] | null;
+  auto_resume_on_quota: boolean;
+  specialist_count: number;
+  evidence_count: number;
+  context_compactions: number;
+  multi_agent_reviewed: boolean;
+  last_error: string | null;
 }
 
 export interface AgentConversation {
@@ -870,10 +1952,84 @@ export interface AgentMessage {
 }
 
 export interface AgentEvidence {
+  evidence_id: string;
   tool: string;
   cache_key: string;
   source: string;
   fetched_at: string;
+  tool_version: string;
+  data_version: string;
+  source_tier: "primary" | "provider" | "engine" | "discovery_only" | string;
+  freshness: "fresh" | "stale" | "expired" | "unknown" | string;
+  blocking: boolean;
+  fields: AgentEvidenceField[];
+}
+
+export interface AgentEvidenceField {
+  evidence_id: string;
+  field_path: string;
+  value: unknown;
+  unit: string | null;
+  currency: string | null;
+  as_of: string;
+  freshness: string;
+  source_tier: string;
+  blocking: boolean;
+  calculation_id: string | null;
+}
+
+export type AgentClaimType =
+  | "fact"
+  | "calculation"
+  | "external"
+  | "inference"
+  | "assumption"
+  | "unknown";
+
+export interface AgentResearchClaim {
+  claim_id: string;
+  text: string;
+  claim_type: AgentClaimType;
+  evidence_ids: string[];
+  calculation_ids: string[];
+  as_of: string | null;
+  confidence: "high" | "medium" | "low" | "blocked";
+  assumptions: string[];
+  counter_evidence: string[];
+  invalidation: string[];
+  unknowns: string[];
+}
+
+export interface AgentVerificationFinding {
+  code: string;
+  severity: "error" | "warning";
+  claim_id: string | null;
+  message: string;
+}
+
+export interface AgentResearchReport {
+  schema_version: string;
+  as_of: string | null;
+  confidence: "high" | "medium" | "low" | "blocked";
+  claims: AgentResearchClaim[];
+  calculations: Array<{
+    calculation_id: string;
+    tool: string;
+    field_path: string;
+    value: unknown;
+    unit: string | null;
+    data_version: string;
+  }>;
+  assumptions: string[];
+  counter_evidence: string[];
+  invalidation: string[];
+  unknowns: string[];
+  verification: {
+    status: "passed" | "failed" | "not_applicable";
+    verifier_version: string;
+    verified_at: number;
+    findings: AgentVerificationFinding[];
+  };
 }
 
 export interface AgentReport {
@@ -881,7 +2037,25 @@ export interface AgentReport {
   answer: string;
   conclusions: unknown;
   evidence: AgentEvidence[];
-  generated_at: string;
+  generated_at: number;
+  /** Optional only for reports saved by pre-v5.1 builds. */
+  research?: AgentResearchReport;
+}
+
+export interface AgentToolWorkItem {
+  label: string;
+  stage: string;
+}
+
+export interface AgentToolProgressDetail {
+  completed: number;
+  total: number;
+  succeeded: number;
+  failed: number;
+  cache_hits: number;
+  records: number;
+  active: AgentToolWorkItem[];
+  recent_errors: string[];
 }
 
 export type AgentEvent =
@@ -909,15 +2083,16 @@ export type AgentEvent =
       args: unknown;
       position: number;
       total: number;
-      timeout_ms: number;
+      estimated_ms: number;
     }
   | {
       type: "tool_call_progress";
       call_id: string;
       name: string;
       elapsed_ms: number;
-      timeout_ms: number;
+      estimated_ms: number;
       stage: string;
+      detail?: AgentToolProgressDetail;
     }
   | {
       type: "tool_call_finished";
@@ -1022,6 +2197,92 @@ export interface SubgraphResult {
   edges: GraphEdge[];
 }
 
+export interface GraphSnapshotEdge {
+  revision_id: string;
+  identity_id: string;
+  revision_no: number;
+  src: string;
+  original_src: string;
+  dst: string;
+  original_dst: string;
+  relation: string;
+  product_scope?: string | null;
+  region_scope?: string | null;
+  weight: number;
+  disclosed_share?: number | null;
+  confidence: number;
+  effective_confidence: number;
+  source_type: string;
+  source_name: string;
+  source_url: string;
+  evidence_version: string;
+  status: string;
+  valid_from: number;
+  valid_to?: number | null;
+  observed_at: number;
+  recorded_at: number;
+  revalidate_after: number;
+}
+
+export interface GraphSnapshot {
+  snapshot_id: string;
+  business_time: number;
+  knowledge_time: number;
+  center?: string | null;
+  hops?: number;
+  nodes: GraphNode[];
+  edges: GraphSnapshotEdge[];
+  revision_ids: string[];
+  merge_ids: string[];
+  stale_count: number;
+  excluded_count: number;
+}
+
+export interface GraphEdgeRevision {
+  revision_id: string;
+  identity_id: string;
+  revision_no: number;
+  src: string;
+  dst: string;
+  relation: string;
+  product_scope?: string | null;
+  region_scope?: string | null;
+  weight: number;
+  confidence: number;
+  disclosed_share?: number | null;
+  source_type: string;
+  source_name: string;
+  source_url: string;
+  evidence_version: string;
+  status: string;
+  valid_from: number;
+  valid_to?: number | null;
+  observed_at: number;
+  recorded_at: number;
+  superseded_at?: number | null;
+  revalidate_after: number;
+  decay_half_life_days: number;
+  supersedes_revision_id?: string | null;
+  metadata: Record<string, unknown> | null;
+}
+
+export interface GraphHistoryBounds {
+  business_min: number;
+  business_max: number;
+  knowledge_min: number;
+  knowledge_max: number;
+  revision_count: number;
+  revalidation_due_count: number;
+}
+
+export interface GraphSnapshotDiff {
+  left_snapshot_id: string;
+  right_snapshot_id: string;
+  added_revision_ids: string[];
+  removed_revision_ids: string[];
+  changed_identity_ids: string[];
+}
+
 /** supply_chain_shock 单条传导结果 */
 export interface ShockEntry {
   node_id: string;
@@ -1073,10 +2334,170 @@ export interface RelationshipGraph {
 
 export const graphSubgraph = (symbolOrNode: string, hops?: number) =>
   cmd<SubgraphResult>("graph_subgraph", { symbol_or_node: symbolOrNode, hops });
+export const graphAsOf = (businessTime: number, knowledgeTime: number, symbolOrNode?: string, hops?: number) =>
+  cmd<GraphSnapshot>("graph_as_of", {
+    business_time: businessTime,
+    knowledge_time: knowledgeTime,
+    symbol_or_node: symbolOrNode,
+    hops,
+  });
+export const graphHistoryBounds = () => cmd<GraphHistoryBounds>("graph_history_bounds");
+export const graphEdgeTimeline = (identityId: string) =>
+  cmd<GraphEdgeRevision[]>("graph_edge_timeline", { identity_id: identityId });
+export const graphSnapshotGet = (snapshotId: string) =>
+  cmd<GraphSnapshot | null>("graph_snapshot_get", { snapshot_id: snapshotId });
+export const graphSnapshotDiff = (
+  leftBusinessTime: number,
+  leftKnowledgeTime: number,
+  rightBusinessTime: number,
+  rightKnowledgeTime: number,
+) => cmd<GraphSnapshotDiff>("graph_snapshot_diff", {
+  left_business_time: leftBusinessTime,
+  left_knowledge_time: leftKnowledgeTime,
+  right_business_time: rightBusinessTime,
+  right_knowledge_time: rightKnowledgeTime,
+});
 export const supplyChainShock = (subject: string, direction: "up" | "down", magnitudePct?: number) =>
   cmd<ShockJson>("supply_chain_shock", { subject, direction, magnitude_pct: magnitudePct });
 export const relationshipGraph = (symbols: string[], windowDays?: number) =>
   cmd<RelationshipGraph>("relationship_graph", { symbols, window_days: windowDays });
+
+// ==================== 可复现量化研究工作台 ====================
+
+export type QuantMetric =
+  | "pearson"
+  | "spearman"
+  | "kendall"
+  | "distance_correlation"
+  | "mutual_information"
+  | "lead_lag"
+  | "granger";
+
+export interface QuantResearchConfig {
+  symbols: string[];
+  metric: QuantMetric;
+  value_mode: "price_level" | "arithmetic_return" | "log_return";
+  frequency: "daily" | "weekly" | "monthly";
+  start_date: string | null;
+  end_date: string | null;
+  adjust: "qfq" | "hfq" | "none";
+  lookback_bars: number;
+  missing_policy: "drop" | "forward_fill" | "zero";
+  rolling_window: number;
+  max_lag: number;
+  controls: string[];
+  bootstrap_reps: number;
+  permutation_reps: number;
+  alpha: number;
+  fdr_method: "benjamini_hochberg" | "bonferroni" | "none";
+  max_pairs: number;
+  max_observations_per_pair: number;
+  seed: number;
+  oos_ratio: number;
+}
+
+export interface QuantStabilitySlice {
+  group: string;
+  label: string;
+  effect: number;
+  effective_n: number;
+}
+
+export interface QuantStabilitySummary {
+  slice_count: number;
+  same_direction_rate: number | null;
+  min_effect: number | null;
+  max_effect: number | null;
+  train_effect: number | null;
+  out_of_sample_effect: number | null;
+  outlier_robust_effect: number | null;
+  assessment: string;
+}
+
+export interface QuantPairInference {
+  left: string;
+  right: string;
+  directed: boolean;
+  effect: number;
+  effect_name: string;
+  confidence_low: number | null;
+  confidence_high: number | null;
+  confidence_method: string;
+  p_value: number | null;
+  p_value_method: string;
+  adjusted_p_value: number | null;
+  significant_raw: boolean | null;
+  significant_after_correction: boolean | null;
+  effective_n: number;
+  best_lag: number | null;
+  controls_used: string[];
+  stability: QuantStabilitySummary;
+  stability_slices: QuantStabilitySlice[];
+  interpretation: string;
+  conclusion: string;
+  warnings: string[];
+}
+
+export interface QuantResearchSnapshot {
+  snapshot_id: string;
+  function_version: string;
+  created_at: number;
+  config: QuantResearchConfig;
+  data_versions: Record<string, string>;
+  budget: {
+    requested_pairs: number;
+    executed_pairs: number;
+    pair_sampling: boolean;
+    max_observations_per_pair: number;
+    estimated_operations: number;
+    complexity: string;
+    explanation: string;
+  };
+  results: QuantPairInference[];
+  warnings: string[];
+  causality_boundary: string;
+}
+
+export interface QuantResearchJob {
+  job_id: string;
+  running: boolean;
+  status: "running" | "completed" | "cancelled" | "failed" | string;
+  phase: string;
+  progress: number;
+  done_pairs: number;
+  total_pairs: number;
+  current_pair: [string, string] | null;
+  effective_observations: number;
+  fetched_series: number;
+  total_series: number;
+  estimated_remaining_seconds: number | null;
+  recent_logs: string[];
+  result: QuantResearchSnapshot | null;
+  error: string | null;
+  started_at: number;
+  updated_at: number;
+}
+
+export interface QuantSnapshotListItem {
+  snapshot_id: string;
+  function_version: string;
+  metric: string;
+  symbols: string[];
+  data_versions: Record<string, string>;
+  config: QuantResearchConfig;
+  created_at: number;
+}
+
+export const quantResearchStart = (config: QuantResearchConfig) =>
+  cmd<QuantResearchJob>("quant_research_start", { config });
+export const quantResearchStatus = (jobId?: string | null) =>
+  cmd<QuantResearchJob | null>("quant_research_status", { job_id: jobId ?? null });
+export const quantResearchCancel = (jobId: string) =>
+  cmd<boolean>("quant_research_cancel", { job_id: jobId });
+export const quantResearchSnapshotGet = (snapshotId: string) =>
+  cmd<QuantResearchSnapshot | null>("quant_research_snapshot_get", { snapshot_id: snapshotId });
+export const quantResearchSnapshotList = (limit = 20) =>
+  cmd<QuantSnapshotListItem[]>("quant_research_snapshot_list", { limit });
 
 // ==================== 东财数据中心 ====================
 
@@ -1256,3 +2677,123 @@ export const getLiftStage = (start: string, end: string) =>
   cmd<DcResult<LiftStageRow>>("get_lift_stage", { start, end });
 export const getNotices = (code: string, days?: number) =>
   cmd<DcResult<NoticeRow>>("get_notices", days != null ? { code, days } : { code });
+
+// ==================== 正式披露中心 ====================
+
+export interface DisclosureSecurity { code: string; name: string; market: string }
+export interface DisclosureSource {
+  source_id: string; provider_id: string; provider_name: string; authority: string;
+  authority_name: string; entry_kind: string; upstream_id: string | null;
+  original_url: string; discovered_at: number; latency_ms: number | null; is_primary: boolean;
+}
+export interface DisclosureAttachment {
+  attachment_id: string; parent_attachment_id: string | null; name: string; original_url: string;
+  media_type: string; byte_size: number | null; content_hash: string | null;
+  source_version_id: string | null; extraction_status: string; page_count: number | null;
+  parser_version: string; review_reason: string | null;
+}
+export interface DisclosureEvent {
+  event_id: string; event_type: string; fields: Record<string, unknown>;
+  evidence: Record<string, unknown>; parser_version: string;
+}
+export interface DisclosureListItem {
+  disclosure_id: string; title: string; category: string; category_name: string;
+  status: string; status_name: string; published_at: number | null;
+  publication_precision: string; first_seen_at: number; discovery_latency_secs: number | null;
+  revision_of: string | null; cancelled_by: string | null; source_version_id: string | null;
+  extraction_status: string; review_reason: string | null; securities: DisclosureSecurity[];
+  sources: DisclosureSource[]; primary_verified: boolean;
+}
+export interface DisclosureDetail extends DisclosureListItem {
+  attachments: DisclosureAttachment[]; events: DisclosureEvent[];
+  revisions: DisclosureListItem[]; verification_note: string;
+}
+export interface DisclosureQuery {
+  security_code?: string | null; keyword?: string | null; category?: string | null;
+  status?: string | null; primary_only?: boolean; from_utc?: number | null; to_utc?: number | null;
+  page: number; page_size: number;
+}
+export interface DisclosurePage {
+  items: DisclosureListItem[]; total: number; page: number; page_size: number; total_pages: number;
+}
+export interface DisclosureSyncSnapshot {
+  job_id: string | null; running: boolean; status: string; phase: string; progress: number;
+  current_provider: string; current_item: string; discovered: number; normalized: number;
+  inserted: number; deduplicated: number; primary_verified: number; needs_review: number;
+  failures: number; estimated_remaining_seconds: number | null; recent_logs: string[];
+  started_at: number | null; updated_at: number; error: string | null;
+}
+export interface DisclosureProviderHealth {
+  provider_id: string; provider_name: string; authority: string; authority_name: string;
+  enabled: boolean; public_index_url: string; target_latency_secs: number;
+  rate_limit_per_minute: number; last_attempt_at: number | null; last_success_at: number | null;
+  consecutive_failures: number; retry_after: number | null; last_error: string | null; note: string;
+}
+export const queryDisclosures = (query: DisclosureQuery) => cmd<DisclosurePage>("query_disclosures", { query });
+export const getDisclosureDetail = (disclosureId: string) => cmd<DisclosureDetail>("get_disclosure_detail", { disclosure_id: disclosureId });
+export const disclosureSyncStart = (request: { security_code?: string; days?: number; max_pages?: number }) =>
+  cmd<{ started: boolean; job_id: string; estimated_seconds: number; note: string }>("disclosure_sync_start", { request });
+export const disclosureSyncStatus = () => cmd<DisclosureSyncSnapshot>("disclosure_sync_status");
+export const disclosureSyncCancel = () => cmd<{ cancelled: boolean }>("disclosure_sync_cancel");
+export const getDisclosureProviderHealth = () => cmd<DisclosureProviderHealth[]>("get_disclosure_provider_health");
+
+// ==================== 全球一级来源与 A 股传导 ====================
+
+export interface GlobalSyncSnapshot {
+  job_id: string | null; running: boolean; status: string; phase: string; progress: number;
+  current_provider: string; current_item: string; sources_total: number; sources_ready: number;
+  source_gaps: number; documents_discovered: number; documents_archived: number;
+  observations_saved: number; mapping_paths: number; failures: number;
+  estimated_remaining_seconds: number | null; recent_logs: string[];
+  started_at: number | null; updated_at: number; error: string | null;
+}
+export interface GlobalProviderRuntime {
+  provider_id: string; provider_name: string; region: string; category: string;
+  official_url: string; original_timezone: string; license_policy: string;
+  credential_env: string | null; enabled: boolean; target_latency_secs: number;
+  rate_limit_per_minute: number; last_attempt_at: number | null; last_success_at: number | null;
+  consecutive_failures: number; retry_after: number | null; last_error: string | null;
+}
+export interface GlobalDocumentListItem {
+  document_id: string; provider_id: string; provider_name: string; document_type: string;
+  title_original: string; title_zh: string | null; original_language: string; original_url: string;
+  source_version_id: string | null; published_at_utc: number; published_local: string;
+  published_timezone: string; revision_no: number; primary_verified: boolean;
+  translation_status: string; gap_reason: string | null; license_policy: string;
+}
+export interface GlobalDocumentQuery {
+  provider_id?: string | null; keyword?: string | null; primary_only: boolean;
+  page: number; page_size: number;
+}
+export interface GlobalDocumentPage {
+  items: GlobalDocumentListItem[]; total: number; page: number; page_size: number; total_pages: number;
+}
+export interface GlobalGoldenChain {
+  chain_id: string; name: string; global_sources: string[]; nodes: string[];
+  activation_requirement: string;
+}
+export interface GlobalEntity {
+  entity_id: string; entity_type: string; legal_name: string; name_zh: string | null;
+  jurisdiction: string; identifiers: Record<string, unknown>; aliases: string[];
+  translation_status: string;
+}
+export interface GlobalRelation {
+  relation_id: string; src_entity_id: string; dst_entity_id: string; relation_type: string;
+  direction: string; confidence_bps: number; evidence_document_id: string;
+  evidence_source_version_id: string; evidence_quote_original: string;
+  evidence_quote_zh: string | null; evidence_location: Record<string, unknown>;
+  observed_at: number; valid_from: number; valid_to: number | null;
+}
+export interface GlobalTransmissionPath {
+  path_id: string; entities: GlobalEntity[]; relations: GlobalRelation[];
+  path_confidence_bps: number; target_a_share_code: string;
+}
+export const globalSyncStart = (request: { sec_cik?: string; include_world_bank?: boolean; max_sec_filings?: number }) =>
+  cmd<{ started: boolean; job_id: string; estimated_seconds: number; note: string }>("global_sync_start", { request });
+export const globalSyncStatus = () => cmd<GlobalSyncSnapshot>("global_sync_status");
+export const globalSyncCancel = () => cmd<{ cancelled: boolean }>("global_sync_cancel");
+export const getGlobalProviderHealth = () => cmd<GlobalProviderRuntime[]>("get_global_provider_health");
+export const queryGlobalDocuments = (query: GlobalDocumentQuery) => cmd<GlobalDocumentPage>("query_global_documents", { query });
+export const getGlobalGoldenChains = () => cmd<GlobalGoldenChain[]>("get_global_golden_chains");
+export const getGlobalTransmissionPaths = (rootEntityId: string, asOf?: number, maxDepth?: number) =>
+  cmd<GlobalTransmissionPath[]>("get_global_transmission_paths", { root_entity_id: rootEntityId, as_of: asOf, max_depth: maxDepth });

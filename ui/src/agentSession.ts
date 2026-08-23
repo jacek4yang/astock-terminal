@@ -5,7 +5,13 @@ import type {
   AgentReport,
   AgentResearchMode,
   AgentStreamEnvelope,
+  AgentToolProgressDetail,
 } from "./lib/api";
+import {
+  emptyClarificationDraft,
+  hasClarification,
+  type ClarificationDraft,
+} from "./lib/agentClarification";
 
 export const DEFAULT_AGENT_TOOLS = [
   "get_quote",
@@ -22,15 +28,25 @@ export const DEFAULT_AGENT_TOOLS = [
   "get_watchlist",
   "get_cached_detail",
   "get_fundamentals",
+  "analyze_earnings_drivers",
   "run_valuation",
   "get_industry_chain",
   "run_supply_chain_shock",
   "build_relationship_graph",
+  "run_quant_research",
   "run_backtest",
   "iterate_strategy",
   "run_joinquant_research",
   "search_web",
+  "fetch_source_document",
+  "read_document",
+  "compare_source_evidence",
   "research_news",
+  "research_disclosures",
+  "research_global_transmission",
+  "analyze_event_price_in",
+  "research_supply_chain_relations",
+  "query_graph_as_of",
 ] as const;
 
 export interface ToolCallItem {
@@ -48,9 +64,22 @@ export interface ToolCallItem {
   total?: number;
   success?: boolean;
   error?: string;
-  timeoutMs?: number;
+  /** Typical duration for display only; never a cancellation deadline. */
+  estimatedMs?: number;
   stage?: string;
   lastProgressAt?: number;
+  /** Compact, persisted lifecycle trail for transparent diagnostics. */
+  timeline?: ToolTimelineEntry[];
+  /** Latest nested counters/current work for long-running tools. */
+  progressDetail?: AgentToolProgressDetail;
+}
+
+export interface ToolTimelineEntry {
+  at: number;
+  kind: "started" | "progress" | "success" | "error";
+  message: string;
+  elapsedMs?: number;
+  detail?: AgentToolProgressDetail;
 }
 
 export interface ChatMsg {
@@ -63,11 +92,15 @@ export interface ChatMsg {
   suspendedAt?: number;
   failed?: string;
   done: boolean;
+  /** Persisted form state for an Agent clarification card. */
+  clarificationDraft?: ClarificationDraft;
+  clarificationSubmitted?: boolean;
 }
 
 export type RunStatus =
   | "idle"
   | "running"
+  | "waiting_input"
   | "suspended"
   | "completed"
   | "failed"
@@ -112,6 +145,73 @@ interface AgentSessionState {
 let keySeq = Date.now();
 export const nextAgentKey = () => keySeq++;
 
+const MAX_PERSISTED_MESSAGES = 24;
+const MAX_PERSISTED_TEXT_CHARS = 48_000;
+
+function compactText(value: string | undefined, limit = MAX_PERSISTED_TEXT_CHARS) {
+  if (value == null || value.length <= limit) return value;
+  const half = Math.floor((limit - 48) / 2);
+  return `${value.slice(0, half)}\n\n……较长内容已保存在会话记录中……\n\n${value.slice(-half)}`;
+}
+
+/**
+ * The durable report remains in SQLite. The live chat only needs evidence
+ * fields referenced by published claims; retaining every raw tool field in
+ * WebView memory was the main source of large-session crashes.
+ */
+export function compactAgentReport(report: AgentReport): AgentReport {
+  if (!report.research) return { ...report, evidence: [] };
+  const evidenceIds = new Set(
+    report.research.claims.flatMap((claim) => claim.evidence_ids),
+  );
+  const calculationIds = new Set(
+    report.research.claims.flatMap((claim) => claim.calculation_ids),
+  );
+  const evidence = report.evidence.flatMap((snapshot) => {
+    const fields = (snapshot.fields ?? []).filter((field) =>
+      evidenceIds.has(field.evidence_id),
+    );
+    return evidenceIds.has(snapshot.evidence_id) || fields.length > 0
+      ? [{ ...snapshot, fields }]
+      : [];
+  });
+  return {
+    ...report,
+    evidence,
+    research: {
+      ...report.research,
+      calculations: report.research.calculations.filter((calculation) =>
+        calculationIds.has(calculation.calculation_id),
+      ),
+    },
+  };
+}
+
+/** Small recovery snapshot; the complete conversation is loaded from SQLite. */
+export function compactMessagesForPersistence(messages: ChatMsg[]): ChatMsg[] {
+  return messages.slice(-MAX_PERSISTED_MESSAGES).map((message) => ({
+    ...message,
+    raw: compactText(message.report ? "" : message.raw) ?? "",
+    failed: compactText(message.failed, 4_000),
+    tools: message.tools.slice(-24).map((tool) => ({
+      ...tool,
+      args: compactText(tool.args, 8_000),
+      error: compactText(tool.error, 4_000),
+      stage: compactText(tool.stage, 2_000),
+      timeline: tool.timeline?.slice(-24).map((entry) => ({
+        ...entry,
+        message: compactText(entry.message, 2_000) ?? "",
+      })),
+    })),
+    report: message.report
+      ? {
+          ...compactAgentReport(message.report),
+          answer: compactText(message.report.answer) ?? "",
+        }
+      : undefined,
+  }));
+}
+
 export const useAgentSession = create<AgentSessionState>()(
   persist(
     (set) => ({
@@ -139,8 +239,10 @@ export const useAgentSession = create<AgentSessionState>()(
       setAutoResumeOnQuota: (autoResumeOnQuota) => set({ autoResumeOnQuota }),
     }),
     {
-      name: "astock-agent-session-v2",
-      version: 3,
+      // Avoid parsing legacy multi-megabyte evidence snapshots before a
+      // migration can run; complete conversations remain available in SQLite.
+      name: "astock-agent-session-v3",
+      version: 1,
       storage: createJSONStorage(() => window.localStorage),
       migrate: (persisted, version) => {
         const state = persisted as Partial<AgentSessionState>;
@@ -153,11 +255,11 @@ export const useAgentSession = create<AgentSessionState>()(
         return {
           ...state,
           enabledTools:
-            version < 3 && hadAllLegacyTools ? [...DEFAULT_AGENT_TOOLS] : enabled,
+            version < 1 && hadAllLegacyTools ? [...DEFAULT_AGENT_TOOLS] : enabled,
         } as AgentSessionState;
       },
       partialize: (state) => ({
-        msgs: state.msgs,
+        msgs: compactMessagesForPersistence(state.msgs),
         input: state.input,
         status: state.status,
         compactionCount: state.compactionCount,
@@ -187,6 +289,42 @@ export function patchLastAssistant(patch: (message: ChatMsg) => ChatMsg) {
       return;
     }
   }
+}
+
+/** Keep a useful task trail without allowing heartbeat logs to grow forever. */
+export function appendToolTimeline(
+  timeline: ToolTimelineEntry[] | undefined,
+  entry: ToolTimelineEntry,
+): ToolTimelineEntry[] {
+  const next = [...(timeline ?? [])];
+  const last = next.at(-1);
+  if (entry.kind === "progress" && last?.kind === "progress" && last.message === entry.message) {
+    next[next.length - 1] = entry;
+  } else {
+    next.push(entry);
+  }
+  if (next.length <= 24) return next;
+  return [next[0], ...next.slice(-23)];
+}
+
+/** Update one persisted clarification card even while its route is unmounted. */
+export function patchClarificationDraft(
+  messageKey: number,
+  patch: (draft: ClarificationDraft) => ClarificationDraft,
+) {
+  const state = useAgentSession.getState();
+  useAgentSession.setState({
+    msgs: state.msgs.map((message) =>
+      message.key === messageKey
+        ? {
+            ...message,
+            clarificationDraft: patch(
+              message.clarificationDraft ?? emptyClarificationDraft(),
+            ),
+          }
+        : message,
+    ),
+  });
 }
 
 /** Stable channel callback: it lives outside any route component. */
@@ -234,6 +372,9 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
       }));
       break;
     case "tool_call_started":
+      {
+      const startedAt = Date.now();
+      const initialStage = "检查本地缓存并选择可用数据源";
       patchLastAssistant((item) => ({
         ...item,
         tools: [
@@ -249,16 +390,22 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
                   ? event.args
                   : JSON.stringify(event.args),
             done: false,
-            startedAt: Date.now(),
+            startedAt,
             position: event.position,
             total: event.total,
-            timeoutMs: event.timeout_ms,
-            stage: "检查本地缓存并选择可用数据源",
+            estimatedMs: event.estimated_ms,
+            stage: initialStage,
+            timeline: [
+              { at: startedAt, kind: "started", message: initialStage, elapsedMs: 0 },
+            ],
           },
         ],
       }));
       break;
+      }
     case "tool_call_progress":
+      {
+      const progressedAt = Date.now();
       patchLastAssistant((item) => ({
         ...item,
         tools: item.tools.map((tool) =>
@@ -266,15 +413,26 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
             ? {
                 ...tool,
                 elapsedMs: event.elapsed_ms,
-                timeoutMs: event.timeout_ms,
+                estimatedMs: event.estimated_ms,
                 stage: event.stage,
-                lastProgressAt: Date.now(),
+                lastProgressAt: progressedAt,
+                progressDetail: event.detail ?? tool.progressDetail,
+                timeline: appendToolTimeline(tool.timeline, {
+                  at: progressedAt,
+                  kind: "progress",
+                  message: event.stage,
+                  elapsedMs: event.elapsed_ms,
+                  detail: event.detail,
+                }),
               }
             : tool,
         ),
       }));
       break;
+      }
     case "tool_call_finished":
+      {
+      const finishedAt = Date.now();
       patchLastAssistant((item) => {
         const tools = [...item.tools];
         for (let index = tools.length - 1; index >= 0; index--) {
@@ -292,6 +450,12 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
               source: event.source ?? undefined,
               fetchedAt: event.fetched_at ?? undefined,
               error: event.error ?? undefined,
+              timeline: appendToolTimeline(tools[index].timeline, {
+                at: finishedAt,
+                kind: event.success ? "success" : "error",
+                message: event.success ? "工具执行完成并保存结果" : event.error ?? "工具执行失败",
+                elapsedMs: event.elapsed_ms,
+              }),
             };
             break;
           }
@@ -299,6 +463,7 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
         return { ...item, tools };
       });
       break;
+      }
     case "suspended":
       useAgentSession.setState({ status: "suspended" });
       patchLastAssistant((item) => ({
@@ -307,14 +472,26 @@ export function handleAgentEnvelope(message: AgentStreamEnvelope) {
       }));
       break;
     case "completed":
-      useAgentSession.setState({ status: "completed", progress: null });
+      useAgentSession.setState({
+        status: hasClarification(event.report.answer)
+          ? "waiting_input"
+          : event.report.research?.verification.status === "failed"
+            ? "failed"
+            : "completed",
+        progress: null,
+      });
       patchLastAssistant((item) => {
         const evidenceByCache = new Map(
           event.report.evidence.map((evidence) => [evidence.cache_key, evidence]),
         );
         return {
           ...item,
-          report: event.report,
+          // Avoid retaining the final Markdown twice (stream buffer + report).
+          raw: "",
+          report: compactAgentReport(event.report),
+          clarificationDraft: hasClarification(event.report.answer)
+            ? item.clarificationDraft ?? emptyClarificationDraft()
+            : item.clarificationDraft,
           suspendedAt: undefined,
           done: true,
           tools: item.tools.map((tool) => {

@@ -20,8 +20,12 @@ use astock_fundamental::model::{
     BalanceSheet, CashFlowStatement, CompanyProfile, FundamentalBundle, IncomeStatement,
     PeriodMeta, ReportType, ValuationPoint,
 };
-use astock_fundamental::{anomaly, metrics, scores, valuation};
+use astock_fundamental::{
+    anomaly, apply_driver_shocks, build_earnings_driver_tree, metrics, parameter_snapshot_id,
+    scores, valuation, DriverShock, EarningsDriverTree, ShockBridge,
+};
 use chrono::{Datelike, NaiveDate};
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use tauri::State;
@@ -304,6 +308,8 @@ pub struct DividendJson {
 pub struct ValuationJson {
     /// 6-digit symbol code.
     pub symbol: String,
+    /// Exact financial parameter snapshot shared with the earnings driver tree.
+    pub parameter_snapshot_id: String,
     /// Current multiples (null when the quote snapshot failed).
     pub current: Option<CurrentJson>,
     /// Historical percentiles (null without valuation history).
@@ -1052,6 +1058,7 @@ fn valuation_json(
     }
     ValuationJson {
         symbol: symbol.code().to_string(),
+        parameter_snapshot_id: parameter_snapshot_id(symbol.code(), bundle),
         current,
         percentile,
         dcf,
@@ -1096,6 +1103,122 @@ pub async fn get_valuation(
         tracing::warn!(%symbol, failures = ?outcome.failures, "fundamental bundle partially degraded");
     }
     Ok(valuation_json(&symbol, &outcome.bundle, &outcome.failures))
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+async fn persist_driver_tree(state: &AppState, tree: &EarningsDriverTree) -> Result<(), CmdError> {
+    let tree = tree.clone();
+    state
+        .storage
+        .run(move |conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO earnings_driver_snapshots
+                 (snapshot_id,parameter_snapshot_id,symbol,model_version,report_period,
+                  knowledge_time,tree_json,created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                rusqlite::params![
+                    tree.snapshot_id,
+                    tree.parameter_snapshot_id,
+                    tree.symbol,
+                    tree.model_version,
+                    tree.report_period,
+                    tree.knowledge_time,
+                    serde_json::to_string(&tree)?,
+                    now_secs(),
+                ],
+            )?;
+            Ok(())
+        })
+        .await?;
+    Ok(())
+}
+
+/// Build and persist an evidence-bound earnings driver tree. Consolidated
+/// statement gaps remain explicit; the command never fabricates segment data.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_earnings_driver_tree(
+    state: State<'_, AppState>,
+    symbol: String,
+) -> Result<EarningsDriverTree, CmdError> {
+    let parsed = parse_symbol(&symbol)?;
+    let outcome = state.fundamental.bundle(&parsed).await;
+    let tree = build_earnings_driver_tree(parsed.code(), &outcome.bundle, now_secs());
+    persist_driver_tree(&state, &tree).await?;
+    Ok(tree)
+}
+
+/// Convert operating or supply-chain shocks into revenue, margin, EPS and
+/// cash-flow deltas using the same immutable driver snapshot.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn run_earnings_driver_shock(
+    state: State<'_, AppState>,
+    symbol: String,
+    shocks: Vec<DriverShock>,
+) -> Result<ShockBridge, CmdError> {
+    if shocks.len() > 20 {
+        return Err(CmdError::new("invalid_param", "单次最多计算 20 个冲击"));
+    }
+    let parsed = parse_symbol(&symbol)?;
+    let outcome = state.fundamental.bundle(&parsed).await;
+    let tree = build_earnings_driver_tree(parsed.code(), &outcome.bundle, now_secs());
+    persist_driver_tree(&state, &tree).await?;
+    let bridge = apply_driver_shocks(&tree, &shocks);
+    let stored = bridge.clone();
+    state
+        .storage
+        .run(move |conn| {
+            let evidence_ids: Vec<&str> = stored
+                .shocks
+                .iter()
+                .filter_map(|shock| shock.evidence_version_id.as_deref())
+                .collect();
+            conn.execute(
+                "INSERT OR IGNORE INTO earnings_driver_shock_bridges
+                 (bridge_id,base_snapshot_id,evidence_version_ids_json,shocks_json,bridge_json,created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![
+                    stored.shocked_snapshot_id,
+                    stored.base_snapshot_id,
+                    serde_json::to_string(&evidence_ids)?,
+                    serde_json::to_string(&stored.shocks)?,
+                    serde_json::to_string(&stored)?,
+                    now_secs(),
+                ],
+            )?;
+            Ok(())
+        })
+        .await?;
+    Ok(bridge)
+}
+
+/// Replay an immutable driver snapshot without refetching or recomputing it.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_earnings_driver_snapshot(
+    state: State<'_, AppState>,
+    snapshot_id: String,
+) -> Result<EarningsDriverTree, CmdError> {
+    let id = snapshot_id.clone();
+    let json = state
+        .storage
+        .run(move |conn| {
+            conn.query_row(
+                "SELECT tree_json FROM earnings_driver_snapshots WHERE snapshot_id=?1",
+                [id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(astock_storage::Error::from)
+        })
+        .await?
+        .ok_or_else(|| CmdError::new("not_found", format!("未找到盈利驱动快照 {snapshot_id}")))?;
+    serde_json::from_str(&json)
+        .map_err(|error| CmdError::new("storage", format!("盈利驱动快照损坏：{error}")))
 }
 
 #[cfg(test)]
@@ -1363,6 +1486,10 @@ mod tests {
     fn valuation_full_bundle_populates_every_section() {
         let json = valuation_json(&sym(), &sample_bundle(), &[]);
         assert!(json.missing.is_empty(), "missing: {:?}", json.missing);
+        assert_eq!(
+            json.parameter_snapshot_id,
+            parameter_snapshot_id("600519", &sample_bundle())
+        );
 
         let cur = json.current.unwrap();
         assert_eq!(cur.price, 100.0);

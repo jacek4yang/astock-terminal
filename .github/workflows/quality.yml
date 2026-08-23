@@ -6,6 +6,39 @@ on:
   pull_request:
 
 jobs:
+  security-audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  evaluation-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      # Offline and deterministic: no web page or model call can change a CI
+      # result. Absolute thresholds and regression allowances both apply.
+      - name: Run versioned research evaluation gate
+        run: >-
+          cargo run --locked -p astock-evaluation --bin astock-eval -- evaluate
+          --dataset eval/datasets/p0-v1/dataset.json
+          --thresholds eval/datasets/p0-v1/thresholds.json
+          --baseline eval/baselines/p0-v1-test.json
+          --json target/eval-reports/p0-v1-test.json
+          --html target/eval-reports/p0-v1-test.html
+          --split test --check
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: research-evaluation-report
+          path: target/eval-reports/
+
   frontend:
     runs-on: ubuntu-latest
     defaults:

@@ -60,6 +60,11 @@ pub struct TextResponse {
     pub body: String,
     /// Raw Content-Type header value, if present.
     pub content_type: Option<String>,
+    /// Successful HTTP status retained for ingestion provenance.
+    pub status: u16,
+    /// Cache validators retained for incremental document archives.
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
 }
 
 /// Shared HTTP client with adaptive throttling and host failover.
@@ -231,16 +236,30 @@ impl HttpClient {
         url: &str,
         params: &[(String, String)],
     ) -> Result<TextResponse, DataError> {
+        self.get_text_with_headers(url, &[], params).await
+    }
+
+    /// GET with explicit per-request headers. This is required by official
+    /// APIs such as SEC EDGAR, whose Fair Access policy requires a declared
+    /// application/contact User-Agent instead of a generic browser identity.
+    pub async fn get_text_with_headers(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        params: &[(String, String)],
+    ) -> Result<TextResponse, DataError> {
         let host = Self::host_key(url);
         self.throttle(&host).await;
 
-        let result = self
+        let mut request = self
             .client_for(url)
             .get(url)
             .header(reqwest::header::USER_AGENT, self.current_ua())
-            .query(params)
-            .send()
-            .await;
+            .query(params);
+        for (key, value) in headers {
+            request = request.header(key, value);
+        }
+        let result = request.send().await;
 
         let resp = match result {
             Ok(r) => r,
@@ -288,12 +307,25 @@ impl HttpClient {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
+        let etag = resp
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let last_modified = resp
+            .headers()
+            .get(reqwest::header::LAST_MODIFIED)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         match resp.bytes().await {
             Ok(bytes) => {
                 self.on_success(&host);
                 Ok(TextResponse {
                     body: String::from_utf8_lossy(&bytes).into_owned(),
                     content_type,
+                    status: status.as_u16(),
+                    etag,
+                    last_modified,
                 })
             }
             Err(e) => {
@@ -313,6 +345,19 @@ impl HttpClient {
         params: &[(String, String)],
     ) -> Result<serde_json::Value, DataError> {
         let resp = self.get_text(url, params).await?;
+        serde_json::from_str(&resp.body).map_err(|e| DataError::Parse {
+            upstream: Self::host_key(url),
+            message: e.to_string(),
+        })
+    }
+
+    pub async fn get_json_with_headers(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        params: &[(String, String)],
+    ) -> Result<serde_json::Value, DataError> {
+        let resp = self.get_text_with_headers(url, headers, params).await?;
         serde_json::from_str(&resp.body).map_err(|e| DataError::Parse {
             upstream: Self::host_key(url),
             message: e.to_string(),
@@ -383,6 +428,66 @@ impl HttpClient {
                 Err(DataError::Parse {
                     upstream: host,
                     message: e.to_string(),
+                })
+            }
+        }
+    }
+
+    /// POST an `application/x-www-form-urlencoded` body and decode JSON.
+    /// Used by public disclosure indexes such as CNInfo. It shares the same
+    /// per-host adaptive limiter and failure bookkeeping as every market
+    /// request, so a disclosure refresh cannot bypass global rate controls.
+    pub async fn post_form_json(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        form: &[(String, String)],
+    ) -> Result<serde_json::Value, DataError> {
+        let host = Self::host_key(url);
+        self.throttle(&host).await;
+        let mut request = self
+            .client_for(url)
+            .post(url)
+            .header(reqwest::header::USER_AGENT, self.current_ua())
+            .form(form);
+        for (key, value) in headers {
+            request = request.header(key, value);
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                self.on_failure(&host);
+                if error.is_timeout() {
+                    return Err(DataError::Timeout(host));
+                }
+                return Err(DataError::Network {
+                    host,
+                    message: error.to_string(),
+                });
+            }
+        };
+        let status = response.status();
+        if status.as_u16() == 429 {
+            self.on_failure(&host);
+            return Err(DataError::RateLimited(host));
+        }
+        if !status.is_success() {
+            self.on_failure(&host);
+            return Err(DataError::Network {
+                host,
+                message: format!("HTTP {status}"),
+            });
+        }
+        match response.json::<serde_json::Value>().await {
+            Ok(value) => {
+                self.on_success(&host);
+                Ok(value)
+            }
+            Err(error) => {
+                self.on_failure(&host);
+                Err(DataError::Parse {
+                    upstream: host,
+                    message: error.to_string(),
                 })
             }
         }

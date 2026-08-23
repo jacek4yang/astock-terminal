@@ -7,23 +7,28 @@
 //! completed tool results come back as conversation messages and cached
 //! payloads, never re-executed.
 
+use std::collections::BTreeSet;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Instant;
 
 use futures::channel::mpsc;
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio::time::Instant;
 
 use astock_minimax::{ChatMessage, ChatRequest, MinimaxError, ToolCall};
-use astock_storage::{AgentTask, Storage};
+use astock_security::{authorize_tool, fingerprint_json, InvocationOrigin, ToolPermissionDomain};
+use astock_storage::{AgentTask, AgentToolAudit, Report as StoredReport, Storage};
 
 use crate::backend::ChatBackend;
 use crate::error::{AgentError, Result};
 use crate::prompt::initial_messages_with_context;
-use crate::report::{assemble_report, AgentReport, Evidence};
-use crate::tools::{now_secs, ToolContext, ToolRegistry};
+use crate::report::{
+    assemble_report, index_tool_evidence, report_versions, verified_subset_answer, AgentReport,
+    ClaimConfidence, Evidence, VerificationStatus,
+};
+use crate::tools::{now_secs, ToolContext, ToolProgressDetail, ToolRegistry};
 
 /// A boxed event stream for one running task.
 pub type TaskStream = Pin<Box<dyn Stream<Item = AgentEvent> + Send>>;
@@ -134,7 +139,7 @@ impl TaskSpec {
     fn runtime_directive(&self) -> String {
         let mode = match self.research_mode.as_deref().unwrap_or("deep") {
             "quick" => "快速模式：只调用回答当前问题必需的工具，优先在较少轮次内给出可核验结论。",
-            "plan" => "计划模式：先判断目标、资金规模、期限、风险承受力和交易限制是否足以决定研究路线。若缺少会实质改变结论的信息，本轮只提出不超过3个具体问题并停止；用户回答后检查仍未明确的关键项，可继续分批提问。信息充分后先列研究计划，再按计划取证、反证和综合。",
+            "plan" => "计划模式：先判断目标、资金规模、期限、风险承受力和交易限制是否足以决定研究路线。若缺少会实质改变结论的信息，本轮只提出不超过3个具体问题并停止；必须用系统约定的astock-questions结构化选择框，禁止退化成普通Markdown问答列表。用户回答后检查仍未明确的关键项，可继续分批提问。信息充分后先列研究计划，再按计划取证、反证和综合。",
             _ => "深度模式：主动进行多源取证、交叉验证和反方检验，只在证据足以支持结论后完成回答。",
         };
         let depth = match self.reasoning_depth.as_deref().unwrap_or("deep") {
@@ -221,8 +226,10 @@ pub enum AgentEvent {
         position: usize,
         /// Total tool calls in the current batch.
         total: usize,
-        /// Tool-level fail-soft deadline shown to the UI.
-        timeout_ms: u64,
+        /// Expected duration used only for UI guidance. It is never a
+        /// cancellation deadline; the tool runs until completion or an
+        /// explicit user cancellation.
+        estimated_ms: u64,
     },
     /// Heartbeat while a tool is still running. This exposes truthful coarse
     /// stages without leaking provider/model internals or private reasoning.
@@ -230,8 +237,13 @@ pub enum AgentEvent {
         call_id: String,
         name: String,
         elapsed_ms: u64,
-        timeout_ms: u64,
+        /// Expected duration used only for UI guidance.
+        estimated_ms: u64,
         stage: String,
+        /// Structured counters/current items for tools that can expose
+        /// deeper deterministic progress.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<ToolProgressDetail>,
     },
     /// A tool call finished.
     ToolCallFinished {
@@ -317,6 +329,10 @@ struct TaskState {
     context_compactions: u32,
     #[serde(default)]
     multi_agent_reviewed: bool,
+    /// Last terminal error, persisted for user-visible diagnostics. Provider
+    /// credentials and private reasoning are never written here.
+    #[serde(default)]
+    last_error: Option<String>,
 }
 
 /// How many trailing messages are never compacted.
@@ -394,7 +410,8 @@ impl AgentEngine {
         Ok(self.ctx.storage.agent_task_list().await?)
     }
 
-    /// Mark a task cancelled; a running loop notices at the next round.
+    /// Mark a task cancelled; running tools notice on their next heartbeat and
+    /// their futures are dropped together with the rest of the active batch.
     /// Returns `false` when the task does not exist.
     pub async fn cancel_task(&self, task_id: &str) -> Result<bool> {
         let Some(record) = self.ctx.storage.agent_task_get(task_id).await? else {
@@ -482,6 +499,7 @@ impl AgentEngine {
             evidence: Vec::new(),
             context_compactions: 0,
             multi_agent_reviewed: false,
+            last_error: None,
         };
         self.run_loop(state, messages, tx).await;
     }
@@ -567,7 +585,16 @@ impl AgentEngine {
                     },
                 );
             }
-            let mut request_messages = compacted;
+            // Treat the provider boundary as a final protocol firewall. Even
+            // histories produced by older builds are repaired before every
+            // request, and an invariant check prevents an invalid transcript
+            // from ever reaching MiniMax.
+            let mut request_messages = reconcile_tool_history(compacted);
+            if let Err(problem) = validate_tool_history(&request_messages) {
+                self.finish_with_error(&state, &tx, format!("工具调用历史无法安全恢复：{problem}"))
+                    .await;
+                return;
+            }
             // A transient system control keeps the stored user message clean
             // while applying changed controls on every turn and after resume.
             let directive = state.spec.runtime_directive();
@@ -670,6 +697,14 @@ impl AgentEngine {
                 }
             }
 
+            // MiniMax requires every tool-call id to be unique. Providers can
+            // occasionally reuse an id in a later round (or emit duplicate ids
+            // at different streaming indexes), so normalize before persisting,
+            // executing, or echoing any result. Unique valid provider ids stay
+            // untouched; only invalid or globally repeated ids are rewritten.
+            sanitize_streamed_tool_calls(&mut calls);
+            normalize_new_tool_calls(&mut calls, &messages, state.round + 1);
+
             let (_, mut clean_text) = astock_minimax::split_reasoning(&text);
             let mut assistant = ChatMessage {
                 role: "assistant".to_string(),
@@ -737,14 +772,57 @@ impl AgentEngine {
                     }
                 }
             }
+            // A plan-mode clarification is a user-input boundary, not an
+            // analyst draft. Sending it through the specialist panel used to
+            // trigger TextReset and made the questions flash then disappear.
+            let awaiting_user_input = state.spec.research_mode.as_deref() == Some("plan")
+                && is_clarification_request(&clean_text);
             let awaiting_specialist_review = calls.is_empty()
+                && !awaiting_user_input
                 && !state.multi_agent_reviewed
                 && !state.spec.specialists.is_empty();
+            // Search snippets are URL-discovery hints, never evidence. Add the
+            // disclosure only to a durable final answer: not to a structured
+            // clarification and not to an internal draft awaiting review.
+            if calls.is_empty()
+                && !awaiting_user_input
+                && !awaiting_specialist_review
+                && contains_discovery_only(&messages)
+                && !contains_primary_source_evidence(&messages)
+                && !clean_text.contains("原文未核验")
+            {
+                let disclosure = "\n\n**核验状态：** 一级来源原文未核验。本轮搜索标题与摘要仅作为发现线索，不标记为【事实】，也不据此确认重大新闻结论。";
+                clean_text.push_str(disclosure);
+                assistant.content = Some(Value::String(clean_text.clone()));
+                send(
+                    &tx,
+                    AgentEvent::TextDelta {
+                        text: disclosure.to_string(),
+                    },
+                );
+            }
+            if calls.is_empty() && !awaiting_user_input && !awaiting_specialist_review {
+                let (blocked, downgraded) = tool_quality_gate_counts(&messages);
+                if (blocked > 0 || downgraded > 0) && !clean_text.contains("数据质量门禁") {
+                    let disclosure = if blocked > 0 {
+                        format!(
+                            "\n\n**数据质量门禁：** 有 {blocked} 项工具结果因硬过期、口径不兼容或未解决冲突被阻止用于确定性计算；另有 {downgraded} 项仅可作为中低置信参考。以上项目不得用于明确买卖结论。"
+                        )
+                    } else {
+                        format!(
+                            "\n\n**数据质量门禁：** 有 {downgraded} 项工具结果存在陈旧、缺失或尚未跨源复核，结论置信度已自动下调，不应据此单独调度资金。"
+                        )
+                    };
+                    clean_text.push_str(&disclosure);
+                    assistant.content = Some(Value::String(clean_text.clone()));
+                    send(&tx, AgentEvent::TextDelta { text: disclosure });
+                }
+            }
             // A first draft awaiting specialist review is internal working
             // material, not a durable user-facing answer. Persist tool-call
             // messages and final/single-agent answers normally; the reviewed
             // branch below persists a hidden system packet instead.
-            if !awaiting_specialist_review {
+            if !awaiting_specialist_review && !calls.is_empty() {
                 if let Err(e) = append_message(
                     &self.ctx.storage,
                     &task_id,
@@ -833,34 +911,154 @@ impl AgentEngine {
                         Err(error) => {
                             tracing::warn!(%error, "specialist panel failed; completing from main evidence");
                             state.multi_agent_reviewed = true;
-                            if let Err(storage_error) = append_message(
-                                &self.ctx.storage,
-                                &task_id,
-                                &conversation_id,
-                                &mut messages,
-                                &assistant,
+                        }
+                    }
+                }
+                let mut report =
+                    assemble_report(&task_id, &clean_text, state.evidence.clone(), now_secs());
+                if awaiting_user_input {
+                    // A clarification card is an interaction boundary, not a
+                    // publishable investment conclusion. Numeric examples in
+                    // the preface (capital, option counts, market context)
+                    // must not turn a valid question card into a
+                    // verification_failed terminal task.
+                    report.research.claims.clear();
+                    report.research.calculations.clear();
+                    report.research.confidence = ClaimConfidence::Low;
+                    report.research.verification.status = VerificationStatus::NotApplicable;
+                    report.research.verification.findings.clear();
+                }
+                if !awaiting_user_input {
+                    for attempt in 1..=2 {
+                        if report.research.verification.passed() {
+                            break;
+                        }
+                        send(
+                            &tx,
+                            AgentEvent::Progress {
+                                phase: "verifying".to_string(),
+                                message: format!(
+                                    "独立校验发现 {} 项发布阻断，正在进行第 {attempt}/2 次证据内修订",
+                                    report.research.verification.findings.len()
+                                ),
+                                round: state.round + 1,
+                                max_rounds,
+                                completed: Some(attempt - 1),
+                                total: Some(2),
+                            },
+                        );
+                        send(
+                            &tx,
+                            AgentEvent::TextReset {
+                                message: "草稿未通过证据校验，正在按具体错误自动修订".to_string(),
+                            },
+                        );
+                        match self
+                            .recover_verified_answer(
+                                &model,
+                                &messages,
+                                &clean_text,
+                                &report.research.verification.repair_instructions(),
+                                &tx,
                             )
                             .await
-                            {
-                                self.finish_with_error(
-                                    &state,
-                                    &tx,
-                                    format!("storage: {storage_error}"),
-                                )
-                                .await;
+                        {
+                            Ok((recovered, answer)) => {
+                                assistant = recovered;
+                                clean_text = answer;
+                                report = assemble_report(
+                                    &task_id,
+                                    &clean_text,
+                                    state.evidence.clone(),
+                                    now_secs(),
+                                );
+                            }
+                            Err(MinimaxError::QuotaExhausted { window_reset_at }) => {
+                                self.suspend(state, &tx, window_reset_at).await;
                                 return;
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, attempt, "verified-answer repair failed");
+                                break;
                             }
                         }
                     }
                 }
-                let report =
-                    assemble_report(&task_id, &clean_text, state.evidence.clone(), now_secs());
-                let _ = self.save_state(&state, "completed").await;
+                if !awaiting_user_input
+                    && report.research.verification.status == VerificationStatus::Failed
+                {
+                    // A long research run can contain both well-supported and
+                    // unsupported model prose. If two repair passes still
+                    // fail, publish the independently verified subset instead
+                    // of hiding all successful evidence behind a terminal
+                    // error. The fallback itself is assembled and verified
+                    // again before it can be shown.
+                    if let Some(subset) = verified_subset_answer(&report) {
+                        let candidate =
+                            assemble_report(&task_id, &subset, state.evidence.clone(), now_secs());
+                        if candidate.research.verification.passed() {
+                            send(
+                                &tx,
+                                AgentEvent::TextReset {
+                                    message:
+                                        "自动修订仍有证据缺口，已切换为仅发布通过校验的部分结论"
+                                            .to_string(),
+                                },
+                            );
+                            clean_text = subset;
+                            assistant = ChatMessage::assistant(clean_text.clone());
+                            report = candidate;
+                        }
+                    }
+                }
+                let publication_blocked = !awaiting_user_input
+                    && report.research.verification.status == VerificationStatus::Failed;
+                if publication_blocked {
+                    clean_text = format!(
+                        "## 报告未通过证据校验\n\n本轮草稿已被阻止发布，共发现 {} 项需要修正的问题。你可以展开下方“结论与证据校验”查看具体字段、错误原因和证据缺口；补充或刷新数据后可继续本任务。",
+                        report.research.verification.findings.len()
+                    );
+                    report.answer = clean_text.clone();
+                    assistant = ChatMessage::assistant(clean_text.clone());
+                }
+                if let Err(error) = append_message(
+                    &self.ctx.storage,
+                    &task_id,
+                    &conversation_id,
+                    &mut messages,
+                    &assistant,
+                )
+                .await
+                {
+                    self.finish_with_error(&state, &tx, format!("storage: {error}"))
+                        .await;
+                    return;
+                }
+                if !awaiting_user_input {
+                    self.link_news_evidence(&task_id, &messages).await;
+                }
+                if let Err(error) = self.persist_report(&report).await {
+                    self.finish_with_error(&state, &tx, format!("研究报告保存失败: {error}"))
+                        .await;
+                    return;
+                }
+                let terminal_status = if publication_blocked {
+                    "verification_failed"
+                } else {
+                    "completed"
+                };
+                let _ = self.save_state(&state, terminal_status).await;
                 send(
                     &tx,
                     AgentEvent::Progress {
                         phase: "synthesizing".to_string(),
-                        message: "证据核验完成，正在生成最终结论".to_string(),
+                        message: if awaiting_user_input {
+                            "需要你确认关键条件，已生成可选择的问题卡片".to_string()
+                        } else if publication_blocked {
+                            "报告未通过独立证据校验，草稿已阻止发布".to_string()
+                        } else {
+                            "证据核验完成，正在生成最终结论".to_string()
+                        },
                         round: state.round + 1,
                         max_rounds,
                         completed: Some(1),
@@ -898,23 +1096,54 @@ impl AgentEngine {
                     total: Some(calls.len()),
                 },
             );
-            let executed = self
+            let executed = match self
                 .execute_round(
                     &calls,
                     &tx,
                     state.round + 1,
                     max_rounds,
                     state.spec.enabled_tools.as_deref(),
+                    &task_id,
                 )
-                .await;
+                .await
+            {
+                Ok(executed) => executed,
+                Err(AgentError::Cancelled(_)) => {
+                    // `agent_cancel` has already persisted the cancelled
+                    // status. Dropping the round future cancels every other
+                    // in-flight tool in the batch.
+                    send(
+                        &tx,
+                        AgentEvent::Failed {
+                            error: "任务已取消".to_string(),
+                        },
+                    );
+                    return;
+                }
+                Err(error) => {
+                    self.finish_with_error(&state, &tx, error.to_string()).await;
+                    return;
+                }
+            };
+            if let Err(error) = self.check_cancelled(&task_id).await {
+                match error {
+                    AgentError::Cancelled(_) => {
+                        send(
+                            &tx,
+                            AgentEvent::Failed {
+                                error: "任务已取消".to_string(),
+                            },
+                        );
+                    }
+                    other => {
+                        self.finish_with_error(&state, &tx, other.to_string()).await;
+                    }
+                }
+                return;
+            }
             for exec in executed {
-                if exec.ok {
-                    state.evidence.push(Evidence {
-                        tool: exec.name.clone(),
-                        cache_key: exec.cache_key.clone(),
-                        source: exec.source.clone(),
-                        fetched_at: exec.fetched_at.clone(),
-                    });
+                if let Some(evidence) = exec.evidence.clone() {
+                    state.evidence.push(evidence);
                 }
                 let message = ChatMessage::tool_result(exec.call_id, exec.message_content);
                 if let Err(e) = append_message(
@@ -941,6 +1170,36 @@ impl AgentEngine {
                     },
                 );
                 return;
+            }
+        }
+    }
+
+    /// Link every immutable news revision present in successful tool results
+    /// to the final report. Archive diagnostics are best-effort and cannot
+    /// discard an otherwise valid analysis.
+    async fn link_news_evidence(&self, task_id: &str, messages: &[ChatMessage]) {
+        for revision_id in news_revision_ids(messages) {
+            if let Err(error) = self
+                .ctx
+                .storage
+                .news_agent_evidence_link(task_id, "final_answer", &revision_id)
+                .await
+            {
+                tracing::warn!(task_id, revision_id, %error, "agent news evidence link failed");
+            }
+        }
+        let verifier = astock_source_verification::SourceVerifier::new(self.ctx.storage.clone());
+        for (source_version_id, fact_id) in source_evidence_pairs(messages) {
+            if let Err(error) = verifier
+                .link_agent_evidence(
+                    task_id,
+                    "final_answer",
+                    &source_version_id,
+                    (!fact_id.is_empty()).then_some(fact_id.as_str()),
+                )
+                .await
+            {
+                tracing::warn!(task_id, source_version_id, fact_id, %error, "agent source evidence link failed");
             }
         }
     }
@@ -1102,6 +1361,77 @@ impl AgentEngine {
         ))
     }
 
+    /// Repair only the publication-contract violations reported by the
+    /// deterministic verifier. No tools are exposed during this pass: the
+    /// model must use the already indexed evidence or explicitly downgrade a
+    /// statement to an assumption/unknown and remove unsupported numbers.
+    async fn recover_verified_answer(
+        &self,
+        model: &str,
+        messages: &[ChatMessage],
+        draft: &str,
+        verification_errors: &str,
+        tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) -> std::result::Result<(ChatMessage, String), MinimaxError> {
+        let mut repair_messages = messages.to_vec();
+        repair_messages.push(ChatMessage::user(format!(
+            "【独立发布校验失败】\n以下是未发布草稿：\n---\n{draft}\n---\n校验器错误：\n{verification_errors}\n\n只基于已有工具消息中的evidence字段修订全文，不得调用工具、猜测或换一个数字规避错误。每条关键结论使用【事实】【计算】【外部】【推断】【假设】【未知】之一；数字后精确写〔证据:evf_xxx〕，确定性计算同时写〔计算引用:calc_xxx〕。无法支持的数字必须删除，无法确认的结论明确写【未知】。保留反方证据、冲突和失效条件。直接输出修订后的完整中文报告，不解释修订过程。"
+        )));
+        let mut request =
+            ChatRequest::new(model.to_string(), repair_messages).with_temperature(0.1);
+        request
+            .extra
+            .insert("reasoning_split".to_string(), Value::Bool(true));
+        request
+            .extra
+            .insert("thinking".to_string(), json!({ "type": "disabled" }));
+        request
+            .extra
+            .insert("max_completion_tokens".to_string(), json!(4096));
+
+        let mut stream = self.backend.chat_stream(&request).await?;
+        let mut text = String::new();
+        let mut reasoning_content = None;
+        let mut reasoning_details = None;
+        while let Some(item) = stream.next().await {
+            let chunk = item?;
+            if let Some(delta) = chunk.raw_delta() {
+                if !delta.is_empty() {
+                    text.push_str(&delta);
+                    send(tx, AgentEvent::TextDelta { text: delta });
+                }
+            }
+            if let Some(delta) = chunk
+                .choices
+                .first()
+                .and_then(|choice| choice.delta.as_ref())
+            {
+                if let Some(reasoning) = delta.reasoning_content.as_ref() {
+                    reasoning_content = Some(reasoning.clone());
+                }
+                if let Some(details) = delta.reasoning_details.as_ref() {
+                    reasoning_details = Some(details.clone());
+                }
+            }
+        }
+        let (_, answer) = astock_minimax::split_reasoning(&text);
+        if answer.trim().is_empty() {
+            return Err(MinimaxError::Parse(
+                "证据校验修订没有产出可见回答".to_string(),
+            ));
+        }
+        Ok((
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: Some(Value::String(text)),
+                reasoning_content,
+                reasoning_details,
+                ..Default::default()
+            },
+            answer,
+        ))
+    }
+
     /// Execute one round of tool calls (bounded concurrency), in call order.
     async fn execute_round(
         &self,
@@ -1110,20 +1440,21 @@ impl AgentEngine {
         round: u32,
         max_rounds: u32,
         enabled_tools: Option<&[String]>,
-    ) -> Vec<ToolExec> {
+        task_id: &str,
+    ) -> Result<Vec<ToolExec>> {
         let total = calls.len();
         let mut pending = futures::stream::iter(calls.iter().cloned().enumerate())
             .map(|(idx, call)| async move {
-                (
+                Ok::<_, AgentError>((
                     idx,
-                    self.execute_one(call, idx + 1, total, tx, enabled_tools)
-                        .await,
-                )
+                    self.execute_one(call, idx + 1, total, tx, enabled_tools, task_id)
+                        .await?,
+                ))
             })
             .buffer_unordered(self.config.max_parallel_tools.max(1));
         let mut indexed: Vec<(usize, ToolExec)> = Vec::with_capacity(total);
         while let Some(item) = pending.next().await {
-            indexed.push(item);
+            indexed.push(item?);
             send(
                 tx,
                 AgentEvent::Progress {
@@ -1137,7 +1468,7 @@ impl AgentEngine {
             );
         }
         indexed.sort_by_key(|(idx, _)| *idx);
-        indexed.into_iter().map(|(_, r)| r).collect()
+        Ok(indexed.into_iter().map(|(_, r)| r).collect())
     }
 
     /// Execute a single tool call; tool failures become error payloads fed
@@ -1149,7 +1480,8 @@ impl AgentEngine {
         total: usize,
         tx: &mpsc::UnboundedSender<AgentEvent>,
         enabled_tools: Option<&[String]>,
-    ) -> ToolExec {
+        task_id: &str,
+    ) -> Result<ToolExec> {
         let call_id = call.id.clone().unwrap_or_else(|| "call_0".to_string());
         let name = call
             .function
@@ -1168,15 +1500,29 @@ impl AgentEngine {
                 Ok(v) => v,
                 Err(e) => {
                     let error = format!("参数不是合法JSON: {e}");
+                    let permission_domain = self
+                        .tools
+                        .permission_domain(&name)
+                        .unwrap_or(ToolPermissionDomain::ReadOnlyNetwork);
+                    let args_fingerprint = fingerprint_json(&json!({ "raw": &raw_args }));
+                    let audit = ToolAuditMeta {
+                        task_id,
+                        call_id: &call_id,
+                        tool: &name,
+                        permission_domain,
+                        args_fingerprint: &args_fingerprint,
+                    };
+                    self.append_tool_audit(&audit, "invalid_arguments", Some(0))
+                        .await;
                     send(
                         tx,
                         AgentEvent::ToolCallStarted {
                             call_id: call_id.clone(),
                             name: name.clone(),
-                            args: json!({ "raw": raw_args }),
+                            args: json!({ "raw": &raw_args }),
                             position,
                             total,
-                            timeout_ms: tool_timeout_secs(&name) * 1000,
+                            estimated_ms: tool_estimated_secs(&name) * 1000,
                         },
                     );
                     send(
@@ -1192,23 +1538,45 @@ impl AgentEngine {
                             error: Some(error.clone()),
                         },
                     );
-                    return ToolExec {
-                        ok: false,
+                    return Ok(ToolExec {
                         call_id,
-                        name: name.clone(),
-                        cache_key: String::new(),
-                        source: String::new(),
-                        fetched_at: String::new(),
+                        evidence: None,
                         message_content: json!({
                             "tool": name,
                             "error": error,
                         })
                         .to_string(),
-                    };
+                    });
                 }
             }
         };
 
+        let enabled_by_user =
+            enabled_tools.is_none_or(|allowed| allowed.iter().any(|item| item == &name));
+        let permission_domain = self
+            .tools
+            .permission_domain(&name)
+            .unwrap_or(ToolPermissionDomain::ReadOnlyNetwork);
+        let args_fingerprint = fingerprint_json(&args);
+        let audit = ToolAuditMeta {
+            task_id,
+            call_id: &call_id,
+            tool: &name,
+            permission_domain,
+            args_fingerprint: &args_fingerprint,
+        };
+        tracing::info!(
+            target: "astock::agent_tool_audit",
+            task_id,
+            call_id,
+            tool = name,
+            permission_domain = %permission_domain,
+            origin = "model_plan",
+            args_fingerprint,
+            event = "requested",
+            "Agent tool audit"
+        );
+        self.append_tool_audit(&audit, "requested", None).await;
         send(
             tx,
             AgentEvent::ToolCallStarted {
@@ -1217,11 +1585,32 @@ impl AgentEngine {
                 args: args.clone(),
                 position,
                 total,
-                timeout_ms: tool_timeout_secs(&name) * 1000,
+                estimated_ms: tool_estimated_secs(&name) * 1000,
             },
         );
-        if enabled_tools.is_some_and(|allowed| !allowed.iter().any(|item| item == &name)) {
-            let error = format!("工具 {name} 已被用户在本轮研究设置中关闭");
+        if let Err(reason) = authorize_tool(
+            permission_domain,
+            InvocationOrigin::ModelPlan,
+            enabled_by_user,
+        ) {
+            let error = if enabled_by_user {
+                format!("工具 {name} 的权限请求被安全策略拒绝：{reason}")
+            } else {
+                format!("工具 {name} 已被用户在本轮研究设置中关闭")
+            };
+            tracing::warn!(
+                target: "astock::agent_tool_audit",
+                task_id,
+                call_id,
+                tool = name,
+                permission_domain = %permission_domain,
+                origin = "model_plan",
+                args_fingerprint,
+                event = "denied",
+                reason = %reason,
+                "Agent tool audit"
+            );
+            self.append_tool_audit(&audit, "denied", Some(0)).await;
             send(
                 tx,
                 AgentEvent::ToolCallFinished {
@@ -1235,26 +1624,48 @@ impl AgentEngine {
                     error: Some(error.clone()),
                 },
             );
-            return ToolExec {
-                ok: false,
+            return Ok(ToolExec {
                 call_id,
-                name: name.clone(),
-                cache_key: String::new(),
-                source: String::new(),
-                fetched_at: String::new(),
+                evidence: None,
                 message_content: json!({ "tool": name, "error": error }).to_string(),
-            };
+            });
         }
         let started = Instant::now();
-        // A provider or a deterministic engine must not hold the whole model
-        // round hostage indefinitely. Timeout is applied at the orchestration
-        // boundary, so a slow tool becomes a normal evidence gap and the
-        // model can still synthesize from the tools that did finish.
-        let timeout_secs = tool_timeout_secs(&name);
-        let dispatch = self.tools.dispatch(&name, args, &self.ctx);
+        // Tools have no orchestration deadline. They run asynchronously until
+        // they finish, fail at their own provider boundary, or the user
+        // explicitly cancels the durable task. The estimate is UI guidance
+        // only and never participates in control flow.
+        let estimated_ms = tool_estimated_secs(&name) * 1000;
+        let progress_tx = tx.clone();
+        let progress_call_id = call_id.clone();
+        let progress_name = name.clone();
+        let progress_started = started;
+        let dispatch_context = self
+            .ctx
+            .clone()
+            .with_progress_reporter(Arc::new(move |detail| {
+                let stage = format!(
+                    "已处理 {}/{}，当前并行 {} 项，成功 {} 项，失败 {} 项",
+                    detail.completed,
+                    detail.total,
+                    detail.active.len(),
+                    detail.succeeded,
+                    detail.failed
+                );
+                send(
+                    &progress_tx,
+                    AgentEvent::ToolCallProgress {
+                        call_id: progress_call_id.clone(),
+                        name: progress_name.clone(),
+                        elapsed_ms: progress_started.elapsed().as_millis() as u64,
+                        estimated_ms,
+                        stage,
+                        detail: Some(detail),
+                    },
+                );
+            }));
+        let dispatch = self.tools.dispatch(&name, args, &dispatch_context);
         tokio::pin!(dispatch);
-        let deadline = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs));
-        tokio::pin!(deadline);
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(2));
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Consume the immediate first tick: ToolCallStarted already describes it.
@@ -1262,20 +1673,16 @@ impl AgentEngine {
         let outcome = loop {
             tokio::select! {
                 result = &mut dispatch => break result,
-                _ = &mut deadline => {
-                    break Err(AgentError::Tool {
-                        tool: name.clone(),
-                        msg: format!("超过 {timeout_secs} 秒，已自动降级并继续综合其他证据"),
-                    });
-                }
                 _ = heartbeat.tick() => {
                     let elapsed_ms = started.elapsed().as_millis() as u64;
+                    self.check_cancelled(task_id).await?;
                     send(tx, AgentEvent::ToolCallProgress {
                         call_id: call_id.clone(),
                         name: name.clone(),
                         elapsed_ms,
-                        timeout_ms: timeout_secs * 1000,
-                        stage: tool_progress_stage(&name, elapsed_ms, timeout_secs * 1000).to_string(),
+                        estimated_ms,
+                        stage: tool_progress_stage(&name, elapsed_ms, estimated_ms).to_string(),
+                        detail: None,
                     });
                 }
             }
@@ -1284,6 +1691,27 @@ impl AgentEngine {
 
         match outcome {
             Ok(result) => {
+                let evidence = index_tool_evidence(
+                    &name,
+                    &result.cache_key,
+                    &result.source,
+                    &result.fetched_at,
+                    &result.summary_json,
+                );
+                tracing::info!(
+                    target: "astock::agent_tool_audit",
+                    task_id,
+                    call_id,
+                    tool = name,
+                    permission_domain = %permission_domain,
+                    origin = "model_plan",
+                    args_fingerprint,
+                    event = "succeeded",
+                    elapsed_ms,
+                    "Agent tool audit"
+                );
+                self.append_tool_audit(&audit, "succeeded", Some(elapsed_ms))
+                    .await;
                 send(
                     tx,
                     AgentEvent::ToolCallFinished {
@@ -1297,25 +1725,37 @@ impl AgentEngine {
                         error: None,
                     },
                 );
-                ToolExec {
-                    ok: true,
+                Ok(ToolExec {
                     call_id,
-                    name: name.clone(),
-                    cache_key: result.cache_key.clone(),
-                    source: result.source.clone(),
-                    fetched_at: result.fetched_at.clone(),
+                    evidence: Some(evidence.clone()),
                     message_content: json!({
                         "tool": name,
                         "cache_key": result.cache_key,
                         "source": result.source,
                         "fetched_at": result.fetched_at,
                         "summary": result.summary_json,
+                        "evidence": evidence,
                     })
                     .to_string(),
-                }
+                })
             }
             Err(e) => {
                 let error = e.to_string();
+                tracing::warn!(
+                    target: "astock::agent_tool_audit",
+                    task_id,
+                    call_id,
+                    tool = name,
+                    permission_domain = %permission_domain,
+                    origin = "model_plan",
+                    args_fingerprint,
+                    event = "failed",
+                    elapsed_ms,
+                    error_kind = %std::any::type_name_of_val(&e),
+                    "Agent tool audit"
+                );
+                self.append_tool_audit(&audit, "failed", Some(elapsed_ms))
+                    .await;
                 send(
                     tx,
                     AgentEvent::ToolCallFinished {
@@ -1329,20 +1769,55 @@ impl AgentEngine {
                         error: Some(error.clone()),
                     },
                 );
-                ToolExec {
-                    ok: false,
+                Ok(ToolExec {
                     call_id,
-                    name: name.clone(),
-                    cache_key: String::new(),
-                    source: String::new(),
-                    fetched_at: String::new(),
+                    evidence: None,
                     message_content: json!({
                         "tool": name,
                         "error": error,
                     })
                     .to_string(),
-                }
+                })
             }
+        }
+    }
+
+    /// Persist only bounded metadata. Audit failure never blocks the user's
+    /// analysis, and the fallback log deliberately omits the storage error
+    /// text because it can contain machine-local paths.
+    async fn append_tool_audit(
+        &self,
+        meta: &ToolAuditMeta<'_>,
+        event: &str,
+        elapsed_ms: Option<u64>,
+    ) {
+        let audit = AgentToolAudit {
+            id: None,
+            task_id: meta.task_id.to_string(),
+            call_id: meta.call_id.to_string(),
+            tool: meta.tool.to_string(),
+            permission_domain: meta.permission_domain.to_string(),
+            origin: "model_plan".to_string(),
+            args_fingerprint: meta.args_fingerprint.to_string(),
+            event: event.to_string(),
+            elapsed_ms: elapsed_ms.map(|value| value.min(i64::MAX as u64) as i64),
+            created_at: now_secs(),
+        };
+        if self
+            .ctx
+            .storage
+            .agent_tool_audit_append(audit)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                target: "astock::agent_tool_audit",
+                task_id = meta.task_id,
+                call_id = meta.call_id,
+                tool = meta.tool,
+                event,
+                "Agent tool audit persistence failed"
+            );
         }
     }
 
@@ -1362,6 +1837,18 @@ impl AgentEngine {
     }
 
     async fn save_state(&self, state: &TaskState, status: &str) -> Result<()> {
+        // Never resurrect a task after an external cancellation races with a
+        // round completion. The storage status is the durable source of truth.
+        if status != "cancelled"
+            && self
+                .ctx
+                .storage
+                .agent_task_get(&state.spec.id)
+                .await?
+                .is_some_and(|task| task.status == "cancelled")
+        {
+            return Err(AgentError::Cancelled(state.spec.id.clone()));
+        }
         let now = now_secs();
         self.ctx
             .storage
@@ -1372,6 +1859,33 @@ impl AgentEngine {
                 state_json: serde_json::to_string(state)?,
                 created_at: now,
                 updated_at: now,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Persist the complete report, including verification findings and exact
+    /// tool/data versions, before the completion event reaches the UI.
+    async fn persist_report(&self, report: &AgentReport) -> Result<()> {
+        let (tool_versions, data_versions) = report_versions(report);
+        let content = json!({
+            "report": report,
+            "tool_versions": tool_versions,
+            "data_versions": data_versions,
+            "verification": &report.research.verification,
+        });
+        self.ctx
+            .storage
+            .reports_insert(StoredReport {
+                id: report.task_id.clone(),
+                kind: if report.research.verification.passed() {
+                    "verified-research".to_string()
+                } else {
+                    "verification-blocked".to_string()
+                },
+                title: format!("AI研究报告 · {}", report.task_id),
+                content_json: serde_json::to_string(&content)?,
+                created_at: report.generated_at,
             })
             .await?;
         Ok(())
@@ -1405,7 +1919,9 @@ impl AgentEngine {
         tx: &mpsc::UnboundedSender<AgentEvent>,
         error: String,
     ) {
-        let _ = self.save_state(state, "failed").await;
+        let mut failed_state = state.clone();
+        failed_state.last_error = Some(error.clone());
+        let _ = self.save_state(&failed_state, "failed").await;
         send(tx, AgentEvent::Failed { error });
     }
 }
@@ -1436,20 +1952,238 @@ fn explicitly_requests_chart(prompt: &str) -> bool {
         .any(|needle| prompt.contains(needle))
 }
 
-/// Total wall-clock ceiling per tool. Large bounded experiments get a longer
-/// background allowance; ordinary research tools fail soft within one minute.
-fn tool_timeout_secs(name: &str) -> u64 {
+/// Recognize both the structured selection protocol and the legacy numbered
+/// Markdown format. The latter keeps older/provider-deviating answers from
+/// entering specialist review and disappearing from the UI.
+fn is_clarification_request(answer: &str) -> bool {
+    if answer.contains("```astock-questions") {
+        return true;
+    }
+    let mut question_count = 0_usize;
+    let mut option_count = 0_usize;
+    for line in answer.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("• ") {
+            option_count += 1;
+        }
+        let plain = trimmed.trim_matches('*').trim_start_matches('#').trim();
+        let numbered_question = plain.find(['.', '、', ')']).is_some_and(|separator| {
+            let separator_len = plain[separator..]
+                .chars()
+                .next()
+                .map(char::len_utf8)
+                .unwrap_or(0);
+            let number = &plain[..separator];
+            let text = &plain[separator + separator_len..];
+            !number.is_empty()
+                && number.chars().all(|ch| ch.is_ascii_digit())
+                && (text.trim_end().ends_with('?') || text.trim_end().ends_with('？'))
+        });
+        if numbered_question {
+            question_count += 1;
+        }
+    }
+    (1..=3).contains(&question_count) && option_count >= question_count * 2
+}
+
+fn news_revision_ids(messages: &[ChatMessage]) -> BTreeSet<String> {
+    fn collect(value: &Value, output: &mut BTreeSet<String>) {
+        match value {
+            Value::Object(fields) => {
+                if let Some(id) = fields.get("document_revision_id").and_then(Value::as_str) {
+                    if id.starts_with("rev:") {
+                        output.insert(id.to_string());
+                    }
+                }
+                for value in fields.values() {
+                    collect(value, output);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    collect(value, output);
+                }
+            }
+            Value::String(text) => {
+                if let Ok(decoded) = serde_json::from_str::<Value>(text) {
+                    collect(&decoded, output);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut output = BTreeSet::new();
+    for message in messages {
+        if let Some(content) = &message.content {
+            collect(content, &mut output);
+        }
+    }
+    output
+}
+
+fn source_evidence_pairs(messages: &[ChatMessage]) -> BTreeSet<(String, String)> {
+    fn collect(value: &Value, output: &mut BTreeSet<(String, String)>) {
+        match value {
+            Value::Object(fields) => {
+                if let Some(version) = fields.get("source_version_id").and_then(Value::as_str) {
+                    if version.starts_with("srcver:") {
+                        let fact = fields
+                            .get("fact_id")
+                            .and_then(Value::as_str)
+                            .filter(|fact| fact.starts_with("fact:"))
+                            .unwrap_or_default();
+                        output.insert((version.to_string(), fact.to_string()));
+                    }
+                }
+                for value in fields.values() {
+                    collect(value, output);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    collect(value, output);
+                }
+            }
+            Value::String(text) => {
+                if let Ok(decoded) = serde_json::from_str::<Value>(text) {
+                    collect(&decoded, output);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut output = BTreeSet::new();
+    for message in messages {
+        if let Some(content) = &message.content {
+            collect(content, &mut output);
+        }
+    }
+    output
+}
+
+fn contains_discovery_only(messages: &[ChatMessage]) -> bool {
+    messages.iter().any(|message| {
+        message
+            .content
+            .as_ref()
+            .is_some_and(|content| content.to_string().contains("discovery_only"))
+    })
+}
+
+fn contains_primary_source_evidence(messages: &[ChatMessage]) -> bool {
+    fn inspect(value: &Value, has_primary: &mut bool, has_version: &mut bool) {
+        match value {
+            Value::Object(fields) => {
+                *has_primary |= fields
+                    .get("is_primary_source")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                *has_version |= fields
+                    .get("source_version_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|version| version.starts_with("srcver:"));
+                for value in fields.values() {
+                    inspect(value, has_primary, has_version);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    inspect(value, has_primary, has_version);
+                }
+            }
+            Value::String(text) => {
+                if let Ok(decoded) = serde_json::from_str::<Value>(text) {
+                    inspect(&decoded, has_primary, has_version);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    messages.iter().any(|message| {
+        let mut has_primary = false;
+        let mut has_version = false;
+        if let Some(content) = &message.content {
+            inspect(content, &mut has_primary, &mut has_version);
+        }
+        has_primary && has_version
+    })
+}
+
+fn tool_quality_gate_counts(messages: &[ChatMessage]) -> (usize, usize) {
+    fn inspect(value: &Value, blocked: &mut usize, downgraded: &mut usize) {
+        match value {
+            Value::Object(fields) => {
+                if let Some(quality) = fields.get("data_quality").and_then(Value::as_object) {
+                    let deterministic = quality
+                        .get("allow_deterministic_compute")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true);
+                    let high_confidence = quality
+                        .get("allow_high_confidence")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true);
+                    if !deterministic {
+                        *blocked += 1;
+                    } else if !high_confidence {
+                        *downgraded += 1;
+                    }
+                    return;
+                }
+                for child in fields.values() {
+                    inspect(child, blocked, downgraded);
+                }
+            }
+            Value::Array(values) => {
+                for child in values {
+                    inspect(child, blocked, downgraded);
+                }
+            }
+            Value::String(text) => {
+                if let Ok(decoded) = serde_json::from_str::<Value>(text) {
+                    inspect(&decoded, blocked, downgraded);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut blocked = 0;
+    let mut downgraded = 0;
+    for message in messages.iter().filter(|message| message.role == "tool") {
+        if let Some(content) = &message.content {
+            inspect(content, &mut blocked, &mut downgraded);
+        }
+    }
+    (blocked, downgraded)
+}
+
+/// Typical duration shown to the user. This value is deliberately not used as
+/// a deadline: every tool keeps running until it completes or the user cancels
+/// the durable task.
+fn tool_estimated_secs(name: &str) -> u64 {
     match name {
         "scan_market" | "run_backtest" | "iterate_strategy" | "run_joinquant_research" => 180,
-        "get_fundamentals" | "run_valuation" | "compare_stocks" | "research_news"
-        | "search_web" => 60,
+        "get_fundamentals"
+        | "run_valuation"
+        | "analyze_earnings_drivers"
+        | "compare_stocks"
+        | "research_news"
+        | "research_disclosures"
+        | "research_global_transmission"
+        | "analyze_event_price_in"
+        | "research_supply_chain_relations"
+        | "query_graph_as_of"
+        | "search_web"
+        | "fetch_source_document" => 60,
         _ => 45,
     }
 }
 
-fn tool_progress_stage(name: &str, elapsed_ms: u64, timeout_ms: u64) -> &'static str {
-    if timeout_ms.saturating_sub(elapsed_ms) <= 8_000 {
-        return "数据源响应较慢，接近自动降级时限";
+fn tool_progress_stage(name: &str, elapsed_ms: u64, estimated_ms: u64) -> &'static str {
+    if elapsed_ms > estimated_ms {
+        return "已超过预估时间，仍在后台继续，可随时取消";
     }
     if elapsed_ms < 2_500 {
         return "检查本地缓存并选择可用数据源";
@@ -1458,24 +2192,36 @@ fn tool_progress_stage(name: &str, elapsed_ms: u64, timeout_ms: u64) -> &'static
         "compare_stocks" => "并行获取各标的数据，已完成结果会立即保留",
         "run_full_analysis" => "汇总行情、资金与市场环境并运行信号引擎",
         "get_fundamentals" | "run_valuation" => "读取财务报表并校验关键字段",
+        "analyze_earnings_drivers" => "连接经营驱动、利润表、现金流与估值，并传播参数区间",
         "run_backtest" | "iterate_strategy" => "执行有上限的历史计算与稳健性检验",
         "run_joinquant_research" => "等待聚宽研究环境并执行受限数据模板",
         "research_news" => "并行读取多家财经快讯并核验可用的个股事件",
+        "research_disclosures" => "查询正式披露、修订链、附件与原文核验状态",
+        "research_global_transmission" => "核验海外一级来源、原时区/币种与逐边 A 股传导证据",
+        "analyze_event_price_in" => "逐字段核验事件，并分离基本面影响与市场 price-in",
+        "research_supply_chain_relations" => "抽取并核验供应链关系候选，只使用已审核发布关系",
+        "query_graph_as_of" => "按业务时间与当时知悉时间重建历史图谱快照",
         "search_web" => "通过 MiniMax 联网检索权威来源并保留原始链接",
+        "fetch_source_document" => "正在安全打开原始页面并提取页码、段落、原值与单位",
+        "read_document" => "读取不可变文档版本与字段级证据",
+        "compare_source_evidence" => "逐字段比较来源原值、时点与证据位置",
         "scan_market" => "并行分析候选股票并更新排名",
         _ => "等待数据源返回并执行确定性计算",
     }
 }
 
 /// One executed tool call, ready to become a `tool` message.
+struct ToolAuditMeta<'a> {
+    task_id: &'a str,
+    call_id: &'a str,
+    tool: &'a str,
+    permission_domain: ToolPermissionDomain,
+    args_fingerprint: &'a str,
+}
+
 struct ToolExec {
-    /// Whether the tool succeeded (its evidence joins the report).
-    ok: bool,
     call_id: String,
-    name: String,
-    cache_key: String,
-    source: String,
-    fetched_at: String,
+    evidence: Option<Evidence>,
     message_content: String,
 }
 
@@ -1486,10 +2232,18 @@ fn send(tx: &mpsc::UnboundedSender<AgentEvent>, event: AgentEvent) {
 
 /// Merge a streamed tool-call fragment into the accumulator, by index.
 fn merge_tool_call(acc: &mut Vec<ToolCall>, delta: &ToolCall) {
-    let idx = delta
-        .index
-        .map(|i| i as usize)
-        .unwrap_or_else(|| acc.len().saturating_sub(1));
+    let idx = if let Some(index) = delta.index {
+        index as usize
+    } else if let Some(id) = delta.id.as_deref() {
+        // Some compatible streaming providers omit `index`. A fragment with
+        // an existing id continues that call; a new id starts a new slot.
+        acc.iter()
+            .position(|call| call.id.as_deref() == Some(id))
+            .unwrap_or(acc.len())
+    } else {
+        // Argument-only continuation chunks belong to the most recent call.
+        acc.len().saturating_sub(1)
+    };
     if acc.len() <= idx {
         acc.resize(idx + 1, ToolCall::default());
     }
@@ -1510,6 +2264,93 @@ fn merge_tool_call(acc: &mut Vec<ToolCall>, delta: &ToolCall) {
                 .arguments
                 .get_or_insert_with(String::new)
                 .push_str(args);
+        }
+    }
+}
+
+const MAX_TOOL_CALL_ID_BYTES: usize = 128;
+
+/// Normalize a provider id without inventing additional restrictions beyond
+/// what is required for a safe JSON/OpenAI-compatible transcript.
+fn valid_tool_call_id(raw: Option<&str>) -> Option<String> {
+    let id = raw?.trim();
+    if id.is_empty() || id.len() > MAX_TOOL_CALL_ID_BYTES || id.chars().any(char::is_control) {
+        return None;
+    }
+    Some(id.to_string())
+}
+
+fn next_recovered_call_id(prefix: &str, seen: &mut std::collections::HashSet<String>) -> String {
+    let mut attempt = 0_u32;
+    loop {
+        let candidate = if attempt == 0 {
+            prefix.to_string()
+        } else {
+            format!("{prefix}_{attempt}")
+        };
+        if seen.insert(candidate.clone()) {
+            return candidate;
+        }
+        attempt = attempt.saturating_add(1);
+    }
+}
+
+fn used_tool_call_ids(messages: &[ChatMessage]) -> std::collections::HashSet<String> {
+    messages
+        .iter()
+        .flat_map(|message| message.tool_calls.as_deref().unwrap_or(&[]))
+        .filter_map(|call| valid_tool_call_id(call.id.as_deref()))
+        .collect()
+}
+
+/// Remove empty slots created by sparse/malformed streaming indexes and fill
+/// the only optional payload that can be safely defaulted. This prevents an
+/// incomplete provider delta from becoming a malformed assistant tool call in
+/// the next request.
+fn sanitize_streamed_tool_calls(calls: &mut Vec<ToolCall>) {
+    calls.retain_mut(|call| {
+        let Some(function) = call.function.as_mut() else {
+            return false;
+        };
+        let Some(name) = function.name.as_deref().map(str::trim) else {
+            return false;
+        };
+        if name.is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
+            return false;
+        }
+        function.name = Some(name.to_string());
+        if function
+            .arguments
+            .as_deref()
+            .is_none_or(|arguments| arguments.trim().is_empty())
+        {
+            function.arguments = Some("{}".to_string());
+        }
+        true
+    });
+}
+
+/// Make a newly streamed batch globally unique against the complete durable
+/// history before the assistant message is persisted. Rewriting happens only
+/// for missing, invalid, or repeated ids; all valid unique provider ids stay
+/// byte-for-byte unchanged.
+fn normalize_new_tool_calls(calls: &mut [ToolCall], messages: &[ChatMessage], round: u32) {
+    let mut seen = used_tool_call_ids(messages);
+    for (index, call) in calls.iter_mut().enumerate() {
+        let provider_id = valid_tool_call_id(call.id.as_deref());
+        let unique = provider_id
+            .as_ref()
+            .is_some_and(|id| seen.insert(id.clone()));
+        if unique {
+            call.id = provider_id;
+        } else {
+            call.id = Some(next_recovered_call_id(
+                &format!("astock_call_r{round}_i{index}"),
+                &mut seen,
+            ));
+        }
+        if call.kind.as_deref().is_none_or(str::is_empty) {
+            call.kind = Some("function".to_string());
         }
     }
 }
@@ -1566,14 +2407,21 @@ async fn load_messages(storage: &Storage, conversation_id: &str) -> Result<Vec<C
 
 /// Repair an OpenAI tool-use transcript after a process interruption.
 ///
-/// MiniMax rejects a request with code 2013 when an assistant `tool_calls`
-/// entry is not followed by exactly one `tool` result for every call id. A
-/// desktop process can exit after the assistant message was persisted but
-/// before all background tools returned. Completed results are preserved;
-/// deterministic interruption results are inserted for missing calls, while
-/// orphan and duplicate tool rows are dropped.
+/// MiniMax rejects a request with code 2013 when tool-call ids are duplicated
+/// anywhere in the submitted history, or when an assistant `tool_calls` entry
+/// is not followed by exactly one `tool` result for every id. A desktop process
+/// can also exit after the assistant message was persisted but before all
+/// background tools returned.
+///
+/// This repair is global, deterministic, and order preserving. Valid unique
+/// provider ids remain unchanged. Later duplicates (including duplicates in a
+/// different round) are renamed together with their matching result. Missing
+/// results receive an explicit interruption payload; orphan/excess results are
+/// dropped.
 fn reconcile_tool_history(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     let mut out = Vec::with_capacity(messages.len());
+    let mut globally_seen = std::collections::HashSet::<String>::new();
+    let mut assistant_batch = 0usize;
     let mut index = 0usize;
     while index < messages.len() {
         let mut message = messages[index].clone();
@@ -1591,44 +2439,79 @@ fn reconcile_tool_history(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
             index += 1;
             continue;
         };
-        if message.role != "assistant" || calls.is_empty() {
+        if message.role != "assistant" {
+            tracing::warn!(role = %message.role, "dropping tool_calls from non-assistant message");
+            message.tool_calls = None;
+            out.push(message);
+            index += 1;
+            continue;
+        }
+        if calls.is_empty() {
+            message.tool_calls = None;
             out.push(message);
             index += 1;
             continue;
         }
 
-        // Normalize missing/duplicate call ids before matching results.
-        let mut seen_ids = std::collections::HashSet::new();
+        // Remember the provider ids so contiguous results can be paired by
+        // occurrence even if two broken calls used the same id.
+        let mut source_ids = Vec::with_capacity(calls.len());
+        let mut expected = Vec::with_capacity(calls.len());
         for (call_index, call) in calls.iter_mut().enumerate() {
-            let valid = call
+            let source_id = call
                 .id
                 .as_deref()
-                .is_some_and(|id| !id.trim().is_empty() && seen_ids.insert(id.to_string()));
-            if !valid {
-                let recovered = format!("recovered_call_{index}_{call_index}");
-                seen_ids.insert(recovered.clone());
-                call.id = Some(recovered);
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string);
+            let provider_id = valid_tool_call_id(call.id.as_deref());
+            let unique = provider_id
+                .as_ref()
+                .is_some_and(|id| globally_seen.insert(id.clone()));
+            let assigned = if unique {
+                provider_id.expect("checked Some above")
+            } else {
+                next_recovered_call_id(
+                    &format!("astock_recovered_b{assistant_batch}_i{call_index}"),
+                    &mut globally_seen,
+                )
+            };
+            call.id = Some(assigned.clone());
+            if call.kind.as_deref().is_none_or(str::is_empty) {
+                call.kind = Some("function".to_string());
             }
+            source_ids.push(source_id);
+            expected.push(assigned);
         }
-        let expected: Vec<String> = calls.iter().filter_map(|call| call.id.clone()).collect();
+        assistant_batch += 1;
         out.push(message);
 
         let mut cursor = index + 1;
-        let mut results = std::collections::HashMap::<String, ChatMessage>::new();
+        let mut results = Vec::<ChatMessage>::new();
         while cursor < messages.len() && messages[cursor].role == "tool" {
-            let result = messages[cursor].clone();
-            if let Some(call_id) = result.tool_call_id.clone() {
-                if expected.contains(&call_id) {
-                    results.entry(call_id).or_insert(result);
-                } else {
-                    tracing::warn!(%call_id, "dropping unmatched Agent tool result");
-                }
-            }
+            results.push(messages[cursor].clone());
             cursor += 1;
         }
 
-        for call_id in expected {
-            if let Some(result) = results.remove(&call_id) {
+        let mut consumed = vec![false; results.len()];
+        for (call_index, call_id) in expected.into_iter().enumerate() {
+            let result_index = source_ids[call_index].as_deref().and_then(|source_id| {
+                results
+                    .iter()
+                    .enumerate()
+                    .position(|(result_index, result)| {
+                        !consumed[result_index]
+                            && result
+                                .tool_call_id
+                                .as_deref()
+                                .map(str::trim)
+                                .is_some_and(|result_id| result_id == source_id)
+                    })
+            });
+            if let Some(result_index) = result_index {
+                consumed[result_index] = true;
+                let mut result = results[result_index].clone();
+                result.tool_call_id = Some(call_id);
                 out.push(result);
             } else {
                 tracing::warn!(%call_id, "repairing interrupted Agent tool call without a result");
@@ -1642,9 +2525,55 @@ fn reconcile_tool_history(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
                 ));
             }
         }
+        for (result_index, result) in results.iter().enumerate() {
+            if !consumed[result_index] {
+                tracing::warn!(
+                    tool_call_id = ?result.tool_call_id,
+                    "dropping unmatched or duplicate Agent tool result"
+                );
+            }
+        }
         index = cursor;
     }
     out
+}
+
+/// Validate the exact provider transcript shape after reconciliation. This is
+/// intentionally strict: a malformed history is stopped locally instead of
+/// spending quota on a request MiniMax must reject with code 2013.
+fn validate_tool_history(messages: &[ChatMessage]) -> std::result::Result<(), String> {
+    let mut globally_seen = std::collections::HashSet::<String>::new();
+    let mut index = 0usize;
+    while index < messages.len() {
+        let message = &messages[index];
+        if message.role == "tool" {
+            return Err(format!("第 {index} 条消息是孤立工具结果"));
+        }
+        let calls = message.tool_calls.as_deref().unwrap_or(&[]);
+        if calls.is_empty() {
+            index += 1;
+            continue;
+        }
+        if message.role != "assistant" {
+            return Err(format!("第 {index} 条非助手消息包含工具调用"));
+        }
+        for (offset, call) in calls.iter().enumerate() {
+            let call_id = valid_tool_call_id(call.id.as_deref())
+                .ok_or_else(|| format!("第 {index} 条消息的第 {offset} 个调用 ID 非法"))?;
+            if !globally_seen.insert(call_id.clone()) {
+                return Err(format!("工具调用 ID {call_id} 在历史中重复"));
+            }
+            let result_index = index + 1 + offset;
+            let result = messages
+                .get(result_index)
+                .ok_or_else(|| format!("工具调用 {call_id} 缺少结果"))?;
+            if result.role != "tool" || result.tool_call_id.as_deref() != Some(call_id.as_str()) {
+                return Err(format!("工具调用 {call_id} 的结果顺序或 ID 不匹配"));
+            }
+        }
+        index += 1 + calls.len();
+    }
+    Ok(())
 }
 
 /// Marker prefix of the synthetic snapshot message produced by
@@ -1947,14 +2876,170 @@ fn extract_section(body: &str, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
+    use async_trait::async_trait;
     use serde_json::json;
 
+    use astock_minimax::{ChatChoice, ChatChunk, ToolCallFunction};
     use astock_storage::StorageConfig;
 
-    use crate::testing::{EchoTool, NoopMarket, ScriptedChat};
-    use crate::tools::AgentTool;
+    #[test]
+    fn extracts_exact_news_revision_ids_from_tool_payloads() {
+        let messages = vec![ChatMessage::tool_result(
+            "call-news".to_string(),
+            json!({
+                "items": [
+                    {"document_revision_id": "rev:abc123", "title": "公告"},
+                    {"document_revision_id": null},
+                    {"document_revision_id": "not-a-revision"}
+                ]
+            })
+            .to_string(),
+        )];
+        assert_eq!(
+            news_revision_ids(&messages),
+            ["rev:abc123".to_string()].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn search_snippets_are_discovery_only_and_source_facts_keep_exact_ids() {
+        let discovery = ChatMessage::tool_result(
+            "search",
+            json!({"verification_status":"discovery_only","fact_eligible":false}).to_string(),
+        );
+        assert!(contains_discovery_only(std::slice::from_ref(&discovery)));
+        assert!(source_evidence_pairs(std::slice::from_ref(&discovery)).is_empty());
+
+        let verified = ChatMessage::tool_result(
+            "source",
+            json!({
+                "source_version_id":"srcver:abc123",
+                "source":{"is_primary_source":true},
+                "facts":[
+                    {"source_version_id":"srcver:abc123","fact_id":"fact:amount","raw_value":"10亿元"},
+                    {"source_version_id":"invalid","fact_id":"fact:ignored"}
+                ]
+            })
+            .to_string(),
+        );
+        let pairs = source_evidence_pairs(std::slice::from_ref(&verified));
+        assert!(pairs.contains(&("srcver:abc123".into(), "".into())));
+        assert!(pairs.contains(&("srcver:abc123".into(), "fact:amount".into())));
+        assert_eq!(pairs.len(), 2);
+        assert!(contains_primary_source_evidence(&[verified]));
+    }
+
+    use crate::testing::{EchoTool, NoopMarket, ScriptedChat, ScriptedReply};
+    use crate::tools::{AgentTool, ToolResult};
+
+    struct SlowTool;
+
+    #[async_trait]
+    impl AgentTool for SlowTool {
+        fn name(&self) -> &'static str {
+            "slow_tool"
+        }
+
+        fn description(&self) -> &'static str {
+            "用于验证无固定超时的异步测试工具"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        fn cacheable(&self) -> bool {
+            false
+        }
+
+        async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolResult> {
+            tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+            Ok(ToolResult {
+                summary_json: json!({"completed": true}),
+                full_json: None,
+                cache_key: String::new(),
+                source: "test".to_string(),
+                fetched_at: "2026-01-01T00:00:00Z".to_string(),
+            })
+        }
+    }
+
+    struct BarrierTool {
+        barrier: Arc<tokio::sync::Barrier>,
+        started: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl AgentTool for BarrierTool {
+        fn name(&self) -> &'static str {
+            "barrier_tool"
+        }
+
+        fn description(&self) -> &'static str {
+            "用于验证工具批次并发启动的异步测试工具"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        fn cacheable(&self) -> bool {
+            false
+        }
+
+        async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolResult> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            self.barrier.wait().await;
+            Ok(ToolResult {
+                summary_json: args,
+                full_json: None,
+                cache_key: String::new(),
+                source: "test".to_string(),
+                fetched_at: "2026-01-01T00:00:00Z".to_string(),
+            })
+        }
+    }
+
+    struct DropSignal(Arc<AtomicBool>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    struct NeverTool {
+        started: Arc<AtomicBool>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl AgentTool for NeverTool {
+        fn name(&self) -> &'static str {
+            "never_tool"
+        }
+
+        fn description(&self) -> &'static str {
+            "用于验证主动取消的异步测试工具"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        fn cacheable(&self) -> bool {
+            false
+        }
+
+        async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolResult> {
+            self.started.store(true, Ordering::SeqCst);
+            let _drop_signal = DropSignal(Arc::clone(&self.dropped));
+            futures::future::pending::<()>().await;
+            unreachable!("pending test tool only exits when its future is dropped")
+        }
+    }
 
     fn build_engine(storage: Storage, chat: Arc<ScriptedChat>, echo: Arc<EchoTool>) -> AgentEngine {
         let ctx = ToolContext {
@@ -1966,6 +3051,7 @@ mod tests {
             minimax_search: None,
             finance_news: None,
             iwencai: None,
+            progress: None,
         };
         let registry = ToolRegistry::new(vec![echo as Arc<dyn AgentTool>]);
         AgentEngine::new(chat, registry, ctx, EngineConfig::default())
@@ -1986,35 +3072,278 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_tools_have_short_deadlines_and_bounded_experiments_have_room() {
-        assert_eq!(tool_timeout_secs("run_full_analysis"), 45);
-        assert_eq!(tool_timeout_secs("compare_stocks"), 60);
-        assert_eq!(tool_timeout_secs("iterate_strategy"), 180);
+    fn tool_estimates_are_guidance_instead_of_deadlines() {
+        assert_eq!(tool_estimated_secs("run_full_analysis"), 45);
+        assert_eq!(tool_estimated_secs("compare_stocks"), 60);
+        assert_eq!(tool_estimated_secs("iterate_strategy"), 180);
         assert!(tool_progress_stage("compare_stocks", 5_000, 60_000).contains("并行获取"));
-        assert!(tool_progress_stage("compare_stocks", 55_000, 60_000).contains("自动降级"));
+        assert!(tool_progress_stage("compare_stocks", 61_000, 60_000).contains("仍在后台继续"));
+    }
+
+    #[tokio::test]
+    async fn terminal_error_is_persisted_for_user_diagnostics() {
+        let (_dir, storage) = test_storage();
+        let chat = Arc::new(ScriptedChat::new("test-model"));
+        chat.push(ScriptedReply::Error(MinimaxError::Api {
+            code: 500,
+            msg: "diagnostic failure".to_string(),
+        }));
+        let engine = build_engine(storage.clone(), chat, Arc::new(EchoTool::new()));
+        let events = collect(engine.run_task(spec("persisted-failure"))).await;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Failed { error } if error.contains("diagnostic failure")
+        )));
+        let record = storage
+            .agent_task_get("persisted-failure")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.status, "failed");
+        let state: Value = serde_json::from_str(&record.state_json).unwrap();
+        assert!(state["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("diagnostic failure"));
+    }
+
+    #[test]
+    fn recognizes_structured_and_legacy_clarification_boundaries() {
+        assert!(is_clarification_request(
+            "```astock-questions\n{\"questions\":[]}\n```"
+        ));
+        assert!(is_clarification_request(
+            "**1. 资金用途？**\n- A. 试探建仓\n- B. 长期定投\n\n**2. 风险偏好？**\n- 保守\n- 平衡"
+        ));
+        assert!(!is_clarification_request(
+            "1. 关键依据\n- 营收增长\n- 现金流改善\n2. 风险因素\n- 估值偏高"
+        ));
+    }
+
+    #[test]
+    fn tool_event_contract_exposes_estimate_without_deadline() {
+        let event = AgentEvent::ToolCallStarted {
+            call_id: "c1".to_string(),
+            name: "echo".to_string(),
+            args: json!({}),
+            position: 1,
+            total: 1,
+            estimated_ms: 45_000,
+        };
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["estimated_ms"], 45_000);
+        assert!(value.get("timeout_ms").is_none());
+    }
+
+    #[tokio::test]
+    async fn every_tool_in_batch_is_polled_asynchronously() {
+        let (_dir, storage) = test_storage();
+        let chat = Arc::new(ScriptedChat::new("test-model"));
+        let calls = [0_u32, 1_u32]
+            .into_iter()
+            .map(|index| ToolCall {
+                id: Some(format!("parallel-{index}")),
+                kind: Some("function".to_string()),
+                index: Some(index),
+                function: Some(ToolCallFunction {
+                    name: Some("barrier_tool".to_string()),
+                    arguments: Some(json!({"index": index}).to_string()),
+                }),
+            })
+            .collect();
+        chat.push(ScriptedReply::Chunks(vec![ChatChunk {
+            choices: vec![ChatChoice {
+                index: Some(0),
+                delta: Some(ChatMessage {
+                    role: "assistant".to_string(),
+                    tool_calls: Some(calls),
+                    ..Default::default()
+                }),
+                finish_reason: Some("tool_calls".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }]));
+        chat.push_text("并行工具均已完成");
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ctx = ToolContext {
+            market: Arc::new(NoopMarket),
+            storage,
+            graph: None,
+            fundamental: None,
+            joinquant: None,
+            minimax_search: None,
+            finance_news: None,
+            iwencai: None,
+            progress: None,
+        };
+        let engine = AgentEngine::new(
+            chat,
+            ToolRegistry::new(vec![Arc::new(BarrierTool {
+                barrier: Arc::clone(&barrier),
+                started: Arc::clone(&started),
+            }) as Arc<dyn AgentTool>]),
+            ctx,
+            EngineConfig::default(),
+        );
+        let stream = engine.run_task(spec("parallel-tools"));
+        // Full-workspace Windows runs can spend several seconds scheduling
+        // freshly linked test processes. The barrier still proves both tool
+        // futures are polled concurrently; the wider wall-clock guard only
+        // removes host-load flakiness.
+        tokio::time::timeout(std::time::Duration::from_secs(10), barrier.wait())
+            .await
+            .expect("both tools must reach the barrier concurrently");
+        let events = collect(stream).await;
+        assert_eq!(started.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ToolCallFinished { success: true, .. }))
+                .count(),
+            2
+        );
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Completed { .. })));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tool_runs_past_estimate_until_success() {
+        let (_dir, storage) = test_storage();
+        let chat = Arc::new(ScriptedChat::new("test-model"));
+        chat.push_tool_call("slow-id", "slow_tool", json!({}));
+        chat.push_text("长任务已经完成");
+        let ctx = ToolContext {
+            market: Arc::new(NoopMarket),
+            storage,
+            graph: None,
+            fundamental: None,
+            joinquant: None,
+            minimax_search: None,
+            finance_news: None,
+            iwencai: None,
+            progress: None,
+        };
+        let engine = AgentEngine::new(
+            chat,
+            ToolRegistry::new(vec![Arc::new(SlowTool) as Arc<dyn AgentTool>]),
+            ctx,
+            EngineConfig::default(),
+        );
+        let mut stream = engine.run_task(spec("slow-past-estimate"));
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            let started = matches!(
+                event,
+                AgentEvent::ToolCallStarted {
+                    estimated_ms: 45_000,
+                    ..
+                }
+            );
+            events.push(event);
+            if started {
+                break;
+            }
+        }
+        tokio::time::advance(std::time::Duration::from_secs(130)).await;
+        tokio::task::yield_now().await;
+        events.extend(stream.collect::<Vec<_>>().await);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolCallFinished {
+                success: true,
+                elapsed_ms,
+                ..
+            } if *elapsed_ms >= 120_000
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Completed { .. })));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolCallFinished {
+                error: Some(error),
+                ..
+            } if error.contains("超时") || error.contains("自动降级")
+        )));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_task_drops_in_flight_tool_future() {
+        let (_dir, storage) = test_storage();
+        let chat = Arc::new(ScriptedChat::new("test-model"));
+        chat.push_tool_call("never-id", "never_tool", json!({}));
+        let started = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let ctx = ToolContext {
+            market: Arc::new(NoopMarket),
+            storage,
+            graph: None,
+            fundamental: None,
+            joinquant: None,
+            minimax_search: None,
+            finance_news: None,
+            iwencai: None,
+            progress: None,
+        };
+        let engine = AgentEngine::new(
+            chat,
+            ToolRegistry::new(vec![Arc::new(NeverTool {
+                started: Arc::clone(&started),
+                dropped: Arc::clone(&dropped),
+            }) as Arc<dyn AgentTool>]),
+            ctx,
+            EngineConfig::default(),
+        );
+        let mut stream = engine.run_task(spec("cancel-in-flight"));
+        while let Some(event) = stream.next().await {
+            if matches!(event, AgentEvent::ToolCallStarted { .. }) {
+                break;
+            }
+        }
+        tokio::task::yield_now().await;
+        assert!(started.load(Ordering::SeqCst));
+        assert!(engine.cancel_task("cancel-in-flight").await.unwrap());
+        tokio::time::advance(std::time::Duration::from_secs(3)).await;
+        tokio::task::yield_now().await;
+        let remaining = stream.collect::<Vec<_>>().await;
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(remaining
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Failed { error } if error == "任务已取消")));
+        let record = engine
+            .ctx
+            .storage
+            .agent_task_get("cancel-in-flight")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.status, "cancelled");
     }
 
     #[tokio::test]
     async fn completes_simple_conversation() {
         let (_dir, storage) = test_storage();
         let chat = Arc::new(ScriptedChat::new("test-model"));
-        chat.push_text("【计算】答案是42");
+        chat.push_text("【未知】当前没有可验证证据");
         let echo = Arc::new(EchoTool::new());
         let engine = build_engine(storage.clone(), chat.clone(), echo);
 
         let events = collect(engine.run_task(spec("t1"))).await;
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::TextDelta { text } if text.contains("答案是42"))));
+        assert!(events.iter().any(
+            |e| matches!(e, AgentEvent::TextDelta { text } if text.contains("没有可验证证据"))
+        ));
         let completed = events.iter().find_map(|e| match e {
             AgentEvent::Completed { report } => Some(report),
             _ => None,
         });
         let report = completed.expect("task should complete");
-        assert!(report.answer.contains("答案是42"));
+        assert!(report.answer.contains("没有可验证证据"));
         assert!(!report.answer.contains("免责声明"));
         assert_eq!(report.conclusions.len(), 1);
-        assert_eq!(report.conclusions[0].grade, "计算");
+        assert_eq!(report.conclusions[0].grade, "未知");
 
         // The task row and the conversation were persisted.
         let record = storage.agent_task_get("t1").await.unwrap().unwrap();
@@ -2029,6 +3358,80 @@ mod tests {
         assert_eq!(
             requests[0].extra.get("reasoning_split"),
             Some(&Value::Bool(true))
+        );
+    }
+
+    #[tokio::test]
+    async fn verifier_repairs_an_unsupported_number_before_publication() {
+        let (_dir, storage) = test_storage();
+        let chat = Arc::new(ScriptedChat::new("test-model"));
+        chat.push_text("【事实】目标价 99 元");
+        chat.push_text("【未知】现有证据不足，无法确认具体目标价");
+        let echo = Arc::new(EchoTool::new());
+        let engine = build_engine(storage.clone(), chat.clone(), echo);
+
+        let events = collect(engine.run_task(spec("t-verify-repair"))).await;
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TextReset { message } if message.contains("证据校验"))));
+        let report = events.iter().find_map(|event| match event {
+            AgentEvent::Completed { report } => Some(report),
+            _ => None,
+        });
+        let report = report.expect("repaired report should be emitted");
+        assert!(report.research.verification.passed());
+        assert!(report.answer.contains("无法确认具体目标价"));
+        assert!(!report.answer.contains("99"));
+        assert_eq!(chat.requests.lock().unwrap().len(), 2);
+        let persisted = storage
+            .reports_get("t-verify-repair")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.kind, "verified-research");
+        assert!(persisted.content_json.contains("tool_versions"));
+        assert!(persisted.content_json.contains("data_versions"));
+        assert!(persisted.content_json.contains("verification"));
+    }
+
+    #[tokio::test]
+    async fn verifier_publishes_safe_empty_result_after_two_failed_repairs() {
+        let (_dir, storage) = test_storage();
+        let chat = Arc::new(ScriptedChat::new("test-model"));
+        chat.push_text("【事实】目标价 99 元");
+        chat.push_text("【事实】目标价 98 元");
+        chat.push_text("【事实】目标价 97 元");
+        let echo = Arc::new(EchoTool::new());
+        let engine = build_engine(storage.clone(), chat.clone(), echo);
+
+        let events = collect(engine.run_task(spec("t-verify-block"))).await;
+        let report = events.iter().find_map(|event| match event {
+            AgentEvent::Completed { report } => Some(report),
+            _ => None,
+        });
+        let report = report.expect("safe fallback report should be emitted");
+        assert!(report.research.verification.passed());
+        assert!(report.answer.contains("本轮暂无可发布结论"));
+        assert!(report.answer.contains("已自动省略"));
+        assert!(!report.answer.contains("97 元"));
+        assert_eq!(chat.requests.lock().unwrap().len(), 3);
+        assert_eq!(
+            storage
+                .agent_task_get("t-verify-block")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "completed"
+        );
+        assert_eq!(
+            storage
+                .reports_get("t-verify-block")
+                .await
+                .unwrap()
+                .unwrap()
+                .kind,
+            "verified-research"
         );
     }
 
@@ -2093,13 +3496,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plan_clarification_waits_for_user_instead_of_flashing_into_specialist_review() {
+        let (_dir, storage) = test_storage();
+        let chat = Arc::new(ScriptedChat::new("main-model"));
+        let clarification = "你提供的2万元资金约束会影响仓位，请先确认：\n```astock-questions\n{\"title\":\"请确认\",\"questions\":[{\"id\":\"risk\",\"question\":\"风险偏好？\",\"kind\":\"single\",\"options\":[{\"id\":\"safe\",\"label\":\"保守\"},{\"id\":\"balanced\",\"label\":\"平衡\"}],\"allow_other\":true}]}\n```";
+        chat.push_text(clarification);
+        let echo = Arc::new(EchoTool::new());
+        let engine = build_engine(storage.clone(), chat.clone(), echo);
+        let task = spec("t-plan-input")
+            .with_run_options("plan", "deep", Vec::new(), true)
+            .with_specialists(vec![SpecialistRoute {
+                name: "风险审计师".into(),
+                instruction: "检查风险".into(),
+                model: Some("review-model".into()),
+            }]);
+
+        let events = collect(engine.run_task(task)).await;
+        assert!(!events.iter().any(
+            |event| matches!(event, AgentEvent::Progress { phase, .. } if phase == "reviewing")
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TextReset { .. })));
+        let completed = events.iter().find_map(|event| match event {
+            AgentEvent::Completed { report } => Some(report),
+            _ => None,
+        });
+        let completed = completed.expect("clarification report");
+        assert_eq!(completed.answer, clarification);
+        assert_eq!(
+            completed.research.verification.status,
+            VerificationStatus::NotApplicable
+        );
+        assert!(completed.research.verification.findings.is_empty());
+        assert!(completed.research.claims.is_empty());
+        assert_eq!(
+            storage
+                .agent_task_get("t-plan-input")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "completed"
+        );
+        assert_eq!(chat.requests.lock().unwrap().len(), 1);
+        let stored = storage.conversation_load("t-plan-input").await.unwrap();
+        assert!(stored
+            .iter()
+            .any(|message| message.role == "assistant"
+                && message.content.contains("astock-questions")));
+    }
+
+    #[tokio::test]
     async fn disabled_tools_are_not_offered_or_executed() {
         let (_dir, storage) = test_storage();
         let chat = Arc::new(ScriptedChat::new("test-model"));
         chat.push_tool_call("c1", "echo", json!({"text": "blocked"}));
         chat.push_text("已说明工具关闭");
         let echo = Arc::new(EchoTool::new());
-        let engine = build_engine(storage, chat.clone(), echo.clone());
+        let engine = build_engine(storage.clone(), chat.clone(), echo.clone());
         let mut task = spec("t-disabled");
         task.enabled_tools = Some(Vec::new());
 
@@ -2111,6 +3566,18 @@ mod tests {
         )));
         assert_eq!(echo.calls.load(Ordering::SeqCst), 0);
         assert!(chat.requests.lock().unwrap()[0].tools.is_none());
+        let audit = storage.agent_tool_audit_list("t-disabled").await.unwrap();
+        assert_eq!(
+            audit
+                .iter()
+                .map(|row| row.event.as_str())
+                .collect::<Vec<_>>(),
+            vec!["requested", "denied"]
+        );
+        assert!(audit
+            .iter()
+            .all(|row| row.args_fingerprint.starts_with("sha256:")
+                && row.permission_domain == "read_only_network"));
     }
 
     #[tokio::test]
@@ -2237,25 +3704,32 @@ mod tests {
         assert_eq!(messages[3].role, "tool");
 
         // The second request contains the tool result with merged arguments.
-        let requests = chat.requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
-        let second = &requests[1].messages;
-        let tool_msg = second.iter().find(|m| m.role == "tool").unwrap();
-        let content = tool_msg.content_text().unwrap();
-        assert!(
-            content.contains("\"echo\""),
-            "tool result replayed: {content}"
-        );
-        assert!(content.contains("cache_key"));
-        let assistant_msg = second.iter().find(|m| m.role == "assistant").unwrap();
-        let args = assistant_msg.tool_calls.as_ref().unwrap()[0]
-            .function
-            .as_ref()
-            .unwrap()
-            .arguments
-            .clone()
-            .unwrap();
-        assert_eq!(args, "{\"text\":\"hi\"}", "fragments merged");
+        {
+            let requests = chat.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            let second = &requests[1].messages;
+            let tool_msg = second.iter().find(|m| m.role == "tool").unwrap();
+            let content = tool_msg.content_text().unwrap();
+            assert!(
+                content.contains("\"echo\""),
+                "tool result replayed: {content}"
+            );
+            assert!(content.contains("cache_key"));
+            assert!(content.contains("\"evidence_id\":\"ev_"));
+            assert!(content.contains("\"field_path\""));
+            let assistant_msg = second.iter().find(|m| m.role == "assistant").unwrap();
+            let args = assistant_msg.tool_calls.as_ref().unwrap()[0]
+                .function
+                .as_ref()
+                .unwrap()
+                .arguments
+                .clone()
+                .unwrap();
+            assert_eq!(args, "{\"text\":\"hi\"}", "fragments merged");
+        }
+        let persisted = storage.reports_get("t2").await.unwrap().unwrap();
+        assert!(persisted.content_json.contains("agent-tool-contract-v2"));
+        assert!(persisted.content_json.contains("data_versions"));
     }
 
     #[tokio::test]
@@ -2336,6 +3810,7 @@ mod tests {
             evidence: Vec::new(),
             context_compactions: 0,
             multi_agent_reviewed: false,
+            last_error: None,
         };
         engine.save_state(&state, "running").await.unwrap();
 
@@ -2414,6 +3889,16 @@ mod tests {
         assert!(engine.cancel_task("t4").await.unwrap());
         let record = storage.agent_task_get("t4").await.unwrap().unwrap();
         assert_eq!(record.status, "cancelled");
+        let cancelled_state: TaskState = serde_json::from_str(&record.state_json).unwrap();
+        assert!(matches!(
+            engine.save_state(&cancelled_state, "running").await,
+            Err(AgentError::Cancelled(task_id)) if task_id == "t4"
+        ));
+        assert_eq!(
+            storage.agent_task_get("t4").await.unwrap().unwrap().status,
+            "cancelled",
+            "a late tool completion must not resurrect a cancelled task"
+        );
 
         let err = match engine.resume_task("t4").await {
             Err(e) => e,
@@ -2447,6 +3932,7 @@ mod tests {
             minimax_search: None,
             finance_news: None,
             iwencai: None,
+            progress: None,
         };
         let registry = ToolRegistry::new(vec![echo as Arc<dyn AgentTool>]);
         let engine = AgentEngine::new(
@@ -2543,6 +4029,187 @@ mod tests {
         assert_pair_integrity(&repaired);
     }
 
+    #[test]
+    fn duplicate_tool_call_ids_across_rounds_are_rewritten_with_results() {
+        let messages = vec![
+            ChatMessage::system("system"),
+            ChatMessage::user("分析"),
+            assistant_call("same-id", "get_quote", json!({"symbol": "600519"})),
+            ChatMessage::tool_result("same-id", "first round"),
+            assistant_call("same-id", "get_kline", json!({"symbol": "600519"})),
+            ChatMessage::tool_result("same-id", "second round"),
+        ];
+        assert!(validate_tool_history(&messages)
+            .unwrap_err()
+            .contains("历史中重复"));
+
+        let repaired = reconcile_tool_history(messages);
+        let first_id = repaired[2].tool_calls.as_ref().unwrap()[0]
+            .id
+            .clone()
+            .unwrap();
+        let second_id = repaired[4].tool_calls.as_ref().unwrap()[0]
+            .id
+            .clone()
+            .unwrap();
+        assert_eq!(
+            first_id, "same-id",
+            "first valid provider id stays unchanged"
+        );
+        assert_ne!(first_id, second_id, "later round receives a fresh id");
+        assert_eq!(repaired[3].tool_call_id.as_deref(), Some(first_id.as_str()));
+        assert_eq!(
+            repaired[5].tool_call_id.as_deref(),
+            Some(second_id.as_str())
+        );
+        assert_eq!(repaired[3].content_text().as_deref(), Some("first round"));
+        assert_eq!(repaired[5].content_text().as_deref(), Some("second round"));
+        assert_pair_integrity(&repaired);
+    }
+
+    #[test]
+    fn duplicate_ids_inside_parallel_batch_are_rewritten_by_occurrence() {
+        let first = assistant_call("duplicate", "get_quote", json!({}))
+            .tool_calls
+            .unwrap()
+            .remove(0);
+        let second = assistant_call("duplicate", "get_kline", json!({}))
+            .tool_calls
+            .unwrap()
+            .remove(0);
+        let messages = vec![
+            ChatMessage::system("system"),
+            ChatMessage {
+                role: "assistant".to_string(),
+                tool_calls: Some(vec![first, second]),
+                ..Default::default()
+            },
+            ChatMessage::tool_result("duplicate", "first result"),
+            ChatMessage::tool_result("duplicate", "second result"),
+        ];
+
+        let repaired = reconcile_tool_history(messages);
+        let calls = repaired[1].tool_calls.as_ref().unwrap();
+        let first_id = calls[0].id.as_deref().unwrap();
+        let second_id = calls[1].id.as_deref().unwrap();
+        assert_eq!(first_id, "duplicate");
+        assert_ne!(first_id, second_id);
+        assert_eq!(repaired[2].tool_call_id.as_deref(), Some(first_id));
+        assert_eq!(repaired[3].tool_call_id.as_deref(), Some(second_id));
+        assert_eq!(repaired[2].content_text().as_deref(), Some("first result"));
+        assert_eq!(repaired[3].content_text().as_deref(), Some("second result"));
+        assert_pair_integrity(&repaired);
+    }
+
+    #[test]
+    fn missing_invalid_and_colliding_ids_are_recovered_deterministically() {
+        let mut missing = assistant_call("placeholder", "get_quote", json!({}));
+        missing.tool_calls.as_mut().unwrap()[0].id = None;
+        let invalid_id = "x".repeat(MAX_TOOL_CALL_ID_BYTES + 1);
+        let messages = vec![
+            ChatMessage::system("system"),
+            missing,
+            assistant_call(&invalid_id, "get_kline", json!({})),
+            ChatMessage::tool_result(&invalid_id, "invalid but matched"),
+            assistant_call("astock_recovered_b0_i0", "get_quote", json!({})),
+            ChatMessage::tool_result("astock_recovered_b0_i0", "colliding provider id"),
+        ];
+        let first = reconcile_tool_history(messages.clone());
+        let second = reconcile_tool_history(messages);
+        assert_eq!(dump(&first), dump(&second));
+        assert_pair_integrity(&first);
+    }
+
+    #[tokio::test]
+    async fn provider_reused_id_is_normalized_before_next_request_and_persistence() {
+        let (_dir, storage) = test_storage();
+        let chat = Arc::new(ScriptedChat::new("test-model"));
+        chat.push_tool_call("provider-reused", "echo", json!({"text": "one"}));
+        chat.push_tool_call("provider-reused", "echo", json!({"text": "two"}));
+        chat.push_text("两轮工具均已完成");
+        let echo = Arc::new(EchoTool::new());
+        let engine = build_engine(storage.clone(), chat.clone(), echo);
+
+        let events = collect(engine.run_task(spec("provider-reused-id"))).await;
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Completed { .. })));
+        {
+            let requests = chat.requests.lock().unwrap();
+            assert_eq!(requests.len(), 3);
+            for request in requests.iter() {
+                validate_tool_history(&request.messages).unwrap();
+            }
+            let ids: Vec<_> = requests[2]
+                .messages
+                .iter()
+                .flat_map(|message| message.tool_calls.as_deref().unwrap_or(&[]))
+                .filter_map(|call| call.id.as_deref())
+                .collect();
+            assert_eq!(ids.len(), 2);
+            assert_eq!(ids[0], "provider-reused");
+            assert_ne!(ids[0], ids[1]);
+        }
+        let persisted = load_messages(&storage, "provider-reused-id").await.unwrap();
+        validate_tool_history(&persisted).unwrap();
+        assert_pair_integrity(&persisted);
+    }
+
+    #[test]
+    fn streaming_calls_without_indexes_keep_distinct_ids() {
+        let mut calls = Vec::new();
+        for (id, name) in [("one", "get_quote"), ("two", "get_kline")] {
+            merge_tool_call(
+                &mut calls,
+                &ToolCall {
+                    id: Some(id.to_string()),
+                    kind: Some("function".to_string()),
+                    index: None,
+                    function: Some(astock_minimax::ToolCallFunction {
+                        name: Some(name.to_string()),
+                        arguments: Some("{}".to_string()),
+                    }),
+                },
+            );
+        }
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id.as_deref(), Some("one"));
+        assert_eq!(calls[1].id.as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn sparse_stream_indexes_cannot_create_empty_tool_calls() {
+        let mut calls = Vec::new();
+        merge_tool_call(
+            &mut calls,
+            &ToolCall {
+                id: None,
+                kind: Some("function".to_string()),
+                index: Some(2),
+                function: Some(ToolCallFunction {
+                    name: Some("get_quote".to_string()),
+                    arguments: None,
+                }),
+            },
+        );
+        assert_eq!(
+            calls.len(),
+            3,
+            "stream accumulator contains sparse placeholders"
+        );
+        sanitize_streamed_tool_calls(&mut calls);
+        normalize_new_tool_calls(&mut calls, &[], 1);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id.as_deref(), Some("astock_call_r1_i0"));
+        assert_eq!(
+            calls[0]
+                .function
+                .as_ref()
+                .and_then(|function| function.arguments.as_deref()),
+            Some("{}")
+        );
+    }
+
     /// A fat multi-round history: system + user + `rounds` tool pairs + a
     /// trailing assistant note.
     fn fat_history(rounds: usize) -> Vec<ChatMessage> {
@@ -2570,11 +4237,14 @@ mod tests {
     /// left unanswered: the sequence is a valid provider message list.
     fn assert_pair_integrity(messages: &[ChatMessage]) {
         let mut pending: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for m in messages {
             match m.role.as_str() {
                 "assistant" => {
                     for c in m.tool_calls.as_deref().unwrap_or(&[]) {
-                        pending.push(c.id.clone().unwrap_or_default());
+                        let id = c.id.clone().unwrap_or_default();
+                        assert!(seen.insert(id.clone()), "duplicate tool call id: {id}");
+                        pending.push(id);
                     }
                 }
                 "tool" => {
@@ -2592,6 +4262,7 @@ mod tests {
             pending.is_empty(),
             "tool calls without results: {pending:?}"
         );
+        validate_tool_history(messages).unwrap();
     }
 
     fn snapshot_count(messages: &[ChatMessage]) -> usize {
@@ -2720,6 +4391,7 @@ mod tests {
                 minimax_search: None,
                 finance_news: None,
                 iwencai: None,
+                progress: None,
             };
             let registry = ToolRegistry::new(vec![echo.clone() as Arc<dyn AgentTool>]);
             AgentEngine::new(chat, registry, ctx, config.clone())

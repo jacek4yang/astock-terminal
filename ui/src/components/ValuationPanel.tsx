@@ -289,6 +289,11 @@ export default function ValuationPanel({ symbol }: Props) {
             label="DCF 估值"
             tip="现金流折现:把公司未来能赚的自由现金流折算成今天的钱。结果是区间而非精确点位,对假设极其敏感,仅供锚定参考"
           />
+          {data.parameter_snapshot_id && (
+            <span className="muted ml-auto text-[10px] font-normal" title="应与盈利驱动树的参数口径编号一致">
+              共享参数口径 {data.parameter_snapshot_id.slice(0, 14)}…
+            </span>
+          )}
         </div>
         {!dcf ? (
           <EmptyBox text="DCF 数据缺失" />
