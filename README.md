@@ -17,6 +17,7 @@
 - 独立专业资讯中心，支持多源增量更新、修订追踪、事件折叠、丰富筛选、分页与十万条虚拟浏览。
 - 资讯按统一 A 股日历和 15:00 边界归入盘前/盘中/下一交易日，实时 Agent 与事件回测共享 Point-in-Time 口径。
 - MiniMax M3 工具调用、Token Plan 额度查看、自动上下文压缩、中断恢复、证据清单和策略迭代。
+- Agent Runtime 提供 SSE 空闲看门狗、pre-commit 安全重建、持久化检查点恢复、工具 single-flight、缓存参数规范化和防死锁预算（见 [运行时加固](docs/agent-runtime-hardening.md)）。
 - 基于 ATR、结构位、交易规则与时段配置生成的 `ManualTradingPlan`。
 
 ## 开发环境
@@ -43,7 +44,7 @@ npm --prefix ui test
 
 MiniMax Key 保存在 Windows 凭据管理器，不写入数据库或日志。Tushare、问财、聚宽及 SOCKS5 为可选配置；未配置时相应数据源会标记为不可用，核心页面继续降级运行。
 
-架构与方法详见 [架构](docs/architecture.md)、[数据源](docs/data-sources.md)、[专业资讯中心](docs/news-center.md)、[数据契约](docs/data-contracts.md)、[Agent 协议](docs/agent-protocol.md)、[量化方法](docs/quant-methodology.md) 和 [可复现量化实验室](docs/quant-lab.md)。
+架构与方法详见 [架构](docs/architecture.md)、[数据源](docs/data-sources.md)、[专业资讯中心](docs/news-center.md)、[数据契约](docs/data-contracts.md)、[Agent 协议](docs/agent-protocol.md)、[Agent Runtime](docs/agent-runtime-hardening.md)、[量化方法](docs/quant-methodology.md) 和 [可复现量化实验室](docs/quant-lab.md)。
 
 ## 数据与风险
 
