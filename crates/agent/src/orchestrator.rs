@@ -114,10 +114,7 @@ impl AgentEngine {
                 let mut retry_reason = None;
                 while let Some(event) = stream.next().await {
                     match event {
-                        AgentEvent::Failed { error }
-                            if attempt < engine.max_runtime_retries
-                                && is_retryable_runtime_error(&error) =>
-                        {
+                        AgentEvent::Failed { error } if is_retryable_runtime_error(&error) => {
                             retry_reason = Some(error);
                             break;
                         }
@@ -140,10 +137,10 @@ impl AgentEngine {
                 });
                 if attempt >= engine.max_runtime_retries {
                     let error = format!(
-                        "{reason}；已达到自动恢复上限 {} 次，可从任务列表手动继续",
+                        "{reason}；已达到自动恢复上限 {} 次，任务已保留为可继续状态",
                         engine.max_runtime_retries
                     );
-                    let _ = engine.mark_runtime_failed(&task_id, &error).await;
+                    let _ = engine.mark_runtime_suspended(&task_id, &error).await;
                     let _ = tx.unbounded_send(AgentEvent::Failed { error });
                     return;
                 }
@@ -187,7 +184,7 @@ impl AgentEngine {
                     Ok(next) => stream = next,
                     Err(error) => {
                         let error = format!("自动恢复任务失败: {error}");
-                        let _ = engine.mark_runtime_failed(&task_id, &error).await;
+                        let _ = engine.mark_runtime_suspended(&task_id, &error).await;
                         let _ = tx.unbounded_send(AgentEvent::Failed { error });
                         return;
                     }
@@ -226,7 +223,7 @@ impl AgentEngine {
         Ok((completed_rounds.saturating_add(1), max_rounds))
     }
 
-    async fn mark_runtime_failed(&self, task_id: &str, error: &str) -> Result<()> {
+    async fn mark_runtime_suspended(&self, task_id: &str, error: &str) -> Result<()> {
         let Some(mut record) = self.storage.agent_task_get(task_id).await? else {
             return Ok(());
         };
@@ -234,7 +231,7 @@ impl AgentEngine {
         if let Some(object) = state.as_object_mut() {
             object.insert("last_error".to_string(), Value::String(error.to_string()));
         }
-        record.status = "failed".to_string();
+        record.status = "suspended".to_string();
         record.state_json = serde_json::to_string(&state)?;
         record.updated_at = now_secs();
         self.storage.agent_task_save(record).await?;
@@ -354,7 +351,7 @@ mod tests {
             .push(ScriptedReply::Error(MinimaxError::Network(
                 "connection reset".to_string(),
             )))
-            .push_text("已恢复并形成最终结论。当前没有需要调用的工具。");
+            .push_quota_exhausted();
         let ctx = ToolContext::new(Arc::new(NoopMarket), storage);
         let engine = AgentEngine::new(
             backend.clone(),
@@ -372,7 +369,7 @@ mod tests {
             .any(|event| matches!(event, AgentEvent::TextReset { .. })));
         assert!(events
             .iter()
-            .any(|event| matches!(event, AgentEvent::Completed { .. })));
+            .any(|event| matches!(event, AgentEvent::Suspended { .. })));
         assert_eq!(backend.requests.lock().unwrap().len(), 2);
     }
 }
