@@ -6,6 +6,7 @@ on:
       - .github/workflows/release-agent-runtime.yml
       - .github/release-requests/v5.0.3-agent-runtime.1.md
       - docs/releases/v5.0.3-agent-runtime.1.md
+      - scripts/release-agent-runtime.ps1
   workflow_dispatch:
   push:
     branches:
@@ -27,6 +28,40 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  automation-lint:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse fallback publisher and verify release identity
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "scripts/release-agent-runtime.ps1"),
+            [ref]$tokens,
+            [ref]$parseErrors
+          ) | Out-Null
+          if ($parseErrors.Count -gt 0) {
+            $parseErrors | ForEach-Object { Write-Error $_.Message }
+            throw "PowerShell fallback publisher has syntax errors"
+          }
+
+          $documents = @(
+            Get-Content ".github/workflows/release-agent-runtime.yml" -Raw,
+            Get-Content ".github/release-requests/v5.0.3-agent-runtime.1.md" -Raw,
+            Get-Content "docs/releases/v5.0.3-agent-runtime.1.md" -Raw,
+            Get-Content "scripts/release-agent-runtime.ps1" -Raw
+          )
+          foreach ($document in $documents) {
+            if (-not $document.Contains($env:RELEASE_TAG)) {
+              throw "release automation document does not contain $env:RELEASE_TAG"
+            }
+            if (-not $document.Contains($env:RELEASE_TARGET_SHA)) {
+              throw "release automation document does not contain $env:RELEASE_TARGET_SHA"
+            }
+          }
+
   security-audit:
     runs-on: ubuntu-latest
     permissions:
@@ -112,11 +147,11 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
       - name: Run Rust workspace tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
       - name: Run Rust clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Check desktop application
-        run: cargo check -p astock-app
+        run: cargo check -p astock-app --locked
       - name: Run frontend tests
         run: npm test --prefix ui
       - name: Build MSI and NSIS installers
@@ -166,6 +201,7 @@ jobs:
   publish:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs:
+      - automation-lint
       - security-audit
       - evaluation-gate
       - windows-package
