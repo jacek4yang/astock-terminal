@@ -1016,6 +1016,68 @@ export const getEventAnalysisStatus = (jobId: string) =>
 export const cancelEventAnalysis = (jobId: string) =>
   cmd<{ cancelled: boolean }>("event_analysis_cancel", { job_id: jobId });
 
+export type RelationDocumentKind =
+  | "annual_report" | "semi_annual_report" | "prospectus" | "investor_relations"
+  | "product_manual" | "tender" | "major_contract" | "patent"
+  | "regulatory_approval" | "capacity_eia" | "customs_industry" | "other";
+export type SupplyRelationType =
+  | "supplies" | "customer_of" | "produces" | "consumes" | "won_bid"
+  | "contract_with" | "patent_for" | "approved_for" | "capacity_for";
+export interface RelationEvidence {
+  evidence_id: string; source_version_id: string; segment_id: string; page_number: number | null;
+  paragraph_index: number; span_start: number; span_end: number; quote_original: string;
+  independent_group: string; polarity: string;
+}
+export interface RelationValidationCheck { field: string; passed: boolean; detail: string }
+export interface RelationCandidate {
+  candidate_id: string; run_id: string; source_version_id: string; document_kind: RelationDocumentKind;
+  subject_text: string; object_text: string; relation: SupplyRelationType; product_text: string | null;
+  amount_text: string | null; share_bps: number | null; report_period: string | null; region: string | null;
+  subject_entity_id: string | null; object_entity_id: string | null;
+  subject_parent_entity_id: string | null; object_parent_entity_id: string | null;
+  disclosure_mode: string; confidence_bps: number; validation_status: string; validation: RelationValidationCheck[];
+  review_status: string; confidential: boolean; non_inferable: boolean; candidate_version: number;
+  proposed_by_model: boolean; publication_status: string | null; eligible_for_agent: boolean;
+  evidence: RelationEvidence[]; created_at: number; updated_at: number;
+}
+export interface RelationExtractionRun {
+  run_id: string; source_version_id: string; document_kind: RelationDocumentKind; extractor_kind: string;
+  model_id: string | null; model_version: string | null; schema_version: string; input_hash: string;
+  status: string; candidate_count: number; validation_errors: number; started_at: number;
+  completed_at: number | null; error: string | null;
+}
+export interface RelationExtractionRunDetail {
+  run: RelationExtractionRun; source_title: string | null; source_url: string;
+  candidates: RelationCandidate[]; diagnostics: string[];
+}
+export interface RelationExtractionSnapshot {
+  job_id: string; source_version_id: string; running: boolean; status: string; phase: string;
+  progress: number; current_item: string; segments_scanned: number; candidates_found: number;
+  validated: number; needs_review: number; estimated_remaining_seconds: number | null;
+  recent_logs: string[]; result: RelationExtractionRunDetail | null; error: string | null;
+  started_at: number; updated_at: number;
+}
+export interface RelationReviewPage { items: RelationCandidate[]; total: number; page: number; page_size: number; total_pages: number }
+export interface RelationReviewRequest {
+  candidate_id: string; decision: "accepted" | "modified" | "rejected" | "confidential" | "non_inferable" | "merge_entity";
+  reviewer: string; reason: string; subject_text: string | null; object_text: string | null;
+  relation: SupplyRelationType | null; product_text: string | null; merged_entity_id: string | null;
+  confidential: boolean; non_inferable: boolean; publish: boolean;
+  dataset_split: "train" | "dev" | "test" | null; training_eligible: boolean;
+}
+export interface RelationPublicationResult { candidate_id: string; publication_id: string | null; projection_key: string | null; status: string; note: string }
+export const startRelationExtraction = (sourceVersionId: string, documentKind: RelationDocumentKind) =>
+  cmd<{ job_id: string; started: boolean; reused: boolean; estimated_seconds: number; note: string }>("relation_extraction_start", { request: { source_version_id: sourceVersionId, document_kind: documentKind, model_id: null, model_version: null, model_candidates: [] } });
+export const getRelationExtractionStatus = (jobId: string) =>
+  cmd<RelationExtractionSnapshot>("relation_extraction_status", { job_id: jobId });
+export const cancelRelationExtraction = (jobId: string) => cmd<boolean>("relation_extraction_cancel", { job_id: jobId });
+export const queryRelationReviews = (status: string, documentKind: RelationDocumentKind | null, minConfidenceBps: number, page: number, pageSize: number) =>
+  cmd<RelationReviewPage>("query_relation_reviews", { status, document_kind: documentKind, min_confidence_bps: minConfidenceBps, page, page_size: pageSize });
+export const reviewRelationCandidate = (request: RelationReviewRequest) =>
+  cmd<RelationPublicationResult>("review_relation_candidate", { request });
+export const retractRelationCandidate = (candidateId: string, reason: string) =>
+  cmd<RelationPublicationResult>("retract_relation_candidate", { candidate_id: candidateId, reason });
+
 export const getPendingNewsEvidenceReviews = (limit = 50) =>
   cmd<AgentConclusionReview[]>("get_pending_news_evidence_reviews", { limit });
 
@@ -1485,6 +1547,7 @@ export interface ValuationHistoryPoint {
 
 /** get_valuation 返回;各 section 可能整体缺失 */
 export interface ValuationJson {
+  parameter_snapshot_id: string;
   current: ValuationCurrent | null;
   percentile: ValuationPercentile | null;
   dcf: DcfValuation | null;
@@ -1494,6 +1557,168 @@ export interface ValuationJson {
 export const getFundamentals = (symbol: string) =>
   cmd<FundamentalsJson>("get_fundamentals", { symbol });
 export const getValuation = (symbol: string) => cmd<ValuationJson>("get_valuation", { symbol });
+
+export type DriverValueOrigin =
+  | "historical_fact"
+  | "management_guidance"
+  | "market_consensus"
+  | "user_assumption"
+  | "agent_assumption"
+  | "industry_prior";
+
+export interface DriverEvidence {
+  source_version_id: string;
+  source_name: string;
+  report_period: string | null;
+  announced_date: string | null;
+  locator: string;
+  unit: string;
+  confidence_low: number;
+  confidence_high: number;
+}
+
+export interface DriverParameter {
+  id: string;
+  name: string;
+  category: string;
+  value: number | null;
+  low: number | null;
+  high: number | null;
+  unit: string;
+  origin: DriverValueOrigin;
+  report_period: string | null;
+  confidence: number;
+  evidence: DriverEvidence[];
+  note: string;
+}
+
+export interface DriverFormulaNode {
+  id: string;
+  name: string;
+  formula: string;
+  parameter_ids: string[];
+  unit: string;
+  historical_value: number | null;
+  forecast_low: number | null;
+  forecast_base: number | null;
+  forecast_high: number | null;
+}
+
+export interface DriverBranch {
+  id: string;
+  label: string;
+  dimension: string;
+  formula: string;
+  status: string;
+  parameter_ids: string[];
+  children: DriverBranch[];
+}
+
+export interface DriverScenario {
+  scenario: "bear" | "base" | "bull" | string;
+  revenue: number;
+  gross_profit: number;
+  operating_profit: number;
+  tax: number;
+  minority_profit: number;
+  parent_net_profit: number;
+  eps: number | null;
+  operating_cash_flow: number;
+  capex: number;
+  free_cash_flow: number;
+}
+
+export interface DriverSensitivityCell {
+  revenue_growth: number;
+  gross_margin: number;
+  eps: number | null;
+  free_cash_flow: number;
+}
+
+export interface EarningsDriverTree {
+  snapshot_id: string;
+  parameter_snapshot_id: string;
+  model_version: string;
+  symbol: string;
+  company_name: string | null;
+  industry: string | null;
+  industry_template: string;
+  industry_template_label: string;
+  revenue_formula: string;
+  cost_formula: string;
+  report_period: string | null;
+  knowledge_time: number;
+  golden_template_reviewed: boolean;
+  parameters: DriverParameter[];
+  revenue_tree: DriverBranch;
+  cost_tree: DriverBranch;
+  formula_nodes: DriverFormulaNode[];
+  scenarios: DriverScenario[];
+  sensitivity: DriverSensitivityCell[];
+  monte_carlo: {
+    samples: number;
+    seed: number;
+    eps_p10: number | null;
+    eps_p50: number | null;
+    eps_p90: number | null;
+    fcf_p10: number;
+    fcf_p50: number;
+    fcf_p90: number;
+    method: string;
+  } | null;
+  implied_assumption: {
+    current_price: number | null;
+    implied_fcf_growth: number | null;
+    search_low: number;
+    search_high: number;
+    wacc: number;
+    terminal_growth: number;
+    explanation: string;
+  };
+  quality: {
+    exact_eps_available: boolean;
+    model_completeness: number;
+    missing_core_drivers: string[];
+    refusal_reason: string | null;
+    warnings: string[];
+  };
+  provenance_legend: Record<string, string>;
+}
+
+export interface DriverShockInput {
+  kind: string;
+  magnitude: number;
+  lag_months: number;
+  pass_through?: number | null;
+  evidence_version_id?: string | null;
+  note?: string | null;
+}
+
+export interface EarningsShockBridge {
+  base_snapshot_id: string;
+  shocked_snapshot_id: string;
+  shocks: DriverShockInput[];
+  base: DriverScenario | null;
+  shocked: DriverScenario | null;
+  delta: {
+    revenue: number;
+    gross_profit: number;
+    operating_profit: number;
+    parent_net_profit: number;
+    eps: number | null;
+    operating_cash_flow: number;
+    free_cash_flow: number;
+  } | null;
+  changed_parameters: DriverParameter[];
+  warnings: string[];
+}
+
+export const getEarningsDriverTree = (symbol: string) =>
+  cmd<EarningsDriverTree>("get_earnings_driver_tree", { symbol });
+export const getEarningsDriverSnapshot = (snapshotId: string) =>
+  cmd<EarningsDriverTree>("get_earnings_driver_snapshot", { snapshot_id: snapshotId });
+export const runEarningsDriverShock = (symbol: string, shocks: DriverShockInput[]) =>
+  cmd<EarningsShockBridge>("run_earnings_driver_shock", { symbol, shocks });
 
 // ==================== 扫描 ====================
 
@@ -1972,6 +2197,92 @@ export interface SubgraphResult {
   edges: GraphEdge[];
 }
 
+export interface GraphSnapshotEdge {
+  revision_id: string;
+  identity_id: string;
+  revision_no: number;
+  src: string;
+  original_src: string;
+  dst: string;
+  original_dst: string;
+  relation: string;
+  product_scope?: string | null;
+  region_scope?: string | null;
+  weight: number;
+  disclosed_share?: number | null;
+  confidence: number;
+  effective_confidence: number;
+  source_type: string;
+  source_name: string;
+  source_url: string;
+  evidence_version: string;
+  status: string;
+  valid_from: number;
+  valid_to?: number | null;
+  observed_at: number;
+  recorded_at: number;
+  revalidate_after: number;
+}
+
+export interface GraphSnapshot {
+  snapshot_id: string;
+  business_time: number;
+  knowledge_time: number;
+  center?: string | null;
+  hops?: number;
+  nodes: GraphNode[];
+  edges: GraphSnapshotEdge[];
+  revision_ids: string[];
+  merge_ids: string[];
+  stale_count: number;
+  excluded_count: number;
+}
+
+export interface GraphEdgeRevision {
+  revision_id: string;
+  identity_id: string;
+  revision_no: number;
+  src: string;
+  dst: string;
+  relation: string;
+  product_scope?: string | null;
+  region_scope?: string | null;
+  weight: number;
+  confidence: number;
+  disclosed_share?: number | null;
+  source_type: string;
+  source_name: string;
+  source_url: string;
+  evidence_version: string;
+  status: string;
+  valid_from: number;
+  valid_to?: number | null;
+  observed_at: number;
+  recorded_at: number;
+  superseded_at?: number | null;
+  revalidate_after: number;
+  decay_half_life_days: number;
+  supersedes_revision_id?: string | null;
+  metadata: Record<string, unknown> | null;
+}
+
+export interface GraphHistoryBounds {
+  business_min: number;
+  business_max: number;
+  knowledge_min: number;
+  knowledge_max: number;
+  revision_count: number;
+  revalidation_due_count: number;
+}
+
+export interface GraphSnapshotDiff {
+  left_snapshot_id: string;
+  right_snapshot_id: string;
+  added_revision_ids: string[];
+  removed_revision_ids: string[];
+  changed_identity_ids: string[];
+}
+
 /** supply_chain_shock 单条传导结果 */
 export interface ShockEntry {
   node_id: string;
@@ -2023,10 +2334,170 @@ export interface RelationshipGraph {
 
 export const graphSubgraph = (symbolOrNode: string, hops?: number) =>
   cmd<SubgraphResult>("graph_subgraph", { symbol_or_node: symbolOrNode, hops });
+export const graphAsOf = (businessTime: number, knowledgeTime: number, symbolOrNode?: string, hops?: number) =>
+  cmd<GraphSnapshot>("graph_as_of", {
+    business_time: businessTime,
+    knowledge_time: knowledgeTime,
+    symbol_or_node: symbolOrNode,
+    hops,
+  });
+export const graphHistoryBounds = () => cmd<GraphHistoryBounds>("graph_history_bounds");
+export const graphEdgeTimeline = (identityId: string) =>
+  cmd<GraphEdgeRevision[]>("graph_edge_timeline", { identity_id: identityId });
+export const graphSnapshotGet = (snapshotId: string) =>
+  cmd<GraphSnapshot | null>("graph_snapshot_get", { snapshot_id: snapshotId });
+export const graphSnapshotDiff = (
+  leftBusinessTime: number,
+  leftKnowledgeTime: number,
+  rightBusinessTime: number,
+  rightKnowledgeTime: number,
+) => cmd<GraphSnapshotDiff>("graph_snapshot_diff", {
+  left_business_time: leftBusinessTime,
+  left_knowledge_time: leftKnowledgeTime,
+  right_business_time: rightBusinessTime,
+  right_knowledge_time: rightKnowledgeTime,
+});
 export const supplyChainShock = (subject: string, direction: "up" | "down", magnitudePct?: number) =>
   cmd<ShockJson>("supply_chain_shock", { subject, direction, magnitude_pct: magnitudePct });
 export const relationshipGraph = (symbols: string[], windowDays?: number) =>
   cmd<RelationshipGraph>("relationship_graph", { symbols, window_days: windowDays });
+
+// ==================== 可复现量化研究工作台 ====================
+
+export type QuantMetric =
+  | "pearson"
+  | "spearman"
+  | "kendall"
+  | "distance_correlation"
+  | "mutual_information"
+  | "lead_lag"
+  | "granger";
+
+export interface QuantResearchConfig {
+  symbols: string[];
+  metric: QuantMetric;
+  value_mode: "price_level" | "arithmetic_return" | "log_return";
+  frequency: "daily" | "weekly" | "monthly";
+  start_date: string | null;
+  end_date: string | null;
+  adjust: "qfq" | "hfq" | "none";
+  lookback_bars: number;
+  missing_policy: "drop" | "forward_fill" | "zero";
+  rolling_window: number;
+  max_lag: number;
+  controls: string[];
+  bootstrap_reps: number;
+  permutation_reps: number;
+  alpha: number;
+  fdr_method: "benjamini_hochberg" | "bonferroni" | "none";
+  max_pairs: number;
+  max_observations_per_pair: number;
+  seed: number;
+  oos_ratio: number;
+}
+
+export interface QuantStabilitySlice {
+  group: string;
+  label: string;
+  effect: number;
+  effective_n: number;
+}
+
+export interface QuantStabilitySummary {
+  slice_count: number;
+  same_direction_rate: number | null;
+  min_effect: number | null;
+  max_effect: number | null;
+  train_effect: number | null;
+  out_of_sample_effect: number | null;
+  outlier_robust_effect: number | null;
+  assessment: string;
+}
+
+export interface QuantPairInference {
+  left: string;
+  right: string;
+  directed: boolean;
+  effect: number;
+  effect_name: string;
+  confidence_low: number | null;
+  confidence_high: number | null;
+  confidence_method: string;
+  p_value: number | null;
+  p_value_method: string;
+  adjusted_p_value: number | null;
+  significant_raw: boolean | null;
+  significant_after_correction: boolean | null;
+  effective_n: number;
+  best_lag: number | null;
+  controls_used: string[];
+  stability: QuantStabilitySummary;
+  stability_slices: QuantStabilitySlice[];
+  interpretation: string;
+  conclusion: string;
+  warnings: string[];
+}
+
+export interface QuantResearchSnapshot {
+  snapshot_id: string;
+  function_version: string;
+  created_at: number;
+  config: QuantResearchConfig;
+  data_versions: Record<string, string>;
+  budget: {
+    requested_pairs: number;
+    executed_pairs: number;
+    pair_sampling: boolean;
+    max_observations_per_pair: number;
+    estimated_operations: number;
+    complexity: string;
+    explanation: string;
+  };
+  results: QuantPairInference[];
+  warnings: string[];
+  causality_boundary: string;
+}
+
+export interface QuantResearchJob {
+  job_id: string;
+  running: boolean;
+  status: "running" | "completed" | "cancelled" | "failed" | string;
+  phase: string;
+  progress: number;
+  done_pairs: number;
+  total_pairs: number;
+  current_pair: [string, string] | null;
+  effective_observations: number;
+  fetched_series: number;
+  total_series: number;
+  estimated_remaining_seconds: number | null;
+  recent_logs: string[];
+  result: QuantResearchSnapshot | null;
+  error: string | null;
+  started_at: number;
+  updated_at: number;
+}
+
+export interface QuantSnapshotListItem {
+  snapshot_id: string;
+  function_version: string;
+  metric: string;
+  symbols: string[];
+  data_versions: Record<string, string>;
+  config: QuantResearchConfig;
+  created_at: number;
+}
+
+export const quantResearchStart = (config: QuantResearchConfig) =>
+  cmd<QuantResearchJob>("quant_research_start", { config });
+export const quantResearchStatus = (jobId?: string | null) =>
+  cmd<QuantResearchJob | null>("quant_research_status", { job_id: jobId ?? null });
+export const quantResearchCancel = (jobId: string) =>
+  cmd<boolean>("quant_research_cancel", { job_id: jobId });
+export const quantResearchSnapshotGet = (snapshotId: string) =>
+  cmd<QuantResearchSnapshot | null>("quant_research_snapshot_get", { snapshot_id: snapshotId });
+export const quantResearchSnapshotList = (limit = 20) =>
+  cmd<QuantSnapshotListItem[]>("quant_research_snapshot_list", { limit });
 
 // ==================== 东财数据中心 ====================
 

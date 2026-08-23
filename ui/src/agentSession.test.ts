@@ -2,10 +2,13 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   appendToolTimeline,
   appendAgentTurn,
+  compactAgentReport,
+  compactMessagesForPersistence,
   handleAgentEnvelope,
   resetAgentSession,
   useAgentSession,
 } from "./agentSession";
+import type { AgentReport } from "./lib/api";
 
 describe("persistent Agent session channel", () => {
   beforeEach(() => resetAgentSession());
@@ -153,5 +156,85 @@ describe("persistent Agent session channel", () => {
     const state = useAgentSession.getState();
     expect(state.status).toBe("waiting_input");
     expect(state.msgs.at(-1)?.clarificationDraft).toEqual({ selections: {}, other: {} });
+  });
+
+  it("keeps only cited evidence and a bounded recovery snapshot", () => {
+    const evidence = Array.from({ length: 100 }, (_, snapshotIndex) => ({
+      evidence_id: `snapshot-${snapshotIndex}`,
+      tool: "run_full_analysis",
+      cache_key: `cache-${snapshotIndex}`,
+      source: "provider",
+      fetched_at: "2026-08-23T09:00:00+08:00",
+      tool_version: "v1",
+      data_version: `data-${snapshotIndex}`,
+      source_tier: "provider",
+      freshness: "fresh",
+      blocking: false,
+      fields: Array.from({ length: 256 }, (_, fieldIndex) => ({
+        evidence_id: `field-${snapshotIndex}-${fieldIndex}`,
+        field_path: `/rows/${fieldIndex}`,
+        value: { payload: "x".repeat(200) },
+        unit: null,
+        currency: null,
+        as_of: "2026-08-23T09:00:00+08:00",
+        freshness: "fresh",
+        source_tier: "provider",
+        blocking: false,
+        calculation_id: null,
+      })),
+    }));
+    const report: AgentReport = {
+      task_id: "stress",
+      answer: "分析完成",
+      conclusions: [],
+      evidence,
+      generated_at: 1,
+      research: {
+        schema_version: "astock-research-report/v1",
+        as_of: "2026-08-23T09:00:00+08:00",
+        confidence: "high",
+        claims: [{
+          claim_id: "claim-1",
+          text: "仅引用一个字段",
+          claim_type: "fact",
+          evidence_ids: ["field-42-7"],
+          calculation_ids: [],
+          as_of: "2026-08-23T09:00:00+08:00",
+          confidence: "high",
+          assumptions: [],
+          counter_evidence: [],
+          invalidation: [],
+          unknowns: [],
+        }],
+        calculations: [],
+        assumptions: [],
+        counter_evidence: [],
+        invalidation: [],
+        unknowns: [],
+        verification: {
+          status: "passed",
+          verifier_version: "v1",
+          verified_at: 1,
+          findings: [],
+        },
+      },
+    };
+    const compact = compactAgentReport(report);
+    expect(compact.evidence).toHaveLength(1);
+    expect(compact.evidence[0].fields.map((field) => field.evidence_id)).toEqual(["field-42-7"]);
+
+    const messages = Array.from({ length: 80 }, (_, index) => ({
+      key: index,
+      role: "assistant" as const,
+      raw: "y".repeat(100_000),
+      tools: [],
+      report: index === 79 ? report : undefined,
+      done: true,
+    }));
+    const persisted = compactMessagesForPersistence(messages);
+    expect(persisted).toHaveLength(24);
+    expect(persisted.at(-1)?.raw).toBe("");
+    expect(persisted.at(-1)?.report?.evidence[0].fields).toHaveLength(1);
+    expect(JSON.stringify(persisted).length).toBeLessThan(1_300_000);
   });
 });

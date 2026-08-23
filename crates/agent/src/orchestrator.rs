@@ -25,8 +25,8 @@ use crate::backend::ChatBackend;
 use crate::error::{AgentError, Result};
 use crate::prompt::initial_messages_with_context;
 use crate::report::{
-    assemble_report, index_tool_evidence, report_versions, AgentReport, Evidence,
-    VerificationStatus,
+    assemble_report, index_tool_evidence, report_versions, verified_subset_answer, AgentReport,
+    ClaimConfidence, Evidence, VerificationStatus,
 };
 use crate::tools::{now_secs, ToolContext, ToolProgressDetail, ToolRegistry};
 
@@ -916,6 +916,18 @@ impl AgentEngine {
                 }
                 let mut report =
                     assemble_report(&task_id, &clean_text, state.evidence.clone(), now_secs());
+                if awaiting_user_input {
+                    // A clarification card is an interaction boundary, not a
+                    // publishable investment conclusion. Numeric examples in
+                    // the preface (capital, option counts, market context)
+                    // must not turn a valid question card into a
+                    // verification_failed terminal task.
+                    report.research.claims.clear();
+                    report.research.calculations.clear();
+                    report.research.confidence = ClaimConfidence::Low;
+                    report.research.verification.status = VerificationStatus::NotApplicable;
+                    report.research.verification.findings.clear();
+                }
                 if !awaiting_user_input {
                     for attempt in 1..=2 {
                         if report.research.verification.passed() {
@@ -972,8 +984,35 @@ impl AgentEngine {
                         }
                     }
                 }
-                let publication_blocked =
-                    report.research.verification.status == VerificationStatus::Failed;
+                if !awaiting_user_input
+                    && report.research.verification.status == VerificationStatus::Failed
+                {
+                    // A long research run can contain both well-supported and
+                    // unsupported model prose. If two repair passes still
+                    // fail, publish the independently verified subset instead
+                    // of hiding all successful evidence behind a terminal
+                    // error. The fallback itself is assembled and verified
+                    // again before it can be shown.
+                    if let Some(subset) = verified_subset_answer(&report) {
+                        let candidate =
+                            assemble_report(&task_id, &subset, state.evidence.clone(), now_secs());
+                        if candidate.research.verification.passed() {
+                            send(
+                                &tx,
+                                AgentEvent::TextReset {
+                                    message:
+                                        "自动修订仍有证据缺口，已切换为仅发布通过校验的部分结论"
+                                            .to_string(),
+                                },
+                            );
+                            clean_text = subset;
+                            assistant = ChatMessage::assistant(clean_text.clone());
+                            report = candidate;
+                        }
+                    }
+                }
+                let publication_blocked = !awaiting_user_input
+                    && report.research.verification.status == VerificationStatus::Failed;
                 if publication_blocked {
                     clean_text = format!(
                         "## 报告未通过证据校验\n\n本轮草稿已被阻止发布，共发现 {} 项需要修正的问题。你可以展开下方“结论与证据校验”查看具体字段、错误原因和证据缺口；补充或刷新数据后可继续本任务。",
@@ -2128,11 +2167,14 @@ fn tool_estimated_secs(name: &str) -> u64 {
         "scan_market" | "run_backtest" | "iterate_strategy" | "run_joinquant_research" => 180,
         "get_fundamentals"
         | "run_valuation"
+        | "analyze_earnings_drivers"
         | "compare_stocks"
         | "research_news"
         | "research_disclosures"
         | "research_global_transmission"
         | "analyze_event_price_in"
+        | "research_supply_chain_relations"
+        | "query_graph_as_of"
         | "search_web"
         | "fetch_source_document" => 60,
         _ => 45,
@@ -2150,12 +2192,15 @@ fn tool_progress_stage(name: &str, elapsed_ms: u64, estimated_ms: u64) -> &'stat
         "compare_stocks" => "并行获取各标的数据，已完成结果会立即保留",
         "run_full_analysis" => "汇总行情、资金与市场环境并运行信号引擎",
         "get_fundamentals" | "run_valuation" => "读取财务报表并校验关键字段",
+        "analyze_earnings_drivers" => "连接经营驱动、利润表、现金流与估值，并传播参数区间",
         "run_backtest" | "iterate_strategy" => "执行有上限的历史计算与稳健性检验",
         "run_joinquant_research" => "等待聚宽研究环境并执行受限数据模板",
         "research_news" => "并行读取多家财经快讯并核验可用的个股事件",
         "research_disclosures" => "查询正式披露、修订链、附件与原文核验状态",
         "research_global_transmission" => "核验海外一级来源、原时区/币种与逐边 A 股传导证据",
         "analyze_event_price_in" => "逐字段核验事件，并分离基本面影响与市场 price-in",
+        "research_supply_chain_relations" => "抽取并核验供应链关系候选，只使用已审核发布关系",
+        "query_graph_as_of" => "按业务时间与当时知悉时间重建历史图谱快照",
         "search_web" => "通过 MiniMax 联网检索权威来源并保留原始链接",
         "fetch_source_document" => "正在安全打开原始页面并提取页码、段落、原值与单位",
         "read_document" => "读取不可变文档版本与字段级证据",
@@ -3143,7 +3188,11 @@ mod tests {
             EngineConfig::default(),
         );
         let stream = engine.run_task(spec("parallel-tools"));
-        tokio::time::timeout(std::time::Duration::from_secs(2), barrier.wait())
+        // Full-workspace Windows runs can spend several seconds scheduling
+        // freshly linked test processes. The barrier still proves both tool
+        // futures are polled concurrently; the wider wall-clock guard only
+        // removes host-load flakiness.
+        tokio::time::timeout(std::time::Duration::from_secs(10), barrier.wait())
             .await
             .expect("both tools must reach the barrier concurrently");
         let events = collect(stream).await;
@@ -3346,7 +3395,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verifier_blocks_publication_after_two_failed_repairs() {
+    async fn verifier_publishes_safe_empty_result_after_two_failed_repairs() {
         let (_dir, storage) = test_storage();
         let chat = Arc::new(ScriptedChat::new("test-model"));
         chat.push_text("【事实】目标价 99 元");
@@ -3360,12 +3409,10 @@ mod tests {
             AgentEvent::Completed { report } => Some(report),
             _ => None,
         });
-        let report = report.expect("blocked report still carries diagnostics");
-        assert_eq!(
-            report.research.verification.status,
-            VerificationStatus::Failed
-        );
-        assert!(report.answer.contains("报告未通过证据校验"));
+        let report = report.expect("safe fallback report should be emitted");
+        assert!(report.research.verification.passed());
+        assert!(report.answer.contains("本轮暂无可发布结论"));
+        assert!(report.answer.contains("已自动省略"));
         assert!(!report.answer.contains("97 元"));
         assert_eq!(chat.requests.lock().unwrap().len(), 3);
         assert_eq!(
@@ -3375,7 +3422,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .status,
-            "verification_failed"
+            "completed"
         );
         assert_eq!(
             storage
@@ -3384,7 +3431,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .kind,
-            "verification-blocked"
+            "verified-research"
         );
     }
 
@@ -3452,7 +3499,7 @@ mod tests {
     async fn plan_clarification_waits_for_user_instead_of_flashing_into_specialist_review() {
         let (_dir, storage) = test_storage();
         let chat = Arc::new(ScriptedChat::new("main-model"));
-        let clarification = "```astock-questions\n{\"title\":\"请确认\",\"questions\":[{\"id\":\"risk\",\"question\":\"风险偏好？\",\"kind\":\"single\",\"options\":[{\"id\":\"safe\",\"label\":\"保守\"},{\"id\":\"balanced\",\"label\":\"平衡\"}],\"allow_other\":true}]}\n```";
+        let clarification = "你提供的2万元资金约束会影响仓位，请先确认：\n```astock-questions\n{\"title\":\"请确认\",\"questions\":[{\"id\":\"risk\",\"question\":\"风险偏好？\",\"kind\":\"single\",\"options\":[{\"id\":\"safe\",\"label\":\"保守\"},{\"id\":\"balanced\",\"label\":\"平衡\"}],\"allow_other\":true}]}\n```";
         chat.push_text(clarification);
         let echo = Arc::new(EchoTool::new());
         let engine = build_engine(storage.clone(), chat.clone(), echo);
@@ -3471,11 +3518,27 @@ mod tests {
         assert!(!events
             .iter()
             .any(|event| matches!(event, AgentEvent::TextReset { .. })));
-        let answer = events.iter().find_map(|event| match event {
-            AgentEvent::Completed { report } => Some(report.answer.as_str()),
+        let completed = events.iter().find_map(|event| match event {
+            AgentEvent::Completed { report } => Some(report),
             _ => None,
         });
-        assert_eq!(answer, Some(clarification));
+        let completed = completed.expect("clarification report");
+        assert_eq!(completed.answer, clarification);
+        assert_eq!(
+            completed.research.verification.status,
+            VerificationStatus::NotApplicable
+        );
+        assert!(completed.research.verification.findings.is_empty());
+        assert!(completed.research.claims.is_empty());
+        assert_eq!(
+            storage
+                .agent_task_get("t-plan-input")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "completed"
+        );
         assert_eq!(chat.requests.lock().unwrap().len(), 1);
         let stored = storage.conversation_load("t-plan-input").await.unwrap();
         assert!(stored
