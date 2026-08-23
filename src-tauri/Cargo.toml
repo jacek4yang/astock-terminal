@@ -30,6 +30,7 @@ astock-source-verification = { path = "../crates/source-verification" }
 astock-disclosure = { path = "../crates/disclosure" }
 astock-global-intelligence = { path = "../crates/global-intelligence" }
 astock-event-intelligence = { path = "../crates/event-intelligence" }
+astock-relation-extraction = { path = "../crates/relation-extraction" }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-store = "2"

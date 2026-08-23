@@ -24,6 +24,11 @@
 - `resolve_news_evidence_review(task_id, conclusion_key, triggering_revision) -> void` — 显式标记一项结论已经人工复核。
 - `get_news_entity_links(revision_ids) -> [DocumentEntityLink]` — 批量查询资讯原文 span、候选实体、消歧理由、关系链、规则版本、置信度和 Agent 可用状态。
 - `get_entity_link_reviews(limit) -> [EntityLinkReview]` — 查询低置信、歧义或模型提议的待审核实体映射。
+- `relation_extraction_start(request) -> {job_id,estimated_seconds,...}` — 从已核验 `source_version_id` 启动无硬超时的后台供应链关系抽取；模型只可提交带原文 span 的结构化候选。
+- `relation_extraction_status(job_id) -> RelationExtractionSnapshot` — 查询扫描段落、候选、校验、待审核、日志、错误和完整结果；切换页面可恢复。
+- `query_relation_reviews(...) -> RelationReviewPage` — 按状态、材料类型、置信度和分页查询关系审核队列。
+- `review_relation_candidate(request) -> PublicationResult` — 通过/修改/拒绝/合并实体/标记保密或不可推断；理由必填，可在通过后幂等发布。
+- `retract_relation_candidate(candidate_id, reason) -> PublicationResult` — 追加撤回审计；最后一份有效证据撤回后使当前图谱投影失效。
 - `resolve_entity_link_review(link_id, entity_id?, accept, reason) -> bool` — 在候选列表中人工确认或拒绝映射；理由不能为空，接受时仍要求精确修订证据。
 - `fetch_source_document(url) -> SourceDocumentDetail` — 受控读取 HTML/JSON/PDF/正式附件，保存不可变来源版本，并返回原值、原单位、页码/段落/span；访问失败仍持久化 `unverified` 诊断。
 - `get_source_documents(limit) -> [SourceDocumentSummary]` — 查询最近来源、来源层级、一级来源标记、读取状态与失败原因，不发起网络请求。

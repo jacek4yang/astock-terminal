@@ -8,11 +8,13 @@ import {
   getDisclosureDetail,
   getDisclosureProviderHealth,
   queryDisclosures,
+  startRelationExtraction,
   type DisclosureDetail,
   type DisclosureListItem,
   type DisclosurePage,
   type DisclosureProviderHealth,
   type DisclosureSyncSnapshot,
+  type RelationDocumentKind,
 } from "../lib/api";
 import { useAgentSession } from "../agentSession";
 import { ErrorBox, Loading } from "../components/ui";
@@ -94,14 +96,14 @@ function ProviderPanel({ providers, onClose }: { providers: DisclosureProviderHe
   </aside>;
 }
 
-function DetailPanel({ detail, loading, onClose, onAgent }: { detail: DisclosureDetail | null; loading: boolean; onClose: () => void; onAgent: (detail: DisclosureDetail) => void }) {
+function DetailPanel({ detail, loading, onClose, onAgent, onExtract }: { detail: DisclosureDetail | null; loading: boolean; onClose: () => void; onAgent: (detail: DisclosureDetail) => void; onExtract: (detail: DisclosureDetail) => void }) {
   return <aside className="flex min-h-0 w-[520px] shrink-0 flex-col border-l border-slate-200 bg-white dark:border-slate-800 dark:bg-[#0d1524]">
     <div className="flex items-center justify-between border-b border-slate-200 px-3 py-2 dark:border-slate-800"><b>公告原文与证据详情</b><button type="button" className="btn" onClick={onClose}>关闭</button></div>
     <div className="min-h-0 flex-1 overflow-auto p-3 text-xs">{loading ? <Loading text="正在读取附件、修订和结构化事件…" /> : detail ? <div className="space-y-3">
       <div><div className="flex flex-wrap gap-1"><span className={`rounded px-2 py-0.5 ${detail.primary_verified ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "bg-amber-500/10 text-amber-700 dark:text-amber-300"}`}>{detail.primary_verified ? "正式原文已核验" : "仅发现，原文待核验"}</span><span className="rounded bg-slate-100 px-2 py-0.5 dark:bg-slate-800">{detail.category_name}</span><span className="rounded bg-violet-500/10 px-2 py-0.5 text-violet-600">{detail.status_name}</span></div><h2 className="mt-2 text-base font-semibold leading-6">{detail.title}</h2></div>
       <div className={`rounded border p-2 ${detail.primary_verified ? "border-emerald-200 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950/30" : "border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/30"}`}>{detail.verification_note}</div>
       <div className="grid grid-cols-2 gap-2 rounded bg-slate-50 p-2 dark:bg-slate-900"><div><span className="muted">发布时间</span><div>{timeText(detail.published_at)}</div></div><div><span className="muted">首次发现</span><div>{timeText(detail.first_seen_at)}</div></div><div><span className="muted">发现延迟</span><div>{durationText(detail.discovery_latency_secs)}</div></div><div><span className="muted">解析状态</span><div>{detail.extraction_status}</div></div></div>
-      <button type="button" className="btn-primary" onClick={() => onAgent(detail)}>交给智能助手核验并深入分析</button>
+      <div className="flex flex-wrap gap-2"><button type="button" className="btn-primary" onClick={() => onAgent(detail)}>交给智能助手核验并深入分析</button><button type="button" className="btn" disabled={!relationSourceVersion(detail)} onClick={() => onExtract(detail)}>{relationSourceVersion(detail) ? "后台抽取供应链关系" : "原文归档后可抽取关系"}</button></div>
       <section><h3 className="font-semibold">证券关联</h3><div className="mt-1 flex flex-wrap gap-1">{detail.securities.map((security) => <span key={security.code} className="chip">{security.name || "名称未知"} {security.code} · {security.market}</span>)}</div></section>
       <section><h3 className="font-semibold">披露入口（{detail.sources.length}）</h3><div className="mt-1 space-y-1">{detail.sources.map((source) => <div key={source.source_id} className="rounded border border-slate-200 p-2 dark:border-slate-800"><div className="flex justify-between"><b>{source.provider_name}</b><span>{source.authority_name}</span></div><button type="button" className="mt-1 max-w-full truncate text-left text-blue-600 underline" onClick={() => window.open(source.original_url, "_blank")}>{source.original_url}</button></div>)}</div></section>
       <section><h3 className="font-semibold">附件层级（{detail.attachments.length}）</h3>{detail.attachments.length ? <div className="mt-1 space-y-1">{detail.attachments.map((attachment) => <div key={attachment.attachment_id} className="rounded border border-slate-200 p-2 dark:border-slate-800"><b>{attachment.parent_attachment_id ? "└ 附件 · " : "原文 · "}{attachment.name}</b><div className="muted mt-1">{attachment.media_type} · {attachment.page_count == null ? "页数未知" : `${attachment.page_count} 页`} · {attachment.extraction_status}</div>{attachment.review_reason && <div className="mt-1 text-amber-600">{attachment.review_reason}</div>}</div>)}</div> : <p className="muted mt-1">索引尚未归档附件，不能据此推断正文内容。</p>}</section>
@@ -154,6 +156,7 @@ export default function DisclosurePage() {
   const startSync = async () => { setError(null); try { await disclosureSyncStart({ security_code: code || undefined, days: 365, max_pages: code ? 10 : 3 }); setSyncExpanded(true); setSync(await disclosureSyncStatus()); } catch (reason) { setError(errMsg(reason)); } };
   const openProviders = async () => { try { setProviders(await getDisclosureProviderHealth()); setShowProviders(true); } catch (reason) { setError(errMsg(reason)); } };
   const askAgent = (item: DisclosureDetail) => { setAgentInput(`请优先核验正式披露 ${item.disclosure_id} 的交易所/巨潮/公司原文与附件，再分析其对 ${item.securities.map((security) => security.code).join("、") || "相关公司"} 的影响。请逐项引用 source_version_id、PDF 页码/表格单元格；如果当前只有镜像发现记录，明确说明“原文未核验”，不要提高结论置信度。`); navigate("/agent"); };
+  const extractRelations = async (item: DisclosureDetail) => { const version = relationSourceVersion(item); if (!version) return; setError(null); try { const task = await startRelationExtraction(version, disclosureRelationKind(item)); localStorage.setItem("astock_relation_job", task.job_id); navigate(`/graph?relation_job=${encodeURIComponent(task.job_id)}`); } catch (reason) { setError(errMsg(reason)); } };
   const summary = useMemo(() => `${page.total.toLocaleString("zh-CN")} 条正式披露记录`, [page.total]);
 
   return <div className="relative flex h-full min-w-0 flex-col overflow-hidden p-3">
@@ -178,8 +181,25 @@ export default function DisclosurePage() {
         <div className="min-h-0 flex-1 overflow-auto">{loading ? <Loading text="正在读取正式披露时间线…" /> : page.items.length ? <table className="w-full text-left text-xs"><thead className="sticky top-0 z-10 bg-slate-100 dark:bg-slate-900"><tr><th className="px-3 py-2">发布时间 / 证券</th><th className="px-3 py-2">公告标题</th><th className="px-3 py-2">类型与状态</th><th className="px-3 py-2">来源核验</th><th className="px-3 py-2">发现延迟</th></tr></thead><tbody>{page.items.map((item) => <tr key={item.disclosure_id} className={`cursor-pointer border-t border-slate-100 hover:bg-blue-50 dark:border-slate-800 dark:hover:bg-blue-950/20 ${selected?.disclosure_id === item.disclosure_id ? "bg-blue-50 dark:bg-blue-950/30" : ""}`} onClick={() => openDetail(item)}><td className="px-3 py-2 align-top"><div>{timeText(item.published_at)}</div><div className="muted mt-1">{item.securities.map((security) => `${security.name || ""} ${security.code}`).join("、") || "未关联证券"}</div></td><td className="max-w-xl px-3 py-2 align-top"><b className="leading-5">{item.title}</b>{item.review_reason && <div className="mt-1 line-clamp-1 text-amber-600">{item.review_reason}</div>}</td><td className="px-3 py-2 align-top"><span className="rounded bg-slate-100 px-2 py-0.5 dark:bg-slate-800">{item.category_name}</span><div className="mt-1">{item.status_name}</div></td><td className="px-3 py-2 align-top"><span className={`rounded px-2 py-0.5 ${item.primary_verified ? "bg-emerald-500/10 text-emerald-600" : "bg-amber-500/10 text-amber-600"}`}>{item.primary_verified ? "正式原文已归档" : "待正式原文核验"}</span><div className="muted mt-1">{item.sources.length} 个入口</div></td><td className="num px-3 py-2 align-top">{durationText(item.discovery_latency_secs)}</td></tr>)}</tbody></table> : <div className="muted flex h-full flex-col items-center justify-center gap-2"><b>当前筛选范围没有披露记录</b><span>可调整筛选或点击“增量同步”；长任务会在后台继续。</span></div>}</div>
         <div className="flex shrink-0 items-center justify-between border-t border-slate-200 px-3 py-2 text-xs dark:border-slate-800"><span className="muted">所有缺失均显示原因，不使用“——”掩盖数据状态</span><div className="flex gap-1">{disclosurePageTokens(pageNo, page.total_pages).map((token, index) => token === "ellipsis" ? <span key={`ellipsis-${index}`} className="px-1">…</span> : <button key={token} type="button" className={`chip ${token === pageNo ? "bg-blue-600 text-white" : ""}`} onClick={() => setPageNo(token)}>{token}</button>)}</div></div>
       </div>
-      {selected && <DetailPanel detail={detail} loading={detailLoading} onClose={() => { setSelected(null); setDetail(null); }} onAgent={askAgent} />}
+      {selected && <DetailPanel detail={detail} loading={detailLoading} onClose={() => { setSelected(null); setDetail(null); }} onAgent={askAgent} onExtract={extractRelations} />}
     </div>
     {showProviders && <ProviderPanel providers={providers} onClose={() => setShowProviders(false)} />}
   </div>;
+}
+
+export function relationSourceVersion(detail: DisclosureDetail): string | null {
+  return detail.source_version_id ?? detail.attachments.find((item) => item.source_version_id)?.source_version_id ?? null;
+}
+
+export function disclosureRelationKind(detail: Pick<DisclosureDetail, "title" | "category">): RelationDocumentKind {
+  const title = detail.title;
+  if (/招股|募集说明书/.test(title)) return "prospectus";
+  if (/半年度|半年报/.test(title)) return "semi_annual_report";
+  if (/年度报告|年报/.test(title)) return "annual_report";
+  if (/调研|投资者关系|业绩说明会/.test(title)) return "investor_relations";
+  if (/招标|投标|中标/.test(title)) return "tender";
+  if (/合同|订单|协议/.test(title) || detail.category === "contract") return "major_contract";
+  if (/专利/.test(title)) return "patent";
+  if (/环评|产能|扩产|投产/.test(title)) return "capacity_eia";
+  return "other";
 }

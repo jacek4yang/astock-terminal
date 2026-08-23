@@ -8,6 +8,7 @@ use astock_fundamental::FundamentalClient;
 use astock_graph::GraphStore;
 use astock_market_data::{EastMoneyF10, MarketData};
 use astock_minimax::MinimaxClient;
+use astock_relation_extraction::ExtractionRunDetail;
 use astock_storage::{Storage, StorageConfig};
 use astock_trading_rules::RuleSet;
 use tokio::sync::RwLock;
@@ -213,6 +214,43 @@ pub struct EventAnalysisState {
     pub cancels: Mutex<HashMap<String, CancellationToken>>,
 }
 
+/// Pollable document-relation extraction jobs. Runs have no hard timeout;
+/// their complete diagnostics and results survive page switches.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RelationExtractionSnapshot {
+    pub job_id: String,
+    pub source_version_id: String,
+    pub running: bool,
+    pub status: String,
+    pub phase: String,
+    pub progress: u8,
+    pub current_item: String,
+    pub segments_scanned: usize,
+    pub candidates_found: usize,
+    pub validated: usize,
+    pub needs_review: usize,
+    pub estimated_remaining_seconds: Option<u32>,
+    pub recent_logs: Vec<String>,
+    pub result: Option<ExtractionRunDetail>,
+    pub error: Option<String>,
+    pub started_at: i64,
+    pub updated_at: i64,
+}
+
+pub struct RelationExtractionState {
+    pub jobs: Mutex<HashMap<String, RelationExtractionSnapshot>>,
+    pub cancels: Mutex<HashMap<String, CancellationToken>>,
+}
+
+impl Default for RelationExtractionState {
+    fn default() -> Self {
+        Self {
+            jobs: Mutex::new(HashMap::new()),
+            cancels: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
 impl Default for EventAnalysisState {
     fn default() -> Self {
         Self {
@@ -300,6 +338,8 @@ pub struct AppState {
     pub global_sync: Arc<GlobalSyncState>,
     /// Background evidence-bound event and market price-in analyses.
     pub event_analysis: Arc<EventAnalysisState>,
+    /// Versioned supply-chain relation extraction and review jobs.
+    pub relation_extraction: Arc<RelationExtractionState>,
     /// Live agent event-forwarder tasks, keyed by task id. Entries are
     /// removed when the event stream ends (Completed / Failed / Suspended)
     /// or on `agent_cancel`.
@@ -394,6 +434,7 @@ impl AppState {
             disclosure_sync: Arc::new(DisclosureSyncState::default()),
             global_sync: Arc::new(GlobalSyncState::default()),
             event_analysis: Arc::new(EventAnalysisState::default()),
+            relation_extraction: Arc::new(RelationExtractionState::default()),
             agent_handles: Arc::new(Mutex::new(HashMap::new())),
         })
     }

@@ -30,6 +30,7 @@ const TOOL_NAMES: Record<string, string> = {
   research_disclosures: "正式披露与修订核验",
   research_global_transmission: "海外一级来源与 A 股传导核验",
   analyze_event_price_in: "结构化事件与市场定价核验",
+  research_supply_chain_relations: "供应链关系抽取与审核核验",
   get_market_regime: "市场环境识别",
   market_regime: "市场环境识别",
   industry_chain: "产业链位置分析",

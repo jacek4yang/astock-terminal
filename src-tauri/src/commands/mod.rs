@@ -13,6 +13,7 @@ pub mod fundamental;
 pub mod global;
 pub mod market;
 pub mod news;
+pub mod relations;
 pub mod scan;
 pub mod settings;
 pub mod source_evidence;

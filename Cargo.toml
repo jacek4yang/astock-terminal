@@ -26,6 +26,7 @@ members = [
     "crates/disclosure",
     "crates/global-intelligence",
     "crates/event-intelligence",
+    "crates/relation-extraction",
 ]
 
 [workspace.package]

@@ -1494,6 +1494,7 @@ pub fn default_registry() -> ToolRegistry {
         Arc::new(crate::deep::ResearchDisclosures),
         Arc::new(crate::deep::ResearchGlobalTransmission),
         Arc::new(crate::deep::AnalyzeEventPriceIn),
+        Arc::new(crate::deep::ResearchSupplyChainRelations),
         Arc::new(crate::deep::ResearchNews),
         Arc::new(crate::deep::GetMarketRegime),
     ])
@@ -1723,7 +1724,7 @@ mod tests {
     #[tokio::test]
     async fn tool_schemas_are_valid() {
         let registry = default_registry();
-        assert_eq!(registry.len(), 29);
+        assert_eq!(registry.len(), 30);
         let mut names = Vec::new();
         for spec in registry.specs() {
             assert_eq!(spec.kind, "function");
@@ -1768,6 +1769,7 @@ mod tests {
             "search_web",
             "research_disclosures",
             "research_global_transmission",
+            "research_supply_chain_relations",
             "research_news",
             "get_market_regime",
         ] {

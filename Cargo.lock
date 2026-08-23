@@ -311,6 +311,7 @@ dependencies = [
  "astock-market-data",
  "astock-minimax",
  "astock-quant",
+ "astock-relation-extraction",
  "astock-security",
  "astock-source-verification",
  "astock-storage",
@@ -346,6 +347,7 @@ dependencies = [
  "astock-market-data",
  "astock-minimax",
  "astock-news-intelligence",
+ "astock-relation-extraction",
  "astock-source-verification",
  "astock-storage",
  "astock-technical",
@@ -624,6 +626,24 @@ dependencies = [
  "serde_json",
  "statrs",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "astock-relation-extraction"
+version = "5.0.1"
+dependencies = [
+ "astock-graph",
+ "astock-source-verification",
+ "astock-storage",
+ "once_cell",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]

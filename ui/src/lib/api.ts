@@ -1016,6 +1016,68 @@ export const getEventAnalysisStatus = (jobId: string) =>
 export const cancelEventAnalysis = (jobId: string) =>
   cmd<{ cancelled: boolean }>("event_analysis_cancel", { job_id: jobId });
 
+export type RelationDocumentKind =
+  | "annual_report" | "semi_annual_report" | "prospectus" | "investor_relations"
+  | "product_manual" | "tender" | "major_contract" | "patent"
+  | "regulatory_approval" | "capacity_eia" | "customs_industry" | "other";
+export type SupplyRelationType =
+  | "supplies" | "customer_of" | "produces" | "consumes" | "won_bid"
+  | "contract_with" | "patent_for" | "approved_for" | "capacity_for";
+export interface RelationEvidence {
+  evidence_id: string; source_version_id: string; segment_id: string; page_number: number | null;
+  paragraph_index: number; span_start: number; span_end: number; quote_original: string;
+  independent_group: string; polarity: string;
+}
+export interface RelationValidationCheck { field: string; passed: boolean; detail: string }
+export interface RelationCandidate {
+  candidate_id: string; run_id: string; source_version_id: string; document_kind: RelationDocumentKind;
+  subject_text: string; object_text: string; relation: SupplyRelationType; product_text: string | null;
+  amount_text: string | null; share_bps: number | null; report_period: string | null; region: string | null;
+  subject_entity_id: string | null; object_entity_id: string | null;
+  subject_parent_entity_id: string | null; object_parent_entity_id: string | null;
+  disclosure_mode: string; confidence_bps: number; validation_status: string; validation: RelationValidationCheck[];
+  review_status: string; confidential: boolean; non_inferable: boolean; candidate_version: number;
+  proposed_by_model: boolean; publication_status: string | null; eligible_for_agent: boolean;
+  evidence: RelationEvidence[]; created_at: number; updated_at: number;
+}
+export interface RelationExtractionRun {
+  run_id: string; source_version_id: string; document_kind: RelationDocumentKind; extractor_kind: string;
+  model_id: string | null; model_version: string | null; schema_version: string; input_hash: string;
+  status: string; candidate_count: number; validation_errors: number; started_at: number;
+  completed_at: number | null; error: string | null;
+}
+export interface RelationExtractionRunDetail {
+  run: RelationExtractionRun; source_title: string | null; source_url: string;
+  candidates: RelationCandidate[]; diagnostics: string[];
+}
+export interface RelationExtractionSnapshot {
+  job_id: string; source_version_id: string; running: boolean; status: string; phase: string;
+  progress: number; current_item: string; segments_scanned: number; candidates_found: number;
+  validated: number; needs_review: number; estimated_remaining_seconds: number | null;
+  recent_logs: string[]; result: RelationExtractionRunDetail | null; error: string | null;
+  started_at: number; updated_at: number;
+}
+export interface RelationReviewPage { items: RelationCandidate[]; total: number; page: number; page_size: number; total_pages: number }
+export interface RelationReviewRequest {
+  candidate_id: string; decision: "accepted" | "modified" | "rejected" | "confidential" | "non_inferable" | "merge_entity";
+  reviewer: string; reason: string; subject_text: string | null; object_text: string | null;
+  relation: SupplyRelationType | null; product_text: string | null; merged_entity_id: string | null;
+  confidential: boolean; non_inferable: boolean; publish: boolean;
+  dataset_split: "train" | "dev" | "test" | null; training_eligible: boolean;
+}
+export interface RelationPublicationResult { candidate_id: string; publication_id: string | null; projection_key: string | null; status: string; note: string }
+export const startRelationExtraction = (sourceVersionId: string, documentKind: RelationDocumentKind) =>
+  cmd<{ job_id: string; started: boolean; reused: boolean; estimated_seconds: number; note: string }>("relation_extraction_start", { request: { source_version_id: sourceVersionId, document_kind: documentKind, model_id: null, model_version: null, model_candidates: [] } });
+export const getRelationExtractionStatus = (jobId: string) =>
+  cmd<RelationExtractionSnapshot>("relation_extraction_status", { job_id: jobId });
+export const cancelRelationExtraction = (jobId: string) => cmd<boolean>("relation_extraction_cancel", { job_id: jobId });
+export const queryRelationReviews = (status: string, documentKind: RelationDocumentKind | null, minConfidenceBps: number, page: number, pageSize: number) =>
+  cmd<RelationReviewPage>("query_relation_reviews", { status, document_kind: documentKind, min_confidence_bps: minConfidenceBps, page, page_size: pageSize });
+export const reviewRelationCandidate = (request: RelationReviewRequest) =>
+  cmd<RelationPublicationResult>("review_relation_candidate", { request });
+export const retractRelationCandidate = (candidateId: string, reason: string) =>
+  cmd<RelationPublicationResult>("retract_relation_candidate", { candidate_id: candidateId, reason });
+
 export const getPendingNewsEvidenceReviews = (limit = 50) =>
   cmd<AgentConclusionReview[]>("get_pending_news_evidence_reviews", { limit });
 

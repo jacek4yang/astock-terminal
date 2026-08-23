@@ -1053,6 +1053,116 @@ pub(crate) const MIGRATIONS: &[(u32, &str)] = &[
         ON event_study_samples(ontology_kind,post_window_days,event_date);
     "#,
     ),
+    (
+        17,
+        r#"
+    -- Versioned supply-chain relation extraction. Model output is only a
+    -- candidate: exact evidence, entity hierarchy and human publication are
+    -- recorded independently so re-extraction never overwrites old evidence.
+    CREATE TABLE IF NOT EXISTS relation_extraction_runs (
+        run_id              TEXT PRIMARY KEY,
+        source_version_id   TEXT NOT NULL,
+        document_kind       TEXT NOT NULL,
+        extractor_kind      TEXT NOT NULL,
+        model_id            TEXT,
+        model_version       TEXT,
+        schema_version      TEXT NOT NULL,
+        input_hash          TEXT NOT NULL,
+        status              TEXT NOT NULL,
+        candidate_count     INTEGER NOT NULL DEFAULT 0,
+        validation_errors   INTEGER NOT NULL DEFAULT 0,
+        started_at          INTEGER NOT NULL,
+        completed_at        INTEGER,
+        error               TEXT,
+        UNIQUE(source_version_id,extractor_kind,model_id,model_version,schema_version,input_hash)
+    );
+    CREATE INDEX IF NOT EXISTS idx_relation_runs_source
+        ON relation_extraction_runs(source_version_id,started_at DESC);
+
+    CREATE TABLE IF NOT EXISTS relation_candidates (
+        candidate_id             TEXT PRIMARY KEY,
+        run_id                   TEXT NOT NULL REFERENCES relation_extraction_runs(run_id),
+        source_version_id        TEXT NOT NULL,
+        document_kind            TEXT NOT NULL,
+        subject_text             TEXT NOT NULL,
+        object_text              TEXT NOT NULL,
+        relation_type            TEXT NOT NULL,
+        product_text             TEXT,
+        amount_text              TEXT,
+        share_bps                INTEGER,
+        report_period            TEXT,
+        region                   TEXT,
+        subject_entity_id        TEXT,
+        object_entity_id         TEXT,
+        subject_parent_entity_id TEXT,
+        object_parent_entity_id  TEXT,
+        disclosure_mode          TEXT NOT NULL DEFAULT 'named',
+        confidence_bps           INTEGER NOT NULL CHECK(confidence_bps BETWEEN 0 AND 10000),
+        validation_status        TEXT NOT NULL,
+        validation_json          TEXT NOT NULL DEFAULT '[]',
+        review_status            TEXT NOT NULL DEFAULT 'pending_review',
+        confidential             INTEGER NOT NULL DEFAULT 0,
+        non_inferable            INTEGER NOT NULL DEFAULT 0,
+        candidate_version        INTEGER NOT NULL DEFAULT 1,
+        proposed_by_model        INTEGER NOT NULL DEFAULT 0,
+        created_at               INTEGER NOT NULL,
+        updated_at               INTEGER NOT NULL,
+        UNIQUE(run_id,subject_text,object_text,relation_type,product_text,source_version_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_relation_candidates_review
+        ON relation_candidates(review_status,confidence_bps DESC,created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_relation_candidates_entities
+        ON relation_candidates(subject_parent_entity_id,object_parent_entity_id,relation_type);
+
+    CREATE TABLE IF NOT EXISTS relation_candidate_evidence (
+        evidence_id          TEXT PRIMARY KEY,
+        candidate_id         TEXT NOT NULL REFERENCES relation_candidates(candidate_id),
+        source_version_id    TEXT NOT NULL,
+        segment_id           TEXT NOT NULL,
+        page_number          INTEGER,
+        paragraph_index      INTEGER NOT NULL,
+        span_start           INTEGER NOT NULL,
+        span_end             INTEGER NOT NULL,
+        quote_original       TEXT NOT NULL,
+        independent_group    TEXT NOT NULL,
+        polarity             TEXT NOT NULL DEFAULT 'supports',
+        created_at           INTEGER NOT NULL,
+        UNIQUE(candidate_id,source_version_id,segment_id,span_start,span_end,polarity)
+    );
+    CREATE INDEX IF NOT EXISTS idx_relation_evidence_candidate
+        ON relation_candidate_evidence(candidate_id,created_at);
+
+    CREATE TABLE IF NOT EXISTS relation_candidate_reviews (
+        review_id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        candidate_id         TEXT NOT NULL REFERENCES relation_candidates(candidate_id),
+        decision             TEXT NOT NULL,
+        reviewer             TEXT NOT NULL,
+        reason               TEXT NOT NULL,
+        modified_json        TEXT,
+        merged_entity_id     TEXT,
+        dataset_split        TEXT,
+        training_eligible    INTEGER NOT NULL DEFAULT 0,
+        reviewed_at          INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_relation_reviews_candidate
+        ON relation_candidate_reviews(candidate_id,reviewed_at DESC);
+
+    CREATE TABLE IF NOT EXISTS relation_publications (
+        publication_id       TEXT PRIMARY KEY,
+        candidate_id         TEXT NOT NULL REFERENCES relation_candidates(candidate_id),
+        graph_edge_id        INTEGER,
+        projection_key       TEXT NOT NULL,
+        publication_version  INTEGER NOT NULL,
+        status               TEXT NOT NULL,
+        published_at         INTEGER NOT NULL,
+        retracted_at         INTEGER,
+        retraction_reason    TEXT,
+        UNIQUE(candidate_id,publication_version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_relation_publications_projection
+        ON relation_publications(projection_key,status,published_at DESC);
+    "#,
+    ),
 ];
 
 /// Current unix time in seconds. All timestamps in this crate are stored as
@@ -1227,6 +1337,11 @@ mod tests {
             "event_state_transitions",
             "event_market_assessments",
             "event_study_samples",
+            "relation_extraction_runs",
+            "relation_candidates",
+            "relation_candidate_evidence",
+            "relation_candidate_reviews",
+            "relation_publications",
         ] {
             let count: i64 = conn
                 .query_row(

@@ -92,7 +92,7 @@ const TOOL_GROUPS = [
   },
   {
     label: "产业链与关系",
-    tools: ["get_industry_chain", "run_supply_chain_shock", "build_relationship_graph"],
+    tools: ["get_industry_chain", "run_supply_chain_shock", "build_relationship_graph", "research_supply_chain_relations"],
   },
   {
     label: "策略实验",

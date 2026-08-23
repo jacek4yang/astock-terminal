@@ -40,6 +40,10 @@ use astock_graph::{
     Engine as GraphEngine, Event, GraphStore, ImpactEntry, ImpactReport, Node, Relation,
 };
 use astock_market_data::{DataProvider, JoinQuantProvider, NewsTrustTier, FINANCE_NEWS_SOURCES};
+use astock_relation_extraction::{
+    CandidateEvidenceInput, DocumentKind, ModelRelationCandidate, RelationExtractionStore,
+    RelationType,
+};
 use astock_security::{inspect_external_text, ToolPermissionDomain, UrlSecurityPolicy};
 use astock_source_verification::SourceVerifier;
 use astock_technical as tech;
@@ -113,6 +117,205 @@ fn bounded_text(value: Option<&Value>, max_chars: usize) -> String {
         .chars()
         .take(max_chars)
         .collect()
+}
+
+// ---------------------------------------------------------------------
+// research_supply_chain_relations
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct AgentRelationEvidence {
+    /// read_document 返回的不可变段落 ID
+    segment_id: String,
+    /// quote 在段落中的 UTF-8 起始字节
+    span_start: usize,
+    /// quote 在段落中的 UTF-8 结束字节
+    span_end: usize,
+    /// 必须能在指定 span 完全复现的原文，不得改写
+    quote_original: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct AgentRelationCandidate {
+    subject_text: String,
+    object_text: String,
+    /// supplies/customer_of/produces/consumes/won_bid/contract_with/patent_for/approved_for/capacity_for
+    relation: String,
+    product_text: Option<String>,
+    amount_text: Option<String>,
+    share_bps: Option<u16>,
+    report_period: Option<String>,
+    region: Option<String>,
+    evidence: AgentRelationEvidence,
+    confidence_bps: u16,
+    #[serde(default)]
+    consortium_members: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ResearchSupplyChainRelationsArgs {
+    /// 查询已审核发布关系时使用公司名、代码、产品或实体 ID
+    entity_query: Option<String>,
+    /// 从正式原文抽取时使用 read_document/research_disclosures 返回的 source_version_id
+    source_version_id: Option<String>,
+    /// annual_report/semi_annual_report/prospectus/investor_relations/product_manual/tender/major_contract/patent/regulatory_approval/capacity_eia/customs_industry/other
+    document_kind: Option<String>,
+    /// 当前实际生成候选的模型标识；用于升级后新建批次，不能覆盖旧批次
+    model_id: Option<String>,
+    model_version: Option<String>,
+    /// 模型只能提交结构化候选；工具会重新校验原文 span、实体、层级、单位和日期并进入人工审核
+    #[serde(default)]
+    candidates: Vec<AgentRelationCandidate>,
+    /// 已审核关系查询上限
+    limit: Option<usize>,
+}
+
+pub struct ResearchSupplyChainRelations;
+
+#[async_trait]
+impl AgentTool for ResearchSupplyChainRelations {
+    fn name(&self) -> &'static str {
+        "research_supply_chain_relations"
+    }
+    fn description(&self) -> &'static str {
+        "从年报、招股书、调研、招投标、合同、专利、审批和产能材料提取带原文 span 的供应链候选，确定性校验后进入人工审核；也可只查询已经人工审核并发布的高置信关系。未审核、匿名、保密、不可推断或低置信候选绝不进入 Agent 高置信结论"
+    }
+    fn parameters_schema(&self) -> Value {
+        schema_value::<ResearchSupplyChainRelationsArgs>()
+    }
+    fn cacheable(&self) -> bool {
+        false
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
+        let args: ResearchSupplyChainRelationsArgs = parse_args(self.name(), args)?;
+        if args
+            .entity_query
+            .as_deref()
+            .is_none_or(|v| v.trim().is_empty())
+            && args
+                .source_version_id
+                .as_deref()
+                .is_none_or(|v| v.trim().is_empty())
+        {
+            return Err(invalid_args(
+                self.name(),
+                "entity_query 与 source_version_id 至少提供一个",
+            ));
+        }
+        let store = RelationExtractionStore::new(ctx.storage.clone());
+        let mut extraction = None;
+        if let Some(source_version_id) = args
+            .source_version_id
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+        {
+            let kind = DocumentKind::parse(args.document_kind.as_deref().unwrap_or("other"));
+            let mut candidates = Vec::new();
+            for value in args.candidates {
+                let relation = RelationType::parse(&value.relation).ok_or_else(|| {
+                    invalid_args(self.name(), format!("未知关系类型：{}", value.relation))
+                })?;
+                candidates.push(ModelRelationCandidate {
+                    subject_text: value.subject_text,
+                    object_text: value.object_text,
+                    relation,
+                    product_text: value.product_text,
+                    amount_text: value.amount_text,
+                    share_bps: value.share_bps,
+                    report_period: value.report_period,
+                    region: value.region,
+                    evidence: CandidateEvidenceInput {
+                        segment_id: value.evidence.segment_id,
+                        span_start: value.evidence.span_start,
+                        span_end: value.evidence.span_end,
+                        quote_original: value.evidence.quote_original,
+                    },
+                    confidence_bps: value.confidence_bps,
+                    consortium_members: value.consortium_members,
+                });
+            }
+            ctx.report_progress(ToolProgressDetail {
+                completed: 0,
+                total: 3,
+                succeeded: 0,
+                failed: 0,
+                cache_hits: 0,
+                records: 0,
+                active: vec![ToolWorkItem {
+                    label: source_version_id.into(),
+                    stage: "读取原文段落、页码和实体层级".into(),
+                }],
+                recent_errors: vec![],
+            });
+            let detail = store
+                .extract_source(
+                    source_version_id,
+                    kind,
+                    args.model_id.as_deref(),
+                    args.model_version.as_deref(),
+                    candidates,
+                )
+                .await
+                .map_err(|error| tool_err(self.name(), error.to_string()))?;
+            ctx.report_progress(ToolProgressDetail {
+                completed: 2,
+                total: 3,
+                succeeded: 2,
+                failed: 0,
+                cache_hits: 0,
+                records: detail.candidates.len(),
+                active: vec![ToolWorkItem {
+                    label: detail.run.run_id.clone(),
+                    stage: "确定性校验完成，候选已进入人工审核队列".into(),
+                }],
+                recent_errors: vec![],
+            });
+            extraction = Some(detail);
+        }
+        let published = if let Some(query) = args
+            .entity_query
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+        {
+            store
+                .agent_relations(query, args.limit.unwrap_or(30))
+                .await
+                .map_err(|error| tool_err(self.name(), error.to_string()))?
+        } else {
+            Vec::new()
+        };
+        let pending = extraction.as_ref().map_or(0, |detail| {
+            detail
+                .candidates
+                .iter()
+                .filter(|c| !c.eligible_for_agent)
+                .count()
+        });
+        ctx.report_progress(ToolProgressDetail {
+            completed: 3,
+            total: 3,
+            succeeded: 3,
+            failed: 0,
+            cache_hits: 0,
+            records: published.len() + extraction.as_ref().map_or(0, |v| v.candidates.len()),
+            active: vec![],
+            recent_errors: vec![],
+        });
+        let full = json!({"extraction":extraction,"agent_eligible_relations":published});
+        Ok(ToolResult {
+            summary_json: json!({
+                "extraction_run":full["extraction"].get("run"),
+                "review_only_candidate_count":pending,
+                "agent_eligible_relations":full["agent_eligible_relations"],
+                "policy":"只有人工审核、已发布、置信度不低于85%且非匿名/保密/不可推断的关系可用于高置信结论；其余仅作为审核线索"
+            }),
+            full_json: Some(full),
+            cache_key: String::new(),
+            source: "verified_relation_ledger".into(),
+            fetched_at: now_rfc3339(),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------

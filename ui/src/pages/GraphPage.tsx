@@ -18,6 +18,7 @@ import {
 } from "../lib/api";
 import { ErrorBox, LoadBar, Term } from "../components/ui";
 import Markdown from "../components/Markdown";
+import RelationReviewWorkbench from "../components/RelationReviewWorkbench";
 import { useAppStore } from "../store";
 
 // ==================== 常量 ====================
@@ -949,10 +950,13 @@ function RelationshipView() {
 const TABS = [
   { key: "chain", label: "产业链地图" },
   { key: "rel", label: "关系网络" },
+  { key: "review", label: "关系抽取与审核" },
 ] as const;
 
 export default function GraphPage() {
-  const [tab, setTab] = useState<(typeof TABS)[number]["key"]>("chain");
+  const [tab, setTab] = useState<(typeof TABS)[number]["key"]>(() =>
+    new URLSearchParams(window.location.search).has("relation_job") ? "review" : "chain"
+  );
 
   return (
     <div className="flex h-full flex-col gap-3 overflow-hidden p-3">
@@ -981,6 +985,9 @@ export default function GraphPage() {
       </div>
       <div className={"flex min-h-0 flex-1 flex-col " + (tab === "rel" ? "" : "hidden")}>
         <RelationshipView />
+      </div>
+      <div className={"flex min-h-0 flex-1 flex-col " + (tab === "review" ? "" : "hidden")}>
+        <RelationReviewWorkbench />
       </div>
     </div>
   );

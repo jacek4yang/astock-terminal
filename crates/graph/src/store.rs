@@ -185,12 +185,14 @@ impl GraphStore {
 
     /// All edges, ordered by row id.
     pub async fn all_edges(&self) -> Result<Vec<Edge>> {
+        let now = now_secs();
         Ok(self
             .storage
             .graph_edges_all()
             .await?
             .into_iter()
             .map(edge_from)
+            .filter(|edge| edge.valid_to.is_none_or(|valid_to| valid_to > now))
             .collect())
     }
 
