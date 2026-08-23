@@ -10,9 +10,8 @@
 //!   provider becomes a normal tool error that the orchestrator can feed back
 //!   to the model instead of leaving the whole Agent run stuck forever.
 
-mod legacy {
-    include!("tools_legacy.rs");
-}
+#[path = "tools_legacy.rs"]
+mod legacy;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -111,7 +110,7 @@ impl ToolRegistry {
         if queue_wait >= Duration::from_secs(1) {
             tracing::debug!(
                 tool = name,
-                cache_key,
+                cache_key = %cache_key,
                 wait_ms = queue_wait.as_millis() as u64,
                 "coalesced duplicate Agent tool request"
             );

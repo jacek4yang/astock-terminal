@@ -14,9 +14,8 @@
 //!   Once visible text or a tool call has been emitted, failures propagate and
 //!   the durable Agent task can be resumed from its last persisted round.
 
-mod legacy {
-    include!("client_legacy.rs");
-}
+#[path = "client_legacy.rs"]
+mod legacy;
 
 use std::collections::VecDeque;
 use std::pin::Pin;
