@@ -12,6 +12,8 @@ thiserror.workspace = true
 nalgebra = "0.33"
 statrs = "0.18"
 rand.workspace = true
+sha2.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

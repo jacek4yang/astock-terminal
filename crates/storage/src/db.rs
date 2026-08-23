@@ -1322,6 +1322,39 @@ pub(crate) const MIGRATIONS: &[(u32, &str)] = &[
         ON earnings_driver_shock_bridges(base_snapshot_id,created_at DESC);
     "#,
     ),
+    (
+        20,
+        r#"
+    -- Reproducible Quant Lab results. The snapshot body includes the exact
+    -- data/function versions, preprocessing conventions, inference budget,
+    -- multiple-testing method and all stability slices.
+    CREATE TABLE IF NOT EXISTS quant_research_snapshots (
+        snapshot_id       TEXT PRIMARY KEY,
+        function_version  TEXT NOT NULL,
+        metric            TEXT NOT NULL,
+        symbols_json      TEXT NOT NULL,
+        data_versions_json TEXT NOT NULL,
+        config_json       TEXT NOT NULL,
+        snapshot_json     TEXT NOT NULL,
+        created_at        INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_quant_research_created
+        ON quant_research_snapshots(created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS quant_research_jobs (
+        job_id             TEXT PRIMARY KEY,
+        status             TEXT NOT NULL,
+        phase              TEXT NOT NULL,
+        progress_json      TEXT NOT NULL,
+        snapshot_id        TEXT REFERENCES quant_research_snapshots(snapshot_id),
+        error              TEXT,
+        created_at         INTEGER NOT NULL,
+        updated_at         INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_quant_research_jobs_updated
+        ON quant_research_jobs(updated_at DESC);
+    "#,
+    ),
 ];
 
 /// Current unix time in seconds. All timestamps in this crate are stored as
@@ -1508,6 +1541,8 @@ mod tests {
             "graph_snapshot_records",
             "earnings_driver_snapshots",
             "earnings_driver_shock_bridges",
+            "quant_research_snapshots",
+            "quant_research_jobs",
         ] {
             let count: i64 = conn
                 .query_row(

@@ -409,6 +409,58 @@ pub fn assemble_report(
     }
 }
 
+/// Build a conservative publication fallback after model-driven repair has
+/// been exhausted. Only claims with no verifier error survive; unsupported
+/// lines are omitted and disclosed as unknown instead of turning a long,
+/// otherwise useful research run into an opaque terminal error.
+pub fn verified_subset_answer(report: &AgentReport) -> Option<String> {
+    let blocked_claims: BTreeSet<&str> = report
+        .research
+        .verification
+        .findings
+        .iter()
+        .filter(|finding| finding.severity == VerificationSeverity::Error)
+        .filter_map(|finding| finding.claim_id.as_deref())
+        .collect();
+    let kept = report
+        .research
+        .claims
+        .iter()
+        .filter(|claim| !blocked_claims.contains(claim.claim_id.as_str()))
+        .collect::<Vec<_>>();
+    if report.research.claims.is_empty() {
+        return None;
+    }
+
+    let omitted = report.research.claims.len().saturating_sub(kept.len());
+    let mut answer = if kept.is_empty() {
+        String::from(
+            "## 本轮暂无可发布结论\n\n现有草稿中的关键数字或表述未能通过字段级证据复现，因此不会将其作为决策依据。\n",
+        )
+    } else {
+        String::from(
+            "## 已通过证据校验的部分结论\n\n以下仅保留可由现有字段级证据复现的内容；未通过校验的数字和表述不会作为决策依据。\n",
+        )
+    };
+    for claim in kept {
+        let grade = match claim.claim_type {
+            ClaimType::Fact => "事实",
+            ClaimType::Calculation => "计算",
+            ClaimType::External => "外部",
+            ClaimType::Inference => "推断",
+            ClaimType::Assumption => "假设",
+            ClaimType::Unknown => "未知",
+        };
+        answer.push_str(&format!("\n- 【{grade}】{}", claim.text));
+    }
+    if omitted > 0 {
+        answer.push_str(&format!(
+            "\n\n## 尚未核验的内容\n\n- 【未知】另有 {omitted} 条草稿结论未能通过数字、引用或绝对化表述校验，已自动省略；需要补充或刷新证据后再继续分析。"
+        ));
+    }
+    Some(answer)
+}
+
 fn build_research_report(text: &str, evidence: &[Evidence], generated_at: i64) -> ResearchReport {
     let mut claims = Vec::new();
     let mut section = String::new();
@@ -629,30 +681,36 @@ pub fn verify_research_report(
         }
 
         let fields = cited_fields(&claim.evidence_ids, evidence);
-        for quantity in extract_quantities(&remove_reference_markup(&claim.text)) {
-            let matching = fields
-                .iter()
-                .copied()
-                .find(|field| quantity_matches_field(&quantity, field));
-            if matching.is_none() {
-                let same_number_wrong_unit = fields.iter().copied().any(|field| {
-                    quantity_numeric_match(&quantity, field)
-                        && !units_compatible(quantity.kind, field.unit.as_deref())
-                });
-                push_error(
-                    &mut findings,
-                    if same_number_wrong_unit {
-                        "unit_mismatch"
-                    } else {
-                        "unsupported_number"
-                    },
-                    claim,
-                    if same_number_wrong_unit {
-                        format!("数字“{}”与所引字段的单位或币种不一致", quantity.raw)
-                    } else {
-                        format!("数字“{}”无法在所引字段或确定性计算中复现", quantity.raw)
-                    },
-                );
+        // Assumption/unknown numbers are explicitly not asserted as observed
+        // market facts (for example a user-provided 2万元 capital constraint).
+        // They remain labelled in the report but do not require a provider
+        // field. Every fact/calculation/inference number remains strict.
+        if !matches!(claim.claim_type, ClaimType::Assumption | ClaimType::Unknown) {
+            for quantity in extract_quantities(&remove_reference_markup(&claim.text)) {
+                let matching = fields
+                    .iter()
+                    .copied()
+                    .find(|field| quantity_matches_field(&quantity, field));
+                if matching.is_none() {
+                    let same_number_wrong_unit = fields.iter().copied().any(|field| {
+                        quantity_numeric_match(&quantity, field)
+                            && !units_compatible(quantity.kind, field.unit.as_deref())
+                    });
+                    push_error(
+                        &mut findings,
+                        if same_number_wrong_unit {
+                            "unit_mismatch"
+                        } else {
+                            "unsupported_number"
+                        },
+                        claim,
+                        if same_number_wrong_unit {
+                            format!("数字“{}”与所引字段的单位或币种不一致", quantity.raw)
+                        } else {
+                            format!("数字“{}”无法在所引字段或确定性计算中复现", quantity.raw)
+                        },
+                    );
+                }
             }
         }
         for field in fields {
@@ -926,7 +984,7 @@ fn parse_quantity(raw: &str) -> Option<Quantity> {
         "万亿" => (1e12, QuantityKind::Money),
         "亿元" | "亿" => (1e8, QuantityKind::Money),
         "万元" => (1e4, QuantityKind::Money),
-        "万" => (1e4, QuantityKind::Plain),
+        "万" => (1e4, QuantityKind::Money),
         "元" => (1.0, QuantityKind::Money),
         "%" | "％" => (1.0, QuantityKind::Percent),
         "股" | "手" => (1.0, QuantityKind::Shares),
@@ -1136,6 +1194,52 @@ mod tests {
     }
 
     #[test]
+    fn verified_subset_keeps_supported_claims_and_omits_bad_numbers() {
+        let items = evidence(
+            json!({"price": 10.0, "data_quality": {"freshness": "fresh", "allow_deterministic_compute": true}}),
+        );
+        let report = tagged_report(
+            "【事实】最新价 10 元\n【推断】未经验证的目标价 99 元",
+            items.clone(),
+        );
+        assert_eq!(
+            report.research.verification.status,
+            VerificationStatus::Failed
+        );
+
+        let fallback = verified_subset_answer(&report).expect("one claim is publishable");
+        assert!(fallback.contains("最新价 10 元"));
+        assert!(!fallback.contains("目标价 99 元"));
+        assert!(fallback.contains("已自动省略"));
+        let repaired = tagged_report(&fallback, items);
+        assert!(
+            repaired.research.verification.passed(),
+            "{:?}",
+            repaired.research.verification.findings
+        );
+    }
+
+    #[test]
+    fn verified_subset_returns_safe_answer_when_every_claim_is_blocked() {
+        let items = evidence(
+            json!({"price": 10.0, "data_quality": {"freshness": "fresh", "allow_deterministic_compute": true}}),
+        );
+        let report = tagged_report("【事实】目标价 99 元", items.clone());
+        assert!(!report.research.verification.passed());
+
+        let fallback = verified_subset_answer(&report).expect("safe empty result");
+        assert!(fallback.contains("本轮暂无可发布结论"));
+        assert!(fallback.contains("1 条草稿结论"));
+        assert!(!fallback.contains("目标价 99 元"));
+        let repaired = tagged_report(&fallback, items);
+        assert!(
+            repaired.research.verification.passed(),
+            "{:?}",
+            repaired.research.verification.findings
+        );
+    }
+
+    #[test]
     fn bad_reference_is_blocked() {
         let report = tagged_report(
             "【事实】最新价 10 元〔证据:evf_missing〕",
@@ -1200,6 +1304,23 @@ mod tests {
             report.research.verification.passed(),
             "{:?}",
             report.research.verification.findings
+        );
+    }
+
+    #[test]
+    fn user_constraint_number_passes_only_when_explicitly_an_assumption() {
+        let report = tagged_report("【假设】按用户提供的 2万元 可用资金规划仓位", vec![]);
+        assert!(
+            report.research.verification.passed(),
+            "{:?}",
+            report.research.verification.findings
+        );
+        assert_eq!(report.research.assumptions.len(), 1);
+
+        let asserted = tagged_report("【事实】可用资金为 2万元", vec![]);
+        assert_eq!(
+            asserted.research.verification.status,
+            VerificationStatus::Failed
         );
     }
 

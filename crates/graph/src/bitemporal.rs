@@ -729,8 +729,7 @@ impl GraphStore {
         self.storage()
             .run(move |conn| {
                 let mut stmt = conn.prepare(&format!(
-                    "{} WHERE r.identity_id=?1 ORDER BY r.recorded_at,r.revision_no",
-                    REVISION_SELECT
+                    "{REVISION_SELECT} WHERE r.identity_id=?1 ORDER BY r.recorded_at,r.revision_no"
                 ))?;
                 let rows = stmt.query_map([identity_id], revision_from_row)?;
                 Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)

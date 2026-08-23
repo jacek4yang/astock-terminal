@@ -2362,6 +2362,143 @@ export const supplyChainShock = (subject: string, direction: "up" | "down", magn
 export const relationshipGraph = (symbols: string[], windowDays?: number) =>
   cmd<RelationshipGraph>("relationship_graph", { symbols, window_days: windowDays });
 
+// ==================== 可复现量化研究工作台 ====================
+
+export type QuantMetric =
+  | "pearson"
+  | "spearman"
+  | "kendall"
+  | "distance_correlation"
+  | "mutual_information"
+  | "lead_lag"
+  | "granger";
+
+export interface QuantResearchConfig {
+  symbols: string[];
+  metric: QuantMetric;
+  value_mode: "price_level" | "arithmetic_return" | "log_return";
+  frequency: "daily" | "weekly" | "monthly";
+  start_date: string | null;
+  end_date: string | null;
+  adjust: "qfq" | "hfq" | "none";
+  lookback_bars: number;
+  missing_policy: "drop" | "forward_fill" | "zero";
+  rolling_window: number;
+  max_lag: number;
+  controls: string[];
+  bootstrap_reps: number;
+  permutation_reps: number;
+  alpha: number;
+  fdr_method: "benjamini_hochberg" | "bonferroni" | "none";
+  max_pairs: number;
+  max_observations_per_pair: number;
+  seed: number;
+  oos_ratio: number;
+}
+
+export interface QuantStabilitySlice {
+  group: string;
+  label: string;
+  effect: number;
+  effective_n: number;
+}
+
+export interface QuantStabilitySummary {
+  slice_count: number;
+  same_direction_rate: number | null;
+  min_effect: number | null;
+  max_effect: number | null;
+  train_effect: number | null;
+  out_of_sample_effect: number | null;
+  outlier_robust_effect: number | null;
+  assessment: string;
+}
+
+export interface QuantPairInference {
+  left: string;
+  right: string;
+  directed: boolean;
+  effect: number;
+  effect_name: string;
+  confidence_low: number | null;
+  confidence_high: number | null;
+  confidence_method: string;
+  p_value: number | null;
+  p_value_method: string;
+  adjusted_p_value: number | null;
+  significant_raw: boolean | null;
+  significant_after_correction: boolean | null;
+  effective_n: number;
+  best_lag: number | null;
+  controls_used: string[];
+  stability: QuantStabilitySummary;
+  stability_slices: QuantStabilitySlice[];
+  interpretation: string;
+  conclusion: string;
+  warnings: string[];
+}
+
+export interface QuantResearchSnapshot {
+  snapshot_id: string;
+  function_version: string;
+  created_at: number;
+  config: QuantResearchConfig;
+  data_versions: Record<string, string>;
+  budget: {
+    requested_pairs: number;
+    executed_pairs: number;
+    pair_sampling: boolean;
+    max_observations_per_pair: number;
+    estimated_operations: number;
+    complexity: string;
+    explanation: string;
+  };
+  results: QuantPairInference[];
+  warnings: string[];
+  causality_boundary: string;
+}
+
+export interface QuantResearchJob {
+  job_id: string;
+  running: boolean;
+  status: "running" | "completed" | "cancelled" | "failed" | string;
+  phase: string;
+  progress: number;
+  done_pairs: number;
+  total_pairs: number;
+  current_pair: [string, string] | null;
+  effective_observations: number;
+  fetched_series: number;
+  total_series: number;
+  estimated_remaining_seconds: number | null;
+  recent_logs: string[];
+  result: QuantResearchSnapshot | null;
+  error: string | null;
+  started_at: number;
+  updated_at: number;
+}
+
+export interface QuantSnapshotListItem {
+  snapshot_id: string;
+  function_version: string;
+  metric: string;
+  symbols: string[];
+  data_versions: Record<string, string>;
+  config: QuantResearchConfig;
+  created_at: number;
+}
+
+export const quantResearchStart = (config: QuantResearchConfig) =>
+  cmd<QuantResearchJob>("quant_research_start", { config });
+export const quantResearchStatus = (jobId?: string | null) =>
+  cmd<QuantResearchJob | null>("quant_research_status", { job_id: jobId ?? null });
+export const quantResearchCancel = (jobId: string) =>
+  cmd<boolean>("quant_research_cancel", { job_id: jobId });
+export const quantResearchSnapshotGet = (snapshotId: string) =>
+  cmd<QuantResearchSnapshot | null>("quant_research_snapshot_get", { snapshot_id: snapshotId });
+export const quantResearchSnapshotList = (limit = 20) =>
+  cmd<QuantSnapshotListItem[]>("quant_research_snapshot_list", { limit });
+
 // ==================== 东财数据中心 ====================
 
 /** 数据中心统一返回:{rows, count, source, fetched_at(RFC3339)} */
