@@ -109,6 +109,9 @@ pub fn run() {
             // 基本面分析
             commands::fundamental::get_fundamentals,
             commands::fundamental::get_valuation,
+            commands::fundamental::get_earnings_driver_tree,
+            commands::fundamental::run_earnings_driver_shock,
+            commands::fundamental::get_earnings_driver_snapshot,
             // 深度分析引擎
             commands::deep::graph_subgraph,
             commands::deep::graph_as_of,
@@ -118,6 +121,11 @@ pub fn run() {
             commands::deep::graph_snapshot_diff,
             commands::deep::supply_chain_shock,
             commands::deep::relationship_graph,
+            commands::deep::quant_research_start,
+            commands::deep::quant_research_status,
+            commands::deep::quant_research_cancel,
+            commands::deep::quant_research_snapshot_get,
+            commands::deep::quant_research_snapshot_list,
             commands::deep::run_backtest,
             commands::deep::backtest_start,
             commands::deep::backtest_status,

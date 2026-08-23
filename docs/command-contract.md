@@ -66,8 +66,16 @@
 - `graph_edge_timeline(identity_id) -> EdgeRevision[]` — 稳定关系身份下的全部不可变修订。
 - `graph_snapshot_get(snapshot_id) -> GraphSnapshot?` — 按确定性 ID 重放；相同输入无法得到相同 ID 时拒绝。
 - `graph_snapshot_diff(left_business_time, left_knowledge_time, right_business_time, right_knowledge_time) -> GraphSnapshotDiff` — 新增/移除 revision 与发生变化的关系身份。历史研究和事件回测必须显式绑定 knowledge-time 快照。
+- `get_earnings_driver_tree(symbol) -> EarningsDriverTree` — 行业适配的可追溯盈利驱动树、参数快照、三情景、敏感性、Monte Carlo 与隐含假设。
+- `run_earnings_driver_shock(symbol, shocks) -> ShockBridge` — 经营/供应链冲击到收入、毛利、EPS、经营现金流和自由现金流的桥接。
+- `get_earnings_driver_snapshot(snapshot_id) -> EarningsDriverTree` — 回放不可变盈利驱动快照，不重新取数。
 - `supply_chain_shock(subject, direction: "up"|"down"(支持涨/跌), magnitude_pct?) -> ShockJson` — 事件沿供应链传导:一二级受益/受损 + 逻辑链/滞后/置信度
 - `relationship_graph(symbols: string[2-12], window_days?: 60-500, 默认 250) -> GraphJson` — 日收益 Pearson + lead-lag 关系网络
+- `quant_research_start(config: ResearchConfig) -> QuantResearchJobSnapshot` — 启动无硬超时的后台量化研究；配置含股票池、口径、频率、日期、复权、缺失值、窗口、滞后、控制变量、重抽样、FDR 和预算。
+- `quant_research_status(job_id?) -> QuantResearchJobSnapshot?` — 查询行情获取数、关系进度、当前配对、有效 N、预计剩余时间、日志、结果或可复制错误。
+- `quant_research_cancel(job_id) -> bool` — 协作式安全取消；已完成的上游缓存仍保留。
+- `quant_research_snapshot_get(snapshot_id) -> ResearchSnapshot?` — 按不可变编号重放完整配置、数据版本、函数版本、推断与稳健性结果。
+- `quant_research_snapshot_list(limit?) -> QuantSnapshotSummary[]` — 最近研究快照，供历史与 Agent/UI 结果复现。
 - `run_backtest(symbol?, strategy?, params?, pool?, fast?, slow?, entry_n?, exit_n?, bars?: 60-2000, 默认 750) -> BacktestJson` — 日线回测(A 股交易规则),返回绩效/净值曲线/最近 50 笔交易
   - 内置策略 `ma_cross`(默认)/ `turtle` / `buy_hold`:标量参数 fast/slow/entry_n/exit_n 直接传,或经 `params` JSON 对象传(显式标量优先);`symbol` 必填。
   - 注册表单标的策略(如 `zscore_mean_reversion`):`symbol` 必填,参数走 `params` JSON(如 `{"ma_window":20,"z_window":60,"entry_z":-2.0,"exit_z":1.0}`);未知参数键报 `invalid_param`。返回同 BacktestJson 形状并带 `kind: "single"`。

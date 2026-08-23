@@ -74,6 +74,34 @@ pub struct BacktestState {
     pub cancel: Mutex<Option<CancellationToken>>,
 }
 
+/// One pollable Quant Lab job. Detailed counters make long O(n²) scans
+/// observable instead of presenting an opaque spinner.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct QuantResearchJobSnapshot {
+    pub job_id: String,
+    pub running: bool,
+    pub status: String,
+    pub phase: String,
+    pub progress: u8,
+    pub done_pairs: usize,
+    pub total_pairs: usize,
+    pub current_pair: Option<[String; 2]>,
+    pub effective_observations: usize,
+    pub fetched_series: usize,
+    pub total_series: usize,
+    pub estimated_remaining_seconds: Option<u64>,
+    pub recent_logs: Vec<String>,
+    pub result: Option<serde_json::Value>,
+    pub error: Option<String>,
+    pub started_at: i64,
+    pub updated_at: i64,
+}
+
+pub struct QuantResearchState {
+    pub jobs: Mutex<HashMap<String, QuantResearchJobSnapshot>>,
+    pub cancels: Mutex<HashMap<String, CancellationToken>>,
+}
+
 /// Detailed, pollable formal-disclosure synchronization state. It survives
 /// page switches and exposes enough information to diagnose slow providers.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -287,6 +315,15 @@ impl Default for BacktestState {
     }
 }
 
+impl Default for QuantResearchState {
+    fn default() -> Self {
+        Self {
+            jobs: Mutex::new(HashMap::new()),
+            cancels: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
 impl Default for ScanState {
     fn default() -> Self {
         ScanState {
@@ -332,6 +369,8 @@ pub struct AppState {
     pub scan: Arc<ScanState>,
     /// Background backtest coordination state.
     pub backtest: Arc<BacktestState>,
+    /// Persistent, cancellable Quant Lab jobs and their drill-down progress.
+    pub quant_research: Arc<QuantResearchState>,
     /// Background formal-disclosure synchronization and diagnostics.
     pub disclosure_sync: Arc<DisclosureSyncState>,
     /// Overseas primary-source collection and Global -> A-share mapping.
@@ -431,6 +470,7 @@ impl AppState {
             minimax: RwLock::new(None),
             scan: Arc::new(ScanState::default()),
             backtest: Arc::new(BacktestState::default()),
+            quant_research: Arc::new(QuantResearchState::default()),
             disclosure_sync: Arc::new(DisclosureSyncState::default()),
             global_sync: Arc::new(GlobalSyncState::default()),
             event_analysis: Arc::new(EventAnalysisState::default()),
