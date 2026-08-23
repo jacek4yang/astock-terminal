@@ -5,7 +5,7 @@
 //! changing the public tool contract:
 //!
 //! - canonical cache arguments plus per-key single-flight coalescing, so
-//!   concurrent identical requests execute upstream work only once;
+//!   concurrent identical requests share both successful results and failures;
 //! - bounded, tool-class-aware execution budgets, so a permanently stalled
 //!   provider becomes a normal tool error that the orchestrator can feed back
 //!   to the model instead of leaving the whole Agent run stuck forever.
@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use serde_json::Value;
-use tokio::sync::Mutex;
+use tokio::sync::OnceCell;
 
 use crate::error::{AgentError, Result};
 
@@ -28,12 +28,18 @@ pub use legacy::{
 };
 pub(crate) use legacy::{now_secs, CacheEnvelope};
 
+#[derive(Debug, Clone)]
+enum SharedToolOutcome {
+    Success(ToolResult),
+    Failure(String),
+}
+
 /// A tool registry with cache-key normalization, request coalescing and a
 /// final safety deadline around every deterministic tool invocation.
 #[derive(Clone)]
 pub struct ToolRegistry {
     inner: legacy::ToolRegistry,
-    flights: Arc<DashMap<String, Arc<Mutex<()>>>>,
+    flights: Arc<DashMap<String, Arc<OnceCell<SharedToolOutcome>>>>,
 }
 
 impl Default for ToolRegistry {
@@ -90,22 +96,43 @@ impl ToolRegistry {
 
     /// Dispatch a tool through the durable read-through cache.
     ///
-    /// Identical calls share one per-key mutex. The first caller performs the
-    /// upstream work; waiters re-check the persistent cache after the leader
-    /// completes. The timeout is deliberately generous and is only a final
-    /// deadlock guard—normal provider-level retries and progress reporting
-    /// remain inside each tool.
+    /// Identical calls share one per-key [`OnceCell`]. The leader performs the
+    /// upstream work; every waiter receives the same cloned success or failure.
+    /// Successful results are still persisted by the legacy read-through cache,
+    /// so a new flight after cleanup remains a cache hit. The timeout is
+    /// deliberately generous and is only a final deadlock guard—normal
+    /// provider-level retries and progress reporting remain inside each tool.
     pub async fn dispatch(&self, name: &str, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
+        // Preserve the public error contract for an unregistered tool instead
+        // of wrapping it as a shared execution failure.
+        if self.get(name).is_none() {
+            return Err(AgentError::UnknownTool(name.to_string()));
+        }
+
         let args = canonicalize_cache_args(args);
         let cache_key = legacy::tool_cache_key(name, &args);
-        let gate = self
+        let flight = self
             .flights
             .entry(cache_key.clone())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .clone();
+        let queued_at = Instant::now();
+        let budget = tool_runtime_budget(name);
+
+        let outcome = flight
+            .get_or_init(|| async {
+                match tokio::time::timeout(budget, self.inner.dispatch(name, args, ctx)).await {
+                    Ok(Ok(result)) => SharedToolOutcome::Success(result),
+                    Ok(Err(error)) => SharedToolOutcome::Failure(error.to_string()),
+                    Err(_) => SharedToolOutcome::Failure(format!(
+                        "运行超过安全上限 {} 秒，已取消该数据源调用；主 Agent 应继续使用其他已成功证据并明确标注此项缺失",
+                        budget.as_secs()
+                    )),
+                }
+            })
+            .await
             .clone();
 
-        let queued_at = Instant::now();
-        let guard = gate.lock().await;
         let queue_wait = queued_at.elapsed();
         if queue_wait >= Duration::from_secs(1) {
             tracing::debug!(
@@ -116,25 +143,19 @@ impl ToolRegistry {
             );
         }
 
-        let budget = tool_runtime_budget(name);
-        let outcome = tokio::time::timeout(budget, self.inner.dispatch(name, args, ctx)).await;
-        drop(guard);
-
-        // Remove an idle flight entry. If another waiter already cloned the
-        // gate its strong count is greater than the map + this local handle,
-        // so the entry remains until the final waiter completes.
-        if Arc::strong_count(&gate) <= 2 {
+        // The map owns one strong reference and this call owns one. Additional
+        // references mean concurrent waiters still rely on this cell; the final
+        // caller removes the idle entry. A newly arriving success request then
+        // reads SQLite, while a later failure may make a fresh bounded attempt.
+        if Arc::strong_count(&flight) <= 2 {
             self.flights.remove(&cache_key);
         }
 
         match outcome {
-            Ok(result) => result,
-            Err(_) => Err(AgentError::Tool {
+            SharedToolOutcome::Success(result) => Ok(result),
+            SharedToolOutcome::Failure(msg) => Err(AgentError::Tool {
                 tool: name.to_string(),
-                msg: format!(
-                    "运行超过安全上限 {} 秒，已取消该数据源调用；主 Agent 应继续使用其他已成功证据并明确标注此项缺失",
-                    budget.as_secs()
-                ),
+                msg,
             }),
         }
     }
@@ -254,8 +275,9 @@ mod tests {
     use super::*;
     use crate::testing::{EchoTool, NoopMarket};
     use astock_storage::{Storage, StorageConfig};
+    use async_trait::async_trait;
     use serde_json::json;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn cache_arguments_are_canonical_but_preserve_array_order() {
@@ -310,5 +332,49 @@ mod tests {
         assert!(results
             .iter()
             .all(|result| result.as_ref().unwrap().summary_json["echo"] == json!("same request")));
+    }
+
+    struct FailingTool {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AgentTool for FailingTool {
+        fn name(&self) -> &'static str {
+            "always_fail"
+        }
+
+        fn description(&self) -> &'static str {
+            "固定失败的 single-flight 测试工具"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolResult> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            Err(AgentError::Tool {
+                tool: self.name().to_string(),
+                msg: "synthetic failure".to_string(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_failures_are_shared_instead_of_retried_serially() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(StorageConfig::with_base_dir(dir.path())).unwrap();
+        let failing = Arc::new(FailingTool {
+            calls: AtomicUsize::new(0),
+        });
+        let registry = ToolRegistry::new(vec![failing.clone()]);
+        let ctx = ToolContext::new(Arc::new(NoopMarket), storage);
+
+        let calls = (0..16).map(|_| registry.dispatch("always_fail", json!({}), &ctx));
+        let results = futures::future::join_all(calls).await;
+        assert!(results.iter().all(Result::is_err));
+        assert_eq!(failing.calls.load(Ordering::SeqCst), 1);
     }
 }
