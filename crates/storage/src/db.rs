@@ -702,6 +702,659 @@ pub(crate) const MIGRATIONS: &[(u32, &str)] = &[
         ON news_user_state(pinned DESC,favorite DESC,ignored,is_read,updated_at DESC);
     "#,
     ),
+    (
+        14,
+        r#"
+    -- Canonical formal-disclosure data plane. Upstream entry points are kept
+    -- separately so a mirror can never silently impersonate an official URL.
+    CREATE TABLE IF NOT EXISTS disclosures (
+        disclosure_id       TEXT PRIMARY KEY,
+        stable_key          TEXT NOT NULL,
+        title               TEXT NOT NULL,
+        normalized_title    TEXT NOT NULL,
+        category            TEXT NOT NULL,
+        status              TEXT NOT NULL,
+        published_at        INTEGER,
+        publication_precision TEXT NOT NULL,
+        first_seen_at       INTEGER NOT NULL,
+        last_seen_at        INTEGER NOT NULL,
+        revision_of         TEXT REFERENCES disclosures(disclosure_id),
+        cancelled_by        TEXT REFERENCES disclosures(disclosure_id),
+        source_version_id   TEXT,
+        parser_version      TEXT NOT NULL,
+        extraction_status   TEXT NOT NULL,
+        review_reason       TEXT,
+        created_at          INTEGER NOT NULL,
+        updated_at          INTEGER NOT NULL,
+        UNIQUE(stable_key,status)
+    );
+    CREATE INDEX IF NOT EXISTS idx_disclosures_timeline
+        ON disclosures(published_at DESC,first_seen_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_disclosures_category
+        ON disclosures(category,status,published_at DESC);
+
+    CREATE TABLE IF NOT EXISTS disclosure_securities (
+        disclosure_id TEXT NOT NULL REFERENCES disclosures(disclosure_id) ON DELETE CASCADE,
+        security_code TEXT NOT NULL,
+        security_name TEXT NOT NULL DEFAULT '',
+        market        TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY(disclosure_id,security_code)
+    );
+    CREATE INDEX IF NOT EXISTS idx_disclosure_security_timeline
+        ON disclosure_securities(security_code,disclosure_id);
+
+    CREATE TABLE IF NOT EXISTS disclosure_sources (
+        source_id       TEXT PRIMARY KEY,
+        disclosure_id   TEXT NOT NULL REFERENCES disclosures(disclosure_id) ON DELETE CASCADE,
+        provider_id     TEXT NOT NULL,
+        provider_name   TEXT NOT NULL,
+        authority       TEXT NOT NULL,
+        entry_kind      TEXT NOT NULL,
+        upstream_id     TEXT,
+        original_url    TEXT NOT NULL,
+        discovered_at   INTEGER NOT NULL,
+        last_success_at INTEGER,
+        latency_ms      INTEGER,
+        is_primary      INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(provider_id,original_url)
+    );
+    CREATE INDEX IF NOT EXISTS idx_disclosure_sources_document
+        ON disclosure_sources(disclosure_id,is_primary DESC,discovered_at);
+
+    CREATE TABLE IF NOT EXISTS disclosure_attachments (
+        attachment_id    TEXT PRIMARY KEY,
+        disclosure_id    TEXT NOT NULL REFERENCES disclosures(disclosure_id) ON DELETE CASCADE,
+        parent_attachment_id TEXT REFERENCES disclosure_attachments(attachment_id),
+        name             TEXT NOT NULL,
+        original_url     TEXT NOT NULL,
+        media_type       TEXT NOT NULL,
+        byte_size        INTEGER,
+        content_hash     TEXT,
+        source_version_id TEXT,
+        extraction_status TEXT NOT NULL,
+        page_count       INTEGER,
+        parser_version   TEXT NOT NULL,
+        review_reason    TEXT,
+        UNIQUE(disclosure_id,original_url)
+    );
+
+    CREATE TABLE IF NOT EXISTS disclosure_events (
+        event_id          TEXT PRIMARY KEY,
+        disclosure_id     TEXT NOT NULL REFERENCES disclosures(disclosure_id) ON DELETE CASCADE,
+        event_type        TEXT NOT NULL,
+        fields_json       TEXT NOT NULL,
+        evidence_json     TEXT NOT NULL,
+        parser_version    TEXT NOT NULL,
+        created_at        INTEGER NOT NULL,
+        UNIQUE(disclosure_id,event_type,fields_json)
+    );
+    CREATE INDEX IF NOT EXISTS idx_disclosure_events_type
+        ON disclosure_events(event_type,created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS disclosure_provider_state (
+        provider_id       TEXT PRIMARY KEY,
+        provider_name     TEXT NOT NULL,
+        authority         TEXT NOT NULL,
+        enabled           INTEGER NOT NULL DEFAULT 1,
+        cursor_json       TEXT NOT NULL DEFAULT '{}',
+        last_attempt_at   INTEGER,
+        last_success_at   INTEGER,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        retry_after       INTEGER,
+        target_latency_secs INTEGER NOT NULL,
+        last_error        TEXT,
+        updated_at        INTEGER NOT NULL
+    );
+
+    -- Evidence coordinates are nullable because many HTML and legacy PDFs
+    -- expose only spans. A scan with no reliable text is explicitly reviewed.
+    ALTER TABLE source_document_segments ADD COLUMN attachment_id TEXT;
+    ALTER TABLE source_document_segments ADD COLUMN page_x REAL;
+    ALTER TABLE source_document_segments ADD COLUMN page_y REAL;
+    ALTER TABLE source_document_segments ADD COLUMN page_width REAL;
+    ALTER TABLE source_document_segments ADD COLUMN page_height REAL;
+    ALTER TABLE source_document_segments ADD COLUMN table_index INTEGER;
+    ALTER TABLE source_document_segments ADD COLUMN row_index INTEGER;
+    ALTER TABLE source_document_segments ADD COLUMN column_index INTEGER;
+    "#,
+    ),
+    (
+        15,
+        r#"
+    -- Overseas primary-source documents and deterministic Global -> A-share
+    -- transmission mappings. Original clocks, units and currencies are
+    -- immutable; translations are stored beside, never over, source text.
+    CREATE TABLE IF NOT EXISTS global_provider_state (
+        provider_id       TEXT PRIMARY KEY,
+        provider_name     TEXT NOT NULL,
+        region            TEXT NOT NULL,
+        category          TEXT NOT NULL,
+        official_url      TEXT NOT NULL,
+        original_timezone TEXT NOT NULL,
+        license_policy    TEXT NOT NULL,
+        credential_env    TEXT,
+        enabled           INTEGER NOT NULL DEFAULT 1,
+        target_latency_secs INTEGER NOT NULL,
+        rate_limit_per_minute INTEGER NOT NULL,
+        cursor_json       TEXT NOT NULL DEFAULT '{}',
+        last_attempt_at   INTEGER,
+        last_success_at   INTEGER,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        retry_after       INTEGER,
+        last_error        TEXT,
+        updated_at        INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS global_documents (
+        document_id       TEXT PRIMARY KEY,
+        provider_id       TEXT NOT NULL REFERENCES global_provider_state(provider_id),
+        upstream_id       TEXT NOT NULL,
+        document_type     TEXT NOT NULL,
+        title_original    TEXT NOT NULL,
+        title_zh          TEXT,
+        original_language TEXT NOT NULL,
+        original_url      TEXT NOT NULL,
+        source_version_id TEXT,
+        content_hash      TEXT,
+        published_at_utc  INTEGER NOT NULL,
+        published_local   TEXT NOT NULL,
+        published_timezone TEXT NOT NULL,
+        utc_offset_seconds INTEGER NOT NULL,
+        first_seen_at     INTEGER NOT NULL,
+        revision_no       INTEGER NOT NULL DEFAULT 1,
+        revision_of       TEXT REFERENCES global_documents(document_id),
+        primary_verified  INTEGER NOT NULL DEFAULT 0,
+        translation_status TEXT NOT NULL,
+        gap_reason        TEXT,
+        license_policy    TEXT NOT NULL,
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL,
+        UNIQUE(provider_id,upstream_id,revision_no)
+    );
+    CREATE INDEX IF NOT EXISTS idx_global_documents_timeline
+        ON global_documents(published_at_utc DESC,first_seen_at DESC);
+
+    CREATE TABLE IF NOT EXISTS global_entities (
+        entity_id         TEXT PRIMARY KEY,
+        entity_type       TEXT NOT NULL,
+        legal_name        TEXT NOT NULL,
+        name_zh           TEXT,
+        jurisdiction      TEXT NOT NULL,
+        identifiers_json  TEXT NOT NULL DEFAULT '{}',
+        aliases_json      TEXT NOT NULL DEFAULT '[]',
+        translation_status TEXT NOT NULL,
+        updated_at        INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS global_relations (
+        relation_id       TEXT PRIMARY KEY,
+        src_entity_id     TEXT NOT NULL REFERENCES global_entities(entity_id),
+        dst_entity_id     TEXT NOT NULL REFERENCES global_entities(entity_id),
+        relation_type     TEXT NOT NULL,
+        direction         TEXT NOT NULL,
+        confidence_bps    INTEGER NOT NULL CHECK(confidence_bps BETWEEN 0 AND 10000),
+        evidence_document_id TEXT NOT NULL REFERENCES global_documents(document_id),
+        evidence_source_version_id TEXT NOT NULL,
+        evidence_quote_original TEXT NOT NULL,
+        evidence_quote_zh TEXT,
+        evidence_location_json TEXT NOT NULL,
+        observed_at       INTEGER NOT NULL,
+        valid_from        INTEGER NOT NULL,
+        valid_to          INTEGER,
+        status            TEXT NOT NULL,
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL,
+        UNIQUE(src_entity_id,dst_entity_id,relation_type,evidence_source_version_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_global_relations_src
+        ON global_relations(src_entity_id,status,valid_from);
+    CREATE INDEX IF NOT EXISTS idx_global_relations_dst
+        ON global_relations(dst_entity_id,status,valid_from);
+
+    CREATE TABLE IF NOT EXISTS global_observations (
+        observation_id    TEXT PRIMARY KEY,
+        document_id       TEXT NOT NULL REFERENCES global_documents(document_id),
+        entity_id         TEXT REFERENCES global_entities(entity_id),
+        indicator_code    TEXT NOT NULL,
+        period            TEXT NOT NULL,
+        value_scaled      INTEGER,
+        scale             INTEGER NOT NULL DEFAULT 1,
+        value_text        TEXT,
+        unit_original     TEXT NOT NULL,
+        currency_original TEXT,
+        released_at_utc   INTEGER NOT NULL,
+        revision_no       INTEGER NOT NULL DEFAULT 1,
+        replaces_observation_id TEXT REFERENCES global_observations(observation_id),
+        source_version_id TEXT NOT NULL,
+        created_at        INTEGER NOT NULL,
+        UNIQUE(document_id,indicator_code,period,revision_no)
+    );
+    CREATE INDEX IF NOT EXISTS idx_global_observations_pit
+        ON global_observations(indicator_code,period,released_at_utc,revision_no);
+
+    CREATE TABLE IF NOT EXISTS global_fx_rates (
+        rate_id            TEXT PRIMARY KEY,
+        base_currency      TEXT NOT NULL,
+        quote_currency     TEXT NOT NULL,
+        rate_scaled        INTEGER NOT NULL,
+        scale              INTEGER NOT NULL,
+        effective_at_utc   INTEGER NOT NULL,
+        released_at_utc    INTEGER NOT NULL,
+        revision_no        INTEGER NOT NULL DEFAULT 1,
+        source_version_id  TEXT NOT NULL,
+        UNIQUE(base_currency,quote_currency,effective_at_utc,revision_no)
+    );
+    "#,
+    ),
+    (
+        16,
+        r#"
+    -- Evidence-bound event ontology and market price-in research. These
+    -- tables deliberately separate source facts, analytical assumptions,
+    -- lifecycle transitions and market assessments.
+    CREATE TABLE IF NOT EXISTS structured_events (
+        event_id                TEXT PRIMARY KEY,
+        source_revision_id      TEXT NOT NULL UNIQUE,
+        ontology_kind           TEXT NOT NULL,
+        title                   TEXT NOT NULL,
+        subjects_json           TEXT NOT NULL DEFAULT '[]',
+        objects_json            TEXT NOT NULL DEFAULT '[]',
+        amount_text             TEXT,
+        quantity_text           TEXT,
+        unit_original           TEXT,
+        currency_original       TEXT,
+        baseline_period         TEXT,
+        starts_at               INTEGER,
+        ends_at                 INTEGER,
+        region                  TEXT,
+        conditions_json         TEXT NOT NULL DEFAULT '[]',
+        official_effective      INTEGER,
+        reversibility           TEXT NOT NULL,
+        impact_horizon          TEXT NOT NULL,
+        lifecycle_status        TEXT NOT NULL,
+        catalyst_path_json      TEXT NOT NULL DEFAULT '[]',
+        validation_dates_json   TEXT NOT NULL DEFAULT '[]',
+        invalidation_json       TEXT NOT NULL DEFAULT '[]',
+        missing_fields_json     TEXT NOT NULL DEFAULT '[]',
+        extraction_version      TEXT NOT NULL,
+        created_at              INTEGER NOT NULL,
+        updated_at              INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_structured_events_timeline
+        ON structured_events(updated_at DESC,ontology_kind,lifecycle_status);
+
+    CREATE TABLE IF NOT EXISTS event_field_evidence (
+        evidence_id             TEXT PRIMARY KEY,
+        event_id                TEXT NOT NULL REFERENCES structured_events(event_id),
+        field_name              TEXT NOT NULL,
+        provenance_kind         TEXT NOT NULL,
+        source_revision_id      TEXT,
+        source_version_id       TEXT,
+        quote_original          TEXT,
+        quote_zh                TEXT,
+        location_json           TEXT NOT NULL DEFAULT '{}',
+        observed_at             INTEGER NOT NULL,
+        confidence_bps          INTEGER NOT NULL CHECK(confidence_bps BETWEEN 0 AND 10000),
+        created_at              INTEGER NOT NULL,
+        UNIQUE(event_id,field_name,provenance_kind,source_revision_id,quote_original)
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_field_evidence_event
+        ON event_field_evidence(event_id,field_name);
+
+    CREATE TABLE IF NOT EXISTS event_state_transitions (
+        transition_id           TEXT PRIMARY KEY,
+        event_id                TEXT NOT NULL REFERENCES structured_events(event_id),
+        from_status             TEXT NOT NULL,
+        to_status               TEXT NOT NULL,
+        reason                  TEXT NOT NULL,
+        evidence_id             TEXT REFERENCES event_field_evidence(evidence_id),
+        transitioned_at         INTEGER NOT NULL,
+        created_at              INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_state_transitions_event
+        ON event_state_transitions(event_id,transitioned_at);
+
+    CREATE TABLE IF NOT EXISTS event_market_assessments (
+        assessment_id           TEXT PRIMARY KEY,
+        event_id                TEXT NOT NULL REFERENCES structured_events(event_id),
+        security_code           TEXT NOT NULL,
+        as_of_date              TEXT NOT NULL,
+        fundamental_json        TEXT NOT NULL,
+        market_opportunity_json TEXT NOT NULL,
+        expectation_gap_json    TEXT NOT NULL,
+        diagnostics_json        TEXT NOT NULL,
+        missing_inputs_json     TEXT NOT NULL DEFAULT '[]',
+        data_versions_json      TEXT NOT NULL DEFAULT '{}',
+        created_at              INTEGER NOT NULL,
+        UNIQUE(event_id,security_code,as_of_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_market_assessments_latest
+        ON event_market_assessments(event_id,security_code,created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS event_study_samples (
+        sample_id               TEXT PRIMARY KEY,
+        event_id                TEXT NOT NULL REFERENCES structured_events(event_id),
+        ontology_kind           TEXT NOT NULL,
+        security_code           TEXT NOT NULL,
+        event_date              TEXT NOT NULL,
+        pre_window_days         INTEGER NOT NULL,
+        post_window_days        INTEGER NOT NULL,
+        pre_abnormal_return_bps INTEGER,
+        post_abnormal_return_bps INTEGER,
+        abnormal_volume_bps     INTEGER,
+        valuation_change_bps    INTEGER,
+        fundamental_direction  TEXT NOT NULL,
+        source_revision_id      TEXT NOT NULL,
+        data_version            TEXT NOT NULL,
+        created_at              INTEGER NOT NULL,
+        UNIQUE(event_id,security_code,post_window_days,data_version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_study_calibration
+        ON event_study_samples(ontology_kind,post_window_days,event_date);
+    "#,
+    ),
+    (
+        17,
+        r#"
+    -- Versioned supply-chain relation extraction. Model output is only a
+    -- candidate: exact evidence, entity hierarchy and human publication are
+    -- recorded independently so re-extraction never overwrites old evidence.
+    CREATE TABLE IF NOT EXISTS relation_extraction_runs (
+        run_id              TEXT PRIMARY KEY,
+        source_version_id   TEXT NOT NULL,
+        document_kind       TEXT NOT NULL,
+        extractor_kind      TEXT NOT NULL,
+        model_id            TEXT,
+        model_version       TEXT,
+        schema_version      TEXT NOT NULL,
+        input_hash          TEXT NOT NULL,
+        status              TEXT NOT NULL,
+        candidate_count     INTEGER NOT NULL DEFAULT 0,
+        validation_errors   INTEGER NOT NULL DEFAULT 0,
+        started_at          INTEGER NOT NULL,
+        completed_at        INTEGER,
+        error               TEXT,
+        UNIQUE(source_version_id,extractor_kind,model_id,model_version,schema_version,input_hash)
+    );
+    CREATE INDEX IF NOT EXISTS idx_relation_runs_source
+        ON relation_extraction_runs(source_version_id,started_at DESC);
+
+    CREATE TABLE IF NOT EXISTS relation_candidates (
+        candidate_id             TEXT PRIMARY KEY,
+        run_id                   TEXT NOT NULL REFERENCES relation_extraction_runs(run_id),
+        source_version_id        TEXT NOT NULL,
+        document_kind            TEXT NOT NULL,
+        subject_text             TEXT NOT NULL,
+        object_text              TEXT NOT NULL,
+        relation_type            TEXT NOT NULL,
+        product_text             TEXT,
+        amount_text              TEXT,
+        share_bps                INTEGER,
+        report_period            TEXT,
+        region                   TEXT,
+        subject_entity_id        TEXT,
+        object_entity_id         TEXT,
+        subject_parent_entity_id TEXT,
+        object_parent_entity_id  TEXT,
+        disclosure_mode          TEXT NOT NULL DEFAULT 'named',
+        confidence_bps           INTEGER NOT NULL CHECK(confidence_bps BETWEEN 0 AND 10000),
+        validation_status        TEXT NOT NULL,
+        validation_json          TEXT NOT NULL DEFAULT '[]',
+        review_status            TEXT NOT NULL DEFAULT 'pending_review',
+        confidential             INTEGER NOT NULL DEFAULT 0,
+        non_inferable            INTEGER NOT NULL DEFAULT 0,
+        candidate_version        INTEGER NOT NULL DEFAULT 1,
+        proposed_by_model        INTEGER NOT NULL DEFAULT 0,
+        created_at               INTEGER NOT NULL,
+        updated_at               INTEGER NOT NULL,
+        UNIQUE(run_id,subject_text,object_text,relation_type,product_text,source_version_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_relation_candidates_review
+        ON relation_candidates(review_status,confidence_bps DESC,created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_relation_candidates_entities
+        ON relation_candidates(subject_parent_entity_id,object_parent_entity_id,relation_type);
+
+    CREATE TABLE IF NOT EXISTS relation_candidate_evidence (
+        evidence_id          TEXT PRIMARY KEY,
+        candidate_id         TEXT NOT NULL REFERENCES relation_candidates(candidate_id),
+        source_version_id    TEXT NOT NULL,
+        segment_id           TEXT NOT NULL,
+        page_number          INTEGER,
+        paragraph_index      INTEGER NOT NULL,
+        span_start           INTEGER NOT NULL,
+        span_end             INTEGER NOT NULL,
+        quote_original       TEXT NOT NULL,
+        independent_group    TEXT NOT NULL,
+        polarity             TEXT NOT NULL DEFAULT 'supports',
+        created_at           INTEGER NOT NULL,
+        UNIQUE(candidate_id,source_version_id,segment_id,span_start,span_end,polarity)
+    );
+    CREATE INDEX IF NOT EXISTS idx_relation_evidence_candidate
+        ON relation_candidate_evidence(candidate_id,created_at);
+
+    CREATE TABLE IF NOT EXISTS relation_candidate_reviews (
+        review_id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        candidate_id         TEXT NOT NULL REFERENCES relation_candidates(candidate_id),
+        decision             TEXT NOT NULL,
+        reviewer             TEXT NOT NULL,
+        reason               TEXT NOT NULL,
+        modified_json        TEXT,
+        merged_entity_id     TEXT,
+        dataset_split        TEXT,
+        training_eligible    INTEGER NOT NULL DEFAULT 0,
+        reviewed_at          INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_relation_reviews_candidate
+        ON relation_candidate_reviews(candidate_id,reviewed_at DESC);
+
+    CREATE TABLE IF NOT EXISTS relation_publications (
+        publication_id       TEXT PRIMARY KEY,
+        candidate_id         TEXT NOT NULL REFERENCES relation_candidates(candidate_id),
+        graph_edge_id        INTEGER,
+        projection_key       TEXT NOT NULL,
+        publication_version  INTEGER NOT NULL,
+        status               TEXT NOT NULL,
+        published_at         INTEGER NOT NULL,
+        retracted_at         INTEGER,
+        retraction_reason    TEXT,
+        UNIQUE(candidate_id,publication_version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_relation_publications_projection
+        ON relation_publications(projection_key,status,published_at DESC);
+    "#,
+    ),
+    (
+        18,
+        r#"
+    -- Bitemporal graph: stable relation identities are separated from
+    -- immutable evidence revisions. Business validity and system knowledge
+    -- time can therefore be queried independently without overwriting history.
+    CREATE TABLE IF NOT EXISTS graph_edge_identities (
+        identity_id    TEXT PRIMARY KEY,
+        src            TEXT NOT NULL REFERENCES graph_nodes(id),
+        dst            TEXT NOT NULL REFERENCES graph_nodes(id),
+        relation       TEXT NOT NULL,
+        product_scope  TEXT NOT NULL DEFAULT '',
+        region_scope   TEXT NOT NULL DEFAULT '',
+        created_at     INTEGER NOT NULL,
+        UNIQUE(src,dst,relation,product_scope,region_scope)
+    );
+    CREATE INDEX IF NOT EXISTS idx_graph_edge_identity_nodes
+        ON graph_edge_identities(src,dst,relation);
+
+    CREATE TABLE IF NOT EXISTS graph_edge_revisions (
+        revision_id          TEXT PRIMARY KEY,
+        identity_id          TEXT NOT NULL REFERENCES graph_edge_identities(identity_id),
+        revision_no          INTEGER NOT NULL,
+        weight               REAL NOT NULL CHECK(weight BETWEEN 0 AND 1),
+        confidence           REAL NOT NULL CHECK(confidence BETWEEN 0 AND 1),
+        disclosed_share      REAL,
+        source_type          TEXT NOT NULL,
+        source_name          TEXT NOT NULL,
+        source_url           TEXT NOT NULL DEFAULT '',
+        evidence_version     TEXT NOT NULL,
+        status               TEXT NOT NULL CHECK(status IN
+                              ('candidate','verified','active','stale','contradicted','expired','revoked')),
+        valid_from           INTEGER NOT NULL,
+        valid_to             INTEGER,
+        observed_at          INTEGER NOT NULL,
+        recorded_at          INTEGER NOT NULL,
+        superseded_at        INTEGER,
+        revalidate_after     INTEGER NOT NULL,
+        decay_half_life_days INTEGER NOT NULL,
+        supersedes_revision_id TEXT REFERENCES graph_edge_revisions(revision_id),
+        metadata_json        TEXT NOT NULL DEFAULT '{}',
+        UNIQUE(identity_id,revision_no),
+        CHECK(valid_to IS NULL OR valid_to > valid_from),
+        CHECK(superseded_at IS NULL OR superseded_at >= recorded_at)
+    );
+    CREATE INDEX IF NOT EXISTS idx_graph_revision_asof
+        ON graph_edge_revisions(recorded_at,superseded_at,valid_from,valid_to,status);
+    CREATE INDEX IF NOT EXISTS idx_graph_revision_identity
+        ON graph_edge_revisions(identity_id,revision_no DESC);
+    CREATE INDEX IF NOT EXISTS idx_graph_revision_revalidate
+        ON graph_edge_revisions(revalidate_after,status);
+
+    CREATE TABLE IF NOT EXISTS graph_revalidation_events (
+        event_id            TEXT PRIMARY KEY,
+        identity_id         TEXT NOT NULL REFERENCES graph_edge_identities(identity_id),
+        revision_id         TEXT NOT NULL REFERENCES graph_edge_revisions(revision_id),
+        trigger_type        TEXT NOT NULL,
+        related_identity_id TEXT REFERENCES graph_edge_identities(identity_id),
+        status              TEXT NOT NULL DEFAULT 'pending'
+                            CHECK(status IN ('pending','completed','dismissed')),
+        reason              TEXT NOT NULL,
+        created_at          INTEGER NOT NULL,
+        resolved_at         INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_graph_revalidation_pending
+        ON graph_revalidation_events(status,created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS graph_entity_merges (
+        merge_id       TEXT PRIMARY KEY,
+        from_node_id   TEXT NOT NULL REFERENCES graph_nodes(id),
+        to_node_id     TEXT NOT NULL REFERENCES graph_nodes(id),
+        valid_from     INTEGER NOT NULL,
+        valid_to       INTEGER,
+        recorded_at   INTEGER NOT NULL,
+        superseded_at INTEGER,
+        reason         TEXT NOT NULL,
+        CHECK(from_node_id <> to_node_id),
+        CHECK(valid_to IS NULL OR valid_to > valid_from),
+        CHECK(superseded_at IS NULL OR superseded_at >= recorded_at)
+    );
+    CREATE INDEX IF NOT EXISTS idx_graph_entity_merge_asof
+        ON graph_entity_merges(from_node_id,recorded_at,superseded_at,valid_from,valid_to);
+
+    CREATE TABLE IF NOT EXISTS graph_snapshot_records (
+        snapshot_id       TEXT PRIMARY KEY,
+        business_time     INTEGER NOT NULL,
+        knowledge_time    INTEGER NOT NULL,
+        revision_ids_json TEXT NOT NULL,
+        merge_ids_json    TEXT NOT NULL DEFAULT '[]',
+        created_at        INTEGER NOT NULL
+    );
+
+    -- Preserve legacy data without pretending that process startup was a
+    -- business-valid date. Values within five seconds of row creation came
+    -- from the old seed loader and are migrated as unknown/always (0).
+    INSERT OR IGNORE INTO graph_edge_identities
+        (identity_id,src,dst,relation,product_scope,region_scope,created_at)
+    SELECT 'legacy:' || id,src,dst,relation,'','',created_at
+      FROM graph_edges;
+
+    INSERT OR IGNORE INTO graph_edge_revisions
+        (revision_id,identity_id,revision_no,weight,confidence,disclosed_share,
+         source_type,source_name,source_url,evidence_version,status,
+         valid_from,valid_to,observed_at,recorded_at,superseded_at,
+         revalidate_after,decay_half_life_days,supersedes_revision_id,metadata_json)
+    SELECT 'legacy-rev:' || id,'legacy:' || id,1,weight,confidence,NULL,
+           CASE
+             WHEN source_name LIKE '%年报%' THEN 'annual_report'
+             WHEN source_name LIKE '%招股%' THEN 'prospectus'
+             ELSE 'legacy'
+           END,
+           source_name,source_url,'legacy-graph-edge:' || id,'active',
+           CASE WHEN ABS(valid_from-created_at) <= 5 THEN 0 ELSE valid_from END,
+           valid_to,created_at,created_at,NULL,
+           created_at + CASE
+             WHEN source_name LIKE '%年报%' THEN 34560000
+             WHEN source_name LIKE '%招股%' THEN 34560000
+             ELSE 15552000
+           END,
+           CASE
+             WHEN source_name LIKE '%年报%' OR source_name LIKE '%招股%' THEN 730
+             ELSE 365
+           END,
+           NULL,'{"migrated_from":"graph_edges"}'
+      FROM graph_edges;
+    "#,
+    ),
+    (
+        19,
+        r#"
+    -- Immutable earnings-driver snapshots bind every forecast, scenario and
+    -- valuation to one exact statement/assumption parameter set.
+    CREATE TABLE IF NOT EXISTS earnings_driver_snapshots (
+        snapshot_id           TEXT PRIMARY KEY,
+        parameter_snapshot_id TEXT NOT NULL,
+        symbol                TEXT NOT NULL,
+        model_version         TEXT NOT NULL,
+        report_period         TEXT,
+        knowledge_time        INTEGER NOT NULL,
+        tree_json             TEXT NOT NULL,
+        created_at            INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_earnings_driver_symbol
+        ON earnings_driver_snapshots(symbol,knowledge_time DESC);
+    CREATE INDEX IF NOT EXISTS idx_earnings_driver_parameter_snapshot
+        ON earnings_driver_snapshots(parameter_snapshot_id);
+
+    CREATE TABLE IF NOT EXISTS earnings_driver_shock_bridges (
+        bridge_id             TEXT PRIMARY KEY,
+        base_snapshot_id      TEXT NOT NULL REFERENCES earnings_driver_snapshots(snapshot_id),
+        evidence_version_ids_json TEXT NOT NULL DEFAULT '[]',
+        shocks_json           TEXT NOT NULL,
+        bridge_json           TEXT NOT NULL,
+        created_at            INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_earnings_driver_bridge_base
+        ON earnings_driver_shock_bridges(base_snapshot_id,created_at DESC);
+    "#,
+    ),
+    (
+        20,
+        r#"
+    -- Reproducible Quant Lab results. The snapshot body includes the exact
+    -- data/function versions, preprocessing conventions, inference budget,
+    -- multiple-testing method and all stability slices.
+    CREATE TABLE IF NOT EXISTS quant_research_snapshots (
+        snapshot_id       TEXT PRIMARY KEY,
+        function_version  TEXT NOT NULL,
+        metric            TEXT NOT NULL,
+        symbols_json      TEXT NOT NULL,
+        data_versions_json TEXT NOT NULL,
+        config_json       TEXT NOT NULL,
+        snapshot_json     TEXT NOT NULL,
+        created_at        INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_quant_research_created
+        ON quant_research_snapshots(created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS quant_research_jobs (
+        job_id             TEXT PRIMARY KEY,
+        status             TEXT NOT NULL,
+        phase              TEXT NOT NULL,
+        progress_json      TEXT NOT NULL,
+        snapshot_id        TEXT REFERENCES quant_research_snapshots(snapshot_id),
+        error              TEXT,
+        created_at         INTEGER NOT NULL,
+        updated_at         INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_quant_research_jobs_updated
+        ON quant_research_jobs(updated_at DESC);
+    "#,
+    ),
 ];
 
 /// Current unix time in seconds. All timestamps in this crate are stored as
@@ -859,6 +1512,37 @@ mod tests {
             "field_lineage_records",
             "data_reconciliation_results",
             "news_user_state",
+            "disclosures",
+            "disclosure_securities",
+            "disclosure_sources",
+            "disclosure_attachments",
+            "disclosure_events",
+            "disclosure_provider_state",
+            "global_provider_state",
+            "global_documents",
+            "global_entities",
+            "global_relations",
+            "global_observations",
+            "global_fx_rates",
+            "structured_events",
+            "event_field_evidence",
+            "event_state_transitions",
+            "event_market_assessments",
+            "event_study_samples",
+            "relation_extraction_runs",
+            "relation_candidates",
+            "relation_candidate_evidence",
+            "relation_candidate_reviews",
+            "relation_publications",
+            "graph_edge_identities",
+            "graph_edge_revisions",
+            "graph_revalidation_events",
+            "graph_entity_merges",
+            "graph_snapshot_records",
+            "earnings_driver_snapshots",
+            "earnings_driver_shock_bridges",
+            "quant_research_snapshots",
+            "quant_research_jobs",
         ] {
             let count: i64 = conn
                 .query_row(
@@ -908,5 +1592,57 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fetched_at, 0);
+    }
+
+    #[test]
+    fn migration_v18_preserves_legacy_edge_and_removes_fake_startup_validity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.db");
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            for &(number, sql) in MIGRATIONS.iter().take_while(|(n, _)| *n <= 17) {
+                let tx = conn.transaction().unwrap();
+                tx.execute_batch(sql).unwrap();
+                tx.commit().unwrap();
+                conn.pragma_update(None, "user_version", number).unwrap();
+            }
+            for (id, code) in [("company:a", "600001"), ("company:b", "600002")] {
+                conn.execute(
+                    "INSERT INTO graph_nodes
+                     (id,kind,name,code,meta_json,created_at,updated_at)
+                     VALUES (?1,'company',?1,?2,'{}',1000,1000)",
+                    rusqlite::params![id, code],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO graph_edges
+                 (src,dst,relation,weight,source_name,source_url,confidence,
+                  valid_from,valid_to,created_at,updated_at)
+                 VALUES ('company:a','company:b','supplies',0.3,'公司年报2024',
+                         'https://example.com',0.9,1000,NULL,1000,1000)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        drop(db);
+        let conn = Connection::open(&path).unwrap();
+        let (identity_count, revision_count, valid_from, source_type): (i64, i64, i64, String) =
+            conn.query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM graph_edge_identities),
+                   (SELECT COUNT(*) FROM graph_edge_revisions),
+                   valid_from,source_type
+                 FROM graph_edge_revisions LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(identity_count, 1);
+        assert_eq!(revision_count, 1);
+        assert_eq!(valid_from, 0, "startup time must not become business time");
+        assert_eq!(source_type, "annual_report");
     }
 }
