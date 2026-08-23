@@ -3,10 +3,12 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use astock_event_intelligence::EventResearchBundle;
 use astock_fundamental::FundamentalClient;
 use astock_graph::GraphStore;
 use astock_market_data::{EastMoneyF10, MarketData};
 use astock_minimax::MinimaxClient;
+use astock_relation_extraction::ExtractionRunDetail;
 use astock_storage::{Storage, StorageConfig};
 use astock_trading_rules::RuleSet;
 use tokio::sync::RwLock;
@@ -72,11 +74,252 @@ pub struct BacktestState {
     pub cancel: Mutex<Option<CancellationToken>>,
 }
 
+/// One pollable Quant Lab job. Detailed counters make long O(n²) scans
+/// observable instead of presenting an opaque spinner.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct QuantResearchJobSnapshot {
+    pub job_id: String,
+    pub running: bool,
+    pub status: String,
+    pub phase: String,
+    pub progress: u8,
+    pub done_pairs: usize,
+    pub total_pairs: usize,
+    pub current_pair: Option<[String; 2]>,
+    pub effective_observations: usize,
+    pub fetched_series: usize,
+    pub total_series: usize,
+    pub estimated_remaining_seconds: Option<u64>,
+    pub recent_logs: Vec<String>,
+    pub result: Option<serde_json::Value>,
+    pub error: Option<String>,
+    pub started_at: i64,
+    pub updated_at: i64,
+}
+
+pub struct QuantResearchState {
+    pub jobs: Mutex<HashMap<String, QuantResearchJobSnapshot>>,
+    pub cancels: Mutex<HashMap<String, CancellationToken>>,
+}
+
+/// Detailed, pollable formal-disclosure synchronization state. It survives
+/// page switches and exposes enough information to diagnose slow providers.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DisclosureSyncSnapshot {
+    pub job_id: Option<String>,
+    pub running: bool,
+    pub status: String,
+    pub phase: String,
+    pub progress: u8,
+    pub current_provider: String,
+    pub current_item: String,
+    pub discovered: u32,
+    pub normalized: u32,
+    pub inserted: u32,
+    pub deduplicated: u32,
+    pub primary_verified: u32,
+    pub needs_review: u32,
+    pub failures: u32,
+    pub estimated_remaining_seconds: Option<u32>,
+    pub recent_logs: Vec<String>,
+    pub started_at: Option<i64>,
+    pub updated_at: i64,
+    pub error: Option<String>,
+}
+
+impl Default for DisclosureSyncSnapshot {
+    fn default() -> Self {
+        Self {
+            job_id: None,
+            running: false,
+            status: "idle".into(),
+            phase: "尚未同步".into(),
+            progress: 0,
+            current_provider: String::new(),
+            current_item: String::new(),
+            discovered: 0,
+            normalized: 0,
+            inserted: 0,
+            deduplicated: 0,
+            primary_verified: 0,
+            needs_review: 0,
+            failures: 0,
+            estimated_remaining_seconds: None,
+            recent_logs: Vec::new(),
+            started_at: None,
+            updated_at: 0,
+            error: None,
+        }
+    }
+}
+
+pub struct DisclosureSyncState {
+    pub snapshot: Mutex<DisclosureSyncSnapshot>,
+    pub cancel: Mutex<Option<CancellationToken>>,
+}
+
+/// Detailed overseas-primary-source synchronization state. Provider gaps are
+/// counted separately from hard task failure so one unavailable jurisdiction
+/// never hides data successfully collected from another.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GlobalSyncSnapshot {
+    pub job_id: Option<String>,
+    pub running: bool,
+    pub status: String,
+    pub phase: String,
+    pub progress: u8,
+    pub current_provider: String,
+    pub current_item: String,
+    pub sources_total: u32,
+    pub sources_ready: u32,
+    pub source_gaps: u32,
+    pub documents_discovered: u32,
+    pub documents_archived: u32,
+    pub observations_saved: u32,
+    pub mapping_paths: u32,
+    pub failures: u32,
+    pub estimated_remaining_seconds: Option<u32>,
+    pub recent_logs: Vec<String>,
+    pub started_at: Option<i64>,
+    pub updated_at: i64,
+    pub error: Option<String>,
+}
+
+impl Default for GlobalSyncSnapshot {
+    fn default() -> Self {
+        Self {
+            job_id: None,
+            running: false,
+            status: "idle".into(),
+            phase: "尚未同步海外一级来源".into(),
+            progress: 0,
+            current_provider: String::new(),
+            current_item: String::new(),
+            sources_total: 0,
+            sources_ready: 0,
+            source_gaps: 0,
+            documents_discovered: 0,
+            documents_archived: 0,
+            observations_saved: 0,
+            mapping_paths: 0,
+            failures: 0,
+            estimated_remaining_seconds: None,
+            recent_logs: Vec::new(),
+            started_at: None,
+            updated_at: 0,
+            error: None,
+        }
+    }
+}
+
+pub struct GlobalSyncState {
+    pub snapshot: Mutex<GlobalSyncSnapshot>,
+    pub cancel: Mutex<Option<CancellationToken>>,
+}
+
+/// One persistent background structured-event / price-in analysis. The
+/// snapshot survives page switches and keeps partial diagnostics visible.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EventAnalysisSnapshot {
+    pub job_id: String,
+    pub revision_id: String,
+    pub security_code: Option<String>,
+    pub running: bool,
+    pub status: String,
+    pub phase: String,
+    pub progress: u8,
+    pub current_item: String,
+    pub estimated_remaining_seconds: Option<u32>,
+    pub recent_logs: Vec<String>,
+    pub result: Option<EventResearchBundle>,
+    pub error: Option<String>,
+    pub started_at: i64,
+    pub updated_at: i64,
+}
+
+pub struct EventAnalysisState {
+    pub jobs: Mutex<HashMap<String, EventAnalysisSnapshot>>,
+    pub cancels: Mutex<HashMap<String, CancellationToken>>,
+}
+
+/// Pollable document-relation extraction jobs. Runs have no hard timeout;
+/// their complete diagnostics and results survive page switches.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RelationExtractionSnapshot {
+    pub job_id: String,
+    pub source_version_id: String,
+    pub running: bool,
+    pub status: String,
+    pub phase: String,
+    pub progress: u8,
+    pub current_item: String,
+    pub segments_scanned: usize,
+    pub candidates_found: usize,
+    pub validated: usize,
+    pub needs_review: usize,
+    pub estimated_remaining_seconds: Option<u32>,
+    pub recent_logs: Vec<String>,
+    pub result: Option<ExtractionRunDetail>,
+    pub error: Option<String>,
+    pub started_at: i64,
+    pub updated_at: i64,
+}
+
+pub struct RelationExtractionState {
+    pub jobs: Mutex<HashMap<String, RelationExtractionSnapshot>>,
+    pub cancels: Mutex<HashMap<String, CancellationToken>>,
+}
+
+impl Default for RelationExtractionState {
+    fn default() -> Self {
+        Self {
+            jobs: Mutex::new(HashMap::new()),
+            cancels: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for EventAnalysisState {
+    fn default() -> Self {
+        Self {
+            jobs: Mutex::new(HashMap::new()),
+            cancels: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for GlobalSyncState {
+    fn default() -> Self {
+        Self {
+            snapshot: Mutex::new(GlobalSyncSnapshot::default()),
+            cancel: Mutex::new(None),
+        }
+    }
+}
+
+impl Default for DisclosureSyncState {
+    fn default() -> Self {
+        Self {
+            snapshot: Mutex::new(DisclosureSyncSnapshot::default()),
+            cancel: Mutex::new(None),
+        }
+    }
+}
+
 impl Default for BacktestState {
     fn default() -> Self {
         Self {
             snapshot: Mutex::new(BacktestSnapshot::default()),
             cancel: Mutex::new(None),
+        }
+    }
+}
+
+impl Default for QuantResearchState {
+    fn default() -> Self {
+        Self {
+            jobs: Mutex::new(HashMap::new()),
+            cancels: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -126,6 +369,16 @@ pub struct AppState {
     pub scan: Arc<ScanState>,
     /// Background backtest coordination state.
     pub backtest: Arc<BacktestState>,
+    /// Persistent, cancellable Quant Lab jobs and their drill-down progress.
+    pub quant_research: Arc<QuantResearchState>,
+    /// Background formal-disclosure synchronization and diagnostics.
+    pub disclosure_sync: Arc<DisclosureSyncState>,
+    /// Overseas primary-source collection and Global -> A-share mapping.
+    pub global_sync: Arc<GlobalSyncState>,
+    /// Background evidence-bound event and market price-in analyses.
+    pub event_analysis: Arc<EventAnalysisState>,
+    /// Versioned supply-chain relation extraction and review jobs.
+    pub relation_extraction: Arc<RelationExtractionState>,
     /// Live agent event-forwarder tasks, keyed by task id. Entries are
     /// removed when the event stream ends (Completed / Failed / Suspended)
     /// or on `agent_cancel`.
@@ -217,6 +470,11 @@ impl AppState {
             minimax: RwLock::new(None),
             scan: Arc::new(ScanState::default()),
             backtest: Arc::new(BacktestState::default()),
+            quant_research: Arc::new(QuantResearchState::default()),
+            disclosure_sync: Arc::new(DisclosureSyncState::default()),
+            global_sync: Arc::new(GlobalSyncState::default()),
+            event_analysis: Arc::new(EventAnalysisState::default()),
+            relation_extraction: Arc::new(RelationExtractionState::default()),
             agent_handles: Arc::new(Mutex::new(HashMap::new())),
         })
     }

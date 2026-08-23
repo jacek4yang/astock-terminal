@@ -9,7 +9,7 @@ astock-security = { path = "../security" }
 astock-storage = { path = "../storage" }
 chrono.workspace = true
 flate2.workspace = true
-lopdf = "0.38"
+lopdf = "0.42"
 once_cell.workspace = true
 regex.workspace = true
 rusqlite.workspace = true
