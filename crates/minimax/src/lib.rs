@@ -14,7 +14,9 @@
 //! - quota-aware scheduling with jittered backoff ([`RateGate`]) and a
 //!   pre-flight quota guard that fails with
 //!   [`MinimaxError::QuotaExhausted`] before burning requests on an exhausted
-//!   window.
+//!   window;
+//! - pre-commit stream replay and idle watchdogs ([`StreamPolicy`]), preventing
+//!   silent, permanently stalled reasoning streams.
 //!
 //! All diagnostics go through `tracing` and never include key material.
 
@@ -32,7 +34,7 @@ pub use chat::{
     split_reasoning, BaseResp, ChatChoice, ChatChunk, ChatMessage, ChatRequest, ChatResponse,
     ChatStream, FunctionSpec, ToolCall, ToolCallFunction, ToolSpec, Usage,
 };
-pub use client::MinimaxClient;
+pub use client::{MinimaxClient, StreamPolicy};
 pub use error::MinimaxError;
 pub use http::{Http, HttpResponse, ReqwestHttp};
 pub use key::{mask_key, redact, KeyStore, SecretKey};
