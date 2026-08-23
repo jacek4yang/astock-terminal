@@ -22,6 +22,7 @@ concurrency:
 
 env:
   RELEASE_TAG: v5.0.3-agent-runtime.1
+  RELEASE_TARGET_SHA: 50fe6da1cf3ea4fb47b18605bc8c095413328168
   RELEASE_NOTES: docs/releases/v5.0.3-agent-runtime.1.md
   CARGO_TERM_COLOR: always
 
@@ -32,6 +33,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TARGET_SHA }}
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -40,6 +43,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TARGET_SHA }}
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
       - name: Run deterministic research evaluation gate
@@ -64,6 +69,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ env.RELEASE_TARGET_SHA }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@1.88.0
         with:
@@ -74,6 +80,13 @@ jobs:
           node-version: 20
           cache: npm
           cache-dependency-path: ui/package-lock.json
+      - name: Verify immutable source target
+        shell: pwsh
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $env:RELEASE_TARGET_SHA) {
+            throw "checked out $actual, expected immutable release target $env:RELEASE_TARGET_SHA"
+          }
       - name: Install frontend dependencies
         run: npm ci --prefix ui
       - name: Verify release version contract
@@ -129,6 +142,12 @@ jobs:
           $version = $env:RELEASE_TAG.Substring(1)
           Copy-Item $msi.FullName "dist/astock-terminal-$version-windows-x86_64.msi" -Force
           Copy-Item $setup.FullName "dist/astock-terminal-$version-windows-x86_64-setup.exe" -Force
+          @(
+            "release_tag=$env:RELEASE_TAG",
+            "source_commit=$env:RELEASE_TARGET_SHA",
+            "application_version=5.0.3",
+            "platform=windows-x86_64"
+          ) | Set-Content dist/BUILD-METADATA.txt -Encoding ascii
 
           Get-ChildItem dist -File |
             Sort-Object Name |
@@ -145,7 +164,7 @@ jobs:
           retention-days: 14
 
   publish:
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs:
       - security-audit
       - evaluation-gate
@@ -161,19 +180,25 @@ jobs:
         with:
           name: astock-terminal-v5.0.3-agent-runtime.1-windows-x86_64
           path: dist
-      - name: Verify release target and checksums
+      - name: Verify immutable release target and checksums
         shell: bash
         run: |
           set -euo pipefail
           test -f "$RELEASE_NOTES"
           test -f dist/SHA256SUMS
-          sed -i 's/\r$//' dist/SHA256SUMS
+          test -f dist/BUILD-METADATA.txt
+          sed -i 's/\r$//' dist/SHA256SUMS dist/BUILD-METADATA.txt
+          grep -Fx "source_commit=$RELEASE_TARGET_SHA" dist/BUILD-METADATA.txt
           (cd dist && sha256sum --check SHA256SUMS)
+
+          git fetch origin main --force
           git fetch --tags --force
+          git cat-file -e "$RELEASE_TARGET_SHA^{commit}"
+          git merge-base --is-ancestor "$RELEASE_TARGET_SHA" origin/main
           if git rev-parse "$RELEASE_TAG^{commit}" >/dev/null 2>&1; then
             existing="$(git rev-parse "$RELEASE_TAG^{commit}")"
-            if [[ "$existing" != "$GITHUB_SHA" ]]; then
-              echo "tag $RELEASE_TAG already points to $existing, expected $GITHUB_SHA" >&2
+            if [[ "$existing" != "$RELEASE_TARGET_SHA" ]]; then
+              echo "tag $RELEASE_TAG already points to $existing, expected $RELEASE_TARGET_SHA" >&2
               exit 1
             fi
           fi
@@ -192,7 +217,7 @@ jobs:
               --draft=false
           else
             gh release create "$RELEASE_TAG" dist/* \
-              --target "$GITHUB_SHA" \
+              --target "$RELEASE_TARGET_SHA" \
               --title "AStock Terminal $RELEASE_TAG" \
               --notes-file "$RELEASE_NOTES" \
               --prerelease \
