@@ -9,6 +9,33 @@
 
 use astock_core::{Adjust, KlinePeriod, Source, Symbol, VolumeUnit};
 use astock_market_data::{DataProvider, MarketData};
+use std::time::Instant;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "live network test (tdx TCP servers)"]
+async fn tdx_full_market_breadth_fallback() {
+    let md = MarketData::new();
+    let started = Instant::now();
+    let breadth = md
+        .tdx
+        .market_breadth()
+        .await
+        .expect("tdx market breadth failed");
+    assert_eq!(breadth.source, Source::Tdx);
+    assert!(breadth.data.total >= 4_000, "too few: {breadth:?}");
+    assert_eq!(
+        breadth.data.total,
+        breadth.data.up + breadth.data.down + breadth.data.flat
+    );
+    println!(
+        "tdx breadth: total={} up={} down={} flat={} elapsed_ms={}",
+        breadth.data.total,
+        breadth.data.up,
+        breadth.data.down,
+        breadth.data.flat,
+        started.elapsed().as_millis()
+    );
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live network test (tdx TCP servers + tencent/eastmoney HTTP)"]

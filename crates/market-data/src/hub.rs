@@ -49,9 +49,15 @@ use tracing::{debug, warn};
 type KlineOutcome = Result<Fetched<Vec<Bar>>, DataError>;
 type QuoteOutcome = Result<Fetched<Quote>, DataError>;
 type FundFlowOutcome = Result<Fetched<Vec<FundFlowPoint>>, DataError>;
+type BreadthOutcome = Result<Fetched<MarketBreadth>, DataError>;
 type SharedKline = Shared<BoxFuture<'static, KlineOutcome>>;
 type SharedQuote = Shared<BoxFuture<'static, QuoteOutcome>>;
 type SharedFundFlow = Shared<BoxFuture<'static, FundFlowOutcome>>;
+type SharedBreadth = Shared<BoxFuture<'static, BreadthOutcome>>;
+
+const MARKET_BREADTH_CACHE_KEY: &str = "market_breadth_composite";
+const MARKET_BREADTH_LAST_GOOD_KEY: &str = "market_data.market_breadth.last_good.v1";
+const MARKET_BREADTH_LAST_GOOD_MAX_AGE: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
 /// Await the in-flight request registered under `key`, becoming the leader
 /// (and running `make`) when none exists yet.
@@ -97,6 +103,7 @@ struct Inner {
     eastmoney: Arc<EastMoney>,
     tdx: Arc<TdxProvider>,
     security_master: Arc<SecurityMaster>,
+    storage: Option<Storage>,
     /// Optional enrichment is deliberately serialized. If EastMoney is
     /// unhealthy, one short probe opens its circuit and queued callers then
     /// continue immediately with valid base OHLCV data.
@@ -107,6 +114,7 @@ struct Inner {
     index_kline_inflight: DashMap<String, SharedKline>,
     quote_inflight: DashMap<String, SharedQuote>,
     fund_flow_inflight: DashMap<String, SharedFundFlow>,
+    breadth_inflight: DashMap<String, SharedBreadth>,
 }
 
 impl Inner {
@@ -117,6 +125,7 @@ impl Inner {
         tdx: Arc<TdxProvider>,
         security_master: Arc<SecurityMaster>,
         breaker_config: BreakerConfig,
+        storage: Option<Storage>,
     ) -> Arc<Self> {
         let breakers = CircuitBreaker::new(breaker_config);
         // Pre-register so the health panel lists every provider from boot.
@@ -125,6 +134,8 @@ impl Inner {
         }
         breakers.register("eastmoney_enrichment");
         breakers.register("eastmoney_fund_flow");
+        breakers.register("eastmoney_market_breadth");
+        breakers.register("tdx_market_breadth");
         Arc::new(Inner {
             chain,
             breakers,
@@ -132,6 +143,7 @@ impl Inner {
             eastmoney,
             tdx,
             security_master,
+            storage,
             enrichment_gate: Semaphore::new(1),
             fund_flow_gate: Semaphore::new(1),
             kline_inflight: DashMap::new(),
@@ -139,6 +151,7 @@ impl Inner {
             index_kline_inflight: DashMap::new(),
             quote_inflight: DashMap::new(),
             fund_flow_inflight: DashMap::new(),
+            breadth_inflight: DashMap::new(),
         })
     }
 
@@ -325,6 +338,115 @@ impl Inner {
         }
     }
 
+    async fn store_last_good_breadth(&self, fetched: &Fetched<MarketBreadth>) {
+        self.cache.set(MARKET_BREADTH_CACHE_KEY, fetched);
+        let Some(storage) = &self.storage else {
+            return;
+        };
+        let Ok(value) = serde_json::to_string(fetched) else {
+            return;
+        };
+        if let Err(error) = storage.kv_set(MARKET_BREADTH_LAST_GOOD_KEY, &value).await {
+            debug!(%error, "failed to persist last-good market breadth");
+        }
+    }
+
+    async fn load_last_good_breadth(&self) -> Option<Fetched<MarketBreadth>> {
+        let storage = self.storage.as_ref()?;
+        let row = match storage.kv_get(MARKET_BREADTH_LAST_GOOD_KEY).await {
+            Ok(Some(row)) => row,
+            Ok(None) => return None,
+            Err(error) => {
+                debug!(%error, "failed to read last-good market breadth");
+                return None;
+            }
+        };
+        let fetched: Fetched<MarketBreadth> = serde_json::from_str(&row.value).ok()?;
+        if validate_market_breadth(&fetched.data).is_err() {
+            return None;
+        }
+        let age_seconds = astock_core::time::utc_now()
+            .signed_duration_since(fetched.fetched_at)
+            .num_seconds();
+        if age_seconds < 0 || age_seconds as u64 > MARKET_BREADTH_LAST_GOOD_MAX_AGE.as_secs() {
+            return None;
+        }
+        Some(fetched)
+    }
+
+    /// Complete breadth pipeline: EastMoney whole-market snapshot with
+    /// host-level retries, TDX batch-quote fallback, then a persisted
+    /// last-good snapshot. There is deliberately no overall task timeout;
+    /// every individual network request remains bounded by the HTTP layer.
+    async fn fetch_market_breadth(&self) -> BreadthOutcome {
+        let mut failures = Vec::new();
+        if self.breakers.allow_request("eastmoney_market_breadth") {
+            let started = Instant::now();
+            match self.eastmoney.market_breadth().await {
+                Ok(fetched) => match validate_market_breadth(&fetched.data) {
+                    Ok(()) => {
+                        self.breakers.on_success("eastmoney_market_breadth");
+                        debug!(
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            total = fetched.data.total,
+                            "EastMoney market breadth completed"
+                        );
+                        self.store_last_good_breadth(&fetched).await;
+                        return Ok(fetched);
+                    }
+                    Err(error) => {
+                        self.breakers.trip("eastmoney_market_breadth");
+                        failures.push(format!("eastmoney validation: {error}"));
+                    }
+                },
+                Err(error) => {
+                    self.breakers.trip("eastmoney_market_breadth");
+                    failures.push(format!("eastmoney retries exhausted: {error}"));
+                }
+            }
+        } else {
+            failures.push("eastmoney: circuit open".to_string());
+        }
+
+        if self.breakers.allow_request("tdx_market_breadth") {
+            let started = Instant::now();
+            match self.tdx.market_breadth().await {
+                Ok(fetched) => match validate_market_breadth(&fetched.data) {
+                    Ok(()) => {
+                        self.breakers.on_success("tdx_market_breadth");
+                        debug!(
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            total = fetched.data.total,
+                            "TDX market breadth fallback completed"
+                        );
+                        self.store_last_good_breadth(&fetched).await;
+                        return Ok(fetched);
+                    }
+                    Err(error) => {
+                        self.breakers.trip("tdx_market_breadth");
+                        failures.push(format!("tdx validation: {error}"));
+                    }
+                },
+                Err(error) => {
+                    self.breakers.trip("tdx_market_breadth");
+                    failures.push(format!("tdx retries exhausted: {error}"));
+                }
+            }
+        } else {
+            failures.push("tdx: circuit open".to_string());
+        }
+
+        if let Some(last_good) = self.load_last_good_breadth().await {
+            debug!(source = %last_good.source, fetched_at = %last_good.fetched_at, "using persisted last-good market breadth");
+            self.cache.set(MARKET_BREADTH_CACHE_KEY, &last_good);
+            return Ok(last_good);
+        }
+        Err(DataError::AllFailed {
+            op: "market_breadth",
+            details: failures.join("; "),
+        })
+    }
+
     /// One real quote fetch: the same breaker-gated failover chain as
     /// kline. Providers without a quote capability answer `NoProvider` and
     /// are skipped (Tencent/Sina), so this is effectively TDX → EastMoney.
@@ -459,6 +581,26 @@ fn index_kline_cache_key(index_secid: &str, period: KlinePeriod, count: u32) -> 
     format!("index_kline_{index_secid}_{period:?}_{count}")
 }
 
+fn validate_market_breadth(breadth: &MarketBreadth) -> Result<(), DataError> {
+    let counted = breadth.up + breadth.down + breadth.flat;
+    if breadth.total != counted {
+        return Err(DataError::Parse {
+            upstream: "market breadth".to_string(),
+            message: format!(
+                "total {} does not match up/down/flat sum {counted}",
+                breadth.total
+            ),
+        });
+    }
+    if breadth.total < 4_000 {
+        return Err(DataError::Empty(format!(
+            "market breadth incomplete: only {} stocks",
+            breadth.total
+        )));
+    }
+    Ok(())
+}
+
 /// Composite market-data facade: kline failover + breaker + single-flight,
 /// everything else delegated to EastMoney.
 #[derive(Clone)]
@@ -554,7 +696,7 @@ impl MarketData {
         let joinquant = Arc::new(JoinQuantProvider::from_env());
         let tushare = Arc::new(TushareProvider::from_env(http.clone(), cache.clone()));
         let iwencai = Arc::new(IwencaiOpenApi::from_env(http.clone(), cache.clone()));
-        let finance_news = Arc::new(match storage {
+        let finance_news = Arc::new(match storage.clone() {
             Some(storage) => FinanceNewsProvider::with_storage(
                 http.clone(),
                 cache.clone(),
@@ -578,6 +720,7 @@ impl MarketData {
             tdx.clone(),
             security_master.clone(),
             breaker_config,
+            storage,
         );
         // Optional token-gated providers: always on the health panel, marked
         // unavailable (and refused traffic) when their token/key is missing.
@@ -916,28 +1059,35 @@ impl DataProvider for MarketData {
     }
 
     async fn all_a_shares(&self) -> Result<Fetched<Vec<StockListItem>>, DataError> {
-        let fetched =
-            match tokio::time::timeout(Duration::from_secs(8), self.eastmoney.all_a_shares()).await
-            {
-                Ok(Ok(fetched)) => fetched,
-                Ok(Err(error)) => {
-                    debug!(%error, "EastMoney A-share list unavailable; using TDX security list");
-                    self.tdx.all_a_shares().await?
-                }
-                Err(_) => {
-                    debug!("EastMoney A-share list probe exceeded 8s; using TDX security list");
-                    self.tdx.all_a_shares().await?
-                }
-            };
+        // Do not wrap the complete host-retry sequence in a shorter outer
+        // timeout. Each HTTP request is already bounded; cancelling the
+        // sequence used to prevent the second/third host from ever running.
+        let fetched = match self.eastmoney.all_a_shares().await {
+            Ok(fetched) => fetched,
+            Err(error) => {
+                debug!(%error, "EastMoney A-share list retries exhausted; using TDX security list");
+                self.tdx.all_a_shares().await?
+            }
+        };
         self.security_master
             .merge_stock_list(&fetched.data, &fetched.source.to_string());
         Ok(fetched)
     }
 
     async fn market_breadth(&self) -> Result<Fetched<MarketBreadth>, DataError> {
-        tokio::time::timeout(Duration::from_secs(5), self.eastmoney.market_breadth())
-            .await
-            .map_err(|_| DataError::Timeout("eastmoney market breadth".into()))?
+        if let Some(hit) = self
+            .cache
+            .get::<Fetched<MarketBreadth>>(MARKET_BREADTH_CACHE_KEY, ttl::BREADTH)
+        {
+            return Ok(hit);
+        }
+        let inner = self.inner.clone();
+        single_flight(
+            &self.inner.breadth_inflight,
+            MARKET_BREADTH_CACHE_KEY.to_string(),
+            move || async move { inner.fetch_market_breadth().await }.boxed(),
+        )
+        .await
     }
 
     async fn index_kline(
@@ -953,6 +1103,57 @@ impl DataProvider for MarketData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn breadth_validation_requires_complete_consistent_counts() {
+        assert!(validate_market_breadth(&MarketBreadth {
+            up: 2_100,
+            down: 2_000,
+            flat: 900,
+            total: 5_000,
+        })
+        .is_ok());
+        assert!(validate_market_breadth(&MarketBreadth {
+            up: 2_100,
+            down: 2_000,
+            flat: 900,
+            total: 4_999,
+        })
+        .is_err());
+        assert!(validate_market_breadth(&MarketBreadth {
+            up: 1_500,
+            down: 1_400,
+            flat: 100,
+            total: 3_000,
+        })
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn last_good_breadth_survives_runtime_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(astock_storage::StorageConfig::with_base_dir(dir.path()))
+            .expect("storage opens");
+        let first = MarketData::with_storage(storage.clone());
+        let expected = Fetched::now(
+            MarketBreadth {
+                up: 2_100,
+                down: 2_000,
+                flat: 900,
+                total: 5_000,
+            },
+            Source::EastMoney,
+        );
+        first.inner.store_last_good_breadth(&expected).await;
+
+        let restarted = MarketData::with_storage(storage);
+        let restored = restarted
+            .inner
+            .load_last_good_breadth()
+            .await
+            .expect("last-good snapshot restored");
+        assert_eq!(restored, expected);
+    }
 
     #[test]
     fn default_failover_chain_order() {
