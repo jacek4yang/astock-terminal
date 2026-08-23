@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use rusqlite::{params, OptionalExtension, Row};
+use rusqlite::{params, params_from_iter, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -235,6 +235,25 @@ pub struct NewsIngestObservation {
     pub raw_evidence_present: bool,
 }
 
+/// Durable per-user state for one canonical news document.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewsUserState {
+    pub document_id: String,
+    pub is_read: bool,
+    pub pinned: bool,
+    pub favorite: bool,
+    pub ignored: bool,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewsUserAction {
+    Read,
+    Pinned,
+    Favorite,
+    Ignored,
+}
+
 #[derive(Debug, Serialize)]
 struct ExportEntry {
     revision: ArchivedNewsRevision,
@@ -243,6 +262,80 @@ struct ExportEntry {
 }
 
 impl Storage {
+    /// Load every explicit news-center user state. Documents without a row
+    /// use the all-false default and therefore do not grow this table.
+    pub async fn news_user_states(&self) -> Result<Vec<NewsUserState>> {
+        self.run(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT document_id,is_read,pinned,favorite,ignored,updated_at
+                 FROM news_user_state ORDER BY updated_at DESC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(NewsUserState {
+                    document_id: row.get(0)?,
+                    is_read: row.get::<_, i64>(1)? != 0,
+                    pinned: row.get::<_, i64>(2)? != 0,
+                    favorite: row.get::<_, i64>(3)? != 0,
+                    ignored: row.get::<_, i64>(4)? != 0,
+                    updated_at: row.get(5)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+        .await
+    }
+
+    /// Atomically update one allowlisted personal flag.
+    pub async fn news_user_state_set(
+        &self,
+        document_id: &str,
+        action: NewsUserAction,
+        value: bool,
+    ) -> Result<NewsUserState> {
+        let document_id = document_id.trim().to_string();
+        if document_id.is_empty() {
+            return Err(Error::Invalid("document_id 不能为空".into()));
+        }
+        let column = match action {
+            NewsUserAction::Read => "is_read",
+            NewsUserAction::Pinned => "pinned",
+            NewsUserAction::Favorite => "favorite",
+            NewsUserAction::Ignored => "ignored",
+        };
+        self.run(move |conn| {
+            let now = now_secs();
+            conn.execute(
+                "INSERT OR IGNORE INTO news_user_state
+                 (document_id,is_read,pinned,favorite,ignored,updated_at)
+                 VALUES (?1,0,0,0,0,?2)",
+                params![document_id, now],
+            )?;
+            conn.execute(
+                &format!(
+                    "UPDATE news_user_state SET {column}=?2,updated_at=?3 WHERE document_id=?1"
+                ),
+                params![document_id, i64::from(value), now],
+            )?;
+            conn.query_row(
+                "SELECT document_id,is_read,pinned,favorite,ignored,updated_at
+                 FROM news_user_state WHERE document_id=?1",
+                params![document_id],
+                |row| {
+                    Ok(NewsUserState {
+                        document_id: row.get(0)?,
+                        is_read: row.get::<_, i64>(1)? != 0,
+                        pinned: row.get::<_, i64>(2)? != 0,
+                        favorite: row.get::<_, i64>(3)? != 0,
+                        ignored: row.get::<_, i64>(4)? != 0,
+                        updated_at: row.get(5)?,
+                    })
+                },
+            )
+            .map_err(Into::into)
+        })
+        .await
+    }
+
     /// Idempotently insert a source document, immutable revision and fetch
     /// observation in one transaction. A changed hash creates a new revision
     /// linked to the previous current revision; unchanged input adds only an
@@ -572,6 +665,37 @@ impl Storage {
             )
             .optional()
             .map_err(Into::into)
+        })
+        .await
+    }
+
+    /// Batch-load exact immutable revisions without scanning the archive.
+    pub async fn news_archive_revisions_by_id(
+        &self,
+        revision_ids: &[String],
+    ) -> Result<Vec<ArchivedNewsRevision>> {
+        let mut revision_ids = revision_ids
+            .iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        revision_ids.sort();
+        revision_ids.dedup();
+        revision_ids.truncate(500);
+        if revision_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.run(move |conn| {
+            let placeholders = (1..=revision_ids.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut stmt = conn.prepare(&format!(
+                "{} WHERE r.revision_id IN ({placeholders})",
+                archive_select()
+            ))?;
+            let rows = stmt.query_map(params_from_iter(revision_ids), map_archive_row)?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
         })
         .await
     }
@@ -1071,6 +1195,19 @@ mod tests {
         assert_eq!(revisions.len(), 2);
         assert_eq!(revisions[0].title, "首次公告");
         assert_eq!(revisions[1].title, "更正公告");
+        let selected = storage
+            .news_archive_revisions_by_id(&[
+                first.revision_id.clone(),
+                second.revision_id.clone(),
+                first.revision_id.clone(),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(
+            selected.len(),
+            2,
+            "batch lookup deduplicates exact revisions"
+        );
         assert_eq!(
             storage
                 .news_revision_snapshot(&first.revision_id)
@@ -1179,6 +1316,43 @@ mod tests {
                 .last_latency_ms,
             Some(42)
         );
+    }
+
+    #[tokio::test]
+    async fn news_user_state_is_atomic_and_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StorageConfig::with_base_dir(dir.path());
+        let storage = Storage::open(config.clone()).unwrap();
+        let saved = storage
+            .news_archive_upsert(input(
+                "https://example.com/personal-state",
+                "重大事项公告",
+                "事实",
+                12_000,
+            ))
+            .await
+            .unwrap();
+
+        let pinned = storage
+            .news_user_state_set(&saved.document_id, NewsUserAction::Pinned, true)
+            .await
+            .unwrap();
+        assert!(pinned.pinned);
+        assert!(!pinned.is_read);
+        let read = storage
+            .news_user_state_set(&saved.document_id, NewsUserAction::Read, true)
+            .await
+            .unwrap();
+        assert!(read.pinned, "updating one flag must preserve the others");
+        assert!(read.is_read);
+
+        drop(storage);
+        let reopened = Storage::open(config).unwrap();
+        let states = reopened.news_user_states().await.unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].document_id, saved.document_id);
+        assert!(states[0].pinned);
+        assert!(states[0].is_read);
     }
 
     #[tokio::test]

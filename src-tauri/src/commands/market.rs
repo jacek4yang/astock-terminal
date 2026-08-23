@@ -275,7 +275,40 @@ pub async fn get_quote(
     symbol: String,
 ) -> Result<astock_core::Quote, CmdError> {
     let symbol = parse_symbol(&symbol)?;
-    let fetched = state.market.quote(&symbol).await?;
+    let started = std::time::Instant::now();
+    let fetched = match state.market.quote(&symbol).await {
+        Ok(fetched) => fetched,
+        Err(error) => {
+            let _ = super::data_quality::persist_quality_failure(
+                &state,
+                astock_core::DatasetKind::RealtimeQuote,
+                "market_failover",
+                Some(symbol.code().to_string()),
+                "get_quote",
+                started.elapsed().as_millis() as u64,
+                error.to_string(),
+            )
+            .await;
+            return Err(error.into());
+        }
+    };
+    let provider = fetched.source.to_string();
+    let source_url = match provider.as_str() {
+        "eastmoney" => Some("https://push2.eastmoney.com".to_string()),
+        "tencent" => Some("https://web.ifzq.gtimg.cn".to_string()),
+        "sina" => Some("https://money.finance.sina.com.cn".to_string()),
+        _ => None,
+    };
+    super::data_quality::persist_quote_source(
+        &state,
+        symbol.code(),
+        &provider,
+        source_url,
+        "get_quote",
+        Some(started.elapsed().as_millis() as u64),
+        &fetched,
+    )
+    .await?;
     if let Some(record) = state.market.security_master.get(symbol.code()) {
         state.storage.securities_upsert(vec![record]).await?;
     }
