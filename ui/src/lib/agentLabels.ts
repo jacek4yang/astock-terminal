@@ -31,6 +31,7 @@ const TOOL_NAMES: Record<string, string> = {
   research_news: "财经新闻与公告研究",
   research_disclosures: "正式披露与修订核验",
   research_global_transmission: "海外一级来源与 A 股传导核验",
+  research_gold_market: "黄金行情、新闻与宏观驱动研究",
   analyze_event_price_in: "结构化事件与市场定价核验",
   research_supply_chain_relations: "供应链关系抽取与审核核验",
   query_graph_as_of: "双时间历史图谱快照",

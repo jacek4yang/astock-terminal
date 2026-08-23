@@ -22,7 +22,9 @@ use astock_core::{
 };
 use astock_fundamental::FundamentalClient;
 use astock_graph::GraphStore;
-use astock_market_data::{DataProvider, FinanceNewsProvider, IwencaiOpenApi, JoinQuantProvider};
+use astock_market_data::{
+    DataProvider, FinanceNewsProvider, GlobalAssetProvider, IwencaiOpenApi, JoinQuantProvider,
+};
 use astock_minimax::MinimaxClient;
 use astock_minimax::ToolSpec;
 use astock_security::ToolPermissionDomain;
@@ -86,6 +88,8 @@ pub struct ToolContext {
     pub minimax_search: Option<Arc<MinimaxClient>>,
     /// 公共财经快讯聚合器（无凭据），用于发现事件线索。
     pub finance_news: Option<Arc<FinanceNewsProvider>>,
+    /// Shared cross-market quotes/trend provider for gold and related assets.
+    pub global_assets: Option<Arc<GlobalAssetProvider>>,
     /// 可选问财官方接口，用于个股公告、新闻和结构化事件补证。
     pub iwencai: Option<Arc<IwencaiOpenApi>>,
     /// Per-invocation progress sink installed by the orchestrator.
@@ -103,6 +107,7 @@ impl ToolContext {
             joinquant: None,
             minimax_search: None,
             finance_news: None,
+            global_assets: None,
             iwencai: None,
             progress: None,
         }
@@ -139,6 +144,11 @@ impl ToolContext {
     ) -> Self {
         self.finance_news = finance_news;
         self.iwencai = iwencai;
+        self
+    }
+
+    pub fn with_global_assets(mut self, provider: Option<Arc<GlobalAssetProvider>>) -> Self {
+        self.global_assets = provider;
         self
     }
 
@@ -369,7 +379,7 @@ fn dataset_for_tool(name: &str, args: &Value) -> DatasetKind {
             DatasetKind::Fundamentals
         }
         "run_valuation" => DatasetKind::Valuation,
-        "research_news" => DatasetKind::News,
+        "research_news" | "research_gold_market" => DatasetKind::News,
         "research_disclosures"
         | "research_global_transmission"
         | "analyze_event_price_in"
@@ -746,6 +756,7 @@ mod tests {
             joinquant: None,
             minimax_search: None,
             finance_news: None,
+            global_assets: None,
             iwencai: None,
             progress: None,
         };

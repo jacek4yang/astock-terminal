@@ -37,9 +37,9 @@ pub use orchestrator::{
     TaskSpec, TaskStream, SNAPSHOT_MARKER,
 };
 pub use report::{
-    AgentReport, CalculationRecord, ClaimConfidence, ClaimType, Conclusion, Evidence,
-    EvidenceField, ResearchClaim, ResearchReport, VerificationFinding, VerificationResult,
-    VerificationSeverity, VerificationStatus,
+    sanitize_public_answer, AgentReport, CalculationRecord, ClaimConfidence, ClaimType, Conclusion,
+    Evidence, EvidenceField, ResearchClaim, ResearchReport, VerificationFinding,
+    VerificationResult, VerificationSeverity, VerificationStatus,
 };
 pub use tools::{
     AgentTool, ToolContext, ToolProgressDetail, ToolRegistry, ToolResult, ToolWorkItem,

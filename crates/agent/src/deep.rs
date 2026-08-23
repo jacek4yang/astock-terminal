@@ -46,7 +46,7 @@ use astock_graph::{
 };
 use astock_market_data::{
     normalize_finance_news_sources, DataProvider, FinanceNewsBatch, JoinQuantProvider,
-    NewsIngestProgressReporter, NewsTrustTier,
+    NewsIngestProgressReporter, NewsTrustTier, FINANCE_NEWS_SOURCES,
 };
 use astock_quant::research::{
     FdrMethod, InputValueMode, MissingValuePolicy, ResearchConfig, ResearchFrequency,
@@ -883,12 +883,10 @@ impl AgentTool for ResearchGlobalTransmission {
             .filter(|provider| !provider.enabled || provider.consecutive_failures > 0)
             .map(|provider| {
                 json!({
-                    "provider_id": provider.provider_id,
                     "provider_name": provider.provider_name,
-                    "enabled": provider.enabled,
-                    "consecutive_failures": provider.consecutive_failures,
+                    "status": if provider.enabled { "暂时不可用，稍后会自动重试" } else { "尚未启用或配置不完整" },
                     "retry_after": provider.retry_after,
-                    "gap": provider.last_error,
+                    "gap": "本来源本轮没有形成可核验原文，不影响其他来源继续研究",
                 })
             })
             .collect();
@@ -1059,6 +1057,380 @@ impl AgentTool for ResearchDisclosures {
             fetched_at: now_rfc3339(),
         })
     }
+}
+
+// ---------------------------------------------------------------------
+// research_gold_market
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ResearchGoldMarketArgs {
+    /// 趋势窗口内最多保留的交易日，默认 90、范围 20-180
+    days: Option<usize>,
+    /// 黄金主题快讯最多返回条数，默认 30、最大 80
+    news_limit: Option<usize>,
+    /// 是否同时通过 MiniMax 联网发现央行、交易所和监管机构原文，默认 true
+    include_official_search: Option<bool>,
+}
+
+/// Dedicated gold research avoids forcing A-share quote tools to understand
+/// global futures symbols and guarantees broad topic aliases for news search.
+pub struct ResearchGoldMarket;
+
+#[async_trait]
+impl AgentTool for ResearchGoldMarket {
+    fn name(&self) -> &'static str {
+        "research_gold_market"
+    }
+
+    fn description(&self) -> &'static str {
+        "一站式研究黄金：并行获取 COMEX 黄金、上海黄金交易所 Au99.99、近阶段趋势、多频道黄金主题快讯，以及美联储、CFTC、上海黄金交易所、人民银行、外汇局、LBMA 和世界黄金协会等原始来源线索。任一来源失败只局部降级"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        schema_value::<ResearchGoldMarketArgs>()
+    }
+
+    fn cacheable(&self) -> bool {
+        // Market and news providers already own freshness-aware caches. The
+        // outer argument cache would hide their independent source status.
+        false
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
+        let args: ResearchGoldMarketArgs = parse_args(self.name(), args)?;
+        let days = args.days.unwrap_or(90).clamp(20, 180);
+        let news_limit = args.news_limit.unwrap_or(30).clamp(1, 80);
+        let include_official_search = args.include_official_search.unwrap_or(true);
+        let market = ctx
+            .global_assets
+            .as_deref()
+            .ok_or_else(|| tool_err(self.name(), "全球黄金行情能力未装配"))?;
+
+        ctx.report_progress(ToolProgressDetail {
+            completed: 0,
+            total: if include_official_search { 5 } else { 4 },
+            succeeded: 0,
+            failed: 0,
+            skipped: 0,
+            retries: 0,
+            cache_hits: 0,
+            records: 0,
+            active: vec![
+                ToolWorkItem {
+                    label: "COMEX 黄金与上海金".into(),
+                    stage: "读取实时价格并进行跨市场核对".into(),
+                },
+                ToolWorkItem {
+                    label: format!("近 {days} 个交易日"),
+                    stage: "计算 5/20/60 日涨跌与区间位置".into(),
+                },
+                ToolWorkItem {
+                    label: format!("{} 个财经频道", FINANCE_NEWS_SOURCES.len()),
+                    stage: "检索黄金、贵金属、央行购金和实际利率线索".into(),
+                },
+                ToolWorkItem {
+                    label: "世界黄金协会与上海黄金交易所".into(),
+                    stage: "直接读取行业研究和交易所公告".into(),
+                },
+            ],
+            recent_errors: Vec::new(),
+        });
+
+        let selected_sources = FINANCE_NEWS_SOURCES
+            .iter()
+            .map(|(id, _, _)| (*id).to_string())
+            .collect::<Vec<_>>();
+        let news_progress: Option<NewsIngestProgressReporter> = ctx.progress.clone().map(|sink| {
+            Arc::new(move |update: astock_market_data::NewsIngestProgress| {
+                sink(ToolProgressDetail {
+                    completed: update.completed.min(update.total),
+                    total: update.total.max(1),
+                    succeeded: update.succeeded,
+                    failed: update.failed,
+                    skipped: 0,
+                    retries: 0,
+                    cache_hits: 0,
+                    records: update.records,
+                    active: update
+                        .active
+                        .into_iter()
+                        .map(|item| ToolWorkItem {
+                            label: item.display_name,
+                            stage: format!(
+                                "{}；尝试 {}/{}；已读取 {}/{} 条；耗时 {:.1} 秒",
+                                item.status,
+                                item.attempt,
+                                item.max_attempts,
+                                item.records_processed,
+                                item.records_total,
+                                item.elapsed_ms as f64 / 1_000.0
+                            ),
+                        })
+                        .collect(),
+                    recent_errors: update.recent_errors,
+                });
+            }) as NewsIngestProgressReporter
+        });
+        // OR semantics are applied by the news registry. Broad aliases avoid
+        // the old "黄金 金价" exact-word blind spot.
+        const GOLD_NEWS_ALIASES: &str =
+            "黄金 金价 贵金属 伦敦金 COMEX XAU Au99.99 上海金 央行购金 黄金储备 实际利率 美联储 地缘风险";
+        let news_future = async {
+            match ctx.finance_news.as_deref() {
+                Some(provider) => {
+                    provider
+                        .research_with_progress(
+                            &selected_sources,
+                            None,
+                            Some(GOLD_NEWS_ALIASES),
+                            news_limit,
+                            news_progress,
+                        )
+                        .await
+                }
+                None => Err(astock_core::DataError::NoProvider("财经快讯聚合器未装配")),
+            }
+        };
+        let official_future = async {
+            if !include_official_search {
+                return (Vec::new(), Vec::new());
+            }
+            official_gold_search(ctx.minimax_search.as_deref()).await
+        };
+        let (market_result, primary_news_result, news_result, (official_leads, official_errors)) = tokio::join!(
+            market.gold_snapshot(days),
+            market.primary_gold_news(news_limit),
+            news_future,
+            official_future
+        );
+
+        let mut errors = official_errors;
+        let market_snapshot = match market_result {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                errors.push(format!("黄金行情：{error}"));
+                None
+            }
+        };
+        let primary_news = match primary_news_result {
+            Ok(batch) => Some(batch),
+            Err(error) => {
+                errors.push(format!("黄金一手资讯：{error}"));
+                None
+            }
+        };
+        let news = match news_result {
+            Ok(batch) => Some(batch),
+            Err(error) => {
+                errors.push(format!("黄金主题资讯：{error}"));
+                None
+            }
+        };
+        let mut headlines = primary_news
+            .as_ref()
+            .into_iter()
+            .flat_map(|batch| batch.items.iter())
+            .map(|item| {
+                json!({
+                    "title": item.title,
+                    "summary": item.summary,
+                    "source_name": item.source_name,
+                    "published_at": item.published_at,
+                    "url": item.url,
+                    "important": true,
+                    "independent_source_count": 1,
+                    "evidence_level": item.evidence_level,
+                    "source_class": "一手来源",
+                })
+            })
+            .collect::<Vec<_>>();
+        headlines.extend(
+            news.as_ref()
+                .into_iter()
+                .flat_map(|batch| batch.items.iter())
+                .map(|item| {
+                    json!({
+                        "title": item.title,
+                        "summary": item.summary,
+                        "source_name": item.source_name,
+                        "published_at": item.published_at,
+                        "url": item.url,
+                        "important": item.important,
+                        "independent_source_count": item.independent_source_count,
+                        "evidence_level": match item.trust_tier {
+                            NewsTrustTier::FirstPartyDisclosure => "原始披露",
+                            NewsTrustTier::LicensedMedia => "授权媒体",
+                            NewsTrustTier::PublicAggregator => "公开资讯线索",
+                            NewsTrustTier::SearchLead => "搜索线索",
+                        },
+                        "source_class": "财经资讯发现层",
+                    })
+                }),
+        );
+        headlines.sort_by(|left, right| {
+            right["published_at"]
+                .as_str()
+                .cmp(&left["published_at"].as_str())
+        });
+        headlines.dedup_by(|left, right| left["url"] == right["url"]);
+        headlines.truncate(news_limit);
+        if let Some(batch) = &primary_news {
+            errors.extend(batch.source_errors.iter().take(4).cloned());
+        }
+        if let Some(batch) = &news {
+            errors.extend(batch.errors.iter().take(8).cloned());
+        }
+        let market_records = market_snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot.quotes.len()
+                    + snapshot
+                        .trend
+                        .as_ref()
+                        .map(|trend| trend.observations)
+                        .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        let success_count = usize::from(market_snapshot.is_some())
+            + usize::from(
+                primary_news
+                    .as_ref()
+                    .is_some_and(|batch| !batch.items.is_empty()),
+            )
+            + usize::from(news.as_ref().is_some_and(|batch| !batch.items.is_empty()))
+            + usize::from(!official_leads.is_empty());
+        if success_count == 0 {
+            return Err(tool_err(
+                self.name(),
+                format!(
+                    "黄金行情、主题资讯和原始来源均未取得有效数据：{}",
+                    errors.join("；")
+                ),
+            ));
+        }
+        ctx.report_progress(ToolProgressDetail {
+            completed: if include_official_search { 5 } else { 4 },
+            total: if include_official_search { 5 } else { 4 },
+            succeeded: success_count,
+            failed: errors.len(),
+            skipped: 0,
+            retries: 0,
+            cache_hits: 0,
+            records: market_records + headlines.len() + official_leads.len(),
+            active: Vec::new(),
+            recent_errors: errors.iter().rev().take(5).cloned().collect(),
+        });
+
+        let payload = json!({
+            "gold_market": market_snapshot,
+            "gold_news": headlines,
+            "official_source_leads": official_leads,
+            "coverage": {
+                "market_venues": ["COMEX", "上海黄金交易所"],
+                "news_channels_requested": selected_sources.len(),
+                "primary_publishers_read": ["世界黄金协会", "上海黄金交易所"],
+                "official_organizations": [
+                    "上海黄金交易所", "中国人民银行", "国家外汇管理局", "美联储",
+                    "美国商品期货交易委员会", "伦敦金银市场协会", "世界黄金协会"
+                ],
+                "topic_aliases": GOLD_NEWS_ALIASES,
+            },
+            "source_errors": errors,
+            "usage_note": "实时行情用于判断走势；公开快讯用于发现事件；涉及央行政策、储备和持仓的重大结论应继续打开原始机构页面核验。部分来源失败时只降低对应结论置信度，不得把局部失败表述为全部失败。",
+        });
+        Ok(ToolResult {
+            summary_json: payload.clone(),
+            full_json: Some(payload),
+            cache_key: String::new(),
+            source: "全球黄金行情+多频道财经资讯+官方机构检索".into(),
+            fetched_at: chrono::Utc::now().to_rfc3339(),
+        })
+    }
+}
+
+async fn official_gold_search(
+    client: Option<&astock_minimax::MinimaxClient>,
+) -> (Vec<Value>, Vec<String>) {
+    let Some(client) = client else {
+        return (Vec::new(), vec!["官方机构联网检索未装配".into()]);
+    };
+    let queries = vec![
+        "黄金 金价 央行购金 黄金储备 上海黄金交易所 中国人民银行 国家外汇管理局".to_string(),
+        "gold price central bank purchases real yields Federal Reserve CFTC LBMA World Gold Council".to_string(),
+    ];
+    let searched = futures::stream::iter(queries)
+        .map(|query| async move {
+            let result = client.web_search(&query).await;
+            (query, result)
+        })
+        .buffer_unordered(2)
+        .collect::<Vec<_>>()
+        .await;
+    let policy = UrlSecurityPolicy::default();
+    let allowed = [
+        "sge.com.cn",
+        "pbc.gov.cn",
+        "safe.gov.cn",
+        "federalreserve.gov",
+        "cftc.gov",
+        "lbma.org.uk",
+        "gold.org",
+        "imf.org",
+    ];
+    let mut leads = Vec::new();
+    let mut errors = Vec::new();
+    for (query, result) in searched {
+        let raw = match result {
+            Ok(value) => value,
+            Err(error) => {
+                errors.push(format!("官方机构检索“{query}”：{error}"));
+                continue;
+            }
+        };
+        let rows = raw
+            .get("organic")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for row in rows.into_iter().take(20) {
+            let title = bounded_text(row.get("title"), 300);
+            let link = bounded_text(row.get("link"), 2_048);
+            if title.is_empty() || link.is_empty() {
+                continue;
+            }
+            let Ok(checked) = policy.validate_resolved(&link).await else {
+                continue;
+            };
+            let host = checked.url.host().to_ascii_lowercase();
+            if !allowed
+                .iter()
+                .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+            {
+                continue;
+            }
+            let snippet = bounded_text(row.get("snippet"), 800);
+            let inspected = inspect_external_text(
+                checked.url.as_str(),
+                "application/x-search-snippet",
+                &snippet,
+                800,
+            );
+            leads.push(json!({
+                "organization_domain": host,
+                "title": title,
+                "url": checked.url.as_str(),
+                "date": bounded_text(row.get("date"), 80),
+                "snippet": inspected.text,
+                "verification_status": "原始机构页面线索，重要事实仍需打开原文核验",
+                "prompt_injection_detected": inspected.prompt_injection_detected,
+            }));
+        }
+    }
+    leads.sort_by(|left, right| left["url"].as_str().cmp(&right["url"].as_str()));
+    leads.dedup_by(|left, right| left["url"] == right["url"]);
+    leads.truncate(20);
+    (leads, errors)
 }
 
 // ---------------------------------------------------------------------
@@ -4895,6 +5267,7 @@ mod tests {
             joinquant: None,
             minimax_search: None,
             finance_news: None,
+            global_assets: None,
             iwencai: None,
             progress: None,
         }

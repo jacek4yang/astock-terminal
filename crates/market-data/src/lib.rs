@@ -53,11 +53,13 @@ pub use provider::{DataProvider, Failover};
 pub use providers::{
     normalize_finance_news_sources, CninfoAnnouncement, CninfoDisclosureProvider, CninfoPage,
     EastMoney, EastMoneyF10, EmDataCenter, F10Report, FinanceNewsBatch, FinanceNewsItem,
-    FinanceNewsProvider, FinanceNewsSourceSelection, IndustryClassified, IwencaiOpenApi,
-    JoinQuantProvider, NewsCapabilities, NewsDeliveryMode, NewsErrorKind, NewsIngestProgress,
-    NewsIngestProgressReporter, NewsIngestWorkItem, NewsProviderHealth, NewsTrustTier,
-    SecEdgarProvider, SecFiling, SinaKline, TdxProvider, TencentKline, TushareProvider,
-    WorldBankObservation, WorldBankProvider, DEFAULT_FINANCE_NEWS_SOURCES, FINANCE_NEWS_SOURCES,
+    FinanceNewsProvider, FinanceNewsSourceSelection, GlobalAssetPoint, GlobalAssetProvider,
+    GlobalAssetQuote, GoldMarketSnapshot, GoldPrimaryNewsBatch, GoldPrimaryNewsItem,
+    GoldTrendSummary, IndustryClassified, IwencaiOpenApi, JoinQuantProvider, NewsCapabilities,
+    NewsDeliveryMode, NewsErrorKind, NewsIngestProgress, NewsIngestProgressReporter,
+    NewsIngestWorkItem, NewsProviderHealth, NewsTrustTier, SecEdgarProvider, SecFiling, SinaKline,
+    TdxProvider, TencentKline, TushareProvider, WorldBankObservation, WorldBankProvider,
+    DEFAULT_FINANCE_NEWS_SOURCES, FINANCE_NEWS_SOURCES,
 };
 pub use proxy::{ProxyConfig, ProxyRoute};
 pub use security_master::SecurityMaster;

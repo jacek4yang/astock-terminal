@@ -1878,6 +1878,7 @@ pub fn default_registry() -> ToolRegistry {
         Arc::new(crate::deep::CompareSourceEvidence),
         Arc::new(crate::deep::ResearchDisclosures),
         Arc::new(crate::deep::ResearchGlobalTransmission),
+        Arc::new(crate::deep::ResearchGoldMarket),
         Arc::new(crate::deep::AnalyzeEventPriceIn),
         Arc::new(crate::deep::ResearchSupplyChainRelations),
         Arc::new(crate::deep::QueryGraphAsOf),
@@ -2090,6 +2091,7 @@ mod tests {
                 joinquant: None,
                 minimax_search: None,
                 finance_news: None,
+                global_assets: None,
                 iwencai: None,
                 progress: None,
             },
@@ -2111,7 +2113,7 @@ mod tests {
     #[tokio::test]
     async fn tool_schemas_are_valid() {
         let registry = default_registry();
-        assert_eq!(registry.len(), 33);
+        assert_eq!(registry.len(), 34);
         let mut names = Vec::new();
         for spec in registry.specs() {
             assert_eq!(spec.kind, "function");
@@ -2163,6 +2165,7 @@ mod tests {
             "compare_source_evidence",
             "research_disclosures",
             "research_global_transmission",
+            "research_gold_market",
             "analyze_event_price_in",
             "research_supply_chain_relations",
             "query_graph_as_of",
@@ -2711,6 +2714,7 @@ mod tests {
             joinquant: None,
             minimax_search: None,
             finance_news: None,
+            global_assets: None,
             iwencai: None,
             progress: None,
         };

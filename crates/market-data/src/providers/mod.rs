@@ -8,6 +8,7 @@ pub mod eastmoney;
 pub mod eastmoney_f10;
 pub mod em_datacenter;
 pub mod finance_news;
+pub mod global_assets;
 pub mod iwencai_openapi;
 pub mod joinquant;
 pub mod news_ingest;
@@ -30,6 +31,10 @@ pub use em_datacenter::{
 pub use finance_news::{
     normalize_finance_news_sources, FinanceNewsBatch, FinanceNewsItem, FinanceNewsProvider,
     FinanceNewsSourceSelection, DEFAULT_FINANCE_NEWS_SOURCES, FINANCE_NEWS_SOURCES,
+};
+pub use global_assets::{
+    GlobalAssetPoint, GlobalAssetProvider, GlobalAssetQuote, GoldMarketSnapshot,
+    GoldPrimaryNewsBatch, GoldPrimaryNewsItem, GoldTrendSummary,
 };
 pub use iwencai_openapi::{IwencaiOpenApi, StockEvents, WencaiRows};
 pub use joinquant::JoinQuantProvider;

@@ -12,6 +12,7 @@ import {
   hasUnansweredClarification,
   isNearScrollBottom,
   redactDiagnosticValue,
+  sanitizeAgentVisibleText,
   stripPrivateReasoning,
   taskRunStatus,
   type ChatMsg,
@@ -45,6 +46,27 @@ describe("Agent history safety", () => {
   it("never renders provider-private reasoning", () => {
     expect(stripPrivateReasoning("可见前<think>私有推理</think>可见后")).toBe("可见前可见后");
     expect(stripPrivateReasoning("回答<think>尚未结束")).toBe("回答");
+  });
+
+  it("never renders internal evidence, tool or credential identifiers", () => {
+    const visible = sanitizeAgentVisibleText(
+      "金价偏强〔证据:evf_5e298283〕；`research_news` 为 status=no_match，research_global_transmission 为 total_documents=0，请配置 BLS_API_KEY 并核对 source_version_id。",
+    );
+    expect(visible).toContain("金价偏强");
+    expect(visible).toContain("财经新闻检索");
+    expect(visible).toContain("海外一手信息检索");
+    expect(visible).toContain("相应数据源配置");
+    for (const internal of [
+      "evf_",
+      "research_news",
+      "research_global_transmission",
+      "status=no_match",
+      "total_documents=0",
+      "BLS_API_KEY",
+      "source_version_id",
+    ]) {
+      expect(visible).not.toContain(internal);
+    }
   });
 
   it("reconciles durable background-task states after reopening the app", () => {

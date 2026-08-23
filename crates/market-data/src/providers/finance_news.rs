@@ -36,10 +36,15 @@ const MAX_CONCURRENT: usize = 3;
 /// 财经来源白名单：(稳定标识、中文名称、上游建议刷新间隔秒)。
 pub const FINANCE_NEWS_SOURCES: &[(&str, &str, u64)] = &[
     ("cls-telegraph", "财联社电报", 300),
+    ("cls-depth", "财联社深度", 600),
+    ("cls-hot", "财联社热门", 600),
     ("jin10", "金十数据", 600),
     ("wallstreetcn-quick", "华尔街见闻快讯", 300),
+    ("wallstreetcn-hot", "华尔街见闻热门", 1_800),
     ("mktnews-flash", "MKTNews 快讯", 120),
     ("gelonghui", "格隆汇事件", 120),
+    ("fastbull-express", "法布财经快讯", 120),
+    ("fastbull-news", "法布财经头条", 1_800),
     ("xueqiu-hotstock", "雪球热门股票", 120),
     ("wallstreetcn-news", "华尔街见闻最新资讯", 1_800),
 ];
@@ -50,6 +55,8 @@ pub const DEFAULT_FINANCE_NEWS_SOURCES: &[&str] = &[
     "wallstreetcn-quick",
     "mktnews-flash",
     "gelonghui",
+    "cls-depth",
+    "fastbull-express",
 ];
 
 /// Tolerant source selection used at every public finance-news boundary.
@@ -105,6 +112,8 @@ fn finance_news_source_alias(raw: &str) -> Option<&'static str> {
         .collect::<String>();
     match normalized.as_str() {
         "cls" | "cls-telegraph" | "财联社" | "财联社电报" => Some("cls-telegraph"),
+        "cls-depth" | "财联社深度" => Some("cls-depth"),
+        "cls-hot" | "财联社热门" => Some("cls-hot"),
         "jin10" | "jin-10" | "金十" | "金十数据" => Some("jin10"),
         "wallstreetcn" | "wallstreetcn-quick" | "wscn" | "华尔街见闻" | "华尔街见闻快讯" => {
             Some("wallstreetcn-quick")
@@ -112,8 +121,15 @@ fn finance_news_source_alias(raw: &str) -> Option<&'static str> {
         "wallstreetcn-news" | "华尔街见闻资讯" | "华尔街见闻新闻" | "华尔街见闻最新资讯" => {
             Some("wallstreetcn-news")
         }
+        "wallstreetcn-hot" | "华尔街见闻热门" | "华尔街见闻最热" => {
+            Some("wallstreetcn-hot")
+        }
         "mktnews" | "mktnews-flash" | "mktnews快讯" => Some("mktnews-flash"),
         "gelonghui" | "格隆汇" | "格隆汇事件" => Some("gelonghui"),
+        "fastbull" | "fastbull-express" | "法布财经" | "法布财经快讯" => {
+            Some("fastbull-express")
+        }
+        "fastbull-news" | "法布财经头条" | "法布财经新闻" => Some("fastbull-news"),
         "xueqiu" | "xueqiu-hotstock" | "xueqiu-hot-stock" | "雪球" | "雪球热股" | "雪球热门"
         | "雪球热门股票" => Some("xueqiu-hotstock"),
         _ => None,
