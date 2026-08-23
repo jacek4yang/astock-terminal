@@ -1485,6 +1485,7 @@ pub fn default_registry() -> ToolRegistry {
         Arc::new(crate::deep::GetIndustryChain),
         Arc::new(crate::deep::RunSupplyChainShock),
         Arc::new(crate::deep::BuildRelationshipGraph),
+        Arc::new(crate::deep::RunQuantResearch),
         Arc::new(crate::deep::RunBacktest),
         Arc::new(crate::deep::IterateStrategy),
         Arc::new(crate::deep::RunJoinQuantResearch),
@@ -1726,7 +1727,7 @@ mod tests {
     #[tokio::test]
     async fn tool_schemas_are_valid() {
         let registry = default_registry();
-        assert_eq!(registry.len(), 32);
+        assert_eq!(registry.len(), 33);
         let mut names = Vec::new();
         for spec in registry.specs() {
             assert_eq!(spec.kind, "function");
@@ -1766,6 +1767,7 @@ mod tests {
             "get_industry_chain",
             "run_supply_chain_shock",
             "build_relationship_graph",
+            "run_quant_research",
             "run_backtest",
             "iterate_strategy",
             "run_joinquant_research",

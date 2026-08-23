@@ -20,6 +20,7 @@ const TOOL_NAMES: Record<string, string> = {
   get_industry_chain: "产业链位置分析",
   run_supply_chain_shock: "产业链冲击推演",
   build_relationship_graph: "股票关系网络分析",
+  run_quant_research: "可复现量化研究与稳健性检验",
   run_backtest: "历史回测验证",
   iterate_strategy: "策略迭代与稳健性检验",
   run_joinquant_research: "聚宽研究数据核验",

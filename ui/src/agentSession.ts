@@ -33,6 +33,7 @@ export const DEFAULT_AGENT_TOOLS = [
   "get_industry_chain",
   "run_supply_chain_shock",
   "build_relationship_graph",
+  "run_quant_research",
   "run_backtest",
   "iterate_strategy",
   "run_joinquant_research",

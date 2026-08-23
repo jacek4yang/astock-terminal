@@ -12,6 +12,8 @@
 //! without duplicating the mapping logic.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -43,12 +45,17 @@ use astock_graph::{
     Engine as GraphEngine, Event, GraphStore, ImpactEntry, ImpactReport, Node, Relation,
 };
 use astock_market_data::{DataProvider, JoinQuantProvider, NewsTrustTier, FINANCE_NEWS_SOURCES};
+use astock_quant::research::{
+    FdrMethod, InputValueMode, MissingValuePolicy, ResearchConfig, ResearchFrequency,
+    ResearchMetric, ResearchProgress, ResearchSnapshot, SeriesInput,
+};
 use astock_relation_extraction::{
     CandidateEvidenceInput, DocumentKind, ModelRelationCandidate, RelationExtractionStore,
     RelationType,
 };
 use astock_security::{inspect_external_text, ToolPermissionDomain, UrlSecurityPolicy};
 use astock_source_verification::SourceVerifier;
+use astock_storage::QuantResearchSnapshotRow;
 use astock_technical as tech;
 use astock_trading_rules::{
     classify_news_session, publication_precision_from_source, target_trading_date_at,
@@ -3319,6 +3326,345 @@ pub async fn relationship_graph_json(
 }
 
 // ---------------------------------------------------------------------
+// run_quant_research — reproducible Quant Lab shared by Agent and UI
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct QuantResearchArgs {
+    /// 2-50 个证券代码；股票越多，两两关系数量按平方增长
+    symbols: Vec<String>,
+    /// pearson / spearman / kendall / distance_correlation / mutual_information / lead_lag / granger
+    metric: Option<String>,
+    /// price_level / arithmetic_return / log_return（默认）
+    value_mode: Option<String>,
+    /// daily（默认）/ weekly / monthly
+    frequency: Option<String>,
+    start_date: Option<String>,
+    end_date: Option<String>,
+    /// qfq（默认）/ hfq / none
+    adjust: Option<String>,
+    /// drop（默认）/ forward_fill / zero
+    missing_policy: Option<String>,
+    rolling_window: Option<usize>,
+    max_lag: Option<usize>,
+    /// 偏相关控制变量代码，仅 Pearson 生效
+    controls: Option<Vec<String>>,
+    bootstrap_reps: Option<usize>,
+    permutation_reps: Option<usize>,
+    /// benjamini_hochberg（默认）/ bonferroni / none
+    fdr_method: Option<String>,
+    max_pairs: Option<usize>,
+    max_observations_per_pair: Option<usize>,
+    lookback_bars: Option<u32>,
+    seed: Option<u64>,
+}
+
+pub type QuantProgressReporter = Arc<dyn Fn(ResearchProgress) + Send + Sync>;
+pub type QuantCancellationCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// Reproducible multi-security inference exposed to the Agent.
+pub struct RunQuantResearch;
+
+#[async_trait]
+impl AgentTool for RunQuantResearch {
+    fn name(&self) -> &'static str {
+        "run_quant_research"
+    }
+
+    fn description(&self) -> &'static str {
+        "可复现量化研究工作台：配置股票池、收益率口径、频率、区间、复权、缺失值、窗口、滞后和控制变量；输出 bootstrap 区间、显著性、默认 FDR 多重检验、年度/市场状态/滚动/异常值/样本外稳健性与快照编号。相关、预测领先、Granger 预测因果和结构因果严格分开"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        schema_value::<QuantResearchArgs>()
+    }
+
+    fn cache_ttl_secs(&self) -> i64 {
+        1800
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
+        let args: QuantResearchArgs = parse_args(self.name(), args)?;
+        let config =
+            quant_config_from_args(args).map_err(|message| tool_err(self.name(), message))?;
+        let progress = ctx.progress.clone().map(|sink| {
+            Arc::new(move |update: ResearchProgress| {
+                sink(ToolProgressDetail {
+                    completed: update.done_pairs,
+                    total: update.total_pairs,
+                    succeeded: update.done_pairs,
+                    failed: 0,
+                    cache_hits: 0,
+                    records: update.effective_observations,
+                    active: update
+                        .current_pair
+                        .map(|pair| {
+                            vec![ToolWorkItem {
+                                label: format!("{} ↔ {}", pair[0], pair[1]),
+                                stage: update.message,
+                            }]
+                        })
+                        .unwrap_or_default(),
+                    recent_errors: Vec::new(),
+                });
+            }) as QuantProgressReporter
+        });
+        let full = quant_research_json(
+            &*ctx.market,
+            &ctx.storage,
+            config,
+            progress,
+            Arc::new(|| false),
+        )
+        .await?;
+        let summary_results: Vec<_> = full
+            .results
+            .iter()
+            .take(20)
+            .map(|result| {
+                json!({
+                    "pair": [result.left, result.right],
+                    "effect": result.effect,
+                    "interval": [result.confidence_low, result.confidence_high],
+                    "raw_p": result.p_value,
+                    "adjusted_p": result.adjusted_p_value,
+                    "fdr_significant": result.significant_after_correction,
+                    "effective_n": result.effective_n,
+                    "best_lag": result.best_lag,
+                    "stability": result.stability,
+                    "conclusion": result.conclusion,
+                })
+            })
+            .collect();
+        let summary = json!({
+            "snapshot_id": full.snapshot_id,
+            "function_version": full.function_version,
+            "budget": full.budget,
+            "result_count": full.results.len(),
+            "results": summary_results,
+            "warnings": full.warnings,
+            "causality_boundary": full.causality_boundary,
+            "note": "完整配置、数据版本、所有配对结果与稳健性切片已保存，可用 snapshot_id 下钻复现",
+        });
+        Ok(ToolResult {
+            summary_json: summary,
+            full_json: Some(serde_json::to_value(&full)?),
+            cache_key: String::new(),
+            source: "market_data+astock_quant_research".into(),
+            fetched_at: now_rfc3339(),
+        })
+    }
+}
+
+fn quant_config_from_args(args: QuantResearchArgs) -> std::result::Result<ResearchConfig, String> {
+    if args.symbols.len() < 2 || args.symbols.len() > 50 {
+        return Err("symbols 需包含 2-50 个证券代码".into());
+    }
+    let parse_metric = |value: Option<String>| match value.as_deref().unwrap_or("pearson") {
+        "pearson" => Ok(ResearchMetric::Pearson),
+        "spearman" => Ok(ResearchMetric::Spearman),
+        "kendall" => Ok(ResearchMetric::Kendall),
+        "distance_correlation" => Ok(ResearchMetric::DistanceCorrelation),
+        "mutual_information" => Ok(ResearchMetric::MutualInformation),
+        "lead_lag" => Ok(ResearchMetric::LeadLag),
+        "granger" => Ok(ResearchMetric::Granger),
+        other => Err(format!("未知研究指标：{other}")),
+    };
+    let value_mode = match args.value_mode.as_deref().unwrap_or("log_return") {
+        "price_level" => InputValueMode::PriceLevel,
+        "arithmetic_return" => InputValueMode::ArithmeticReturn,
+        "log_return" => InputValueMode::LogReturn,
+        other => return Err(format!("未知数值口径：{other}")),
+    };
+    let frequency = match args.frequency.as_deref().unwrap_or("daily") {
+        "daily" => ResearchFrequency::Daily,
+        "weekly" => ResearchFrequency::Weekly,
+        "monthly" => ResearchFrequency::Monthly,
+        other => return Err(format!("未知频率：{other}")),
+    };
+    let missing_policy = match args.missing_policy.as_deref().unwrap_or("drop") {
+        "drop" => MissingValuePolicy::Drop,
+        "forward_fill" => MissingValuePolicy::ForwardFill,
+        "zero" => MissingValuePolicy::Zero,
+        other => return Err(format!("未知缺失值处理：{other}")),
+    };
+    let fdr_method = match args.fdr_method.as_deref().unwrap_or("benjamini_hochberg") {
+        "benjamini_hochberg" => FdrMethod::BenjaminiHochberg,
+        "bonferroni" => FdrMethod::Bonferroni,
+        "none" => FdrMethod::None,
+        other => return Err(format!("未知多重检验方法：{other}")),
+    };
+    Ok(ResearchConfig {
+        symbols: args.symbols,
+        metric: parse_metric(args.metric)?,
+        value_mode,
+        frequency,
+        start_date: args.start_date,
+        end_date: args.end_date,
+        adjust: args.adjust.unwrap_or_else(|| "qfq".into()),
+        lookback_bars: args.lookback_bars.unwrap_or(750).clamp(60, 2_000),
+        missing_policy,
+        rolling_window: args.rolling_window.unwrap_or(60),
+        max_lag: args.max_lag.unwrap_or(5),
+        controls: args.controls.unwrap_or_default(),
+        bootstrap_reps: args.bootstrap_reps.unwrap_or(199),
+        permutation_reps: args.permutation_reps.unwrap_or(199),
+        alpha: 0.05,
+        fdr_method,
+        max_pairs: args.max_pairs.unwrap_or(2_000),
+        max_observations_per_pair: args.max_observations_per_pair.unwrap_or(500),
+        seed: args.seed.unwrap_or(42),
+        oos_ratio: 0.3,
+    })
+}
+
+/// Shared acquisition + deterministic calculation path used by the Agent
+/// and desktop Quant Lab. It has no hard timeout; cancellation is cooperative.
+pub async fn quant_research_json(
+    market: &dyn DataProvider,
+    storage: &astock_storage::Storage,
+    config: ResearchConfig,
+    progress: Option<QuantProgressReporter>,
+    cancelled: QuantCancellationCheck,
+) -> Result<ResearchSnapshot> {
+    let tool = "run_quant_research";
+    let symbols: Vec<Symbol> = config
+        .symbols
+        .iter()
+        .map(|raw| parse_symbol(tool, raw))
+        .collect::<Result<_>>()?;
+    let adjust = match config.adjust.to_ascii_lowercase().as_str() {
+        "qfq" => Adjust::Qfq,
+        "hfq" => Adjust::Hfq,
+        "none" => Adjust::None,
+        other => {
+            return Err(tool_err(
+                tool,
+                format!("复权方式只能是 qfq/hfq/none，收到 {other}"),
+            ))
+        }
+    };
+    let total = symbols.len();
+    let fetch_done = Arc::new(AtomicUsize::new(0));
+    let fetched: Vec<Result<SeriesInput>> = futures::stream::iter(symbols.into_iter().enumerate())
+        .map(|(index, symbol)| {
+            let progress = progress.clone();
+            let cancelled = cancelled.clone();
+            let fetch_done = fetch_done.clone();
+            async move {
+                if cancelled() {
+                    return Err(tool_err(tool, "研究已由用户取消"));
+                }
+                if let Some(report) = &progress {
+                    report(ResearchProgress {
+                        phase: "获取版本化行情".into(),
+                        done_pairs: index,
+                        total_pairs: total,
+                        current_pair: Some([symbol.code().to_string(), "行情数据".into()]),
+                        effective_observations: 0,
+                        message: format!("正在获取 {} 的日线与来源版本", symbol.code()),
+                    });
+                }
+                let response = market
+                    .kline(&symbol, KlinePeriod::Day, adjust, config.lookback_bars)
+                    .await?;
+                let completed = fetch_done.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+                if let Some(report) = &progress {
+                    report(ResearchProgress {
+                        phase: "获取版本化行情".into(),
+                        done_pairs: completed,
+                        total_pairs: total,
+                        current_pair: Some([symbol.code().to_string(), "行情数据".into()]),
+                        effective_observations: response.data.len(),
+                        message: format!(
+                            "{} 行情获取完成：{} 根日线，来源 {}",
+                            symbol.code(),
+                            response.data.len(),
+                            response.source
+                        ),
+                    });
+                }
+                let first = response
+                    .data
+                    .first()
+                    .map(|bar| bar.date.to_string())
+                    .unwrap_or_default();
+                let last = response
+                    .data
+                    .last()
+                    .map(|bar| bar.date.to_string())
+                    .unwrap_or_default();
+                let data_version = format!(
+                    "{}:{}:{}:{}:{}",
+                    response.source,
+                    response.fetched_at.to_rfc3339(),
+                    response.data.len(),
+                    first,
+                    last
+                );
+                Ok(SeriesInput {
+                    symbol: symbol.code().to_string(),
+                    dates: response
+                        .data
+                        .iter()
+                        .map(|bar| bar.date.to_string())
+                        .collect(),
+                    values: response.data.iter().map(|bar| bar.close).collect(),
+                    data_version,
+                })
+            }
+        })
+        .buffer_unordered(4)
+        .collect()
+        .await;
+    let mut inputs = Vec::new();
+    let mut errors = Vec::new();
+    for item in fetched {
+        match item {
+            Ok(input) => inputs.push(input),
+            Err(error) => errors.push(error.to_string()),
+        }
+    }
+    inputs.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+    if inputs.len() < 2 {
+        return Err(tool_err(
+            tool,
+            format!("可用行情不足两条：{}", errors.join("；")),
+        ));
+    }
+    let config_for_run = config.clone();
+    let report_for_run = progress.clone();
+    let cancel_for_run = cancelled.clone();
+    let snapshot = tokio::task::spawn_blocking(move || {
+        astock_quant::research::run_research_with_hooks(
+            &inputs,
+            &config_for_run,
+            |update| {
+                if let Some(report) = &report_for_run {
+                    report(update);
+                }
+            },
+            || cancel_for_run(),
+        )
+    })
+    .await
+    .map_err(|error| tool_err(tool, format!("研究工作线程异常：{error}")))?
+    .map_err(|error| tool_err(tool, error.to_string()))?;
+    let row = QuantResearchSnapshotRow {
+        snapshot_id: snapshot.snapshot_id.clone(),
+        function_version: snapshot.function_version.clone(),
+        metric: format!("{:?}", snapshot.config.metric).to_ascii_lowercase(),
+        symbols_json: serde_json::to_string(&snapshot.config.symbols)?,
+        data_versions_json: serde_json::to_string(&snapshot.data_versions)?,
+        config_json: serde_json::to_string(&snapshot.config)?,
+        snapshot_json: serde_json::to_string(&snapshot)?,
+        created_at: snapshot.created_at,
+    };
+    storage.quant_research_snapshot_put(row).await?;
+    Ok(snapshot)
+}
+
+// ---------------------------------------------------------------------
 // run_backtest
 // ---------------------------------------------------------------------
 
@@ -4564,6 +4910,59 @@ mod tests {
             )
             .await;
         assert!(matches!(bad, Err(AgentError::InvalidArgs { .. })));
+    }
+
+    #[tokio::test]
+    async fn quant_research_agent_and_ui_path_return_identical_numbers() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(StorageConfig::with_base_dir(dir.path())).unwrap();
+        let ctx = deep_ctx(storage.clone(), None);
+        let registry = crate::default_registry();
+        let tool_result = registry
+            .dispatch(
+                "run_quant_research",
+                json!({
+                    "symbols": ["600519", "000001", "600362"],
+                    "metric": "pearson",
+                    "value_mode": "log_return",
+                    "lookback_bars": 120,
+                    "bootstrap_reps": 99,
+                    "permutation_reps": 99,
+                    "fdr_method": "benjamini_hochberg",
+                    "seed": 2026
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let agent_snapshot: ResearchSnapshot =
+            serde_json::from_value(tool_result.full_json.unwrap()).unwrap();
+        let config = ResearchConfig {
+            symbols: vec!["600519".into(), "000001".into(), "600362".into()],
+            lookback_bars: 120,
+            bootstrap_reps: 99,
+            permutation_reps: 99,
+            seed: 2026,
+            ..ResearchConfig::default()
+        };
+        let ui_snapshot =
+            quant_research_json(&*ctx.market, &storage, config, None, Arc::new(|| false))
+                .await
+                .unwrap();
+        assert_eq!(agent_snapshot.results.len(), 3);
+        assert_eq!(
+            serde_json::to_value(&agent_snapshot.results).unwrap(),
+            serde_json::to_value(&ui_snapshot.results).unwrap()
+        );
+        assert!(agent_snapshot
+            .results
+            .iter()
+            .all(|row| row.adjusted_p_value.is_some() && row.effective_n > 30));
+        let persisted = storage
+            .quant_research_snapshot_get(&agent_snapshot.snapshot_id)
+            .await
+            .unwrap();
+        assert!(persisted.is_some());
     }
 
     #[tokio::test]
