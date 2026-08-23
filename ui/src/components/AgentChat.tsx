@@ -84,7 +84,7 @@ const TOOL_GROUPS = [
   },
   {
     label: "基本面与估值",
-    tools: ["get_fundamentals", "run_valuation"],
+    tools: ["get_fundamentals", "analyze_earnings_drivers", "run_valuation"],
   },
   {
     label: "扫描与横向比较",

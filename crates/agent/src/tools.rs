@@ -360,7 +360,9 @@ fn dataset_for_tool(name: &str, args: &Value) -> DatasetKind {
         "compute_indicators" | "run_full_analysis" | "run_chanlun" | "compare_stocks"
         | "scan_market" | "get_market_regime" => DatasetKind::DailyKline,
         "get_fund_flow" => DatasetKind::FundFlow,
-        "get_fundamentals" | "run_joinquant_research" => DatasetKind::Fundamentals,
+        "get_fundamentals" | "analyze_earnings_drivers" | "run_joinquant_research" => {
+            DatasetKind::Fundamentals
+        }
         "run_valuation" => DatasetKind::Valuation,
         "research_news" => DatasetKind::News,
         "research_disclosures"
@@ -473,11 +475,11 @@ fn quality_for_result(
             format!("检测到 {conflicts} 个未解决的跨源冲突"),
         ));
     }
-    if name == "run_valuation" {
+    if matches!(name, "run_valuation" | "analyze_earnings_drivers") {
         flags.push(QualityFlag::warning(
             QualityFlagCode::Unverified,
             None,
-            "本次 Agent 估值未在同一工具内完成独立估值源对账，置信上限降为中等",
+            "本次盈利/估值分析未在同一工具内完成独立预测源对账，置信上限降为中等",
         ));
     }
     if matches!(name, "run_backtest" | "iterate_strategy") {

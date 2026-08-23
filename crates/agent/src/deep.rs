@@ -34,7 +34,10 @@ use astock_fundamental::model::{
     BalanceSheet, CashFlowStatement, FundamentalBundle, IncomeStatement, PeriodMeta, ReportType,
     ValuationPoint,
 };
-use astock_fundamental::{anomaly, metrics, scores, valuation, FundamentalClient};
+use astock_fundamental::{
+    anomaly, apply_driver_shocks, build_earnings_driver_tree, metrics, parameter_snapshot_id,
+    scores, valuation, DriverShock, FundamentalClient,
+};
 use astock_global_intelligence::{global_a_share_golden_chains, GlobalDocumentQuery, GlobalStore};
 use astock_graph::{
     Engine as GraphEngine, Event, GraphStore, ImpactEntry, ImpactReport, Node, Relation,
@@ -2553,6 +2556,7 @@ pub fn valuation_full_json(
     }
     json!({
         "symbol": symbol.code(),
+        "parameter_snapshot_id": parameter_snapshot_id(symbol.code(), bundle),
         "current": current,
         "percentile": percentile,
         "dcf": dcf,
@@ -2599,6 +2603,159 @@ fn valuation_summary(full: &Value) -> Value {
         "missing": full["missing"],
         "note": "分位为 0–100；DCF 单位为元/股；完整敏感性与方法标注见缓存",
     })
+}
+
+// ---------------------------------------------------------------------
+// analyze_earnings_drivers
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct EarningsDriverShockArgs {
+    /// 冲击类型：volume/product_price/revenue/capacity/raw_material/energy/transport/fx/opex/working_capital
+    kind: String,
+    /// 变化幅度，小数表示（0.10=上涨10%，-0.10=下降10%）
+    magnitude: f64,
+    /// 预计传导滞后月数
+    #[serde(default)]
+    lag_months: u32,
+    /// 可选传导/对冲比例（0–1）；原料冲击表示成本向售价传导比例
+    pass_through: Option<f64>,
+    /// 支撑本次冲击的不可变证据版本编号
+    evidence_version_id: Option<String>,
+    /// 假设说明
+    note: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct EarningsDriverArgs {
+    /// 6位证券代码
+    symbol: String,
+    /// 可选经营/供应链冲击；不传则只构建盈利驱动树
+    #[serde(default)]
+    shocks: Vec<EarningsDriverShockArgs>,
+}
+
+/// Evidence-bound earnings tree, scenario analysis and event-to-financial bridge.
+pub struct AnalyzeEarningsDrivers;
+
+#[async_trait]
+impl AgentTool for AnalyzeEarningsDrivers {
+    fn name(&self) -> &'static str {
+        "analyze_earnings_drivers"
+    }
+
+    fn description(&self) -> &'static str {
+        "构建可追溯盈利驱动树：按金融/地产/资源/制造/消费/软件适配收入与成本公式，区分历史事实、指引、共识和假设；输出 Bull/Base/Bear、双变量敏感性、确定性 Monte Carlo、现价隐含 FCF 增速，并可把供应链冲击桥接到收入/毛利/EPS/现金流。缺少分部数据时只给区间或拒绝精确 EPS"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        schema_value::<EarningsDriverArgs>()
+    }
+
+    fn cache_ttl_secs(&self) -> i64 {
+        3600
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
+        let args: EarningsDriverArgs = parse_args(self.name(), args)?;
+        if args.shocks.len() > 20 {
+            return Err(tool_err(self.name(), "单次最多计算 20 个冲击"));
+        }
+        let symbol = parse_symbol(self.name(), &args.symbol)?;
+        let client = require_fundamental(ctx, self.name())?;
+        let outcome = client.bundle(&symbol).await;
+        let tree = build_earnings_driver_tree(symbol.code(), &outcome.bundle, now_secs());
+        let shocks: Vec<DriverShock> = args
+            .shocks
+            .into_iter()
+            .map(|shock| DriverShock {
+                kind: shock.kind,
+                magnitude: shock.magnitude,
+                lag_months: shock.lag_months,
+                pass_through: shock.pass_through,
+                evidence_version_id: shock.evidence_version_id,
+                note: shock.note,
+            })
+            .collect();
+        let bridge = (!shocks.is_empty()).then(|| apply_driver_shocks(&tree, &shocks));
+
+        let stored_tree = tree.clone();
+        ctx.storage
+            .run(move |conn| {
+                conn.execute(
+                    "INSERT OR IGNORE INTO earnings_driver_snapshots
+                     (snapshot_id,parameter_snapshot_id,symbol,model_version,report_period,
+                      knowledge_time,tree_json,created_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                    rusqlite::params![
+                        stored_tree.snapshot_id,
+                        stored_tree.parameter_snapshot_id,
+                        stored_tree.symbol,
+                        stored_tree.model_version,
+                        stored_tree.report_period,
+                        stored_tree.knowledge_time,
+                        serde_json::to_string(&stored_tree)?,
+                        now_secs(),
+                    ],
+                )?;
+                Ok(())
+            })
+            .await?;
+        if let Some(stored) = bridge.clone() {
+            ctx.storage
+                .run(move |conn| {
+                    let evidence_ids: Vec<&str> = stored
+                        .shocks
+                        .iter()
+                        .filter_map(|shock| shock.evidence_version_id.as_deref())
+                        .collect();
+                    conn.execute(
+                        "INSERT OR IGNORE INTO earnings_driver_shock_bridges
+                         (bridge_id,base_snapshot_id,evidence_version_ids_json,shocks_json,bridge_json,created_at)
+                         VALUES (?1,?2,?3,?4,?5,?6)",
+                        rusqlite::params![
+                            stored.shocked_snapshot_id,
+                            stored.base_snapshot_id,
+                            serde_json::to_string(&evidence_ids)?,
+                            serde_json::to_string(&stored.shocks)?,
+                            serde_json::to_string(&stored)?,
+                            now_secs(),
+                        ],
+                    )?;
+                    Ok(())
+                })
+                .await?;
+        }
+
+        let summary = json!({
+            "symbol": tree.symbol,
+            "snapshot_id": tree.snapshot_id,
+            "parameter_snapshot_id": tree.parameter_snapshot_id,
+            "industry_template": tree.industry_template_label,
+            "report_period": tree.report_period,
+            "scenarios": tree.scenarios,
+            "monte_carlo": tree.monte_carlo,
+            "implied_assumption": tree.implied_assumption,
+            "exact_eps_available": tree.quality.exact_eps_available,
+            "model_completeness": tree.quality.model_completeness,
+            "missing_core_drivers": tree.quality.missing_core_drivers,
+            "refusal_reason": tree.quality.refusal_reason,
+            "shock_delta": bridge.as_ref().and_then(|value| value.delta.clone()),
+            "note": "每个预测行的公式、参数来源、报告期、单位、置信区间和完整敏感性数据均在缓存详情；区间不是收益概率",
+        });
+        let full = json!({
+            "tree": tree,
+            "shock_bridge": bridge,
+            "fetch_failures": outcome.failures,
+        });
+        Ok(ToolResult {
+            summary_json: summary,
+            full_json: Some(full),
+            cache_key: String::new(),
+            source: "eastmoney_f10+earnings_driver_engine".into(),
+            fetched_at: now_rfc3339(),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -3948,6 +4105,10 @@ mod tests {
     fn valuation_full_and_overrides() {
         let sym = Symbol::new("600519").unwrap();
         let full = valuation_full_json(&sym, &sample_bundle(), None, None, &[]);
+        assert_eq!(
+            full["parameter_snapshot_id"],
+            json!(parameter_snapshot_id("600519", &sample_bundle()))
+        );
         assert_eq!(full["current"]["pe_ttm"], json!(20.0));
         assert_eq!(full["current"]["ps_ttm"], json!(5.0));
         // PE history 18..=27, current 20 → 3 of 10 ≤ 20 → 30%.

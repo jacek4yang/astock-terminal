@@ -66,6 +66,9 @@
 - `graph_edge_timeline(identity_id) -> EdgeRevision[]` — 稳定关系身份下的全部不可变修订。
 - `graph_snapshot_get(snapshot_id) -> GraphSnapshot?` — 按确定性 ID 重放；相同输入无法得到相同 ID 时拒绝。
 - `graph_snapshot_diff(left_business_time, left_knowledge_time, right_business_time, right_knowledge_time) -> GraphSnapshotDiff` — 新增/移除 revision 与发生变化的关系身份。历史研究和事件回测必须显式绑定 knowledge-time 快照。
+- `get_earnings_driver_tree(symbol) -> EarningsDriverTree` — 行业适配的可追溯盈利驱动树、参数快照、三情景、敏感性、Monte Carlo 与隐含假设。
+- `run_earnings_driver_shock(symbol, shocks) -> ShockBridge` — 经营/供应链冲击到收入、毛利、EPS、经营现金流和自由现金流的桥接。
+- `get_earnings_driver_snapshot(snapshot_id) -> EarningsDriverTree` — 回放不可变盈利驱动快照，不重新取数。
 - `supply_chain_shock(subject, direction: "up"|"down"(支持涨/跌), magnitude_pct?) -> ShockJson` — 事件沿供应链传导:一二级受益/受损 + 逻辑链/滞后/置信度
 - `relationship_graph(symbols: string[2-12], window_days?: 60-500, 默认 250) -> GraphJson` — 日收益 Pearson + lead-lag 关系网络
 - `run_backtest(symbol?, strategy?, params?, pool?, fast?, slow?, entry_n?, exit_n?, bars?: 60-2000, 默认 750) -> BacktestJson` — 日线回测(A 股交易规则),返回绩效/净值曲线/最近 50 笔交易

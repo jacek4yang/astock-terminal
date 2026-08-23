@@ -109,6 +109,9 @@ pub fn run() {
             // 基本面分析
             commands::fundamental::get_fundamentals,
             commands::fundamental::get_valuation,
+            commands::fundamental::get_earnings_driver_tree,
+            commands::fundamental::run_earnings_driver_shock,
+            commands::fundamental::get_earnings_driver_snapshot,
             // 深度分析引擎
             commands::deep::graph_subgraph,
             commands::deep::graph_as_of,

@@ -1290,6 +1290,38 @@ pub(crate) const MIGRATIONS: &[(u32, &str)] = &[
       FROM graph_edges;
     "#,
     ),
+    (
+        19,
+        r#"
+    -- Immutable earnings-driver snapshots bind every forecast, scenario and
+    -- valuation to one exact statement/assumption parameter set.
+    CREATE TABLE IF NOT EXISTS earnings_driver_snapshots (
+        snapshot_id           TEXT PRIMARY KEY,
+        parameter_snapshot_id TEXT NOT NULL,
+        symbol                TEXT NOT NULL,
+        model_version         TEXT NOT NULL,
+        report_period         TEXT,
+        knowledge_time        INTEGER NOT NULL,
+        tree_json             TEXT NOT NULL,
+        created_at            INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_earnings_driver_symbol
+        ON earnings_driver_snapshots(symbol,knowledge_time DESC);
+    CREATE INDEX IF NOT EXISTS idx_earnings_driver_parameter_snapshot
+        ON earnings_driver_snapshots(parameter_snapshot_id);
+
+    CREATE TABLE IF NOT EXISTS earnings_driver_shock_bridges (
+        bridge_id             TEXT PRIMARY KEY,
+        base_snapshot_id      TEXT NOT NULL REFERENCES earnings_driver_snapshots(snapshot_id),
+        evidence_version_ids_json TEXT NOT NULL DEFAULT '[]',
+        shocks_json           TEXT NOT NULL,
+        bridge_json           TEXT NOT NULL,
+        created_at            INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_earnings_driver_bridge_base
+        ON earnings_driver_shock_bridges(base_snapshot_id,created_at DESC);
+    "#,
+    ),
 ];
 
 /// Current unix time in seconds. All timestamps in this crate are stored as
@@ -1474,6 +1506,8 @@ mod tests {
             "graph_revalidation_events",
             "graph_entity_merges",
             "graph_snapshot_records",
+            "earnings_driver_snapshots",
+            "earnings_driver_shock_bridges",
         ] {
             let count: i64 = conn
                 .query_row(

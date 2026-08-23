@@ -1547,6 +1547,7 @@ export interface ValuationHistoryPoint {
 
 /** get_valuation 返回;各 section 可能整体缺失 */
 export interface ValuationJson {
+  parameter_snapshot_id: string;
   current: ValuationCurrent | null;
   percentile: ValuationPercentile | null;
   dcf: DcfValuation | null;
@@ -1556,6 +1557,168 @@ export interface ValuationJson {
 export const getFundamentals = (symbol: string) =>
   cmd<FundamentalsJson>("get_fundamentals", { symbol });
 export const getValuation = (symbol: string) => cmd<ValuationJson>("get_valuation", { symbol });
+
+export type DriverValueOrigin =
+  | "historical_fact"
+  | "management_guidance"
+  | "market_consensus"
+  | "user_assumption"
+  | "agent_assumption"
+  | "industry_prior";
+
+export interface DriverEvidence {
+  source_version_id: string;
+  source_name: string;
+  report_period: string | null;
+  announced_date: string | null;
+  locator: string;
+  unit: string;
+  confidence_low: number;
+  confidence_high: number;
+}
+
+export interface DriverParameter {
+  id: string;
+  name: string;
+  category: string;
+  value: number | null;
+  low: number | null;
+  high: number | null;
+  unit: string;
+  origin: DriverValueOrigin;
+  report_period: string | null;
+  confidence: number;
+  evidence: DriverEvidence[];
+  note: string;
+}
+
+export interface DriverFormulaNode {
+  id: string;
+  name: string;
+  formula: string;
+  parameter_ids: string[];
+  unit: string;
+  historical_value: number | null;
+  forecast_low: number | null;
+  forecast_base: number | null;
+  forecast_high: number | null;
+}
+
+export interface DriverBranch {
+  id: string;
+  label: string;
+  dimension: string;
+  formula: string;
+  status: string;
+  parameter_ids: string[];
+  children: DriverBranch[];
+}
+
+export interface DriverScenario {
+  scenario: "bear" | "base" | "bull" | string;
+  revenue: number;
+  gross_profit: number;
+  operating_profit: number;
+  tax: number;
+  minority_profit: number;
+  parent_net_profit: number;
+  eps: number | null;
+  operating_cash_flow: number;
+  capex: number;
+  free_cash_flow: number;
+}
+
+export interface DriverSensitivityCell {
+  revenue_growth: number;
+  gross_margin: number;
+  eps: number | null;
+  free_cash_flow: number;
+}
+
+export interface EarningsDriverTree {
+  snapshot_id: string;
+  parameter_snapshot_id: string;
+  model_version: string;
+  symbol: string;
+  company_name: string | null;
+  industry: string | null;
+  industry_template: string;
+  industry_template_label: string;
+  revenue_formula: string;
+  cost_formula: string;
+  report_period: string | null;
+  knowledge_time: number;
+  golden_template_reviewed: boolean;
+  parameters: DriverParameter[];
+  revenue_tree: DriverBranch;
+  cost_tree: DriverBranch;
+  formula_nodes: DriverFormulaNode[];
+  scenarios: DriverScenario[];
+  sensitivity: DriverSensitivityCell[];
+  monte_carlo: {
+    samples: number;
+    seed: number;
+    eps_p10: number | null;
+    eps_p50: number | null;
+    eps_p90: number | null;
+    fcf_p10: number;
+    fcf_p50: number;
+    fcf_p90: number;
+    method: string;
+  } | null;
+  implied_assumption: {
+    current_price: number | null;
+    implied_fcf_growth: number | null;
+    search_low: number;
+    search_high: number;
+    wacc: number;
+    terminal_growth: number;
+    explanation: string;
+  };
+  quality: {
+    exact_eps_available: boolean;
+    model_completeness: number;
+    missing_core_drivers: string[];
+    refusal_reason: string | null;
+    warnings: string[];
+  };
+  provenance_legend: Record<string, string>;
+}
+
+export interface DriverShockInput {
+  kind: string;
+  magnitude: number;
+  lag_months: number;
+  pass_through?: number | null;
+  evidence_version_id?: string | null;
+  note?: string | null;
+}
+
+export interface EarningsShockBridge {
+  base_snapshot_id: string;
+  shocked_snapshot_id: string;
+  shocks: DriverShockInput[];
+  base: DriverScenario | null;
+  shocked: DriverScenario | null;
+  delta: {
+    revenue: number;
+    gross_profit: number;
+    operating_profit: number;
+    parent_net_profit: number;
+    eps: number | null;
+    operating_cash_flow: number;
+    free_cash_flow: number;
+  } | null;
+  changed_parameters: DriverParameter[];
+  warnings: string[];
+}
+
+export const getEarningsDriverTree = (symbol: string) =>
+  cmd<EarningsDriverTree>("get_earnings_driver_tree", { symbol });
+export const getEarningsDriverSnapshot = (snapshotId: string) =>
+  cmd<EarningsDriverTree>("get_earnings_driver_snapshot", { snapshot_id: snapshotId });
+export const runEarningsDriverShock = (symbol: string, shocks: DriverShockInput[]) =>
+  cmd<EarningsShockBridge>("run_earnings_driver_shock", { symbol, shocks });
 
 // ==================== 扫描 ====================
 

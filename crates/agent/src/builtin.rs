@@ -1481,6 +1481,7 @@ pub fn default_registry() -> ToolRegistry {
         Arc::new(GetCachedDetail),
         Arc::new(crate::deep::GetFundamentals),
         Arc::new(crate::deep::RunValuation),
+        Arc::new(crate::deep::AnalyzeEarningsDrivers),
         Arc::new(crate::deep::GetIndustryChain),
         Arc::new(crate::deep::RunSupplyChainShock),
         Arc::new(crate::deep::BuildRelationshipGraph),
@@ -1725,7 +1726,7 @@ mod tests {
     #[tokio::test]
     async fn tool_schemas_are_valid() {
         let registry = default_registry();
-        assert_eq!(registry.len(), 31);
+        assert_eq!(registry.len(), 32);
         let mut names = Vec::new();
         for spec in registry.specs() {
             assert_eq!(spec.kind, "function");
@@ -1761,6 +1762,7 @@ mod tests {
             "get_cached_detail",
             "get_fundamentals",
             "run_valuation",
+            "analyze_earnings_drivers",
             "get_industry_chain",
             "run_supply_chain_shock",
             "build_relationship_graph",

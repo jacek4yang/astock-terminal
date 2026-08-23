@@ -28,6 +28,7 @@ export const DEFAULT_AGENT_TOOLS = [
   "get_watchlist",
   "get_cached_detail",
   "get_fundamentals",
+  "analyze_earnings_drivers",
   "run_valuation",
   "get_industry_chain",
   "run_supply_chain_shock",

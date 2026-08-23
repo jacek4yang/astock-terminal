@@ -2128,6 +2128,7 @@ fn tool_estimated_secs(name: &str) -> u64 {
         "scan_market" | "run_backtest" | "iterate_strategy" | "run_joinquant_research" => 180,
         "get_fundamentals"
         | "run_valuation"
+        | "analyze_earnings_drivers"
         | "compare_stocks"
         | "research_news"
         | "research_disclosures"
@@ -2152,6 +2153,7 @@ fn tool_progress_stage(name: &str, elapsed_ms: u64, estimated_ms: u64) -> &'stat
         "compare_stocks" => "并行获取各标的数据，已完成结果会立即保留",
         "run_full_analysis" => "汇总行情、资金与市场环境并运行信号引擎",
         "get_fundamentals" | "run_valuation" => "读取财务报表并校验关键字段",
+        "analyze_earnings_drivers" => "连接经营驱动、利润表、现金流与估值，并传播参数区间",
         "run_backtest" | "iterate_strategy" => "执行有上限的历史计算与稳健性检验",
         "run_joinquant_research" => "等待聚宽研究环境并执行受限数据模板",
         "research_news" => "并行读取多家财经快讯并核验可用的个股事件",
