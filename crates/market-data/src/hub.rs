@@ -15,7 +15,7 @@
 //! - a per-provider [`CircuitBreaker`] skips providers whose circuit is Open
 //!   (e.g. the WAF-blocked Tencent endpoint) instead of paying the failing
 //!   attempt on every request — see [`crate::breaker`];
-//! - single-flight request coalescing: concurrent identical kline/quote
+//! - single-flight request coalescing: concurrent identical stock/index kline and quote
 //!   calls share one in-flight upstream request (the stock page fires 3+
 //!   identical kline fetches for the K线图 / 信号卡 / 缠论 views);
 //! - `tracing::debug!` timing for every upstream attempt
@@ -93,6 +93,7 @@ struct Inner {
     tdx: Arc<TdxProvider>,
     security_master: Arc<SecurityMaster>,
     kline_inflight: DashMap<String, SharedKline>,
+    index_kline_inflight: DashMap<String, SharedKline>,
     quote_inflight: DashMap<String, SharedQuote>,
 }
 
@@ -118,6 +119,7 @@ impl Inner {
             tdx,
             security_master,
             kline_inflight: DashMap::new(),
+            index_kline_inflight: DashMap::new(),
             quote_inflight: DashMap::new(),
         })
     }
@@ -345,6 +347,10 @@ impl Inner {
 
 fn kline_cache_key(symbol: &Symbol, period: KlinePeriod, adjust: Adjust, count: u32) -> String {
     format!("kline_{symbol}_{count}_{period:?}_{adjust:?}")
+}
+
+fn index_kline_cache_key(index_secid: &str, count: u32) -> String {
+    format!("index_kline_{index_secid}_{count}")
 }
 
 /// Composite market-data facade: kline failover + breaker + single-flight,
@@ -631,37 +637,56 @@ impl DataProvider for MarketData {
         index_secid: &str,
         count: u32,
     ) -> Result<Fetched<Vec<Bar>>, DataError> {
-        // EastMoney first (fqt=0, daily); Tencent plain `day` key as fallback.
-        match self.eastmoney.index_kline(index_secid, count).await {
-            Ok(Fetched {
-                data,
-                source,
-                fetched_at,
-            }) => {
-                let validated = filter_valid_index_bars(index_secid, data);
-                Ok(Fetched {
-                    data: validated,
-                    source,
-                    fetched_at,
-                })
-            }
-            Err(e) => {
-                debug!(error = %e, index_secid, "EM index kline failed, trying tencent");
-                let index_code = index_secid.split('.').next_back().unwrap_or(index_secid);
-                let bars = self.tencent.index_kline(index_code, count).await?;
-                let validated = filter_valid_index_bars(index_secid, bars);
-                // Accept short answers when the caller asked for few bars
-                // (e.g. index cards request only the last 2 bars).
-                let required = (count as usize).min(10);
-                if validated.len() < required {
-                    return Err(DataError::Empty(format!(
-                        "index kline {index_secid}: {} bars",
-                        validated.len()
-                    )));
-                }
-                Ok(Fetched::now(validated, Source::Tencent))
-            }
+        let cache_key = index_kline_cache_key(index_secid, count);
+        if let Some(hit) = self.cache.get::<Fetched<Vec<Bar>>>(&cache_key, ttl::KLINE) {
+            return Ok(hit);
         }
+
+        // A multi-stock analysis asks for the same market index once per
+        // symbol. Coalesce those calls before they reach the adaptive host
+        // limiter; otherwise one slow host can create a 30-second staircase of
+        // duplicate requests that all return identical data.
+        let eastmoney = self.eastmoney.clone();
+        let tencent = self.tencent.clone();
+        let cache = self.cache.clone();
+        let index_secid = index_secid.to_string();
+        let sf_key = format!("index_kline|{index_secid}|{count}");
+        single_flight(&self.inner.index_kline_inflight, sf_key, move || {
+            async move {
+                // EastMoney first (fqt=0, daily); Tencent plain `day` key as fallback.
+                let fetched = match eastmoney.index_kline(&index_secid, count).await {
+                    Ok(Fetched {
+                        data,
+                        source,
+                        fetched_at,
+                    }) => Fetched {
+                        data: filter_valid_index_bars(&index_secid, data),
+                        source,
+                        fetched_at,
+                    },
+                    Err(error) => {
+                        debug!(%error, %index_secid, "EM index kline failed, trying tencent");
+                        let index_code = index_secid.split('.').next_back().unwrap_or(&index_secid);
+                        let bars = tencent.index_kline(index_code, count).await?;
+                        let validated = filter_valid_index_bars(&index_secid, bars);
+                        // Accept short answers when the caller asked for few bars
+                        // (e.g. index cards request only the last 2 bars).
+                        let required = (count as usize).min(10);
+                        if validated.len() < required {
+                            return Err(DataError::Empty(format!(
+                                "index kline {index_secid}: {} bars",
+                                validated.len()
+                            )));
+                        }
+                        Fetched::now(validated, Source::Tencent)
+                    }
+                };
+                cache.set(&index_kline_cache_key(&index_secid, count), &fetched);
+                Ok(fetched)
+            }
+            .boxed()
+        })
+        .await
     }
 }
 

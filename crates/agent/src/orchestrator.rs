@@ -25,8 +25,8 @@ use crate::backend::ChatBackend;
 use crate::error::{AgentError, Result};
 use crate::prompt::initial_messages_with_context;
 use crate::report::{
-    assemble_report, index_tool_evidence, report_versions, AgentReport, ClaimConfidence, Evidence,
-    VerificationStatus,
+    assemble_report, index_tool_evidence, report_versions, verified_subset_answer, AgentReport,
+    ClaimConfidence, Evidence, VerificationStatus,
 };
 use crate::tools::{now_secs, ToolContext, ToolProgressDetail, ToolRegistry};
 
@@ -981,6 +981,33 @@ impl AgentEngine {
                                 tracing::warn!(%error, attempt, "verified-answer repair failed");
                                 break;
                             }
+                        }
+                    }
+                }
+                if !awaiting_user_input
+                    && report.research.verification.status == VerificationStatus::Failed
+                {
+                    // A long research run can contain both well-supported and
+                    // unsupported model prose. If two repair passes still
+                    // fail, publish the independently verified subset instead
+                    // of hiding all successful evidence behind a terminal
+                    // error. The fallback itself is assembled and verified
+                    // again before it can be shown.
+                    if let Some(subset) = verified_subset_answer(&report) {
+                        let candidate =
+                            assemble_report(&task_id, &subset, state.evidence.clone(), now_secs());
+                        if candidate.research.verification.passed() {
+                            send(
+                                &tx,
+                                AgentEvent::TextReset {
+                                    message:
+                                        "自动修订仍有证据缺口，已切换为仅发布通过校验的部分结论"
+                                            .to_string(),
+                                },
+                            );
+                            clean_text = subset;
+                            assistant = ChatMessage::assistant(clean_text.clone());
+                            report = candidate;
                         }
                     }
                 }

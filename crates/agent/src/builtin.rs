@@ -195,6 +195,8 @@ struct AnalysisInputs {
     index: Option<Vec<tech::Kline>>,
     source: String,
     fetched_at: String,
+    upstream_records: usize,
+    context_diagnostics: Vec<String>,
 }
 
 fn attach_agent_manual_plan(signal: &mut Value, symbol: &Symbol, inputs: &AnalysisInputs) {
@@ -261,7 +263,23 @@ async fn fetch_analysis_inputs(
     period: astock_core::KlinePeriod,
     count: u32,
     with_context: bool,
+    detailed_progress: bool,
 ) -> Result<AnalysisInputs> {
+    if detailed_progress {
+        ctx.report_progress(ToolProgressDetail {
+            completed: 0,
+            total: 6,
+            succeeded: 0,
+            failed: 0,
+            cache_hits: 0,
+            records: 0,
+            active: vec![ToolWorkItem {
+                label: format!("{} 日 K 线", symbol.code()),
+                stage: format!("正在获取并校验 {count} 根复权行情；失败时自动切换备用来源"),
+            }],
+            recent_errors: Vec::new(),
+        });
+    }
     let fetched = ctx
         .market
         .kline(symbol, period, astock_core::Adjust::Qfq, count)
@@ -278,22 +296,79 @@ async fn fetch_analysis_inputs(
     }
     let (source, fetched_at) = provenance(&fetched);
     let klines = to_tech_klines(&fetched.data);
+    let mut upstream_records = klines.len();
+    let mut context_diagnostics = Vec::new();
 
     let (quote, flows, index) = if with_context {
         // These three sources are independent. Running them sequentially made
         // a comparison pay the sum of every upstream latency for every stock;
         // joining them bounds the context phase by the slowest one instead.
-        let (quote, flows, index) = tokio::join!(
+        if detailed_progress {
+            ctx.report_progress(ToolProgressDetail {
+                completed: 1,
+                total: 6,
+                succeeded: 1,
+                failed: 0,
+                cache_hits: 0,
+                records: upstream_records,
+                active: vec![
+                    ToolWorkItem {
+                        label: format!("{} 实时行情", symbol.code()),
+                        stage: "正在读取价格、涨跌幅和成交状态".into(),
+                    },
+                    ToolWorkItem {
+                        label: format!("{} 资金流", symbol.code()),
+                        stage: "正在读取最近 30 日主力资金流向".into(),
+                    },
+                    ToolWorkItem {
+                        label: "上证指数环境".into(),
+                        stage: format!("正在读取并校验 {count} 根指数 K 线"),
+                    },
+                ],
+                recent_errors: Vec::new(),
+            });
+        }
+        let (quote_result, flows_result, index_result) = tokio::join!(
             ctx.market.quote(symbol),
             ctx.market.fund_flow_daily(symbol, 30),
             ctx.market.index_kline("1.000001", count),
         );
+        let succeeded = usize::from(quote_result.is_ok())
+            + usize::from(flows_result.is_ok())
+            + usize::from(index_result.is_ok());
+        if let Err(error) = &quote_result {
+            context_diagnostics.push(format!("实时行情暂不可用：{error}"));
+        }
+        if let Err(error) = &flows_result {
+            context_diagnostics.push(format!("资金流暂不可用：{error}"));
+        }
+        if let Err(error) = &index_result {
+            context_diagnostics.push(format!("指数环境暂不可用：{error}"));
+        }
+        upstream_records += quote_result.as_ref().map_or(0, |_| 1);
+        upstream_records += flows_result.as_ref().map_or(0, |value| value.data.len());
+        upstream_records += index_result.as_ref().map_or(0, |value| value.data.len());
+        if detailed_progress {
+            ctx.report_progress(ToolProgressDetail {
+                completed: 4,
+                total: 6,
+                succeeded: 1 + succeeded,
+                failed: 3 - succeeded,
+                cache_hits: 0,
+                records: upstream_records,
+                active: vec![ToolWorkItem {
+                    label: "全市场涨跌环境".into(),
+                    stage: "准备读取上涨、下跌和平盘家数；失败时以中性环境继续".into(),
+                }],
+                recent_errors: context_diagnostics.clone(),
+            });
+        }
         (
-            quote.ok().map(|q| to_tech_quote(&q.data)),
-            flows
+            quote_result.ok().map(|q| to_tech_quote(&q.data)),
+            flows_result
                 .ok()
                 .map(|f| f.data.iter().map(to_tech_flow).collect::<Vec<_>>()),
-            index.ok().map(|f| to_tech_klines(&f.data)),
+            index_result.ok().map(|f| to_tech_klines(&f.data)),
         )
     } else {
         (None, None, None)
@@ -305,6 +380,8 @@ async fn fetch_analysis_inputs(
         index,
         source,
         fetched_at,
+        upstream_records,
+        context_diagnostics,
     })
 }
 
@@ -588,13 +665,35 @@ impl AgentTool for RunFullAnalysis {
             .unwrap_or(250)
             .clamp(MIN_ANALYSIS_BARS as u32, 500);
 
-        let inputs = fetch_analysis_inputs(ctx, self.name(), &symbol, period, count, true).await?;
-        let breadth = ctx
-            .market
-            .market_breadth()
-            .await
-            .ok()
-            .map(|b| to_tech_breadth(&b.data));
+        let mut inputs =
+            fetch_analysis_inputs(ctx, self.name(), &symbol, period, count, true, true).await?;
+        let breadth_result = ctx.market.market_breadth().await;
+        let breadth = match breadth_result {
+            Ok(value) => {
+                inputs.upstream_records += 1;
+                Some(to_tech_breadth(&value.data))
+            }
+            Err(error) => {
+                inputs
+                    .context_diagnostics
+                    .push(format!("市场宽度暂不可用：{error}"));
+                None
+            }
+        };
+        let failed = inputs.context_diagnostics.len();
+        ctx.report_progress(ToolProgressDetail {
+            completed: 5,
+            total: 6,
+            succeeded: 5usize.saturating_sub(failed),
+            failed,
+            cache_hits: 0,
+            records: inputs.upstream_records,
+            active: vec![ToolWorkItem {
+                label: format!("{} 确定性信号引擎", symbol.code()),
+                stage: "正在计算趋势、形态、量价、突破、CANSLIM 与人工交易计划".into(),
+            }],
+            recent_errors: inputs.context_diagnostics.clone(),
+        });
         let mut signal = run_engine(&inputs, breadth.as_ref());
         attach_agent_manual_plan(&mut signal, &symbol, &inputs);
 
@@ -602,7 +701,21 @@ impl AgentTool for RunFullAnalysis {
         if let Some(obj) = summary.as_object_mut() {
             obj.insert("symbol".into(), json!(symbol.code()));
             obj.insert("period".into(), json!(format!("{period:?}")));
+            obj.insert("data_diagnostics".into(), json!(inputs.context_diagnostics));
         }
+        if let Some(object) = signal.as_object_mut() {
+            object.insert("data_diagnostics".into(), json!(inputs.context_diagnostics));
+        }
+        ctx.report_progress(ToolProgressDetail {
+            completed: 6,
+            total: 6,
+            succeeded: 6usize.saturating_sub(failed),
+            failed,
+            cache_hits: 0,
+            records: inputs.upstream_records,
+            active: Vec::new(),
+            recent_errors: inputs.context_diagnostics.clone(),
+        });
         Ok(ToolResult {
             summary_json: summary,
             full_json: Some(signal),
@@ -993,6 +1106,7 @@ impl AgentTool for CompareStocks {
                             astock_core::KlinePeriod::Day,
                             250,
                             true,
+                            false,
                         )
                         .await?;
                         let signal = run_engine(&inputs, breadth.as_ref().as_ref());
@@ -1287,6 +1401,7 @@ impl ScanMarket {
             &symbol,
             astock_core::KlinePeriod::Day,
             250,
+            false,
             false,
         )
         .await?;
@@ -1908,6 +2023,53 @@ mod tests {
         let full = r.full_json.unwrap();
         assert!(full.get("trend").is_some());
         assert!(full.get("canslim").is_some());
+    }
+
+    #[tokio::test]
+    async fn run_full_analysis_reports_each_upstream_and_engine_stage() {
+        let (_dir, ctx) = test_ctx();
+        let snapshots = Arc::new(std::sync::Mutex::new(Vec::<ToolProgressDetail>::new()));
+        let sink = Arc::clone(&snapshots);
+        let ctx = ctx.with_progress_reporter(Arc::new(move |detail| {
+            sink.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(detail);
+        }));
+        let registry = default_registry();
+        let result = dispatch(
+            &registry,
+            &ctx,
+            "run_full_analysis",
+            json!({"symbol": "600519"}),
+        )
+        .await;
+        assert_eq!(result.summary_json["data_diagnostics"], json!([]));
+        let snapshots = snapshots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(snapshots.iter().any(|snapshot| snapshot
+            .active
+            .iter()
+            .any(|item| item.label.contains("日 K 线"))));
+        assert!(snapshots.iter().any(|snapshot| {
+            snapshot.active.len() == 3
+                && snapshot
+                    .active
+                    .iter()
+                    .any(|item| item.label.contains("实时行情"))
+                && snapshot
+                    .active
+                    .iter()
+                    .any(|item| item.label.contains("资金流"))
+                && snapshot
+                    .active
+                    .iter()
+                    .any(|item| item.label.contains("上证指数"))
+        }));
+        let final_progress = snapshots.last().unwrap();
+        assert_eq!(final_progress.completed, 6);
+        assert_eq!(final_progress.failed, 0);
+        assert!(final_progress.active.is_empty());
     }
 
     #[tokio::test]

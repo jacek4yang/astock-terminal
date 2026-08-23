@@ -409,6 +409,52 @@ pub fn assemble_report(
     }
 }
 
+/// Build a conservative publication fallback after model-driven repair has
+/// been exhausted. Only claims with no verifier error survive; unsupported
+/// lines are omitted and disclosed as unknown instead of turning a long,
+/// otherwise useful research run into an opaque terminal error.
+pub fn verified_subset_answer(report: &AgentReport) -> Option<String> {
+    let blocked_claims: BTreeSet<&str> = report
+        .research
+        .verification
+        .findings
+        .iter()
+        .filter(|finding| finding.severity == VerificationSeverity::Error)
+        .filter_map(|finding| finding.claim_id.as_deref())
+        .collect();
+    let kept = report
+        .research
+        .claims
+        .iter()
+        .filter(|claim| !blocked_claims.contains(claim.claim_id.as_str()))
+        .collect::<Vec<_>>();
+    if kept.is_empty() {
+        return None;
+    }
+
+    let omitted = report.research.claims.len().saturating_sub(kept.len());
+    let mut answer = String::from(
+        "## 已通过证据校验的部分结论\n\n以下仅保留可由现有字段级证据复现的内容；未通过校验的数字和表述不会作为决策依据。\n",
+    );
+    for claim in kept {
+        let grade = match claim.claim_type {
+            ClaimType::Fact => "事实",
+            ClaimType::Calculation => "计算",
+            ClaimType::External => "外部",
+            ClaimType::Inference => "推断",
+            ClaimType::Assumption => "假设",
+            ClaimType::Unknown => "未知",
+        };
+        answer.push_str(&format!("\n- 【{grade}】{}", claim.text));
+    }
+    if omitted > 0 {
+        answer.push_str(&format!(
+            "\n\n## 尚未核验的内容\n\n- 【未知】另有 {omitted} 条草稿结论未能通过数字、引用或绝对化表述校验，已自动省略；需要补充或刷新证据后再继续分析。"
+        ));
+    }
+    Some(answer)
+}
+
 fn build_research_report(text: &str, evidence: &[Evidence], generated_at: i64) -> ResearchReport {
     let mut claims = Vec::new();
     let mut section = String::new();
@@ -1139,6 +1185,32 @@ mod tests {
             .findings
             .iter()
             .any(|item| item.code == "unsupported_number"));
+    }
+
+    #[test]
+    fn verified_subset_keeps_supported_claims_and_omits_bad_numbers() {
+        let items = evidence(
+            json!({"price": 10.0, "data_quality": {"freshness": "fresh", "allow_deterministic_compute": true}}),
+        );
+        let report = tagged_report(
+            "【事实】最新价 10 元\n【推断】未经验证的目标价 99 元",
+            items.clone(),
+        );
+        assert_eq!(
+            report.research.verification.status,
+            VerificationStatus::Failed
+        );
+
+        let fallback = verified_subset_answer(&report).expect("one claim is publishable");
+        assert!(fallback.contains("最新价 10 元"));
+        assert!(!fallback.contains("目标价 99 元"));
+        assert!(fallback.contains("已自动省略"));
+        let repaired = tagged_report(&fallback, items);
+        assert!(
+            repaired.research.verification.passed(),
+            "{:?}",
+            repaired.research.verification.findings
+        );
     }
 
     #[test]
