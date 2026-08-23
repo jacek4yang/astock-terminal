@@ -1,319 +1,409 @@
-//! High-level MiniMax client: detection, quota, model selection and chat.
+//! Resilient high-level MiniMax client.
+//!
+//! The provider implementation from the previous release remains verbatim in
+//! `client_legacy.rs`. This facade preserves its public API while making SSE
+//! rounds transactional before the first user-visible/tool-call delta:
+//!
+//! - reasoning-only chunks are buffered briefly, so a connection loss during
+//!   private reasoning can be retried without duplicating visible output or
+//!   corrupting the tool-call transcript;
+//! - first-chunk and inter-chunk idle watchdogs turn a permanently silent
+//!   connection into a typed transient error instead of an Agent that appears
+//!   to run forever;
+//! - a bounded restart loop is allowed only before protocol state is committed.
+//!   Once visible text or a tool call has been emitted, failures propagate and
+//!   the durable Agent task can be resumed from its last persisted round.
 
+mod legacy {
+    include!("client_legacy.rs");
+}
+
+use std::collections::VecDeque;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use futures::{Stream, StreamExt};
+use rand::Rng;
 
-use crate::chat::{ChatChunk, ChatRequest, ChatResponse, ChatStream};
+use crate::chat::{ChatChunk, ChatRequest, ChatResponse};
 use crate::error::MinimaxError;
-use crate::http::{map_base_resp, map_http_error, Http, ReqwestHttp};
+use crate::http::{Http, ReqwestHttp};
 use crate::key::SecretKey;
-use crate::models::{AvailableModel, AvailableModelsResponse, ModelCatalog};
+use crate::models::{AvailableModel, ModelCatalog};
 use crate::quota::QuotaStatus;
 use crate::rate_gate::RateGate;
 use crate::region::{RegionDetector, ServiceInfo};
 
-/// How long a quota snapshot is reused by the quota guard before refetching.
-const QUOTA_CACHE_TTL: Duration = Duration::from_secs(30);
-/// Bound concurrent reasoning streams so multiple background Agents cannot
-/// stampede a Token Plan account. Plan-side dynamic limits still take
-/// precedence through 429/Retry-After handling.
-const MAX_CONCURRENT_CHAT_STREAMS: usize = 4;
+/// Safety policy for one streamed model round.
+#[derive(Debug, Clone, Copy)]
+pub struct StreamPolicy {
+    /// Maximum silence before the first SSE chunk.
+    pub first_chunk_timeout: Duration,
+    /// Maximum silence between subsequent SSE chunks.
+    pub idle_timeout: Duration,
+    /// Number of complete request restarts allowed before visible text/tool
+    /// protocol state has been emitted.
+    pub max_precommit_restarts: u32,
+    /// Maximum private-reasoning buffer before chunks are committed to the
+    /// caller to keep memory bounded.
+    pub max_buffered_bytes: usize,
+}
 
-/// Entry point of the crate.
-///
-/// Wraps an API key with region detection, Token Plan quota introspection, a
-/// model fallback chain and a backoff [`RateGate`]. Construct with
-/// [`MinimaxClient::new`] and tune with the `with_*` builder methods.
+impl Default for StreamPolicy {
+    fn default() -> Self {
+        Self {
+            first_chunk_timeout: Duration::from_secs(90),
+            idle_timeout: Duration::from_secs(120),
+            max_precommit_restarts: 2,
+            max_buffered_bytes: 2 * 1024 * 1024,
+        }
+    }
+}
+
+/// Entry point of the MiniMax provider with resilient streaming semantics.
 pub struct MinimaxClient {
-    http: Arc<dyn Http>,
-    key: SecretKey,
-    detector: RegionDetector,
-    catalog: ModelCatalog,
-    gate: RateGate,
-    quota_guard: bool,
-    quota_cache: tokio::sync::Mutex<Option<(SystemTime, QuotaStatus)>>,
-    quota_pacing_next: tokio::sync::Mutex<Option<tokio::time::Instant>>,
-    chat_slots: Arc<tokio::sync::Semaphore>,
+    inner: Arc<legacy::MinimaxClient>,
+    stream_policy: StreamPolicy,
 }
 
 impl MinimaxClient {
-    /// Client over the production services with default catalog and gate.
+    /// Client over production services with default catalog, rate gate and
+    /// resilient stream policy.
     pub fn new(key: SecretKey) -> Self {
         Self::with_http(key, Arc::new(ReqwestHttp::new()))
     }
 
-    /// Client over a custom transport (tests, proxies).
+    /// Client over a custom transport (tests, explicit proxy transports).
     pub fn with_http(key: SecretKey, http: Arc<dyn Http>) -> Self {
         Self {
-            detector: RegionDetector::new(http.clone()),
-            http,
-            key,
-            catalog: ModelCatalog::new(),
-            gate: RateGate::default(),
-            quota_guard: true,
-            quota_cache: tokio::sync::Mutex::new(None),
-            quota_pacing_next: tokio::sync::Mutex::new(None),
-            chat_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CHAT_STREAMS)),
+            inner: Arc::new(legacy::MinimaxClient::with_http(key, http)),
+            stream_policy: StreamPolicy::default(),
         }
     }
 
-    /// Override region detection (custom endpoints, pre-resolved service).
-    pub fn with_detector(mut self, detector: RegionDetector) -> Self {
-        self.detector = detector;
-        self
+    fn map_inner(
+        self,
+        update: impl FnOnce(legacy::MinimaxClient) -> legacy::MinimaxClient,
+    ) -> Self {
+        let Self {
+            inner,
+            stream_policy,
+        } = self;
+        let inner = match Arc::try_unwrap(inner) {
+            Ok(inner) => inner,
+            Err(_) => panic!("MiniMax client builders must run before the client is shared"),
+        };
+        Self {
+            inner: Arc::new(update(inner)),
+            stream_policy,
+        }
+    }
+
+    /// Override region detection.
+    pub fn with_detector(self, detector: RegionDetector) -> Self {
+        self.map_inner(|inner| inner.with_detector(detector))
     }
 
     /// Override the model fallback chain.
-    pub fn with_catalog(mut self, catalog: ModelCatalog) -> Self {
-        self.catalog = catalog;
+    pub fn with_catalog(self, catalog: ModelCatalog) -> Self {
+        self.map_inner(|inner| inner.with_catalog(catalog))
+    }
+
+    /// Override the retry/backoff policy used at request establishment.
+    pub fn with_gate(self, gate: RateGate) -> Self {
+        self.map_inner(|inner| inner.with_gate(gate))
+    }
+
+    /// Enable or disable the pre-flight Token Plan quota guard.
+    pub fn with_quota_guard(self, enabled: bool) -> Self {
+        self.map_inner(|inner| inner.with_quota_guard(enabled))
+    }
+
+    /// Override streamed-round watchdogs. Primarily useful for deterministic
+    /// integration tests and constrained private deployments.
+    pub fn with_stream_policy(mut self, policy: StreamPolicy) -> Self {
+        self.stream_policy = policy;
         self
     }
 
-    /// Override the retry/backoff policy.
-    pub fn with_gate(mut self, gate: RateGate) -> Self {
-        self.gate = gate;
-        self
-    }
-
-    /// Enable/disable the pre-flight quota guard (enabled by default). When
-    /// enabled, chat calls check the cached Token Plan first and fail with
-    /// [`MinimaxError::QuotaExhausted`] instead of burning a request on an
-    /// exhausted window.
-    pub fn with_quota_guard(mut self, enabled: bool) -> Self {
-        self.quota_guard = enabled;
-        self
-    }
-
-    /// Detect (once, cached) which MiniMax service this key belongs to.
+    /// Detect and cache the MiniMax service region for this key.
     pub async fn detect_service(&self) -> Result<ServiceInfo, MinimaxError> {
-        self.detector.detect_service(&self.key).await
+        self.inner.detect_service().await
     }
 
-    /// Fetch the Token Plan quota for all models.
+    /// Fetch Token Plan quota for all models.
     pub async fn quota(&self) -> Result<QuotaStatus, MinimaxError> {
-        let service = self.detect_service().await?;
-        let url = format!("{}/v1/token_plan/remains", service.www_host);
-        let resp = self.http.get(&url, Some(&self.key)).await?;
-        if resp.status != 200 {
-            return Err(map_http_error(resp.status, &resp.headers, &resp.body));
-        }
-        crate::quota::parse_remains(&resp.body)
+        self.inner.quota().await
     }
 
-    /// Discover the models available to this key. This avoids baking current
-    /// model names into the desktop UI and automatically surfaces future
-    /// MiniMax releases.
+    /// Discover models available to this key.
     pub async fn available_models(&self) -> Result<Vec<AvailableModel>, MinimaxError> {
-        let service = self.detect_service().await?;
-        let url = format!("{}/v1/models", service.api_host);
-        let resp = self.http.get(&url, Some(&self.key)).await?;
-        if resp.status != 200 {
-            return Err(map_http_error(resp.status, &resp.headers, &resp.body));
-        }
-        let parsed: AvailableModelsResponse = serde_json::from_slice(&resp.body)
-            .map_err(|error| MinimaxError::Parse(format!("models response: {error}")))?;
-        Ok(parsed.data)
+        self.inner.available_models().await
     }
 
-    /// Search the public web through MiniMax Coding Plan's official search
-    /// endpoint (the same endpoint exposed by `minimax-coding-plan-mcp`).
-    /// The returned JSON keeps titles, links, snippets and dates so callers
-    /// can preserve source attribution instead of treating search text as fact.
+    /// Search the public web through MiniMax Coding Plan's official endpoint.
     pub async fn web_search(&self, query: &str) -> Result<serde_json::Value, MinimaxError> {
-        let query = query.trim();
-        if query.chars().count() < 2 || query.chars().count() > 500 {
-            return Err(MinimaxError::Parse(
-                "web search query must contain 2-500 characters".to_string(),
-            ));
-        }
-        let service = self.detect_service().await?;
-        let url = format!("{}/v1/coding_plan/search", service.api_host);
-        let body = serde_json::json!({"q": query});
-        let http = &self.http;
-        let key = &self.key;
-        self.gate
-            .run(|| async {
-                let response = http
-                    .post_with_headers(
-                        &url,
-                        Some(key),
-                        Some(&body),
-                        &[("MM-API-Source", "Minimax-MCP")],
-                    )
-                    .await?;
-                if response.status != 200 {
-                    return Err(map_http_error(
-                        response.status,
-                        &response.headers,
-                        &response.body,
-                    ));
-                }
-                let value: serde_json::Value = serde_json::from_slice(&response.body)
-                    .map_err(|error| MinimaxError::Parse(format!("web search: {error}")))?;
-                let code = value
-                    .get("base_resp")
-                    .and_then(|base| base.get("status_code"))
-                    .and_then(serde_json::Value::as_i64)
-                    .unwrap_or(-1);
-                if code != 0 {
-                    let message = value
-                        .get("base_resp")
-                        .and_then(|base| base.get("status_msg"))
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("unknown web search error");
-                    return Err(map_base_resp(code, message));
-                }
-                Ok(value)
-            })
-            .await
+        self.inner.web_search(query).await
     }
 
-    /// Probe the model fallback chain and return the selected model (cached).
+    /// Probe the configured model fallback chain.
     pub async fn selected_model(&self) -> Result<String, MinimaxError> {
-        let service = self.detect_service().await?;
-        self.catalog
-            .probe_models(&*self.http, &service.api_host, &self.key)
-            .await
+        self.inner.selected_model().await
     }
 
-    /// The model fallback chain.
+    /// The active model catalog.
     pub fn catalog(&self) -> &ModelCatalog {
-        &self.catalog
+        self.inner.catalog()
     }
 
-    /// Non-streaming chat completion, wrapped in the [`RateGate`].
+    /// Non-streaming chat completion.
     pub async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, MinimaxError> {
-        self.ensure_quota(&request.model).await?;
-        let service = self.detect_service().await?;
-        let url = format!("{}/v1/chat/completions", service.api_host);
-        let mut body = serde_json::to_value(request)
-            .map_err(|e| MinimaxError::Parse(format!("chat request: {e}")))?;
-        if let Some(obj) = body.as_object_mut() {
-            obj.insert("stream".to_string(), false.into());
-        }
-        tracing::debug!(model = %request.model, "chat completion request");
-        let http = &self.http;
-        let key = &self.key;
-        self.gate
-            .run(|| async {
-                let resp = http.post(&url, Some(key), Some(&body)).await?;
-                if resp.status != 200 {
-                    return Err(map_http_error(resp.status, &resp.headers, &resp.body));
-                }
-                let parsed: ChatResponse = serde_json::from_slice(&resp.body)
-                    .map_err(|e| MinimaxError::Parse(format!("chat response: {e}")))?;
-                parsed.check_base_resp()?;
-                Ok(parsed)
-            })
-            .await
+        self.inner.chat(request).await
     }
 
-    /// Streaming chat completion as a stream of SSE chunks.
-    ///
-    /// Stream establishment goes through the quota guard; mid-stream failures
-    /// surface as `Err` items and are not retried (retry by re-calling).
+    /// Streaming chat completion with pre-commit replay safety and idle
+    /// watchdogs.
     pub async fn chat_stream(
         &self,
         request: &ChatRequest,
     ) -> Result<impl Stream<Item = Result<ChatChunk, MinimaxError>> + Send + use<>, MinimaxError>
     {
-        self.ensure_quota(&request.model).await?;
-        let service = self.detect_service().await?;
-        let url = format!("{}/v1/chat/completions", service.api_host);
-        let mut body = serde_json::to_value(request)
-            .map_err(|e| MinimaxError::Parse(format!("chat request: {e}")))?;
-        if let Some(obj) = body.as_object_mut() {
-            obj.insert("stream".to_string(), true.into());
-        }
-        tracing::debug!(model = %request.model, "streaming chat completion request");
-        let permit = self
-            .chat_slots
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| MinimaxError::Network("MiniMax并发调度器已关闭".to_string()))?;
-        let http = &self.http;
-        let key = &self.key;
-        // Retry only before a stream is established. Retrying after partial
-        // text/tool deltas would duplicate protocol state and can itself
-        // cause a tool-call/result mismatch.
-        let bytes = self
-            .gate
-            .run(|| async { http.post_stream(&url, key, &body).await })
-            .await?;
-        let chunks = ChatStream::from_byte_stream(bytes);
-        Ok(futures::stream::unfold(
-            (Box::pin(chunks), permit),
-            |(mut chunks, permit)| async move {
-                chunks.next().await.map(|item| (item, (chunks, permit)))
-            },
-        ))
-    }
-
-    /// Pre-flight quota check: fail fast when the rolling window is exhausted
-    /// so pause-and-resume does not burn requests. A failed quota fetch is
-    /// logged and treated as "unknown" — it never blocks a chat call.
-    async fn ensure_quota(&self, model: &str) -> Result<(), MinimaxError> {
-        if !self.quota_guard {
-            return Ok(());
-        }
-        let quota = match self.cached_quota().await {
-            Ok(quota) => quota,
-            Err(e) => {
-                tracing::warn!(error = %e, "quota check failed; proceeding without guard");
-                return Ok(());
-            }
+        let initial = self.inner.chat_stream(request).await?;
+        let state = ResilientStreamState {
+            inner: self.inner.clone(),
+            request: request.clone(),
+            stream: Some(Box::pin(initial)),
+            pending: VecDeque::new(),
+            buffered: VecDeque::new(),
+            buffered_bytes: 0,
+            committed: false,
+            terminal_seen: false,
+            restart_count: 0,
+            done: false,
+            policy: self.stream_policy,
         };
-        if quota.exhausted(model) {
-            tracing::info!(%model, "quota window exhausted; refusing to burn a request");
-            return Err(MinimaxError::QuotaExhausted {
-                window_reset_at: quota.window_reset_at(model),
-            });
-        }
-        if quota.throttled(model) {
-            let pacing = quota.pacing(model);
-            tracing::info!(%model, ?pacing.min_interval, "quota nearly exhausted; applying pacing");
-            self.reserve_paced_slot(pacing.min_interval).await;
-        }
-        Ok(())
-    }
 
-    /// Reserve a globally spaced slot for this client. Concurrent tasks are
-    /// assigned different future instants instead of all waking together.
-    async fn reserve_paced_slot(&self, min_interval: Duration) {
-        if min_interval.is_zero() {
-            return;
-        }
-        let wait = {
-            let now = tokio::time::Instant::now();
-            let mut next = self.quota_pacing_next.lock().await;
-            let scheduled = next.map_or(now, |instant| instant.max(now));
-            *next = Some(scheduled + min_interval);
-            scheduled.saturating_duration_since(now)
-        };
-        if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
-        }
-    }
+        Ok(futures::stream::unfold(state, |mut state| async move {
+            loop {
+                if state.done {
+                    return None;
+                }
+                if let Some(item) = state.pending.pop_front() {
+                    return Some((item, state));
+                }
 
-    async fn cached_quota(&self) -> Result<QuotaStatus, MinimaxError> {
-        {
-            let cache = self.quota_cache.lock().await;
-            if let Some((fetched, quota)) = &*cache {
-                if fetched
-                    .elapsed()
-                    .map(|age| age < QUOTA_CACHE_TTL)
-                    .unwrap_or(false)
-                {
-                    return Ok(quota.clone());
+                if state.stream.is_none() {
+                    match state.inner.chat_stream(&state.request).await {
+                        Ok(stream) => {
+                            state.stream = Some(Box::pin(stream));
+                        }
+                        Err(error)
+                            if error.is_transient()
+                                && state.restart_count < state.policy.max_precommit_restarts =>
+                        {
+                            state.restart_count += 1;
+                            tokio::time::sleep(restart_delay(state.restart_count)).await;
+                            continue;
+                        }
+                        Err(error) => {
+                            state.done = true;
+                            return Some((Err(error), state));
+                        }
+                    }
+                }
+
+                let timeout = if state.buffered.is_empty() && !state.committed {
+                    state.policy.first_chunk_timeout
+                } else {
+                    state.policy.idle_timeout
+                };
+                let next = {
+                    let stream = state.stream.as_mut().expect("stream established");
+                    tokio::time::timeout(timeout, stream.next()).await
+                };
+
+                match next {
+                    Ok(Some(Ok(chunk))) => {
+                        if chunk.finish_reason().is_some() {
+                            state.terminal_seen = true;
+                        }
+                        if state.committed {
+                            return Some((Ok(chunk), state));
+                        }
+
+                        state.buffered_bytes = state
+                            .buffered_bytes
+                            .saturating_add(serde_json::to_vec(&chunk).map_or(0, |value| value.len()));
+                        let commits_protocol = chunk_commits_protocol(&chunk)
+                            || state.buffered_bytes >= state.policy.max_buffered_bytes;
+                        state.buffered.push_back(chunk);
+                        if commits_protocol {
+                            state.committed = true;
+                            while let Some(buffered) = state.buffered.pop_front() {
+                                state.pending.push_back(Ok(buffered));
+                            }
+                            state.buffered_bytes = 0;
+                        }
+                    }
+                    Ok(Some(Err(error))) => {
+                        if !state.committed
+                            && error.is_transient()
+                            && state.restart_count < state.policy.max_precommit_restarts
+                        {
+                            state.prepare_restart();
+                            tokio::time::sleep(restart_delay(state.restart_count)).await;
+                            continue;
+                        }
+                        state.done = true;
+                        return Some((Err(error), state));
+                    }
+                    Ok(None) => {
+                        if !state.committed
+                            && state.restart_count < state.policy.max_precommit_restarts
+                        {
+                            state.prepare_restart();
+                            tokio::time::sleep(restart_delay(state.restart_count)).await;
+                            continue;
+                        }
+                        if state.committed && state.terminal_seen {
+                            state.done = true;
+                            return None;
+                        }
+                        state.done = true;
+                        return Some((
+                            Err(MinimaxError::Network(
+                                "MiniMax 流在终止标记前关闭；本轮未被视为完整回答，可从持久化任务安全重试"
+                                    .to_string(),
+                            )),
+                            state,
+                        ));
+                    }
+                    Err(_) => {
+                        if !state.committed
+                            && state.restart_count < state.policy.max_precommit_restarts
+                        {
+                            state.prepare_restart();
+                            tokio::time::sleep(restart_delay(state.restart_count)).await;
+                            continue;
+                        }
+                        state.done = true;
+                        return Some((
+                            Err(MinimaxError::Network(format!(
+                                "MiniMax 流连续 {} 秒没有数据，已触发空闲看门狗；本轮可从最后持久化检查点继续",
+                                timeout.as_secs()
+                            ))),
+                            state,
+                        ));
+                    }
                 }
             }
+        }))
+    }
+}
+
+type BoxChatStream = Pin<Box<dyn Stream<Item = Result<ChatChunk, MinimaxError>> + Send>>;
+
+struct ResilientStreamState {
+    inner: Arc<legacy::MinimaxClient>,
+    request: ChatRequest,
+    stream: Option<BoxChatStream>,
+    pending: VecDeque<Result<ChatChunk, MinimaxError>>,
+    buffered: VecDeque<ChatChunk>,
+    buffered_bytes: usize,
+    committed: bool,
+    terminal_seen: bool,
+    restart_count: u32,
+    done: bool,
+    policy: StreamPolicy,
+}
+
+impl ResilientStreamState {
+    fn prepare_restart(&mut self) {
+        self.stream = None;
+        self.pending.clear();
+        self.buffered.clear();
+        self.buffered_bytes = 0;
+        self.terminal_seen = false;
+        self.restart_count = self.restart_count.saturating_add(1);
+        tracing::warn!(
+            attempt = self.restart_count,
+            model = %self.request.model,
+            "restarting MiniMax stream before protocol commit"
+        );
+    }
+}
+
+fn chunk_commits_protocol(chunk: &ChatChunk) -> bool {
+    chunk
+        .raw_delta()
+        .is_some_and(|text| !text.is_empty())
+        || !chunk.tool_calls().is_empty()
+        || chunk.finish_reason().is_some()
+}
+
+fn restart_delay(attempt: u32) -> Duration {
+    let ceiling_ms = 500_u64
+        .saturating_mul(1_u64 << attempt.saturating_sub(1).min(3))
+        .min(4_000);
+    Duration::from_millis(rand::rng().random_range(0..=ceiling_ms))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::{ChatChoice, ChatMessage, ToolCall, ToolCallFunction};
+    use serde_json::Value;
+
+    #[test]
+    fn only_visible_or_tool_protocol_chunks_commit_a_round() {
+        let reasoning = ChatChunk {
+            choices: vec![ChatChoice {
+                delta: Some(ChatMessage {
+                    reasoning_content: Some("private".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(!chunk_commits_protocol(&reasoning));
+
+        let text = ChatChunk {
+            choices: vec![ChatChoice {
+                delta: Some(ChatMessage {
+                    content: Some(Value::String("answer".to_string())),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(chunk_commits_protocol(&text));
+
+        let tool = ChatChunk {
+            choices: vec![ChatChoice {
+                delta: Some(ChatMessage {
+                    tool_calls: Some(vec![ToolCall {
+                        function: Some(ToolCallFunction {
+                            name: Some("get_quote".to_string()),
+                            arguments: Some("{}".to_string()),
+                        }),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(chunk_commits_protocol(&tool));
+    }
+
+    #[test]
+    fn restart_backoff_is_bounded() {
+        for attempt in 1..=20 {
+            assert!(restart_delay(attempt) <= Duration::from_secs(4));
         }
-        let quota = self.quota().await?;
-        let mut cache = self.quota_cache.lock().await;
-        *cache = Some((SystemTime::now(), quota.clone()));
-        Ok(quota)
     }
 }
