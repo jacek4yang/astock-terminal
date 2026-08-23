@@ -1,6 +1,11 @@
 name: release-agent-runtime
 
 on:
+  pull_request:
+    paths:
+      - .github/workflows/release-agent-runtime.yml
+      - .github/release-requests/v5.0.3-agent-runtime.1.md
+      - docs/releases/v5.0.3-agent-runtime.1.md
   workflow_dispatch:
   push:
     branches:
@@ -101,6 +106,8 @@ jobs:
         run: cargo check -p astock-app
       - name: Run frontend tests
         run: npm test --prefix ui
+      - name: Ensure dependency lockfiles are unchanged
+        run: git diff --exit-code -- Cargo.lock ui/package-lock.json
       - name: Build MSI and NSIS installers
         shell: pwsh
         run: .\ui\node_modules\.bin\tauri.cmd build
@@ -138,6 +145,7 @@ jobs:
           retention-days: 14
 
   publish:
+    if: github.event_name != 'pull_request'
     needs:
       - security-audit
       - evaluation-gate
@@ -159,6 +167,7 @@ jobs:
           set -euo pipefail
           test -f "$RELEASE_NOTES"
           test -f dist/SHA256SUMS
+          sed -i 's/\r$//' dist/SHA256SUMS
           (cd dist && sha256sum --check SHA256SUMS)
           git fetch --tags --force
           if git rev-parse "$RELEASE_TAG^{commit}" >/dev/null 2>&1; then
