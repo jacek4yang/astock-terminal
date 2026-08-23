@@ -82,7 +82,9 @@ impl AgentEngine {
     pub async fn resume_task(&self, task_id: &str) -> Result<TaskStream> {
         if let Some(record) = self.storage.agent_task_get(task_id).await? {
             if record.status == "failed"
-                && task_last_error(&record).is_some_and(is_retryable_runtime_error)
+                && task_last_error(&record)
+                    .as_deref()
+                    .is_some_and(is_retryable_runtime_error)
             {
                 self.prepare_runtime_retry(task_id).await?;
             }
@@ -240,13 +242,14 @@ impl AgentEngine {
     }
 }
 
-fn task_last_error(task: &AgentTask) -> Option<&str> {
+fn task_last_error(task: &AgentTask) -> Option<String> {
     let state: Value = serde_json::from_str(&task.state_json).ok()?;
     state
         .get("last_error")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|error| !error.is_empty())
+        .map(str::to_string)
 }
 
 /// Conservative terminal-error classification. Only transport/rate-limit and
