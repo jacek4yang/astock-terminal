@@ -58,7 +58,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 arrow = { version = "54", features = ["prettyprint"] }
 parquet = { version = "54", features = ["arrow"] }
 # utils
-lru = "0.13"
+lru = "0.18.2"
 parking_lot = "0.12"
 dashmap = "6"
 governor = "0.8"
