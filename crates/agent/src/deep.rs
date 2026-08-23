@@ -3506,7 +3506,14 @@ impl AgentTool for RunSupplyChainShock {
         3600
     }
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
-        let args: ShockArgs = parse_args(self.name(), args)?;
+        let mut args: ShockArgs = parse_args(self.name(), args)?;
+        let compact_subject = args.subject.trim().replace(' ', "");
+        if matches!(
+            compact_subject.as_str(),
+            "金价" | "黄金价格" | "COMEX金价" | "COMEX黄金" | "上海金" | "伦敦金"
+        ) {
+            args.subject = "黄金".to_string();
+        }
         let graph = require_graph(ctx, self.name())?;
         let direction: i8 = match args.direction.to_ascii_lowercase().as_str() {
             "up" | "涨" | "上涨" => 1,
@@ -4748,7 +4755,7 @@ mod tests {
     use super::*;
     use astock_core::{DataError, Fetched, MarketBreadth, Quote, Source, VolumeUnit};
     use astock_fundamental::model::{CompanyProfile, KeyIndicators, ValuationSnapshot};
-    use astock_graph::{Edge, NodeKind};
+    use astock_graph::{seed_if_empty, Edge, NodeKind};
     use astock_market_data::providers::news_ingest::{
         NewsIngestRequest, NewsPage, NewsProvider, NewsProviderError,
     };
@@ -5384,6 +5391,36 @@ mod tests {
             )
             .await;
         assert!(matches!(bad, Err(AgentError::InvalidArgs { .. })));
+    }
+
+    #[tokio::test]
+    async fn gold_price_alias_resolves_to_seeded_gold_producers() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(StorageConfig::with_base_dir(dir.path())).unwrap();
+        let store = GraphStore::new(storage.clone());
+        seed_if_empty(&store).await.unwrap();
+        let ctx = deep_ctx(storage, Some(store));
+        let result = crate::default_registry()
+            .dispatch(
+                "run_supply_chain_shock",
+                json!({"subject": "金价", "direction": "up", "magnitude_pct": 10}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.summary_json["subject"]["name"], json!("黄金"));
+        let codes = result.summary_json["impacted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["code"].as_str())
+            .collect::<Vec<_>>();
+        for code in ["601899", "600547", "600489"] {
+            assert!(
+                codes.contains(&code),
+                "missing gold producer {code}: {codes:?}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -48,8 +48,10 @@ import {
   clarificationIsComplete,
   emptyClarificationDraft,
   formatClarificationAnswer,
+  formatClarificationPayload,
   hasClarification,
   parseClarification,
+  stripClarificationPayload,
   type ClarificationDraft,
   type ClarificationRequest,
 } from "../lib/agentClarification";
@@ -104,6 +106,7 @@ const TOOL_GROUPS = [
       "research_news",
       "research_disclosures",
       "research_global_transmission",
+      "research_gold_market",
       "analyze_event_price_in",
       "search_web",
       "fetch_source_document",
@@ -1126,9 +1129,9 @@ export default function AgentChat({
   const err = useAgentSession((s) => s.err);
   const progress = useAgentSession((s) => s.progress);
   const pendingQuestions = useAgentSession((s) => s.pendingQuestions ?? []);
-  const researchMode = useAgentSession((s) => s.researchMode ?? "deep");
-  const reasoningDepth = useAgentSession((s) => s.reasoningDepth ?? "deep");
-  const enabledTools = useAgentSession((s) => s.enabledTools ?? [...DEFAULT_AGENT_TOOLS]);
+  const researchMode = useAgentSession((s) => s.researchMode ?? "plan");
+  const reasoningDepth = useAgentSession((s) => s.reasoningDepth ?? "maximum");
+  const enabledTools = useAgentSession((s) => s.enabledTools);
   const autoResumeOnQuota = useAgentSession((s) => s.autoResumeOnQuota ?? true);
   const setInput = useAgentSession((s) => s.setInput);
   const setStatus = useAgentSession((s) => s.setStatus);
@@ -1143,6 +1146,7 @@ export default function AgentChat({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [taskDetail, setTaskDetail] = useState<AgentTask | null>(null);
   const [visibleMessageCount, setVisibleMessageCount] = useState(60);
+  const [planQuestion, setPlanQuestion] = useState("");
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const shouldFollowLatestRef = useRef(true);
@@ -1256,14 +1260,14 @@ export default function AgentChat({
     return () => clearInterval(t);
   }, [refreshTasks]);
 
-  const send = async (question: string) => {
+  const send = async (question: string, transportQuestion?: string) => {
     const q = question.trim();
     if (!q || running) return;
     followLatest();
     const session = useAgentSession.getState();
     appendAgentTurn(q);
     // 新会话首轮:把当前查看的股票作为上下文前置(气泡仍只显示用户原文)
-    let payload = q;
+    let payload = transportQuestion?.trim() || q;
     if (session.conversationId === null && currentSymbol) {
       payload = `【上下文】用户在查看 ${currentSymbol} ${currentName ?? ""}\n`.replace(/\s+\n/, "\n") + q;
     }
@@ -1273,9 +1277,9 @@ export default function AgentChat({
         session.conversationId,
         handleAgentEnvelope,
         {
-          research_mode: session.researchMode ?? "deep",
-          reasoning_depth: session.reasoningDepth ?? "deep",
-          enabled_tools: session.enabledTools ?? [...DEFAULT_AGENT_TOOLS],
+          research_mode: session.researchMode ?? "plan",
+          reasoning_depth: session.reasoningDepth ?? "maximum",
+          enabled_tools: session.enabledTools,
           auto_resume_on_quota: session.autoResumeOnQuota ?? true,
         },
       );
@@ -1305,7 +1309,8 @@ export default function AgentChat({
     if (!clarificationIsComplete(request, draft) || running) return;
     patchClarificationDraft(messageKey, (current) => ({ ...current, submitted: true }));
     useAgentSession.setState({ status: "completed" });
-    void send(formatClarificationAnswer(request, draft));
+    const visible = formatClarificationAnswer(request, draft);
+    void send(visible, formatClarificationPayload(request, draft));
   };
 
   const queueFollowUp = (question: string) => {
@@ -1316,6 +1321,17 @@ export default function AgentChat({
       input: "",
       pendingQuestions: [...(session.pendingQuestions ?? []), q],
     });
+  };
+
+  const askAboutPlan = () => {
+    const question = planQuestion.trim();
+    if (!question || waitingForInput || hasKey === false) return;
+    setPlanQuestion("");
+    if (running) {
+      queueFollowUp(question);
+    } else {
+      void send(question);
+    }
   };
 
   // The user can keep talking while a long analysis runs. Follow-ups are
@@ -1651,10 +1667,10 @@ export default function AgentChat({
             自动上下文压缩{compactionCount ? ` · ${compactionCount}` : ""}
           </span>
           <span className="chip bg-blue-600/10 text-blue-600 dark:text-blue-400">
-            {RESEARCH_MODES.find((mode) => mode.id === researchMode)?.label ?? "深度"}模式
+            {RESEARCH_MODES.find((mode) => mode.id === researchMode)?.label ?? "计划"}模式
           </span>
           <span className="chip bg-amber-500/10 text-amber-700 dark:text-amber-300">
-            {REASONING_DEPTHS.find((depth) => depth.id === reasoningDepth)?.label ?? "深入"}思考
+            {REASONING_DEPTHS.find((depth) => depth.id === reasoningDepth)?.label ?? "极深"}思考
           </span>
           {taskId && status !== "idle" && (
             <button
@@ -1755,8 +1771,8 @@ export default function AgentChat({
               <fieldset disabled={running}>
                 <div className="mb-1.5 flex items-center gap-2">
                   <legend className="micro-label">本轮可用工具</legend>
-                  <span className="num muted">{enabledTools.length} / {DEFAULT_AGENT_TOOLS.length}</span>
-                  <button className="btn ml-auto" type="button" onClick={() => setEnabledTools([...DEFAULT_AGENT_TOOLS])}>
+                  <span className="num muted">{enabledTools?.length ?? DEFAULT_AGENT_TOOLS.length} / {DEFAULT_AGENT_TOOLS.length}</span>
+                  <button className="btn ml-auto" type="button" onClick={() => setEnabledTools(null)}>
                     全部开启
                   </button>
                   <button className="btn" type="button" onClick={() => setEnabledTools([])}>
@@ -1765,7 +1781,7 @@ export default function AgentChat({
                 </div>
                 <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
                   {TOOL_GROUPS.map((group) => {
-                    const allOn = group.tools.every((tool) => enabledTools.includes(tool));
+                    const allOn = enabledTools === null || group.tools.every((tool) => enabledTools.includes(tool));
                     return (
                       <div key={group.label} className="rounded border border-slate-200 bg-white p-2 dark:border-slate-700 dark:bg-slate-900">
                         <label className="mb-1.5 flex cursor-pointer items-center gap-2 font-medium">
@@ -1776,8 +1792,10 @@ export default function AgentChat({
                               const groupSet = new Set<string>(group.tools);
                               setEnabledTools(
                                 event.target.checked
-                                  ? [...new Set([...enabledTools, ...group.tools])]
-                                  : enabledTools.filter((tool) => !groupSet.has(tool)),
+                                  ? enabledTools === null
+                                    ? null
+                                    : [...new Set([...enabledTools, ...group.tools])]
+                                  : (enabledTools ?? [...DEFAULT_AGENT_TOOLS]).filter((tool) => !groupSet.has(tool)),
                               );
                             }}
                           />
@@ -1788,12 +1806,14 @@ export default function AgentChat({
                             <label key={tool} className="muted flex cursor-pointer items-center gap-1.5">
                               <input
                                 type="checkbox"
-                                checked={enabledTools.includes(tool)}
+                                checked={enabledTools === null || enabledTools.includes(tool)}
                                 onChange={(event) =>
                                   setEnabledTools(
                                     event.target.checked
-                                      ? [...new Set([...enabledTools, tool])]
-                                      : enabledTools.filter((item) => item !== tool),
+                                      ? enabledTools === null
+                                        ? null
+                                        : [...new Set([...enabledTools, tool])]
+                                      : (enabledTools ?? [...DEFAULT_AGENT_TOOLS]).filter((item) => item !== tool),
                                   )
                                 }
                               />
@@ -1971,6 +1991,69 @@ export default function AgentChat({
           </div>
         </div>
       </section>
+      {variant === "page" && (
+        <aside className="hidden w-80 shrink-0 flex-col border-l border-slate-200 bg-slate-50/70 dark:border-slate-800 dark:bg-slate-950/30 xl:flex">
+          <header className="border-b border-slate-200 px-4 py-3 dark:border-slate-800">
+            <div className="font-medium">计划答疑</div>
+            <div className="muted mt-1 text-xs leading-relaxed">
+              围绕当前投资计划追问证据、取舍和风险。已确认条件会继续沿用，不会重新开始同一套问卷。
+            </div>
+          </header>
+          <div className="min-h-0 flex-1 overflow-y-auto p-3">
+            <div className="rounded border border-slate-200 bg-white p-3 text-xs dark:border-slate-800 dark:bg-slate-900">
+              <div className="micro-label">当前状态</div>
+              <div className="mt-1 font-medium">
+                {waitingForInput
+                  ? "等待你提交投资约束"
+                  : running
+                    ? "计划正在后台研究，可继续加入问题"
+                    : conversationId
+                      ? "可继续讨论和修订当前计划"
+                      : "先提出你的资金计划问题"}
+              </div>
+              {pendingQuestions.length > 0 && (
+                <div className="muted mt-2">已有 {pendingQuestions.length} 个问题等待当前研究完成后依次回答。</div>
+              )}
+            </div>
+            <div className="mt-3 space-y-1.5 text-xs">
+              {["为什么选择这些股票？", "这项判断有哪些反方证据？", "如果市场转弱，计划如何调整？", "哪些数据还没有核验？"].map((question) => (
+                <button
+                  key={question}
+                  type="button"
+                  className="btn w-full justify-start text-left"
+                  disabled={waitingForInput}
+                  onClick={() => setPlanQuestion(question)}
+                >
+                  {question}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="border-t border-slate-200 p-3 dark:border-slate-800">
+            <textarea
+              className="input min-h-24 w-full resize-y"
+              value={planQuestion}
+              disabled={waitingForInput || hasKey === false}
+              placeholder={waitingForInput ? "请先提交左侧投资约束" : "询问当前计划，不会丢失上下文"}
+              onChange={(event) => setPlanQuestion(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  askAboutPlan();
+                }
+              }}
+            />
+            <button
+              type="button"
+              className="btn-primary mt-2 w-full justify-center"
+              disabled={!planQuestion.trim() || waitingForInput || hasKey === false}
+              onClick={askAboutPlan}
+            >
+              {running ? "加入计划答疑队列" : "询问当前计划"}
+            </button>
+          </div>
+        </aside>
+      )}
     </div>
   );
 }
@@ -1983,7 +2066,7 @@ export function historyToMsgs(m: AgentMessage, out: ChatMsg[]): ChatMsg[] {
     if (last?.role === "assistant" && hasClarification(last.raw)) {
       last.clarificationSubmitted = true;
     }
-    return [{ key: nextAgentKey(), role: "user", raw: m.content, tools: [], done: true }];
+    return [{ key: nextAgentKey(), role: "user", raw: stripClarificationPayload(m.content), tools: [], done: true }];
   }
   if (m.role === "assistant") {
     const tools = m.tool_calls.map((call) => ({

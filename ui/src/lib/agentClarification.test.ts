@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   clarificationIsComplete,
   formatClarificationAnswer,
+  formatClarificationPayload,
   parseClarification,
+  stripClarificationPayload,
 } from "./agentClarification";
 
 describe("Agent clarification protocol", () => {
@@ -56,5 +58,9 @@ describe("Agent clarification protocol", () => {
     expect(answer).toContain("风险偏好？：平衡");
     expect(answer).toContain("计划期限？：三年");
     expect(answer).toContain("不要重复询问");
+    const payload = formatClarificationPayload(request, complete);
+    expect(payload).toContain("```astock-answers");
+    expect(payload).toContain('"schema":"astock-answers/v1"');
+    expect(stripClarificationPayload(payload)).toBe(answer);
   });
 });

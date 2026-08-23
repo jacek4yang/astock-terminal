@@ -249,7 +249,7 @@ async fn live_gold_research_uses_real_sources_and_publishes_clean_chinese() {
     .with_run_options(
         "deep",
         "maximum",
-        vec!["research_gold_market".into()],
+        Some(vec!["research_gold_market".into()]),
         false,
     );
 
@@ -297,6 +297,76 @@ async fn live_gold_research_uses_real_sources_and_publishes_clean_chinese() {
     }
     eprintln!(
         "gold Agent smoke test completed; public_answer_chars={}",
+        answer.chars().count()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the desktop app's stored MiniMax key"]
+async fn live_confirmed_plan_constraints_do_not_restart_the_questionnaire() {
+    let Some(key) = astock_minimax::KeyStore::new()
+        .load_key()
+        .expect("load the desktop MiniMax credential")
+    else {
+        eprintln!("desktop MiniMax key not configured; skipping");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(StorageConfig::with_base_dir(dir.path())).unwrap();
+    let ctx = ToolContext {
+        market: Arc::new(NoopMarket),
+        storage,
+        graph: None,
+        fundamental: None,
+        joinquant: None,
+        minimax_search: None,
+        finance_news: None,
+        global_assets: None,
+        iwencai: None,
+        progress: None,
+    };
+    let engine = AgentEngine::new(
+        Arc::new(MinimaxClient::new(key)),
+        astock_agent::default_registry(),
+        ctx,
+        EngineConfig {
+            max_rounds: 6,
+            ..Default::default()
+        },
+    );
+    let prompt = r#"关于你刚才提出的澄清问题，我的确认如下：
+1. 这笔2万元计划持有1—3个月；
+2. 最大可承受回撤为10%—15%；
+3. 这是完全闲置资金。
+请把这些条件作为本会话已确认前提，不要重复询问；本轮只列出下一步研究计划。
+```astock-answers
+{"schema":"astock-answers/v1","answers":{"horizon":"1—3个月","drawdown":"10%—15%","capital":"闲置资金"}}
+```"#;
+    let spec = TaskSpec::new("live-plan-state", "live-plan-state", prompt).with_run_options(
+        "plan",
+        "maximum",
+        Some(Vec::new()),
+        true,
+    );
+
+    let events: Vec<AgentEvent> = engine.run_task(spec).collect().await;
+    let answer = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::Completed { report } => Some(report.answer.as_str()),
+            _ => None,
+        })
+        .expect("confirmed plan turn should complete");
+    assert!(
+        !answer.contains("astock-questions"),
+        "the Agent restarted the clarification form: {answer}"
+    );
+    assert!(
+        !answer.contains("需要先确认") && !answer.contains("请先确认"),
+        "the Agent ignored durable constraints: {answer}"
+    );
+    eprintln!(
+        "confirmed-plan smoke test completed; public_answer_chars={}",
         answer.chars().count()
     );
 }

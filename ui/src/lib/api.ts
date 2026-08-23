@@ -2126,7 +2126,8 @@ export type AgentReasoningDepth = "standard" | "deep" | "maximum";
 export interface AgentRunOptions {
   research_mode: AgentResearchMode;
   reasoning_depth: AgentReasoningDepth;
-  enabled_tools: string[];
+  /** null = all current and future tools; [] = text only. */
+  enabled_tools: string[] | null;
   auto_resume_on_quota: boolean;
 }
 

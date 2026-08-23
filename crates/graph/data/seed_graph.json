@@ -29,6 +29,7 @@
     {"id": "commodity:corn", "kind": "commodity", "name": "玉米"},
     {"id": "commodity:soybean_meal", "kind": "commodity", "name": "豆粕"},
     {"id": "commodity:copper", "kind": "commodity", "name": "铜"},
+    {"id": "commodity:gold", "kind": "commodity", "name": "黄金"},
 
     {"id": "material:lithium_carbonate", "kind": "material", "name": "碳酸锂"},
     {"id": "material:pv_glass", "kind": "material", "name": "光伏玻璃"},
@@ -150,6 +151,8 @@
     {"id": "company:002726", "kind": "company", "name": "龙大美食", "code": "002726"},
 
     {"id": "company:601899", "kind": "company", "name": "紫金矿业", "code": "601899"},
+    {"id": "company:600547", "kind": "company", "name": "山东黄金", "code": "600547"},
+    {"id": "company:600489", "kind": "company", "name": "中金黄金", "code": "600489"},
     {"id": "company:600362", "kind": "company", "name": "江西铜业", "code": "600362"},
     {"id": "company:000878", "kind": "company", "name": "云南铜业", "code": "000878"},
     {"id": "company:000630", "kind": "company", "name": "铜陵有色", "code": "000630"},
@@ -365,6 +368,9 @@
     ["company:002726", "industry:pig_chain", "belongs_to", 1.0, 0.9, "AR24"],
 
     ["company:601899", "commodity:copper", "produces", 0.8, 0.9, "AR24"],
+    ["company:601899", "commodity:gold", "produces", 0.8, 0.9, "AR24"],
+    ["company:600547", "commodity:gold", "produces", 0.9, 0.9, "AR24"],
+    ["company:600489", "commodity:gold", "produces", 0.9, 0.9, "AR24"],
     ["company:600362", "commodity:copper", "produces", 0.85, 0.9, "AR24"],
     ["company:000878", "commodity:copper", "produces", 0.8, 0.85, "AR24"],
     ["company:000630", "commodity:copper", "produces", 0.8, 0.85, "AR24"],

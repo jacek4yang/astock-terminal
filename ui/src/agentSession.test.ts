@@ -13,6 +13,10 @@ import type { AgentReport } from "./lib/api";
 describe("persistent Agent session channel", () => {
   beforeEach(() => resetAgentSession());
 
+  it("uses a future-safe all-tools default", () => {
+    expect(useAgentSession.getState().enabledTools).toBeNull();
+  });
+
   it("keeps parallel tool progress matched by call id outside a mounted page", () => {
     appendAgentTurn("全面分析 300308");
     handleAgentEnvelope({
