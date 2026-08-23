@@ -1,0 +1,22 @@
+[package]
+name = "astock-relation-extraction"
+description = "Evidence-bound supply-chain relation extraction, review and publication"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+astock-storage = { path = "../storage" }
+astock-source-verification = { path = "../source-verification" }
+astock-graph = { path = "../graph" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+regex.workspace = true
+once_cell.workspace = true
+sha2.workspace = true
+rusqlite.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio.workspace = true

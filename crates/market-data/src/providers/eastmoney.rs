@@ -267,6 +267,120 @@ impl EastMoney {
         Ok(rows)
     }
 
+    async fn quote_by_secid(
+        &self,
+        code: &str,
+        secid: &str,
+        cache_namespace: &'static str,
+    ) -> Result<Fetched<Quote>, DataError> {
+        let key = format!("{cache_namespace}_{secid}");
+        if let Some(hit) = self.cache.get::<Fetched<Quote>>(&key, ttl::REALTIME) {
+            return Ok(hit);
+        }
+        let params = vec![
+            ("secid".to_string(), secid.to_string()),
+            (
+                "fields".to_string(),
+                "f43,f44,f45,f46,f47,f48,f57,f58,f60,f169,f170,f168".to_string(),
+            ),
+            ("fltt".to_string(), "2".to_string()),
+            ("invt".to_string(), "2".to_string()),
+        ];
+        let data = self
+            .em_json("/api/qt/stock/get", params, &QUOTE_HOSTS, cache_namespace)
+            .await?;
+        let d = data.get("data").cloned().unwrap_or(serde_json::Value::Null);
+        if d.is_null() {
+            return Err(DataError::Empty(format!(
+                "eastmoney {cache_namespace} {secid}"
+            )));
+        }
+        let get = |field: &str| d.get(field).and_then(json_f64).unwrap_or(0.0);
+        let timestamp = astock_core::time::utc_now();
+        let mut field_provenance = std::collections::BTreeMap::new();
+        for field in [
+            "name",
+            "price",
+            "high",
+            "low",
+            "open",
+            "volume",
+            "amount",
+            "pre_close",
+            "change",
+            "pct",
+        ] {
+            field_provenance.insert(
+                field.to_string(),
+                astock_core::FieldProvenance::reported("eastmoney", timestamp),
+            );
+        }
+        let turnover = d.get("f168").and_then(json_f64);
+        field_provenance.insert(
+            "turnover".to_string(),
+            turnover.map_or_else(
+                || astock_core::FieldProvenance::missing("eastmoney", "上游未返回换手率"),
+                |_| astock_core::FieldProvenance::reported("eastmoney", timestamp),
+            ),
+        );
+        let quote = Quote {
+            symbol: code.to_string(),
+            name: d
+                .get("f58")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            price: get("f43"),
+            high: get("f44"),
+            low: get("f45"),
+            open: get("f46"),
+            volume: get("f47"),
+            amount: get("f48"),
+            pre_close: get("f60"),
+            change: get("f169"),
+            pct: get("f170"),
+            turnover,
+            timestamp,
+            field_provenance,
+        };
+        let out = Fetched::now(quote, Source::EastMoney);
+        self.cache.set(&key, &out);
+        Ok(out)
+    }
+
+    /// Quote for an index code using the index-specific EastMoney market id.
+    pub async fn index_quote(&self, index_code: &str) -> Result<Fetched<Quote>, DataError> {
+        self.quote_by_secid(index_code, &Symbol::index_secid(index_code), "index_quote")
+            .await
+    }
+
+    /// Index bars never use stock split/dividend adjustment semantics.
+    pub async fn index_kline_period(
+        &self,
+        index_secid: &str,
+        period: KlinePeriod,
+        count: u32,
+    ) -> Result<Fetched<Vec<Bar>>, DataError> {
+        let key = format!("index_{index_secid}_{period:?}_{count}");
+        if let Some(hit) = self.cache.get::<Fetched<Vec<Bar>>>(&key, ttl::KLINE) {
+            return Ok(hit);
+        }
+        let rows = self
+            .kline_rows(index_secid, period, Adjust::None, count)
+            .await?;
+        let bars = Self::parse_kline_rows(&rows, VolumeUnit::Lots);
+        let required = (count as usize).min(10);
+        if bars.len() < required {
+            return Err(DataError::Empty(format!(
+                "eastmoney index kline {index_secid}: {} bars",
+                bars.len()
+            )));
+        }
+        let out = Fetched::now(bars, Source::EastMoney);
+        self.cache.set(&key, &out);
+        Ok(out)
+    }
+
     /// Full A-share list with EastMoney industry tags (clist `f100` field).
     /// Rows with an empty industry tag are skipped. Used by the graph
     /// crate's industry enrichment.
@@ -339,77 +453,8 @@ impl DataProvider for EastMoney {
     }
 
     async fn quote(&self, symbol: &Symbol) -> Result<Fetched<Quote>, DataError> {
-        let key = format!("quote_{symbol}");
-        if let Some(hit) = self.cache.get::<Fetched<Quote>>(&key, ttl::REALTIME) {
-            return Ok(hit);
-        }
-        let params = vec![
-            ("secid".to_string(), symbol.secid()),
-            (
-                "fields".to_string(),
-                "f43,f44,f45,f46,f47,f48,f57,f58,f60,f169,f170,f168".to_string(),
-            ),
-            ("fltt".to_string(), "2".to_string()),
-            ("invt".to_string(), "2".to_string()),
-        ];
-        let data = self
-            .em_json("/api/qt/stock/get", params, &QUOTE_HOSTS, "quote")
-            .await?;
-        let d = data.get("data").cloned().unwrap_or(serde_json::Value::Null);
-        if d.is_null() {
-            return Err(DataError::Empty(format!("eastmoney quote {symbol}")));
-        }
-        let get = |f: &str| d.get(f).and_then(json_f64).unwrap_or(0.0);
-        let timestamp = astock_core::time::utc_now();
-        let mut field_provenance = std::collections::BTreeMap::new();
-        for field in [
-            "name",
-            "price",
-            "high",
-            "low",
-            "open",
-            "volume",
-            "amount",
-            "pre_close",
-            "change",
-            "pct",
-        ] {
-            field_provenance.insert(
-                field.to_string(),
-                astock_core::FieldProvenance::reported("eastmoney", timestamp),
-            );
-        }
-        let turnover = d.get("f168").and_then(json_f64);
-        field_provenance.insert(
-            "turnover".to_string(),
-            turnover.map_or_else(
-                || astock_core::FieldProvenance::missing("eastmoney", "上游未返回换手率"),
-                |_| astock_core::FieldProvenance::reported("eastmoney", timestamp),
-            ),
-        );
-        let quote = Quote {
-            symbol: symbol.code().to_string(),
-            name: d
-                .get("f58")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            price: get("f43"),
-            high: get("f44"),
-            low: get("f45"),
-            open: get("f46"),
-            volume: get("f47"), // lots (手)
-            amount: get("f48"),
-            pre_close: get("f60"),
-            change: get("f169"),
-            pct: get("f170"),
-            turnover,
-            timestamp,
-            field_provenance,
-        };
-        let out = Fetched::now(quote, Source::EastMoney);
-        self.cache.set(&key, &out);
-        Ok(out)
+        self.quote_by_secid(symbol.code(), &symbol.secid(), "quote")
+            .await
     }
 
     async fn search(&self, keyword: &str) -> Result<Fetched<Vec<SearchResult>>, DataError> {
@@ -739,25 +784,8 @@ impl DataProvider for EastMoney {
         index_secid: &str,
         count: u32,
     ) -> Result<Fetched<Vec<Bar>>, DataError> {
-        let key = format!("index_{index_secid}_{count}");
-        if let Some(hit) = self.cache.get::<Fetched<Vec<Bar>>>(&key, ttl::KLINE) {
-            return Ok(hit);
-        }
-        let rows = self
-            .kline_rows(index_secid, KlinePeriod::Day, Adjust::None, count)
-            .await?;
-        let bars = Self::parse_kline_rows(&rows, VolumeUnit::Lots);
-        // Require only as many bars as requested (UI index cards ask for 2).
-        let required = (count as usize).min(10);
-        if bars.len() < required {
-            return Err(DataError::Empty(format!(
-                "eastmoney index kline {index_secid}: {} bars",
-                bars.len()
-            )));
-        }
-        let out = Fetched::now(bars, Source::EastMoney);
-        self.cache.set(&key, &out);
-        Ok(out)
+        self.index_kline_period(index_secid, KlinePeriod::Day, count)
+            .await
     }
 }
 

@@ -1,0 +1,293 @@
+{
+  "schema_version": 1,
+  "dataset_id": "astock-p0-research-eval",
+  "dataset_version": "1.0.0",
+  "dataset_fingerprint": "sha256:f290ebb51e578652e582eb1b9847136f4c4229dd90e9bed1b9428fc57741b33c",
+  "frozen_at": "2026-08-23T10:30:00+08:00",
+  "split": "test",
+  "case_count": 13,
+  "metrics": {
+    "agent.abstention_accuracy": 1.0,
+    "agent.conflict_handling": 1.0,
+    "agent.evidence_coverage": 1.0,
+    "agent.fact_citation_accuracy": 0.75,
+    "agent.mean_api_cost_microunits": 9300.0,
+    "agent.mean_latency_ms": 22066.666667,
+    "agent.mean_tokens": 12933.333333,
+    "agent.numeric_consistency": 1.0,
+    "agent.task_success": 0.666667,
+    "clustering.correction_recall": 1.0,
+    "clustering.pairwise_f1": 0.857143,
+    "clustering.pairwise_precision": 0.75,
+    "clustering.pairwise_recall": 1.0,
+    "entity.f1": 0.909091,
+    "entity.precision": 0.833333,
+    "entity.recall": 1.0,
+    "graph.evidence_accuracy": 0.666667,
+    "graph.f1": 0.75,
+    "graph.precision": 0.75,
+    "graph.recall": 0.75,
+    "graph.validity_accuracy": 1.0,
+    "news.coverage": 1.0,
+    "news.duplicate_rate": 0.125,
+    "news.mean_latency_seconds": 102.857143,
+    "news.old_news_rate": 0.125,
+    "news.precision": 0.875,
+    "news.source_availability": 0.875,
+    "propagation.direction_accuracy": 1.0,
+    "propagation.interval_coverage": 1.0,
+    "propagation.lag_mae_days": 1.0,
+    "propagation.path_f1": 0.666667,
+    "propagation.path_precision": 0.666667,
+    "propagation.path_recall": 0.666667
+  },
+  "by_industry": {
+    "光伏": {
+      "case_count": 1,
+      "metrics": {
+        "propagation.direction_accuracy": 0.0,
+        "propagation.interval_coverage": 0.0,
+        "propagation.lag_mae_days": 0.0,
+        "propagation.path_f1": 0.0,
+        "propagation.path_precision": 0.0,
+        "propagation.path_recall": 0.0
+      }
+    },
+    "券商": {
+      "case_count": 1,
+      "metrics": {
+        "agent.conflict_handling": 1.0,
+        "agent.evidence_coverage": 1.0,
+        "agent.fact_citation_accuracy": 0.5,
+        "agent.mean_api_cost_microunits": 17600.0,
+        "agent.mean_latency_ms": 41600.0,
+        "agent.mean_tokens": 24800.0,
+        "agent.numeric_consistency": 1.0,
+        "agent.task_success": 0.0
+      }
+    },
+    "化工": {
+      "case_count": 1,
+      "metrics": {
+        "graph.evidence_accuracy": 1.0,
+        "graph.f1": 0.5,
+        "graph.precision": 0.5,
+        "graph.recall": 0.5,
+        "graph.validity_accuracy": 1.0
+      }
+    },
+    "医药": {
+      "case_count": 1,
+      "metrics": {
+        "news.coverage": 1.0,
+        "news.duplicate_rate": 0.25,
+        "news.mean_latency_seconds": 120.0,
+        "news.old_news_rate": 0.25,
+        "news.precision": 0.75,
+        "news.source_availability": 0.75
+      }
+    },
+    "半导体": {
+      "case_count": 2,
+      "metrics": {
+        "clustering.correction_recall": 1.0,
+        "clustering.pairwise_f1": 0.666667,
+        "clustering.pairwise_precision": 0.5,
+        "clustering.pairwise_recall": 1.0,
+        "graph.evidence_accuracy": 0.5,
+        "graph.f1": 1.0,
+        "graph.precision": 1.0,
+        "graph.recall": 1.0,
+        "graph.validity_accuracy": 1.0
+      }
+    },
+    "新能源车": {
+      "case_count": 2,
+      "metrics": {
+        "clustering.correction_recall": 1.0,
+        "clustering.pairwise_f1": 1.0,
+        "clustering.pairwise_precision": 1.0,
+        "clustering.pairwise_recall": 1.0,
+        "propagation.direction_accuracy": 1.0,
+        "propagation.interval_coverage": 1.0,
+        "propagation.lag_mae_days": 1.0,
+        "propagation.path_f1": 1.0,
+        "propagation.path_precision": 1.0,
+        "propagation.path_recall": 1.0
+      }
+    },
+    "消费电子": {
+      "case_count": 1,
+      "metrics": {
+        "entity.f1": 0.8,
+        "entity.precision": 0.666667,
+        "entity.recall": 1.0
+      }
+    },
+    "电力": {
+      "case_count": 1,
+      "metrics": {
+        "entity.f1": 1.0,
+        "entity.precision": 1.0,
+        "entity.recall": 1.0
+      }
+    },
+    "白酒": {
+      "case_count": 1,
+      "metrics": {
+        "agent.conflict_handling": 1.0,
+        "agent.evidence_coverage": 1.0,
+        "agent.fact_citation_accuracy": 1.0,
+        "agent.mean_api_cost_microunits": 8400.0,
+        "agent.mean_latency_ms": 18400.0,
+        "agent.mean_tokens": 11200.0,
+        "agent.numeric_consistency": 1.0,
+        "agent.task_success": 1.0
+      }
+    },
+    "综合": {
+      "case_count": 1,
+      "metrics": {
+        "agent.abstention_accuracy": 1.0,
+        "agent.mean_api_cost_microunits": 1900.0,
+        "agent.mean_latency_ms": 6200.0,
+        "agent.mean_tokens": 2800.0,
+        "agent.task_success": 1.0
+      }
+    },
+    "银行": {
+      "case_count": 1,
+      "metrics": {
+        "news.coverage": 1.0,
+        "news.duplicate_rate": 0.0,
+        "news.mean_latency_seconds": 90.0,
+        "news.old_news_rate": 0.0,
+        "news.precision": 1.0,
+        "news.source_availability": 1.0
+      }
+    }
+  },
+  "by_regime": {
+    "政策冲击": {
+      "case_count": 3,
+      "metrics": {
+        "clustering.correction_recall": 1.0,
+        "clustering.pairwise_f1": 1.0,
+        "clustering.pairwise_precision": 1.0,
+        "clustering.pairwise_recall": 1.0,
+        "graph.evidence_accuracy": 0.5,
+        "graph.f1": 1.0,
+        "graph.precision": 1.0,
+        "graph.recall": 1.0,
+        "graph.validity_accuracy": 1.0,
+        "propagation.direction_accuracy": 0.0,
+        "propagation.interval_coverage": 0.0,
+        "propagation.lag_mae_days": 0.0,
+        "propagation.path_f1": 0.0,
+        "propagation.path_precision": 0.0,
+        "propagation.path_recall": 0.0
+      }
+    },
+    "震荡": {
+      "case_count": 2,
+      "metrics": {
+        "agent.conflict_handling": 1.0,
+        "agent.evidence_coverage": 1.0,
+        "agent.fact_citation_accuracy": 1.0,
+        "agent.mean_api_cost_microunits": 8400.0,
+        "agent.mean_latency_ms": 18400.0,
+        "agent.mean_tokens": 11200.0,
+        "agent.numeric_consistency": 1.0,
+        "agent.task_success": 1.0,
+        "entity.f1": 1.0,
+        "entity.precision": 1.0,
+        "entity.recall": 1.0
+      }
+    },
+    "风险偏好上升": {
+      "case_count": 2,
+      "metrics": {
+        "clustering.correction_recall": 1.0,
+        "clustering.pairwise_f1": 0.666667,
+        "clustering.pairwise_precision": 0.5,
+        "clustering.pairwise_recall": 1.0,
+        "propagation.direction_accuracy": 1.0,
+        "propagation.interval_coverage": 1.0,
+        "propagation.lag_mae_days": 1.0,
+        "propagation.path_f1": 1.0,
+        "propagation.path_precision": 1.0,
+        "propagation.path_recall": 1.0
+      }
+    },
+    "风险偏好下降": {
+      "case_count": 3,
+      "metrics": {
+        "agent.conflict_handling": 1.0,
+        "agent.evidence_coverage": 1.0,
+        "agent.fact_citation_accuracy": 0.5,
+        "agent.mean_api_cost_microunits": 17600.0,
+        "agent.mean_latency_ms": 41600.0,
+        "agent.mean_tokens": 24800.0,
+        "agent.numeric_consistency": 1.0,
+        "agent.task_success": 0.0,
+        "graph.evidence_accuracy": 1.0,
+        "graph.f1": 0.5,
+        "graph.precision": 0.5,
+        "graph.recall": 0.5,
+        "graph.validity_accuracy": 1.0,
+        "news.coverage": 1.0,
+        "news.duplicate_rate": 0.25,
+        "news.mean_latency_seconds": 120.0,
+        "news.old_news_rate": 0.25,
+        "news.precision": 0.75,
+        "news.source_availability": 0.75
+      }
+    },
+    "高波动": {
+      "case_count": 3,
+      "metrics": {
+        "agent.abstention_accuracy": 1.0,
+        "agent.mean_api_cost_microunits": 1900.0,
+        "agent.mean_latency_ms": 6200.0,
+        "agent.mean_tokens": 2800.0,
+        "agent.task_success": 1.0,
+        "entity.f1": 0.8,
+        "entity.precision": 0.666667,
+        "entity.recall": 1.0,
+        "news.coverage": 1.0,
+        "news.duplicate_rate": 0.0,
+        "news.mean_latency_seconds": 90.0,
+        "news.old_news_rate": 0.0,
+        "news.precision": 1.0,
+        "news.source_availability": 1.0
+      }
+    }
+  },
+  "failures": [
+    {
+      "case_id": "test-agent-systematic-003",
+      "category": "Agent 事实或引用错误",
+      "detail": "政策事件的影响方向仍有不确定性"
+    },
+    {
+      "case_id": "test-entity-brand-product-002",
+      "category": "实体链接错误",
+      "detail": "小米（上下文仅指手机品类，不指公司）(company)"
+    },
+    {
+      "case_id": "test-graph-direction-validity-002",
+      "category": "图谱关系漏抽取",
+      "detail": "commodity:rubber|company:tire-d|cost_exposure|-1"
+    },
+    {
+      "case_id": "test-news-dedupe-old-002",
+      "category": "虚假或无关快讯",
+      "detail": "n-med-a-copy"
+    },
+    {
+      "case_id": "test-propagation-policy-002",
+      "category": "传导路径缺失",
+      "detail": "policy:export-rebate→product:module→company:pv-g"
+    }
+  ]
+}

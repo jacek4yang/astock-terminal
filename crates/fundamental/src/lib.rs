@@ -10,6 +10,7 @@
 
 pub mod anomaly;
 pub mod client;
+pub mod driver_tree;
 pub mod metrics;
 pub mod model;
 pub mod parse;
@@ -17,6 +18,10 @@ pub mod scores;
 pub mod valuation;
 
 pub use client::{BundleOutcome, FundamentalClient};
+pub use driver_tree::{
+    apply_driver_shocks, build_earnings_driver_tree, parameter_snapshot_id, DriverShock,
+    EarningsDriverTree, ShockBridge,
+};
 pub use model::{
     BalanceSheet, CashFlowStatement, CompanyProfile, DividendRecord, FundamentalBundle,
     IncomeStatement, KeyIndicators, PeriodMeta, ReportType, ValuationPoint, ValuationSnapshot,

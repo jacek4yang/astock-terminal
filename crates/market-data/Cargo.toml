@@ -9,6 +9,9 @@ astock-core = { path = "../core" }
 astock-tdx = { path = "../tdx" }
 astock-joinquant = { path = "../joinquant" }
 astock-security = { path = "../security" }
+astock-storage = { path = "../storage" }
+astock-news-intelligence = { path = "../news-intelligence" }
+astock-entity-linking = { path = "../entity-linking" }
 tokio.workspace = true
 reqwest.workspace = true
 futures.workspace = true
@@ -28,3 +31,4 @@ once_cell.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
+tempfile = "3"

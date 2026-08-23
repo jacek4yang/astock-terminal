@@ -20,6 +20,9 @@ import {
 import { fmtBytes } from "../lib/format";
 import { ErrorBox, Term } from "../components/ui";
 import ProviderHealth from "../components/ProviderHealth";
+import NewsEventClusters from "../components/NewsEventClusters";
+import SourceEvidenceWorkbench from "../components/SourceEvidenceWorkbench";
+import DataQualityWorkbench from "../components/DataQualityWorkbench";
 import { applyTheme, useAppStore, type Theme, type UiMode } from "../store";
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -331,6 +334,9 @@ export default function SettingsPage() {
 
         {/* 数据源健康(5s 轮询) */}
         <ProviderHealth />
+        <DataQualityWorkbench />
+        <NewsEventClusters />
+        <SourceEvidenceWorkbench />
 
       {/* MiniMax 访问密钥 */}
       <Section title="MiniMax 访问密钥">

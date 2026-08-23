@@ -1,0 +1,22 @@
+[package]
+name = "astock-global-intelligence"
+description = "Auditable overseas primary-source ingestion and Global-to-A-share transmission mapping"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+astock-storage = { path = "../storage" }
+astock-trading-rules = { path = "../trading-rules" }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
+regex.workspace = true
+once_cell.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }

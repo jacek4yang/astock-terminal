@@ -1,0 +1,55 @@
+{
+  "dataset_id": "astock-p0-research-eval",
+  "dataset_version": "1.0.0",
+  "minimum": {
+    "news.coverage": 0.95,
+    "news.precision": 0.85,
+    "news.source_availability": 0.85,
+    "clustering.pairwise_precision": 0.70,
+    "clustering.pairwise_recall": 0.95,
+    "clustering.pairwise_f1": 0.80,
+    "clustering.correction_recall": 0.95,
+    "entity.f1": 0.88,
+    "graph.precision": 0.74,
+    "graph.recall": 0.74,
+    "graph.evidence_accuracy": 0.65,
+    "graph.validity_accuracy": 0.95,
+    "propagation.path_precision": 0.65,
+    "propagation.path_recall": 0.65,
+    "propagation.direction_accuracy": 0.95,
+    "propagation.interval_coverage": 0.90,
+    "agent.fact_citation_accuracy": 0.74,
+    "agent.numeric_consistency": 0.95,
+    "agent.evidence_coverage": 0.95,
+    "agent.conflict_handling": 0.95,
+    "agent.abstention_accuracy": 0.95,
+    "agent.task_success": 0.66
+  },
+  "maximum": {
+    "news.duplicate_rate": 0.13,
+    "news.old_news_rate": 0.13,
+    "news.mean_latency_seconds": 1000000.0,
+    "propagation.lag_mae_days": 1.10,
+    "agent.mean_latency_ms": 25000.0,
+    "agent.mean_tokens": 13000.0,
+    "agent.mean_api_cost_microunits": 9500.0
+  },
+  "max_regression": {
+    "news.coverage": 0.01,
+    "news.precision": 0.02,
+    "clustering.pairwise_f1": 0.02,
+    "entity.f1": 0.02,
+    "graph.f1": 0.02,
+    "propagation.path_f1": 0.02,
+    "agent.fact_citation_accuracy": 0.02,
+    "agent.numeric_consistency": 0.01,
+    "agent.task_success": 0.01
+  },
+  "release_claims": [
+    {"claim":"离线基准中新闻覆盖率不低于 95%","metric":"news.coverage","minimum":0.95},
+    {"claim":"离线基准支持更正与撤回识别","metric":"clustering.correction_recall","minimum":0.95},
+    {"claim":"离线基准实体链接 F1 不低于 0.88","metric":"entity.f1","minimum":0.88},
+    {"claim":"离线基准能够拒绝无数据结论","metric":"agent.abstention_accuracy","minimum":0.95},
+    {"claim":"离线基准中 Agent 数值一致率不低于 95%","metric":"agent.numeric_consistency","minimum":0.95}
+  ]
+}

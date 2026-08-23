@@ -8,21 +8,25 @@
 //! the engines twice.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
+use chrono::{Datelike, FixedOffset, Timelike, Utc};
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
 
-use astock_core::{Adjust, KlinePeriod};
+use astock_core::{
+    Adjust, DataQualitySummary, DatasetKind, KlinePeriod, QualityFlag, QualityFlagCode,
+};
 use astock_fundamental::FundamentalClient;
 use astock_graph::GraphStore;
 use astock_market_data::{DataProvider, FinanceNewsProvider, IwencaiOpenApi, JoinQuantProvider};
 use astock_minimax::MinimaxClient;
 use astock_minimax::ToolSpec;
 use astock_security::ToolPermissionDomain;
-use astock_storage::{Storage, ToolCacheEntry};
+use astock_storage::{QualityObservation, Storage, ToolCacheEntry};
 
 use crate::error::{AgentError, Result};
 
@@ -277,18 +281,35 @@ impl ToolRegistry {
         if tool.cacheable() {
             if let Some(entry) = ctx.storage.tool_cache_get(&cache_key).await? {
                 if let Ok(env) = serde_json::from_str::<CacheEnvelope>(&entry.result_json) {
-                    return Ok(ToolResult {
+                    let mut result = ToolResult {
                         summary_json: env.summary,
                         full_json: env.full,
                         cache_key,
                         source: env.source,
                         fetched_at: env.fetched_at,
-                    });
+                    };
+                    attach_and_observe_quality(name, &args, &mut result, ctx, None, true).await;
+                    return Ok(result);
                 }
             }
         }
 
-        let mut result = tool.execute(args, ctx).await?;
+        let started = Instant::now();
+        let execution = tool.execute(args.clone(), ctx).await;
+        let mut result = match execution {
+            Ok(result) => result,
+            Err(error) => {
+                observe_failure(
+                    name,
+                    &args,
+                    ctx,
+                    started.elapsed().as_millis() as u64,
+                    &error,
+                )
+                .await;
+                return Err(error);
+            }
+        };
         result.cache_key = cache_key.clone();
 
         if tool.cacheable() {
@@ -312,8 +333,269 @@ impl ToolRegistry {
                 })
                 .await?;
         }
+        attach_and_observe_quality(
+            name,
+            &args,
+            &mut result,
+            ctx,
+            Some(started.elapsed().as_millis() as u64),
+            false,
+        )
+        .await;
         Ok(result)
     }
+}
+
+fn dataset_for_tool(name: &str, args: &Value) -> DatasetKind {
+    match name {
+        "get_quote" | "get_market_breadth" | "search_stock" | "get_watchlist" => {
+            DatasetKind::RealtimeQuote
+        }
+        "get_kline" => match args.get("period").and_then(Value::as_str).unwrap_or("day") {
+            "week" | "weekly" | "w" => DatasetKind::WeeklyKline,
+            "month" | "monthly" => DatasetKind::MonthlyKline,
+            value if value.contains('m') => DatasetKind::IntradayMinute,
+            _ => DatasetKind::DailyKline,
+        },
+        "compute_indicators" | "run_full_analysis" | "run_chanlun" | "compare_stocks"
+        | "scan_market" | "get_market_regime" => DatasetKind::DailyKline,
+        "get_fund_flow" => DatasetKind::FundFlow,
+        "get_fundamentals" | "analyze_earnings_drivers" | "run_joinquant_research" => {
+            DatasetKind::Fundamentals
+        }
+        "run_valuation" => DatasetKind::Valuation,
+        "research_news" => DatasetKind::News,
+        "research_disclosures"
+        | "research_global_transmission"
+        | "analyze_event_price_in"
+        | "research_supply_chain_relations" => DatasetKind::Announcement,
+        "search_web" => DatasetKind::SearchDiscovery,
+        "fetch_source_document" | "read_document" | "compare_source_evidence" => {
+            DatasetKind::Announcement
+        }
+        "get_industry_chain"
+        | "run_supply_chain_shock"
+        | "build_relationship_graph"
+        | "run_quant_research"
+        | "query_graph_as_of" => DatasetKind::KnowledgeGraph,
+        "run_backtest" | "iterate_strategy" => DatasetKind::Backtest,
+        _ => DatasetKind::Other,
+    }
+}
+
+fn entity_key(args: &Value) -> Option<String> {
+    ["symbol", "code", "subject", "query", "cache_key"]
+        .iter()
+        .find_map(|key| args.get(*key).and_then(Value::as_str).map(str::to_string))
+        .or_else(|| {
+            args.get("symbols")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .take(20)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .filter(|value| !value.is_empty())
+        })
+}
+
+fn count_missing(value: &Value) -> u32 {
+    match value {
+        Value::Null => 1,
+        Value::Array(values) => values.iter().map(count_missing).sum(),
+        Value::Object(values) => values
+            .iter()
+            .filter(|(key, _)| key.as_str() != "data_quality")
+            .map(|(_, value)| count_missing(value))
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn count_conflicts(value: &Value) -> u32 {
+    match value {
+        Value::Array(values) => values.iter().map(count_conflicts).sum(),
+        Value::Object(values) => {
+            let local = values
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| {
+                    matches!(status, "conflict" | "incompatible_contract" | "冲突")
+                }) as u32;
+            let declared = values
+                .get("conflict_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as u32;
+            local
+                .saturating_add(declared)
+                .saturating_add(values.values().map(count_conflicts).sum())
+        }
+        _ => 0,
+    }
+}
+
+fn age_secs(fetched_at: &str) -> Option<u64> {
+    chrono::DateTime::parse_from_rfc3339(fetched_at)
+        .ok()
+        .map(|time| Utc::now().timestamp().saturating_sub(time.timestamp()) as u64)
+}
+
+fn in_china_trading_session() -> bool {
+    let china = FixedOffset::east_opt(8 * 3_600).expect("valid China offset");
+    let now = Utc::now().with_timezone(&china);
+    if now.weekday().number_from_monday() > 5 {
+        return false;
+    }
+    let minutes = now.hour() * 60 + now.minute();
+    (570..=690).contains(&minutes) || (780..=900).contains(&minutes)
+}
+
+fn quality_for_result(
+    name: &str,
+    dataset: DatasetKind,
+    result: &ToolResult,
+) -> (DataQualitySummary, u32, u32) {
+    let value = result.full_json.as_ref().unwrap_or(&result.summary_json);
+    let missing = count_missing(value);
+    let conflicts = count_conflicts(value);
+    let mut flags = Vec::new();
+    if missing > 0 {
+        flags.push(QualityFlag::warning(
+            QualityFlagCode::Partial,
+            None,
+            format!("结果中有 {missing} 个空值；空值不会自动替换为零"),
+        ));
+    }
+    if conflicts > 0 {
+        flags.push(QualityFlag::blocking(
+            QualityFlagCode::SourceConflict,
+            None,
+            format!("检测到 {conflicts} 个未解决的跨源冲突"),
+        ));
+    }
+    if matches!(name, "run_valuation" | "analyze_earnings_drivers") {
+        flags.push(QualityFlag::warning(
+            QualityFlagCode::Unverified,
+            None,
+            "本次盈利/估值分析未在同一工具内完成独立预测源对账，置信上限降为中等",
+        ));
+    }
+    if matches!(name, "run_backtest" | "iterate_strategy") {
+        flags.push(QualityFlag::warning(
+            QualityFlagCode::Unverified,
+            None,
+            "历史输入序列未在本工具内逐字段完成跨源复核，不得仅凭最优回测给出高置信建议",
+        ));
+    }
+    let age = age_secs(&result.fetched_at).unwrap_or_else(|| {
+        flags.push(QualityFlag::warning(
+            QualityFlagCode::Unverified,
+            None,
+            "上游结果没有可解析的抓取时间，无法证明实时性",
+        ));
+        0
+    });
+    (
+        DataQualitySummary::evaluate(dataset, age, in_china_trading_session(), flags),
+        missing,
+        conflicts,
+    )
+}
+
+fn insert_quality(value: &mut Value, quality: &Value) {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("data_quality".into(), quality.clone());
+    } else {
+        let data = std::mem::take(value);
+        *value = serde_json::json!({
+            "data": data,
+            "data_quality": quality,
+        });
+    }
+}
+
+async fn attach_and_observe_quality(
+    name: &str,
+    args: &Value,
+    result: &mut ToolResult,
+    ctx: &ToolContext,
+    latency_ms: Option<u64>,
+    cache_hit: bool,
+) {
+    let dataset = dataset_for_tool(name, args);
+    let (summary, missing, conflicts) = quality_for_result(name, dataset, result);
+    let quality_json = serde_json::to_value(&summary).unwrap_or(Value::Null);
+    insert_quality(&mut result.summary_json, &quality_json);
+    if let Some(full) = result.full_json.as_mut() {
+        insert_quality(full, &quality_json);
+    }
+    let provider = if result.source.trim().is_empty() {
+        "未声明来源".to_string()
+    } else {
+        result.source.clone()
+    };
+    let operation = if cache_hit {
+        format!("{name}（缓存命中）")
+    } else {
+        name.to_string()
+    };
+    let _ = ctx
+        .storage
+        .quality_observation_add(QualityObservation {
+            observation_id: None,
+            dataset,
+            provider,
+            entity_key: entity_key(args),
+            operation,
+            success: true,
+            latency_ms,
+            summary,
+            missing_fields: missing,
+            conflicts,
+            error_kind: None,
+            recorded_at: now_secs(),
+        })
+        .await;
+}
+
+async fn observe_failure(
+    name: &str,
+    args: &Value,
+    ctx: &ToolContext,
+    latency_ms: u64,
+    error: &AgentError,
+) {
+    let dataset = dataset_for_tool(name, args);
+    let summary = DataQualitySummary::evaluate(
+        dataset,
+        0,
+        in_china_trading_session(),
+        vec![QualityFlag::warning(
+            QualityFlagCode::Partial,
+            None,
+            "本次工具调用失败，未产生可用于结论的数据",
+        )],
+    );
+    let _ = ctx
+        .storage
+        .quality_observation_add(QualityObservation {
+            observation_id: None,
+            dataset,
+            provider: "调用失败".into(),
+            entity_key: entity_key(args),
+            operation: name.into(),
+            success: false,
+            latency_ms: Some(latency_ms),
+            summary,
+            missing_fields: 0,
+            conflicts: 0,
+            error_kind: Some(error.to_string()),
+            recorded_at: now_secs(),
+        })
+        .await;
 }
 
 /// Deterministic cache key for `(tool, args)`: `tool:fnv1a64(canonical_json)`.
@@ -350,7 +632,15 @@ pub fn schema_value<T: JsonSchema>() -> Value {
 pub fn parse_args<T: DeserializeOwned>(tool: &str, args: Value) -> Result<T> {
     serde_json::from_value(args).map_err(|e| AgentError::InvalidArgs {
         tool: tool.to_string(),
-        msg: e.to_string(),
+        // serde_json may include the rejected raw string in Display output.
+        // Tool arguments can contain credentials, so diagnostics must only
+        // expose the error category and never echo the submitted value.
+        msg: match e.classify() {
+            serde_json::error::Category::Data => "参数字段或数据类型不符合工具声明".to_string(),
+            serde_json::error::Category::Syntax => "参数不是有效的 JSON".to_string(),
+            serde_json::error::Category::Eof => "参数 JSON 不完整".to_string(),
+            serde_json::error::Category::Io => "读取参数时发生内部错误".to_string(),
+        },
     })
 }
 
@@ -418,6 +708,21 @@ mod tests {
         assert!(parse_adjust(Some("xxx")).is_err());
     }
 
+    #[test]
+    fn typed_argument_errors_never_echo_raw_values() {
+        #[derive(Debug, serde::Deserialize)]
+        struct Args {
+            #[allow(dead_code)]
+            symbol: String,
+        }
+
+        let error = parse_args::<Args>("fixture", json!("api_key=must-not-leak"))
+            .expect_err("string must not deserialize as an object");
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("参数字段或数据类型"));
+        assert!(!diagnostic.contains("must-not-leak"));
+    }
+
     #[tokio::test]
     async fn dispatch_is_read_through_cached() {
         use crate::testing::{EchoTool, NoopMarket};
@@ -449,7 +754,24 @@ mod tests {
         );
         assert_eq!(first.cache_key, second.cache_key);
         assert!(first.cache_key.starts_with("echo:"));
-        assert_eq!(second.summary_json, json!({"echo": "hi"}));
+        assert_eq!(second.summary_json["echo"], json!("hi"));
+        assert_eq!(
+            second.summary_json["data_quality"]["freshness"],
+            json!("expired")
+        );
+        assert_eq!(
+            second.summary_json["data_quality"]["allow_deterministic_compute"],
+            json!(false)
+        );
+        let observations = ctx
+            .storage
+            .quality_observations_recent(None, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(observations.len(), 2);
+        assert!(observations
+            .iter()
+            .any(|item| item.operation.contains("缓存命中")));
 
         let missing = registry.dispatch("nope", json!({}), &ctx).await;
         assert!(matches!(missing, Err(AgentError::UnknownTool(_))));
