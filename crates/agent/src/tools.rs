@@ -371,9 +371,10 @@ fn dataset_for_tool(name: &str, args: &Value) -> DatasetKind {
         "fetch_source_document" | "read_document" | "compare_source_evidence" => {
             DatasetKind::Announcement
         }
-        "get_industry_chain" | "run_supply_chain_shock" | "build_relationship_graph" => {
-            DatasetKind::KnowledgeGraph
-        }
+        "get_industry_chain"
+        | "run_supply_chain_shock"
+        | "build_relationship_graph"
+        | "query_graph_as_of" => DatasetKind::KnowledgeGraph,
         "run_backtest" | "iterate_strategy" => DatasetKind::Backtest,
         _ => DatasetKind::Other,
     }

@@ -22,6 +22,7 @@ use astock_graph::{Edge, Engine as GraphEngine, Event, Node, NodeKind, Relation}
 use astock_market_data::{DataProvider, MarketData};
 use astock_trading_rules::{RuleSet, TradeSide};
 use serde_json::{json, Value};
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::State;
@@ -105,6 +106,118 @@ pub async fn graph_subgraph(
         "nodes": sub.nodes,
         "edges": sub.edges,
     }))
+}
+
+/// Rebuild the graph for separate business-valid and system-knowledge clocks.
+/// Optional center/hops filtering never changes the global reproducible
+/// snapshot id; it only limits the UI payload.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn graph_as_of(
+    state: State<'_, AppState>,
+    business_time: i64,
+    knowledge_time: i64,
+    symbol_or_node: Option<String>,
+    hops: Option<u32>,
+) -> Result<Value, CmdError> {
+    let requested_query = symbol_or_node
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if let Some(query) = requested_query.as_deref() {
+        ensure_graph_company(&state, query).await?;
+    }
+    let mut snapshot = state
+        .graph
+        .graph_as_of(business_time, knowledge_time)
+        .await?;
+    let mut center = None;
+    let hops = hops.unwrap_or(2).clamp(1, 3);
+    if let Some(query) = requested_query.as_deref() {
+        let node = state
+            .graph
+            .find_node(query)
+            .await?
+            .ok_or_else(|| CmdError::new("not_found", format!("图谱节点不存在：{query}")))?;
+        center = Some(node.id.clone());
+        let mut visited = HashSet::from([node.id.clone()]);
+        let mut queue = VecDeque::from([(node.id, 0_u32)]);
+        while let Some((current, depth)) = queue.pop_front() {
+            if depth >= hops {
+                continue;
+            }
+            for edge in &snapshot.edges {
+                let next = if edge.src == current {
+                    Some(&edge.dst)
+                } else if edge.dst == current {
+                    Some(&edge.src)
+                } else {
+                    None
+                };
+                if let Some(next) = next {
+                    if visited.insert(next.clone()) {
+                        queue.push_back((next.clone(), depth + 1));
+                    }
+                }
+            }
+        }
+        snapshot
+            .edges
+            .retain(|edge| visited.contains(&edge.src) && visited.contains(&edge.dst));
+        snapshot.nodes.retain(|node| visited.contains(&node.id));
+    }
+    let mut value = serde_json::to_value(snapshot)
+        .map_err(|error| CmdError::new("engine", format!("serialize graph snapshot: {error}")))?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("center".into(), json!(center));
+        object.insert("hops".into(), json!(hops));
+    }
+    Ok(value)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn graph_history_bounds(
+    state: State<'_, AppState>,
+) -> Result<astock_graph::GraphHistoryBounds, CmdError> {
+    Ok(state.graph.graph_history_bounds().await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn graph_edge_timeline(
+    state: State<'_, AppState>,
+    identity_id: String,
+) -> Result<Vec<astock_graph::EdgeRevision>, CmdError> {
+    if identity_id.trim().is_empty() {
+        return Err(CmdError::new("invalid_param", "关系身份不能为空"));
+    }
+    Ok(state.graph.edge_timeline(identity_id.trim()).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn graph_snapshot_get(
+    state: State<'_, AppState>,
+    snapshot_id: String,
+) -> Result<Option<astock_graph::GraphSnapshot>, CmdError> {
+    Ok(state.graph.graph_snapshot(snapshot_id.trim()).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn graph_snapshot_diff(
+    state: State<'_, AppState>,
+    left_business_time: i64,
+    left_knowledge_time: i64,
+    right_business_time: i64,
+    right_knowledge_time: i64,
+) -> Result<astock_graph::GraphSnapshotDiff, CmdError> {
+    Ok(state
+        .graph
+        .compare_graph_snapshots(
+            left_business_time,
+            left_knowledge_time,
+            right_business_time,
+            right_knowledge_time,
+        )
+        .await?)
 }
 
 /// Propagate an event (e.g. 铜 +10%) through the supply-chain graph:

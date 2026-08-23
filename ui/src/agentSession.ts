@@ -44,6 +44,7 @@ export const DEFAULT_AGENT_TOOLS = [
   "research_global_transmission",
   "analyze_event_price_in",
   "research_supply_chain_relations",
+  "query_graph_as_of",
 ] as const;
 
 export interface ToolCallItem {

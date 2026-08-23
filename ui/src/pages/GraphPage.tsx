@@ -19,6 +19,7 @@ import {
 import { ErrorBox, LoadBar, Term } from "../components/ui";
 import Markdown from "../components/Markdown";
 import RelationReviewWorkbench from "../components/RelationReviewWorkbench";
+import GraphHistoryWorkbench from "../components/GraphHistoryWorkbench";
 import { useAppStore } from "../store";
 
 // ==================== 常量 ====================
@@ -951,6 +952,7 @@ const TABS = [
   { key: "chain", label: "产业链地图" },
   { key: "rel", label: "关系网络" },
   { key: "review", label: "关系抽取与审核" },
+  { key: "history", label: "历史图谱与时间线" },
 ] as const;
 
 export default function GraphPage() {
@@ -988,6 +990,9 @@ export default function GraphPage() {
       </div>
       <div className={"flex min-h-0 flex-1 flex-col " + (tab === "review" ? "" : "hidden")}>
         <RelationReviewWorkbench />
+      </div>
+      <div className={"flex min-h-0 flex-1 flex-col " + (tab === "history" ? "" : "hidden")}>
+        <GraphHistoryWorkbench />
       </div>
     </div>
   );

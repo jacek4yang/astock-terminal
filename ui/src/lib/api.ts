@@ -2034,6 +2034,92 @@ export interface SubgraphResult {
   edges: GraphEdge[];
 }
 
+export interface GraphSnapshotEdge {
+  revision_id: string;
+  identity_id: string;
+  revision_no: number;
+  src: string;
+  original_src: string;
+  dst: string;
+  original_dst: string;
+  relation: string;
+  product_scope?: string | null;
+  region_scope?: string | null;
+  weight: number;
+  disclosed_share?: number | null;
+  confidence: number;
+  effective_confidence: number;
+  source_type: string;
+  source_name: string;
+  source_url: string;
+  evidence_version: string;
+  status: string;
+  valid_from: number;
+  valid_to?: number | null;
+  observed_at: number;
+  recorded_at: number;
+  revalidate_after: number;
+}
+
+export interface GraphSnapshot {
+  snapshot_id: string;
+  business_time: number;
+  knowledge_time: number;
+  center?: string | null;
+  hops?: number;
+  nodes: GraphNode[];
+  edges: GraphSnapshotEdge[];
+  revision_ids: string[];
+  merge_ids: string[];
+  stale_count: number;
+  excluded_count: number;
+}
+
+export interface GraphEdgeRevision {
+  revision_id: string;
+  identity_id: string;
+  revision_no: number;
+  src: string;
+  dst: string;
+  relation: string;
+  product_scope?: string | null;
+  region_scope?: string | null;
+  weight: number;
+  confidence: number;
+  disclosed_share?: number | null;
+  source_type: string;
+  source_name: string;
+  source_url: string;
+  evidence_version: string;
+  status: string;
+  valid_from: number;
+  valid_to?: number | null;
+  observed_at: number;
+  recorded_at: number;
+  superseded_at?: number | null;
+  revalidate_after: number;
+  decay_half_life_days: number;
+  supersedes_revision_id?: string | null;
+  metadata: Record<string, unknown> | null;
+}
+
+export interface GraphHistoryBounds {
+  business_min: number;
+  business_max: number;
+  knowledge_min: number;
+  knowledge_max: number;
+  revision_count: number;
+  revalidation_due_count: number;
+}
+
+export interface GraphSnapshotDiff {
+  left_snapshot_id: string;
+  right_snapshot_id: string;
+  added_revision_ids: string[];
+  removed_revision_ids: string[];
+  changed_identity_ids: string[];
+}
+
 /** supply_chain_shock 单条传导结果 */
 export interface ShockEntry {
   node_id: string;
@@ -2085,6 +2171,29 @@ export interface RelationshipGraph {
 
 export const graphSubgraph = (symbolOrNode: string, hops?: number) =>
   cmd<SubgraphResult>("graph_subgraph", { symbol_or_node: symbolOrNode, hops });
+export const graphAsOf = (businessTime: number, knowledgeTime: number, symbolOrNode?: string, hops?: number) =>
+  cmd<GraphSnapshot>("graph_as_of", {
+    business_time: businessTime,
+    knowledge_time: knowledgeTime,
+    symbol_or_node: symbolOrNode,
+    hops,
+  });
+export const graphHistoryBounds = () => cmd<GraphHistoryBounds>("graph_history_bounds");
+export const graphEdgeTimeline = (identityId: string) =>
+  cmd<GraphEdgeRevision[]>("graph_edge_timeline", { identity_id: identityId });
+export const graphSnapshotGet = (snapshotId: string) =>
+  cmd<GraphSnapshot | null>("graph_snapshot_get", { snapshot_id: snapshotId });
+export const graphSnapshotDiff = (
+  leftBusinessTime: number,
+  leftKnowledgeTime: number,
+  rightBusinessTime: number,
+  rightKnowledgeTime: number,
+) => cmd<GraphSnapshotDiff>("graph_snapshot_diff", {
+  left_business_time: leftBusinessTime,
+  left_knowledge_time: leftKnowledgeTime,
+  right_business_time: rightBusinessTime,
+  right_knowledge_time: rightKnowledgeTime,
+});
 export const supplyChainShock = (subject: string, direction: "up" | "down", magnitudePct?: number) =>
   cmd<ShockJson>("supply_chain_shock", { subject, direction, magnitude_pct: magnitudePct });
 export const relationshipGraph = (symbols: string[], windowDays?: number) =>

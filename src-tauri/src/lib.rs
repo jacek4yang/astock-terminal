@@ -111,6 +111,11 @@ pub fn run() {
             commands::fundamental::get_valuation,
             // 深度分析引擎
             commands::deep::graph_subgraph,
+            commands::deep::graph_as_of,
+            commands::deep::graph_history_bounds,
+            commands::deep::graph_edge_timeline,
+            commands::deep::graph_snapshot_get,
+            commands::deep::graph_snapshot_diff,
             commands::deep::supply_chain_shock,
             commands::deep::relationship_graph,
             commands::deep::run_backtest,

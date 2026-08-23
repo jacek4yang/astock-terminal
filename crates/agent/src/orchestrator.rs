@@ -2134,6 +2134,7 @@ fn tool_estimated_secs(name: &str) -> u64 {
         | "research_global_transmission"
         | "analyze_event_price_in"
         | "research_supply_chain_relations"
+        | "query_graph_as_of"
         | "search_web"
         | "fetch_source_document" => 60,
         _ => 45,
@@ -2158,6 +2159,7 @@ fn tool_progress_stage(name: &str, elapsed_ms: u64, estimated_ms: u64) -> &'stat
         "research_global_transmission" => "核验海外一级来源、原时区/币种与逐边 A 股传导证据",
         "analyze_event_price_in" => "逐字段核验事件，并分离基本面影响与市场 price-in",
         "research_supply_chain_relations" => "抽取并核验供应链关系候选，只使用已审核发布关系",
+        "query_graph_as_of" => "按业务时间与当时知悉时间重建历史图谱快照",
         "search_web" => "通过 MiniMax 联网检索权威来源并保留原始链接",
         "fetch_source_document" => "正在安全打开原始页面并提取页码、段落、原值与单位",
         "read_document" => "读取不可变文档版本与字段级证据",
@@ -3145,7 +3147,11 @@ mod tests {
             EngineConfig::default(),
         );
         let stream = engine.run_task(spec("parallel-tools"));
-        tokio::time::timeout(std::time::Duration::from_secs(2), barrier.wait())
+        // Full-workspace Windows runs can spend several seconds scheduling
+        // freshly linked test processes. The barrier still proves both tool
+        // futures are polled concurrently; the wider wall-clock guard only
+        // removes host-load flakiness.
+        tokio::time::timeout(std::time::Duration::from_secs(10), barrier.wait())
             .await
             .expect("both tools must reach the barrier concurrently");
         let events = collect(stream).await;

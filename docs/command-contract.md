@@ -61,6 +61,11 @@
 
 ## 深度分析引擎(astock-graph / astock-agent)
 - `graph_subgraph(symbol_or_node, hops?: 1-3, 默认 2) -> {nodes, edges}` — 产业链子图(代码/节点 id/精确名称)
+- `graph_as_of(business_time, knowledge_time, symbol_or_node?, hops?) -> GraphSnapshot` — 按业务时间和系统知悉时间重建可重复快照，返回 `snapshot_id`、不可变 revision、状态、有效置信度、原始/合并后实体和来源。
+- `graph_history_bounds() -> GraphHistoryBounds` — 历史滑块边界、修订总量和当前待复核数量。
+- `graph_edge_timeline(identity_id) -> EdgeRevision[]` — 稳定关系身份下的全部不可变修订。
+- `graph_snapshot_get(snapshot_id) -> GraphSnapshot?` — 按确定性 ID 重放；相同输入无法得到相同 ID 时拒绝。
+- `graph_snapshot_diff(left_business_time, left_knowledge_time, right_business_time, right_knowledge_time) -> GraphSnapshotDiff` — 新增/移除 revision 与发生变化的关系身份。历史研究和事件回测必须显式绑定 knowledge-time 快照。
 - `supply_chain_shock(subject, direction: "up"|"down"(支持涨/跌), magnitude_pct?) -> ShockJson` — 事件沿供应链传导:一二级受益/受损 + 逻辑链/滞后/置信度
 - `relationship_graph(symbols: string[2-12], window_days?: 60-500, 默认 250) -> GraphJson` — 日收益 Pearson + lead-lag 关系网络
 - `run_backtest(symbol?, strategy?, params?, pool?, fast?, slow?, entry_n?, exit_n?, bars?: 60-2000, 默认 750) -> BacktestJson` — 日线回测(A 股交易规则),返回绩效/净值曲线/最近 50 笔交易

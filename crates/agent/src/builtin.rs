@@ -1495,6 +1495,7 @@ pub fn default_registry() -> ToolRegistry {
         Arc::new(crate::deep::ResearchGlobalTransmission),
         Arc::new(crate::deep::AnalyzeEventPriceIn),
         Arc::new(crate::deep::ResearchSupplyChainRelations),
+        Arc::new(crate::deep::QueryGraphAsOf),
         Arc::new(crate::deep::ResearchNews),
         Arc::new(crate::deep::GetMarketRegime),
     ])
@@ -1724,7 +1725,7 @@ mod tests {
     #[tokio::test]
     async fn tool_schemas_are_valid() {
         let registry = default_registry();
-        assert_eq!(registry.len(), 30);
+        assert_eq!(registry.len(), 31);
         let mut names = Vec::new();
         for spec in registry.specs() {
             assert_eq!(spec.kind, "function");
@@ -2011,7 +2012,19 @@ mod tests {
             json!({"top": 10, "candidates": 50}),
         )
         .await;
-        assert_eq!(again.summary_json, r.summary_json);
+        // Quality age is deliberately recomputed at read time, so crossing a
+        // one-second wall-clock boundary must not make this cache test flaky.
+        let mut first_summary = r.summary_json.clone();
+        let mut cached_summary = again.summary_json.clone();
+        for summary in [&mut first_summary, &mut cached_summary] {
+            let age = summary["data_quality"]["age_secs"].as_u64().unwrap();
+            assert!(age <= 2, "fresh cached scan unexpectedly aged {age}s");
+            summary["data_quality"]
+                .as_object_mut()
+                .unwrap()
+                .remove("age_secs");
+        }
+        assert_eq!(cached_summary, first_summary);
         assert_eq!(
             progress
                 .lock()

@@ -319,6 +319,103 @@ impl AgentTool for ResearchSupplyChainRelations {
 }
 
 // ---------------------------------------------------------------------
+// query_graph_as_of
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct QueryGraphAsOfArgs {
+    /// 关系在现实业务中应当有效的 Unix 秒时间
+    business_time: i64,
+    /// 系统当时已经知晓材料的 Unix 秒时间；历史研究不得填当前时间冒充过去
+    knowledge_time: i64,
+    /// 可选公司代码、名称或节点 ID；留空返回整个截面的压缩摘要
+    subject: Option<String>,
+    /// 围绕主体保留 1-3 层关系，默认 2
+    max_hops: Option<u32>,
+}
+
+pub struct QueryGraphAsOf;
+
+#[async_trait]
+impl AgentTool for QueryGraphAsOf {
+    fn name(&self) -> &'static str {
+        "query_graph_as_of"
+    }
+
+    fn description(&self) -> &'static str {
+        "按业务有效时间与系统知悉时间重建可重复的产业链图谱快照，返回不可变 revision 和 snapshot_id；用于历史研究与事件回测，防止后来发现的关系穿越到过去"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        schema_value::<QueryGraphAsOfArgs>()
+    }
+
+    fn permission_domain(&self) -> ToolPermissionDomain {
+        ToolPermissionDomain::ReadOnlyLocal
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
+        let args: QueryGraphAsOfArgs = parse_args(self.name(), args)?;
+        if args.business_time < 0 || args.knowledge_time < 0 {
+            return Err(invalid_args(self.name(), "业务时间和知悉时间不能为负数"));
+        }
+        let graph = require_graph(ctx, self.name())?;
+        let mut snapshot = graph
+            .graph_as_of(args.business_time, args.knowledge_time)
+            .await
+            .map_err(|error| tool_err(self.name(), error.to_string()))?;
+        if let Some(subject) = args
+            .subject
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let center = graph
+                .find_node(subject)
+                .await
+                .map_err(|error| tool_err(self.name(), error.to_string()))?
+                .ok_or_else(|| invalid_args(self.name(), format!("图谱节点不存在：{subject}")))?;
+            let mut visible = HashSet::from([center.id.clone()]);
+            for _ in 0..args.max_hops.unwrap_or(2).clamp(1, 3) {
+                let mut next = visible.clone();
+                for edge in &snapshot.edges {
+                    if visible.contains(&edge.src) {
+                        next.insert(edge.dst.clone());
+                    }
+                    if visible.contains(&edge.dst) {
+                        next.insert(edge.src.clone());
+                    }
+                }
+                visible = next;
+            }
+            snapshot
+                .edges
+                .retain(|edge| visible.contains(&edge.src) && visible.contains(&edge.dst));
+            snapshot.nodes.retain(|node| visible.contains(&node.id));
+        }
+        let full = serde_json::to_value(&snapshot)?;
+        let summary_edges = snapshot.edges.iter().take(50).collect::<Vec<_>>();
+        Ok(ToolResult {
+            summary_json: json!({
+                "snapshot_id":snapshot.snapshot_id,
+                "business_time":snapshot.business_time,
+                "knowledge_time":snapshot.knowledge_time,
+                "node_count":snapshot.nodes.len(),
+                "edge_count":snapshot.edges.len(),
+                "stale_count":snapshot.stale_count,
+                "excluded_by_status":snapshot.excluded_count,
+                "edges":summary_edges,
+                "policy":"历史结论和事件回测必须引用本次 snapshot_id；candidate/contradicted/expired/revoked 不进入有效图，stale 明示降级，后来记录的 revision 在较早 knowledge_time 下不可见"
+            }),
+            full_json: Some(full),
+            cache_key: String::new(),
+            source: "bitemporal_graph_snapshot".into(),
+            fetched_at: now_rfc3339(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------
 // analyze_event_price_in
 // ---------------------------------------------------------------------
 
@@ -4160,6 +4257,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn graph_as_of_tool_returns_snapshot_and_blocks_later_knowledge() {
+        let (_dir, storage, store) = seeded_graph().await;
+        let ctx = deep_ctx(storage, Some(store));
+        let registry = crate::default_registry();
+        let now = now_secs();
+        let current = registry
+            .dispatch(
+                "query_graph_as_of",
+                json!({
+                    "business_time": now,
+                    "knowledge_time": now,
+                    "subject": "600519",
+                    "max_hops": 1
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(current.summary_json["snapshot_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("graph-snapshot:"));
+        assert!(current.summary_json["edge_count"].as_u64().unwrap() > 0);
+
+        let before_system_knew = registry
+            .dispatch(
+                "query_graph_as_of",
+                json!({"business_time": now, "knowledge_time": 1, "subject": "600519"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(before_system_knew.summary_json["edge_count"], json!(0));
+    }
+
+    #[tokio::test]
     async fn supply_chain_shock_propagates_with_chains() {
         let (_dir, storage, store) = seeded_graph().await;
         let ctx = deep_ctx(storage, Some(store));
@@ -4218,6 +4351,10 @@ mod tests {
             (
                 "run_supply_chain_shock",
                 json!({"subject": "铜", "direction": "up"}),
+            ),
+            (
+                "query_graph_as_of",
+                json!({"business_time": 1, "knowledge_time": 1}),
             ),
             ("get_fundamentals", json!({"symbol": "600519"})),
             ("run_valuation", json!({"symbol": "600519"})),

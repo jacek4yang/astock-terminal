@@ -9,7 +9,10 @@
 
 use std::collections::BTreeSet;
 
-use astock_graph::{Edge, GraphStore, Node, NodeKind, Relation};
+use astock_graph::{
+    Edge, EdgeRevisionInput, EvidenceSourceType, GraphStore, Node, NodeKind, Relation,
+    RelationStatus,
+};
 use astock_source_verification::{SourceDocumentDetail, SourceSegment, SourceVerifier};
 use astock_storage::Storage;
 use once_cell::sync::Lazy;
@@ -64,6 +67,22 @@ impl DocumentKind {
 
     pub fn parse(value: &str) -> Self {
         serde_json::from_value(serde_json::Value::String(value.into())).unwrap_or(Self::Other)
+    }
+
+    fn graph_source_type(self) -> EvidenceSourceType {
+        match self {
+            Self::AnnualReport | Self::SemiAnnualReport => EvidenceSourceType::AnnualReport,
+            Self::Prospectus => EvidenceSourceType::Prospectus,
+            Self::InvestorRelations => EvidenceSourceType::InvestorResearch,
+            Self::Tender => EvidenceSourceType::Tender,
+            Self::MajorContract => EvidenceSourceType::Contract,
+            Self::Patent => EvidenceSourceType::Patent,
+            Self::RegulatoryApproval => EvidenceSourceType::RegulatoryApproval,
+            Self::CapacityEia => EvidenceSourceType::CapacityDisclosure,
+            Self::ProductManual | Self::CustomsIndustry | Self::Other => {
+                EvidenceSourceType::Research
+            }
+        }
     }
 }
 
@@ -664,24 +683,46 @@ impl RelationExtractionStore {
         let relation = candidate.relation.graph_relation();
         let projection_key = format!("{}|{}|{}", src_node.id, dst_node.id, relation.as_str());
         let now = now_secs();
+        let detail = SourceVerifier::new(self.storage.clone())
+            .read_document(&candidate.source_version_id)
+            .await?;
+        let version = detail
+            .version
+            .as_ref()
+            .ok_or_else(|| Error::Invalid("来源版本不存在，不能发布关系".into()))?;
+        let (valid_from, valid_to) =
+            relation_business_interval(candidate.report_period.as_deref(), version.published_at);
+        let edge = Edge {
+            id: None,
+            src: src_node.id.clone(),
+            dst: dst_node.id.clone(),
+            relation,
+            weight: candidate
+                .share_bps
+                .map_or(0.7, |value| f64::from(value) / 10_000.0),
+            source_name: format!("人工审核关系 · {}", candidate.evidence[0].source_version_id),
+            source_url: detail.document.canonical_url,
+            confidence: f64::from(candidate.confidence_bps) / 10_000.0,
+            valid_from,
+            valid_to,
+        };
         self.graph
-            .upsert_edge(&Edge {
-                id: None,
-                src: src_node.id.clone(),
-                dst: dst_node.id.clone(),
-                relation,
-                weight: candidate
-                    .share_bps
-                    .map_or(0.7, |value| f64::from(value) / 10_000.0),
-                source_name: format!("人工审核关系 · {}", candidate.evidence[0].source_version_id),
-                source_url: SourceVerifier::new(self.storage.clone())
-                    .read_document(&candidate.source_version_id)
-                    .await?
-                    .document
-                    .canonical_url,
-                confidence: f64::from(candidate.confidence_bps) / 10_000.0,
-                valid_from: now,
-                valid_to: None,
+            .upsert_revision_at(EdgeRevisionInput {
+                edge,
+                product_scope: candidate.product_text.clone(),
+                region_scope: candidate.region.clone(),
+                disclosed_share: candidate.share_bps.map(|value| f64::from(value) / 10_000.0),
+                source_type: candidate.document_kind.graph_source_type(),
+                evidence_version: candidate.source_version_id.clone(),
+                status: RelationStatus::Active,
+                observed_at: version.published_at.unwrap_or(version.fetched_at).min(now),
+                recorded_at: now,
+                supersedes_revision_id: None,
+                metadata: serde_json::json!({
+                    "candidate_id": candidate.candidate_id,
+                    "report_period": candidate.report_period,
+                    "review_status": candidate.review_status,
+                }),
             })
             .await?;
         let graph_edge_id = self
@@ -759,16 +800,53 @@ impl RelationExtractionStore {
             })
             .await?;
         if active_supports == 0 {
+            let candidate = self
+                .candidate(candidate_id)
+                .await?
+                .ok_or_else(|| Error::NotFound(candidate_id.into()))?;
             let parts = projection_key.split('|').collect::<Vec<_>>();
             if parts.len() == 3 {
-                if let Some(mut edge) = self.graph.all_edges().await?.into_iter().find(|edge| {
+                if let Some(edge) = self.graph.all_edges().await?.into_iter().find(|edge| {
                     edge.src == parts[0]
                         && edge.dst == parts[1]
                         && edge.relation.as_str() == parts[2]
                 }) {
-                    edge.valid_to = Some(now);
-                    edge.source_name = format!("{} · 已撤回", edge.source_name);
-                    self.graph.upsert_edge(&edge).await?;
+                    let snapshot = self.graph.graph_as_of(now, now).await?;
+                    let previous = snapshot
+                        .edges
+                        .iter()
+                        .find(|row| {
+                            row.src == edge.src
+                                && row.dst == edge.dst
+                                && row.relation == edge.relation
+                                && row.product_scope == candidate.product_text
+                        })
+                        .map(|row| row.revision_id.clone());
+                    let (valid_from, _) =
+                        relation_business_interval(candidate.report_period.as_deref(), None);
+                    self.graph
+                        .upsert_revision_at(EdgeRevisionInput {
+                            edge: Edge {
+                                valid_from,
+                                valid_to: None,
+                                source_name: format!("关系撤回 · {reason}"),
+                                source_url: edge.source_url.clone(),
+                                ..edge
+                            },
+                            product_scope: candidate.product_text,
+                            region_scope: candidate.region,
+                            disclosed_share: candidate
+                                .share_bps
+                                .map(|value| f64::from(value) / 10_000.0),
+                            source_type: EvidenceSourceType::Manual,
+                            evidence_version: format!("retraction:{publication_id}"),
+                            status: RelationStatus::Revoked,
+                            observed_at: now,
+                            recorded_at: now,
+                            supersedes_revision_id: previous,
+                            metadata: serde_json::json!({"candidate_id": candidate_id, "reason": reason}),
+                        })
+                        .await?;
                 }
             }
         }
@@ -1652,6 +1730,29 @@ fn is_anonymous(value: &str) -> bool {
 }
 fn valid_period(value: &str) -> bool {
     PERIOD.is_match(value)
+}
+fn relation_business_interval(
+    period: Option<&str>,
+    published_at: Option<i64>,
+) -> (i64, Option<i64>) {
+    let year = period.and_then(|value| {
+        PERIOD
+            .find(value)
+            .and_then(|matched| matched.as_str().get(..4))
+            .and_then(|value| value.parse::<i32>().ok())
+    });
+    if let Some(year) = year {
+        let start = chrono::NaiveDate::from_ymd_opt(year, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .map(|value| value.and_utc().timestamp())
+            .unwrap_or(0);
+        let end = chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .map(|value| value.and_utc().timestamp());
+        (start, end)
+    } else {
+        (published_at.unwrap_or(0), None)
+    }
 }
 fn normalize(value: &str) -> String {
     value
