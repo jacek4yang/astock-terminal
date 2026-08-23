@@ -3,8 +3,10 @@
 //!
 //! Kline strategy: Tencent (qfq, accurate prices) → Sina (unadjusted) →
 //! TDX (unadjusted, TCP quote protocol) → EastMoney (last resort), then
-//! validation filtering, then EastMoney amount/turnover enrichment — skipped
-//! when EastMoney itself answered (fixing the legacy double-fetch), with
+//! validation filtering. The validated OHLCV base series is cached separately
+//! so a broad scan can warm it without waiting for optional enrichment. A
+//! detailed request reuses that base and then attempts EastMoney
+//! amount/turnover enrichment once — skipped when EastMoney itself answered, with
 //! `klt` matched to the requested period (fixing the legacy always-daily
 //! enrichment bug). Quote snapshots fail over through the same chain
 //! (Tencent/Sina answer `NoProvider` and are skipped, so effectively
@@ -40,13 +42,16 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::future::{BoxFuture, FutureExt, Shared};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 use tracing::{debug, warn};
 
 type KlineOutcome = Result<Fetched<Vec<Bar>>, DataError>;
 type QuoteOutcome = Result<Fetched<Quote>, DataError>;
+type FundFlowOutcome = Result<Fetched<Vec<FundFlowPoint>>, DataError>;
 type SharedKline = Shared<BoxFuture<'static, KlineOutcome>>;
 type SharedQuote = Shared<BoxFuture<'static, QuoteOutcome>>;
+type SharedFundFlow = Shared<BoxFuture<'static, FundFlowOutcome>>;
 
 /// Await the in-flight request registered under `key`, becoming the leader
 /// (and running `make`) when none exists yet.
@@ -92,9 +97,16 @@ struct Inner {
     eastmoney: Arc<EastMoney>,
     tdx: Arc<TdxProvider>,
     security_master: Arc<SecurityMaster>,
+    /// Optional enrichment is deliberately serialized. If EastMoney is
+    /// unhealthy, one short probe opens its circuit and queued callers then
+    /// continue immediately with valid base OHLCV data.
+    enrichment_gate: Semaphore,
+    fund_flow_gate: Semaphore,
     kline_inflight: DashMap<String, SharedKline>,
+    enriched_kline_inflight: DashMap<String, SharedKline>,
     index_kline_inflight: DashMap<String, SharedKline>,
     quote_inflight: DashMap<String, SharedQuote>,
+    fund_flow_inflight: DashMap<String, SharedFundFlow>,
 }
 
 impl Inner {
@@ -111,6 +123,8 @@ impl Inner {
         for p in &chain {
             breakers.register(p.name());
         }
+        breakers.register("eastmoney_enrichment");
+        breakers.register("eastmoney_fund_flow");
         Arc::new(Inner {
             chain,
             breakers,
@@ -118,17 +132,22 @@ impl Inner {
             eastmoney,
             tdx,
             security_master,
+            enrichment_gate: Semaphore::new(1),
+            fund_flow_gate: Semaphore::new(1),
             kline_inflight: DashMap::new(),
+            enriched_kline_inflight: DashMap::new(),
             index_kline_inflight: DashMap::new(),
             quote_inflight: DashMap::new(),
+            fund_flow_inflight: DashMap::new(),
         })
     }
 
-    /// One real kline fetch: failover chain gated by the breakers, then
-    /// validation and (for non-EM sources) EM amount/turnover enrichment.
+    /// One real base-kline fetch: failover chain gated by the breakers, then
+    /// validation. Optional amount/turnover enrichment is a separate derived
+    /// layer so broad scans can warm reusable OHLCV data at full width.
     /// Only successful, non-empty results are cached — failures (WAF,
     /// network, empty payloads) never enter the cache.
-    async fn fetch_kline(
+    async fn fetch_base_kline(
         &self,
         symbol: &Symbol,
         period: KlinePeriod,
@@ -197,35 +216,113 @@ impl Inner {
             details: failures.join("; "),
         })?;
 
-        // Legacy: with fewer than 10 bars, return as-is (no validation,
-        // no enrichment).
+        // Legacy: with fewer than 10 bars, return as-is (no validation).
         if fetched.data.len() < 10 {
             warn!(%symbol, bars = fetched.data.len(), "kline returned very few bars");
-            self.cache
-                .set(&kline_cache_key(symbol, period, adjust, count), &fetched);
+            self.cache.set(
+                &base_kline_cache_key(symbol, period, adjust, count),
+                &fetched,
+            );
             return Ok(fetched);
         }
 
-        let from_eastmoney = fetched.source == Source::EastMoney;
         let validated = filter_valid_bars(symbol.code(), fetched.data);
-        let mut out = Fetched {
+        let out = Fetched {
             data: validated,
             source: fetched.source,
             fetched_at: fetched.fetched_at,
         };
-
-        // Enrichment: EM supplies amount/turnover for Tencent/Sina bars.
-        // Skipped when EM was already the source (its rows carry both) —
-        // the legacy code fetched EM a second time here.
-        if !from_eastmoney {
-            self.eastmoney
-                .enrich(symbol, period, count, &mut out.data)
-                .await;
-        }
-
         self.cache
-            .set(&kline_cache_key(symbol, period, adjust, count), &out);
+            .set(&base_kline_cache_key(symbol, period, adjust, count), &out);
         Ok(out)
+    }
+
+    /// Best-effort enrichment for a detailed view. This never invalidates a
+    /// valid base series: unavailable/slow optional data opens a dedicated
+    /// circuit and the caller continues with OHLCV.
+    async fn enrich_kline(
+        &self,
+        symbol: &Symbol,
+        period: KlinePeriod,
+        count: u32,
+        bars: &mut [Bar],
+    ) {
+        if bars.is_empty() || !self.breakers.allow_request("eastmoney_enrichment") {
+            return;
+        }
+        let Ok(_permit) = self.enrichment_gate.acquire().await else {
+            return;
+        };
+        // Re-check after waiting: the caller ahead of us may have opened the
+        // circuit, in which case this request must not join the failed queue.
+        if !self.breakers.allow_request("eastmoney_enrichment") {
+            return;
+        }
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            self.eastmoney.enrich(symbol, period, count, bars),
+        )
+        .await
+        {
+            Ok(Ok(matched)) => {
+                self.breakers.on_success("eastmoney_enrichment");
+                debug!(%symbol, matched, "eastmoney enrichment completed");
+            }
+            Ok(Err(error)) => {
+                self.breakers.trip("eastmoney_enrichment");
+                debug!(%symbol, %error, "eastmoney enrichment unavailable; continuing with base kline");
+            }
+            Err(_) => {
+                self.breakers.trip("eastmoney_enrichment");
+                debug!(%symbol, "eastmoney enrichment exceeded 5s; continuing with base kline");
+            }
+        }
+    }
+
+    /// Fund-flow is supplementary context, not a reason to hold a complete
+    /// technical analysis behind an unhealthy host queue. Calls are
+    /// serialized; one eight-second probe either succeeds or opens the
+    /// dedicated circuit so waiting peers degrade immediately.
+    async fn fetch_fund_flow_daily(&self, symbol: &Symbol, days: u32) -> FundFlowOutcome {
+        if !self.breakers.allow_request("eastmoney_fund_flow") {
+            return Err(DataError::AllFailed {
+                op: "fund_flow_daily",
+                details: "eastmoney: circuit open after an unresponsive probe".into(),
+            });
+        }
+        let _permit = self
+            .fund_flow_gate
+            .acquire()
+            .await
+            .map_err(|_| DataError::NoProvider("fund_flow_daily"))?;
+        if !self.breakers.allow_request("eastmoney_fund_flow") {
+            return Err(DataError::AllFailed {
+                op: "fund_flow_daily",
+                details: "eastmoney: circuit open after an unresponsive probe".into(),
+            });
+        }
+        match tokio::time::timeout(
+            Duration::from_secs(8),
+            self.eastmoney.fund_flow_daily(symbol, days),
+        )
+        .await
+        {
+            Ok(Ok(fetched)) => {
+                self.breakers.on_success("eastmoney_fund_flow");
+                Ok(fetched)
+            }
+            Ok(Err(error)) => {
+                self.breakers.on_failure("eastmoney_fund_flow", &error);
+                Err(error)
+            }
+            Err(_) => {
+                self.breakers.trip("eastmoney_fund_flow");
+                Err(DataError::Timeout(format!(
+                    "eastmoney fund flow {}",
+                    symbol.code()
+                )))
+            }
+        }
     }
 
     /// One real quote fetch: the same breaker-gated failover chain as
@@ -349,12 +446,22 @@ fn kline_cache_key(symbol: &Symbol, period: KlinePeriod, adjust: Adjust, count: 
     format!("kline_{symbol}_{count}_{period:?}_{adjust:?}")
 }
 
+fn base_kline_cache_key(
+    symbol: &Symbol,
+    period: KlinePeriod,
+    adjust: Adjust,
+    count: u32,
+) -> String {
+    format!("kline_base_{symbol}_{count}_{period:?}_{adjust:?}")
+}
+
 fn index_kline_cache_key(index_secid: &str, period: KlinePeriod, count: u32) -> String {
     format!("index_kline_{index_secid}_{period:?}_{count}")
 }
 
 /// Composite market-data facade: kline failover + breaker + single-flight,
 /// everything else delegated to EastMoney.
+#[derive(Clone)]
 pub struct MarketData {
     /// Shared HTTP layer (exposed for diagnostics such as `current_delay`).
     pub http: Arc<HttpClient>,
@@ -510,9 +617,67 @@ impl MarketData {
         self.inner.chain.iter().map(|p| p.name()).collect()
     }
 
-    /// Kline pipeline: cache lookup, then single-flight over the breaker-
-    /// gated failover chain. Concurrent identical calls share one upstream
-    /// request keyed by method+symbol+period+adjust+count.
+    /// Read the exact cache entry first, then reuse a fresh longer series when
+    /// one was pre-warmed. A 250-bar scan can therefore satisfy later 60/120-
+    /// bar requests without another API call.
+    fn cached_kline(
+        &self,
+        symbol: &Symbol,
+        period: KlinePeriod,
+        adjust: Adjust,
+        count: u32,
+        base: bool,
+    ) -> Option<Fetched<Vec<Bar>>> {
+        let mut candidates = vec![count];
+        for candidate in [500_u32, 250, 120] {
+            if candidate > count && !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+        for candidate in candidates {
+            let key = if base {
+                base_kline_cache_key(symbol, period, adjust, candidate)
+            } else {
+                kline_cache_key(symbol, period, adjust, candidate)
+            };
+            let ttl = if base { ttl::KLINE_BASE } else { ttl::KLINE };
+            let Some(mut hit) = self.cache.get::<Fetched<Vec<Bar>>>(&key, ttl) else {
+                continue;
+            };
+            if candidate == count || hit.data.len() >= count as usize {
+                if hit.data.len() > count as usize {
+                    hit.data = hit.data.split_off(hit.data.len() - count as usize);
+                }
+                return Some(hit);
+            }
+        }
+        None
+    }
+
+    /// Base OHLCV pipeline: reusable cache lookup, then single-flight over
+    /// the breaker-gated failover chain.
+    async fn base_kline_pipeline(
+        &self,
+        symbol: &Symbol,
+        period: KlinePeriod,
+        adjust: Adjust,
+        count: u32,
+    ) -> KlineOutcome {
+        if let Some(hit) = self.cached_kline(symbol, period, adjust, count, true) {
+            return Ok(hit);
+        }
+
+        let inner = self.inner.clone();
+        let symbol = symbol.clone();
+        let sf_key = format!("kline_base|{symbol}|{period:?}|{adjust:?}|{count}");
+        single_flight(&self.inner.kline_inflight, sf_key, move || {
+            async move { inner.fetch_base_kline(&symbol, period, adjust, count).await }.boxed()
+        })
+        .await
+    }
+
+    /// Detailed Kline pipeline. It reuses the warmed base series and only
+    /// derives optional amount/turnover fields once per cache window.
     async fn kline_pipeline(
         &self,
         symbol: &Symbol,
@@ -520,16 +685,34 @@ impl MarketData {
         adjust: Adjust,
         count: u32,
     ) -> KlineOutcome {
-        let key = kline_cache_key(symbol, period, adjust, count);
-        if let Some(hit) = self.cache.get::<Fetched<Vec<Bar>>>(&key, ttl::KLINE) {
+        if let Some(hit) = self.cached_kline(symbol, period, adjust, count, false) {
             return Ok(hit);
         }
-
+        let market = self.clone();
         let inner = self.inner.clone();
         let symbol = symbol.clone();
-        let sf_key = format!("kline|{symbol}|{period:?}|{adjust:?}|{count}");
-        single_flight(&self.inner.kline_inflight, sf_key, move || {
-            async move { inner.fetch_kline(&symbol, period, adjust, count).await }.boxed()
+        let sf_key = format!("kline_enriched|{symbol}|{period:?}|{adjust:?}|{count}");
+        single_flight(&self.inner.enriched_kline_inflight, sf_key, move || {
+            async move {
+                let mut fetched = market
+                    .base_kline_pipeline(&symbol, period, adjust, count)
+                    .await?;
+                if fetched.source != Source::EastMoney
+                    && fetched
+                        .data
+                        .iter()
+                        .any(|bar| bar.amount.is_none() || bar.turnover.is_none())
+                {
+                    inner
+                        .enrich_kline(&symbol, period, count, &mut fetched.data)
+                        .await;
+                }
+                inner
+                    .cache
+                    .set(&kline_cache_key(&symbol, period, adjust, count), &fetched);
+                Ok(fetched)
+            }
+            .boxed()
         })
         .await
     }
@@ -552,21 +735,39 @@ impl MarketData {
         let sf_key = format!("index_kline|{index_secid}|{period:?}|{count}");
         single_flight(&self.inner.index_kline_inflight, sf_key, move || {
             async move {
-                let fetched = match eastmoney
-                    .index_kline_period(&index_secid, period, count)
-                    .await
-                {
-                    Ok(Fetched {
+                let em_attempt = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    eastmoney.index_kline_period(&index_secid, period, count),
+                )
+                .await;
+                let fetched = match em_attempt {
+                    Ok(Ok(Fetched {
                         data,
                         source,
                         fetched_at,
-                    }) => Fetched {
+                    })) => Fetched {
                         data: filter_valid_index_bars(&index_secid, data),
                         source,
                         fetched_at,
                     },
-                    Err(error) => {
+                    Ok(Err(error)) => {
                         debug!(%error, %index_secid, ?period, "EM index kline failed, trying tencent");
+                        let index_code = index_secid.split('.').next_back().unwrap_or(&index_secid);
+                        let bars = tencent
+                            .index_kline_period(index_code, period, count)
+                            .await?;
+                        let validated = filter_valid_index_bars(&index_secid, bars);
+                        let required = (count as usize).min(10);
+                        if validated.len() < required {
+                            return Err(DataError::Empty(format!(
+                                "index kline {index_secid}: {} bars",
+                                validated.len()
+                            )));
+                        }
+                        Fetched::now(validated, Source::Tencent)
+                    }
+                    Err(_) => {
+                        debug!(%index_secid, ?period, "EM index kline probe exceeded 5s, trying tencent");
                         let index_code = index_secid.split('.').next_back().unwrap_or(&index_secid);
                         let bars = tencent
                             .index_kline_period(index_code, period, count)
@@ -618,6 +819,22 @@ impl DataProvider for MarketData {
                 .await;
         }
         self.kline_pipeline(symbol, period, adjust, count).await
+    }
+
+    async fn scan_kline(
+        &self,
+        symbol: &Symbol,
+        period: KlinePeriod,
+        adjust: Adjust,
+        count: u32,
+    ) -> KlineOutcome {
+        if symbol.is_unambiguous_index() {
+            return self
+                .index_kline_period_pipeline(&Symbol::index_secid(symbol.code()), period, count)
+                .await;
+        }
+        self.base_kline_pipeline(symbol, period, adjust, count)
+            .await
     }
 
     async fn quote(&self, symbol: &Symbol) -> Result<Fetched<Quote>, DataError> {
@@ -678,7 +895,13 @@ impl DataProvider for MarketData {
         symbol: &Symbol,
         days: u32,
     ) -> Result<Fetched<Vec<FundFlowPoint>>, DataError> {
-        self.eastmoney.fund_flow_daily(symbol, days).await
+        let inner = self.inner.clone();
+        let symbol = symbol.clone();
+        let sf_key = format!("fund_flow_daily|{symbol}|{days}");
+        single_flight(&self.inner.fund_flow_inflight, sf_key, move || {
+            async move { inner.fetch_fund_flow_daily(&symbol, days).await }.boxed()
+        })
+        .await
     }
 
     async fn fund_flow_realtime(
@@ -693,20 +916,28 @@ impl DataProvider for MarketData {
     }
 
     async fn all_a_shares(&self) -> Result<Fetched<Vec<StockListItem>>, DataError> {
-        let fetched = match self.eastmoney.all_a_shares().await {
-            Ok(fetched) => fetched,
-            Err(error) => {
-                debug!(%error, "EastMoney A-share list unavailable; using TDX security list");
-                self.tdx.all_a_shares().await?
-            }
-        };
+        let fetched =
+            match tokio::time::timeout(Duration::from_secs(8), self.eastmoney.all_a_shares()).await
+            {
+                Ok(Ok(fetched)) => fetched,
+                Ok(Err(error)) => {
+                    debug!(%error, "EastMoney A-share list unavailable; using TDX security list");
+                    self.tdx.all_a_shares().await?
+                }
+                Err(_) => {
+                    debug!("EastMoney A-share list probe exceeded 8s; using TDX security list");
+                    self.tdx.all_a_shares().await?
+                }
+            };
         self.security_master
             .merge_stock_list(&fetched.data, &fetched.source.to_string());
         Ok(fetched)
     }
 
     async fn market_breadth(&self) -> Result<Fetched<MarketBreadth>, DataError> {
-        self.eastmoney.market_breadth().await
+        tokio::time::timeout(Duration::from_secs(5), self.eastmoney.market_breadth())
+            .await
+            .map_err(|_| DataError::Timeout("eastmoney market breadth".into()))?
     }
 
     async fn index_kline(

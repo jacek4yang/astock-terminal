@@ -54,19 +54,46 @@ impl StubProvider {
 }
 
 fn make_bars(n: usize) -> Vec<Bar> {
-    (1..=n as u32)
+    let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+    (0..n)
         .map(|day| {
             Bar::new(
-                NaiveDate::from_ymd_opt(2025, 8, day).unwrap(),
-                100.0 + f64::from(day),
-                101.0 + f64::from(day),
-                102.0 + f64::from(day),
-                100.0 + f64::from(day),
+                start + chrono::Duration::days(day as i64),
+                100.0 + day as f64,
+                101.0 + day as f64,
+                102.0 + day as f64,
+                100.0 + day as f64,
                 1000.0,
                 VolumeUnit::Lots,
             )
         })
         .collect()
+}
+
+/// A broad scan warms complete OHLCV history. A later detailed request for a
+/// shorter window must reuse the longer base series instead of calling the
+/// upstream again.
+#[tokio::test]
+async fn scan_kline_prewarms_longer_history_for_detailed_analysis() {
+    let (stub, calls) = StubProvider::new("eastmoney", Behavior::Bars(250));
+    let md = MarketData::with_kline_chain(
+        vec![Arc::new(stub) as Arc<dyn DataProvider>],
+        BreakerConfig::default(),
+    );
+    let stock = sym("600519");
+
+    let warmed = md
+        .scan_kline(&stock, KlinePeriod::Day, Adjust::Qfq, 250)
+        .await
+        .unwrap();
+    assert_eq!(warmed.data.len(), 250);
+
+    let detailed = md
+        .kline(&stock, KlinePeriod::Day, Adjust::Qfq, 120)
+        .await
+        .unwrap();
+    assert_eq!(detailed.data.len(), 120);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[async_trait]

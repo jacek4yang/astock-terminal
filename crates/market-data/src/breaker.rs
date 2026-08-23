@@ -198,6 +198,18 @@ impl CircuitBreaker {
         c.cooldown = self.config.cooldown;
     }
 
+    /// Open a circuit immediately for a best-effort supplementary source.
+    /// This is used when a valid primary result already exists and allowing
+    /// more callers to queue behind the same optional outage would only add
+    /// latency without improving correctness.
+    pub fn trip(&self, name: &str) {
+        let entry = self.circuit(name);
+        let mut c = entry.lock();
+        c.state = CircuitState::Open;
+        c.opened_at = Some(Instant::now());
+        c.consecutive_failures = 0;
+    }
+
     /// Record a failed call. See the module docs for the classification.
     pub fn on_failure(&self, name: &str, err: &DataError) {
         let entry = self.circuit(name);
@@ -298,6 +310,14 @@ mod tests {
         cb.on_failure("sina", &network());
         assert_eq!(cb.state("sina"), CircuitState::Open);
         assert!(!cb.allow_request("sina"));
+    }
+
+    #[test]
+    fn supplementary_source_can_be_opened_immediately() {
+        let cb = CircuitBreaker::default();
+        cb.trip("eastmoney_enrichment");
+        assert_eq!(cb.state("eastmoney_enrichment"), CircuitState::Open);
+        assert!(!cb.allow_request("eastmoney_enrichment"));
     }
 
     #[test]

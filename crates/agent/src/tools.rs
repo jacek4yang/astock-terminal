@@ -46,6 +46,11 @@ pub struct ToolProgressDetail {
     pub total: usize,
     pub succeeded: usize,
     pub failed: usize,
+    /// Items intentionally excluded because they cannot be compared safely
+    /// (for example, a newly listed stock with fewer than 60 daily bars).
+    pub skipped: usize,
+    /// Number of automatic retry attempts already performed.
+    pub retries: usize,
     pub cache_hits: usize,
     /// Number of upstream data rows successfully ingested in this run.
     pub records: usize,

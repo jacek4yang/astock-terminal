@@ -31,6 +31,22 @@ pub trait DataProvider: Send + Sync {
         Err(DataError::NoProvider("kline"))
     }
 
+    /// Historical bars for high-throughput screening and cache warming.
+    ///
+    /// The default preserves provider compatibility. The composite market
+    /// hub overrides this to return the complete OHLCV series without waiting
+    /// for optional amount/turnover enrichment; a later detailed request can
+    /// reuse the warmed base series and enrich it once.
+    async fn scan_kline(
+        &self,
+        symbol: &Symbol,
+        period: KlinePeriod,
+        adjust: Adjust,
+        count: u32,
+    ) -> Result<Fetched<Vec<Bar>>, DataError> {
+        self.kline(symbol, period, adjust, count).await
+    }
+
     /// Realtime quote snapshot.
     async fn quote(&self, _symbol: &Symbol) -> Result<Fetched<Quote>, DataError> {
         Err(DataError::NoProvider("quote"))

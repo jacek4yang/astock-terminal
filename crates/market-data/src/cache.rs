@@ -15,6 +15,10 @@ pub mod ttl {
     pub const REALTIME: Duration = Duration::from_secs(2);
     /// Kline data: 15s.
     pub const KLINE: Duration = Duration::from_secs(15);
+    /// Validated OHLCV base bars used by broad scans and later detailed
+    /// analysis. Daily history is reusable for one minute; realtime quote
+    /// freshness is handled by the separate quote path.
+    pub const KLINE_BASE: Duration = Duration::from_secs(60);
     /// Search results and daily fund flow: 15s.
     pub const SEARCH: Duration = Duration::from_secs(15);
     /// Full A-share list: 60s.

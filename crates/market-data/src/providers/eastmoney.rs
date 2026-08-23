@@ -169,22 +169,21 @@ impl EastMoney {
     ///   so weekly/monthly bars never matched);
     /// - callers skip this entirely when EM was already the kline source
     ///   (legacy fetched twice).
-    pub async fn enrich(&self, symbol: &Symbol, period: KlinePeriod, count: u32, bars: &mut [Bar]) {
+    pub async fn enrich(
+        &self,
+        symbol: &Symbol,
+        period: KlinePeriod,
+        count: u32,
+        bars: &mut [Bar],
+    ) -> Result<usize, DataError> {
         if bars.is_empty() {
-            return;
+            return Ok(0);
         }
         // Request extra rows so the EM date range covers the other source's.
         let request_count = (count + 60).min(500);
-        let rows = match self
+        let rows = self
             .kline_rows(&symbol.secid(), period, Adjust::None, request_count)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::debug!(%symbol, error = %e, "eastmoney enrichment unavailable");
-                return;
-            }
-        };
+            .await?;
         let mut map: std::collections::HashMap<String, (Option<f64>, Option<f64>)> =
             std::collections::HashMap::new();
         for line in &rows {
@@ -206,6 +205,7 @@ impl EastMoney {
             }
         }
         tracing::debug!(%symbol, matched, total = bars.len(), "eastmoney enrichment merged");
+        Ok(matched)
     }
 
     async fn fetch_clist_page(
