@@ -25,7 +25,7 @@ use crate::backend::ChatBackend;
 use crate::error::{AgentError, Result};
 use crate::prompt::initial_messages_with_context;
 use crate::report::{
-    assemble_report, index_tool_evidence, report_versions, AgentReport, Evidence,
+    assemble_report, index_tool_evidence, report_versions, AgentReport, ClaimConfidence, Evidence,
     VerificationStatus,
 };
 use crate::tools::{now_secs, ToolContext, ToolProgressDetail, ToolRegistry};
@@ -916,6 +916,18 @@ impl AgentEngine {
                 }
                 let mut report =
                     assemble_report(&task_id, &clean_text, state.evidence.clone(), now_secs());
+                if awaiting_user_input {
+                    // A clarification card is an interaction boundary, not a
+                    // publishable investment conclusion. Numeric examples in
+                    // the preface (capital, option counts, market context)
+                    // must not turn a valid question card into a
+                    // verification_failed terminal task.
+                    report.research.claims.clear();
+                    report.research.calculations.clear();
+                    report.research.confidence = ClaimConfidence::Low;
+                    report.research.verification.status = VerificationStatus::NotApplicable;
+                    report.research.verification.findings.clear();
+                }
                 if !awaiting_user_input {
                     for attempt in 1..=2 {
                         if report.research.verification.passed() {
@@ -972,8 +984,8 @@ impl AgentEngine {
                         }
                     }
                 }
-                let publication_blocked =
-                    report.research.verification.status == VerificationStatus::Failed;
+                let publication_blocked = !awaiting_user_input
+                    && report.research.verification.status == VerificationStatus::Failed;
                 if publication_blocked {
                     clean_text = format!(
                         "## 报告未通过证据校验\n\n本轮草稿已被阻止发布，共发现 {} 项需要修正的问题。你可以展开下方“结论与证据校验”查看具体字段、错误原因和证据缺口；补充或刷新数据后可继续本任务。",
@@ -3462,7 +3474,7 @@ mod tests {
     async fn plan_clarification_waits_for_user_instead_of_flashing_into_specialist_review() {
         let (_dir, storage) = test_storage();
         let chat = Arc::new(ScriptedChat::new("main-model"));
-        let clarification = "```astock-questions\n{\"title\":\"请确认\",\"questions\":[{\"id\":\"risk\",\"question\":\"风险偏好？\",\"kind\":\"single\",\"options\":[{\"id\":\"safe\",\"label\":\"保守\"},{\"id\":\"balanced\",\"label\":\"平衡\"}],\"allow_other\":true}]}\n```";
+        let clarification = "你提供的2万元资金约束会影响仓位，请先确认：\n```astock-questions\n{\"title\":\"请确认\",\"questions\":[{\"id\":\"risk\",\"question\":\"风险偏好？\",\"kind\":\"single\",\"options\":[{\"id\":\"safe\",\"label\":\"保守\"},{\"id\":\"balanced\",\"label\":\"平衡\"}],\"allow_other\":true}]}\n```";
         chat.push_text(clarification);
         let echo = Arc::new(EchoTool::new());
         let engine = build_engine(storage.clone(), chat.clone(), echo);
@@ -3481,11 +3493,27 @@ mod tests {
         assert!(!events
             .iter()
             .any(|event| matches!(event, AgentEvent::TextReset { .. })));
-        let answer = events.iter().find_map(|event| match event {
-            AgentEvent::Completed { report } => Some(report.answer.as_str()),
+        let completed = events.iter().find_map(|event| match event {
+            AgentEvent::Completed { report } => Some(report),
             _ => None,
         });
-        assert_eq!(answer, Some(clarification));
+        let completed = completed.expect("clarification report");
+        assert_eq!(completed.answer, clarification);
+        assert_eq!(
+            completed.research.verification.status,
+            VerificationStatus::NotApplicable
+        );
+        assert!(completed.research.verification.findings.is_empty());
+        assert!(completed.research.claims.is_empty());
+        assert_eq!(
+            storage
+                .agent_task_get("t-plan-input")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "completed"
+        );
         assert_eq!(chat.requests.lock().unwrap().len(), 1);
         let stored = storage.conversation_load("t-plan-input").await.unwrap();
         assert!(stored

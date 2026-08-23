@@ -24,8 +24,9 @@ use std::time::Duration;
 use super::em_datacenter::{EmDataCenter, NoticeNode};
 use super::news_ingest::{
     bounded_raw, classify_data_error, ConfiguredJsonNewsProvider, JsonNewsProviderConfig,
-    NewsCapabilities, NewsDeliveryMode, NewsIngestOutcome, NewsIngestRequest, NewsIngestor,
-    NewsPage, NewsProvider, NewsProviderError, NewsProviderHealth, NewsTrustTier,
+    NewsCapabilities, NewsDeliveryMode, NewsIngestOutcome, NewsIngestProgressReporter,
+    NewsIngestRequest, NewsIngestor, NewsPage, NewsProvider, NewsProviderError, NewsProviderHealth,
+    NewsTrustTier,
 };
 
 pub const NEWSNOW_ENDPOINT: &str = "https://newsnow.busiyi.world/api/s";
@@ -117,6 +118,19 @@ pub struct FinanceNewsProvider {
 impl FinanceNewsProvider {
     pub fn new(http: Arc<HttpClient>, cache: Arc<TtlCache>) -> Self {
         Self::build(http, cache, None, None)
+    }
+
+    /// Build the facade from explicit provider plugins. This is useful for
+    /// commercial provider extensions and deterministic end-to-end tests;
+    /// the same validation, rate limits, retries, circuit breakers and
+    /// persistence rules still apply.
+    pub fn from_providers(
+        providers: Vec<Arc<dyn NewsProvider>>,
+        storage: Option<Storage>,
+    ) -> Result<Self, NewsProviderError> {
+        Ok(Self {
+            ingestor: NewsIngestor::new(providers, storage)?,
+        })
     }
 
     pub fn with_storage(
@@ -239,6 +253,18 @@ impl FinanceNewsProvider {
         keyword: Option<&str>,
         limit: usize,
     ) -> Result<FinanceNewsBatch, DataError> {
+        self.research_with_progress(sources, symbol, keyword, limit, None)
+            .await
+    }
+
+    pub async fn research_with_progress(
+        &self,
+        sources: &[String],
+        symbol: Option<&str>,
+        keyword: Option<&str>,
+        limit: usize,
+        progress: Option<NewsIngestProgressReporter>,
+    ) -> Result<FinanceNewsBatch, DataError> {
         let selected = symbol.is_none().then(|| {
             self.ingestor
                 .provider_ids()
@@ -248,7 +274,7 @@ impl FinanceNewsProvider {
         });
         let outcome = self
             .ingestor
-            .ingest(
+            .ingest_with_progress(
                 NewsIngestRequest {
                     source_ids: sources.to_vec(),
                     symbol: symbol.map(ToString::to_string),
@@ -257,6 +283,7 @@ impl FinanceNewsProvider {
                     ..Default::default()
                 },
                 selected.as_deref(),
+                progress,
             )
             .await;
         outcome_to_batch(outcome)
@@ -282,10 +309,17 @@ fn outcome_to_batch(outcome: NewsIngestOutcome) -> Result<FinanceNewsBatch, Data
         stale_sources: outcome.stale_providers,
         errors: outcome.errors.iter().map(ToString::to_string).collect(),
     };
-    if batch.items.is_empty() {
+    if batch.items.is_empty()
+        && batch.successful_sources.is_empty()
+        && batch.stale_sources.is_empty()
+    {
         Err(DataError::AllFailed {
             op: "finance news",
-            details: batch.errors.join("; "),
+            details: if batch.errors.is_empty() {
+                "资讯来源注册表为空或全部被筛选/停用".into()
+            } else {
+                batch.errors.join("; ")
+            },
         })
     } else {
         Ok(batch)
@@ -436,19 +470,22 @@ impl NewsProvider for NewsNowProvider {
         } else {
             request.source_ids
         };
+        let total_channels = sources.len();
         let outcomes = stream::iter(sources.into_iter().map(|source| async move {
-            self.fetch_source(&source, request.limit.clamp(1, 100))
-                .await
+            let result = self
+                .fetch_source(&source, request.limit.clamp(1, 100))
+                .await;
+            (source, result)
         }))
         .buffer_unordered(MAX_CONCURRENT)
         .collect::<Vec<_>>()
         .await;
         let mut items = Vec::new();
-        let mut last_error = None;
+        let mut errors = Vec::new();
         let mut http_status = None;
         let mut etag = None;
         let mut last_modified = None;
-        for outcome in outcomes {
+        for (source, outcome) in outcomes {
             match outcome {
                 Ok(snapshot) => {
                     items.extend(snapshot.items);
@@ -456,18 +493,34 @@ impl NewsProvider for NewsNowProvider {
                     etag = etag.or(snapshot.etag);
                     last_modified = last_modified.or(snapshot.last_modified);
                 }
-                Err(error) => last_error = Some(error),
+                Err(error) => errors.push((source, error)),
             }
         }
         if items.is_empty() {
-            return Err(last_error.unwrap_or_else(|| {
-                NewsProviderError::new(
+            if errors.is_empty() {
+                return Err(NewsProviderError::new(
                     &self.capabilities.provider_id,
                     super::news_ingest::NewsErrorKind::Empty,
                     "所有 NewsNow 频道均为空",
                     false,
-                )
-            }));
+                ));
+            }
+            let retryable = errors.iter().all(|(_, error)| error.retryable);
+            let kind = errors
+                .first()
+                .map(|(_, error)| error.kind)
+                .unwrap_or(super::news_ingest::NewsErrorKind::Empty);
+            let details = errors
+                .iter()
+                .map(|(source, error)| format!("{source} [{:?}]: {}", error.kind, error.message))
+                .collect::<Vec<_>>()
+                .join("；");
+            return Err(NewsProviderError::new(
+                &self.capabilities.provider_id,
+                kind,
+                format!("{}/{} 个频道失败：{details}", errors.len(), total_channels),
+                retryable,
+            ));
         }
         let next_cursor = items.first().map(|item| item.id.clone());
         Ok(NewsPage {
@@ -476,6 +529,7 @@ impl NewsProvider for NewsNowProvider {
             http_status,
             etag,
             last_modified,
+            diagnostics: errors.into_iter().map(|(_, error)| error).collect(),
         })
     }
 }
@@ -572,6 +626,7 @@ impl NewsProvider for OfficialAnnouncementProvider {
             http_status: Some(200),
             etag: None,
             last_modified: None,
+            diagnostics: Vec::new(),
         })
     }
 }
@@ -772,5 +827,24 @@ mod tests {
             .map(|row| row.0)
             .collect::<HashSet<_>>();
         assert_eq!(ids.len(), FINANCE_NEWS_SOURCES.len());
+    }
+
+    #[test]
+    fn healthy_no_match_is_not_misreported_as_provider_outage() {
+        let batch = outcome_to_batch(NewsIngestOutcome {
+            successful_providers: vec!["fixture".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(batch.items.is_empty());
+        assert_eq!(batch.successful_sources, vec!["fixture"]);
+    }
+
+    #[test]
+    fn empty_registry_error_is_never_blank() {
+        let error = outcome_to_batch(NewsIngestOutcome::default()).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("资讯来源注册表"));
+        assert!(!message.ends_with(": "));
     }
 }

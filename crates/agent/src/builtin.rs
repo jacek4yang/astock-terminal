@@ -1748,6 +1748,8 @@ mod tests {
                 .is_empty());
             names.push(spec.function.name.clone());
         }
+        let unique: std::collections::HashSet<_> = names.iter().collect();
+        assert_eq!(unique.len(), names.len(), "tool names must be unique");
         for expected in [
             "get_quote",
             "get_kline",
@@ -1772,9 +1774,14 @@ mod tests {
             "iterate_strategy",
             "run_joinquant_research",
             "search_web",
+            "fetch_source_document",
+            "read_document",
+            "compare_source_evidence",
             "research_disclosures",
             "research_global_transmission",
+            "analyze_event_price_in",
             "research_supply_chain_relations",
+            "query_graph_as_of",
             "research_news",
             "get_market_regime",
         ] {
@@ -1788,6 +1795,38 @@ mod tests {
             schema.get("required").and_then(Value::as_array).unwrap(),
             &vec![json!("symbol")]
         );
+    }
+
+    #[tokio::test]
+    async fn every_registered_tool_handles_malformed_arguments_without_panicking_or_leaking() {
+        let (_dir, ctx) = test_ctx();
+        let registry = default_registry();
+        let malformed = json!("api_key=must-not-leak");
+
+        for name in registry.names() {
+            match registry.dispatch(name, malformed.clone(), &ctx).await {
+                Ok(result) => {
+                    // Argument-free tools intentionally ignore the payload.
+                    let diagnostic = serde_json::to_string(&result.summary_json).unwrap();
+                    assert!(
+                        !result.summary_json.is_null(),
+                        "{name} returned a null result"
+                    );
+                    assert!(!diagnostic.contains("must-not-leak"));
+                }
+                Err(error) => {
+                    let diagnostic = error.to_string();
+                    assert!(
+                        !diagnostic.trim().is_empty(),
+                        "{name} returned a blank error"
+                    );
+                    assert!(
+                        !diagnostic.contains("must-not-leak"),
+                        "{name} leaked argument contents in its error: {diagnostic}"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]

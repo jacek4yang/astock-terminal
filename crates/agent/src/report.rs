@@ -629,30 +629,36 @@ pub fn verify_research_report(
         }
 
         let fields = cited_fields(&claim.evidence_ids, evidence);
-        for quantity in extract_quantities(&remove_reference_markup(&claim.text)) {
-            let matching = fields
-                .iter()
-                .copied()
-                .find(|field| quantity_matches_field(&quantity, field));
-            if matching.is_none() {
-                let same_number_wrong_unit = fields.iter().copied().any(|field| {
-                    quantity_numeric_match(&quantity, field)
-                        && !units_compatible(quantity.kind, field.unit.as_deref())
-                });
-                push_error(
-                    &mut findings,
-                    if same_number_wrong_unit {
-                        "unit_mismatch"
-                    } else {
-                        "unsupported_number"
-                    },
-                    claim,
-                    if same_number_wrong_unit {
-                        format!("数字“{}”与所引字段的单位或币种不一致", quantity.raw)
-                    } else {
-                        format!("数字“{}”无法在所引字段或确定性计算中复现", quantity.raw)
-                    },
-                );
+        // Assumption/unknown numbers are explicitly not asserted as observed
+        // market facts (for example a user-provided 2万元 capital constraint).
+        // They remain labelled in the report but do not require a provider
+        // field. Every fact/calculation/inference number remains strict.
+        if !matches!(claim.claim_type, ClaimType::Assumption | ClaimType::Unknown) {
+            for quantity in extract_quantities(&remove_reference_markup(&claim.text)) {
+                let matching = fields
+                    .iter()
+                    .copied()
+                    .find(|field| quantity_matches_field(&quantity, field));
+                if matching.is_none() {
+                    let same_number_wrong_unit = fields.iter().copied().any(|field| {
+                        quantity_numeric_match(&quantity, field)
+                            && !units_compatible(quantity.kind, field.unit.as_deref())
+                    });
+                    push_error(
+                        &mut findings,
+                        if same_number_wrong_unit {
+                            "unit_mismatch"
+                        } else {
+                            "unsupported_number"
+                        },
+                        claim,
+                        if same_number_wrong_unit {
+                            format!("数字“{}”与所引字段的单位或币种不一致", quantity.raw)
+                        } else {
+                            format!("数字“{}”无法在所引字段或确定性计算中复现", quantity.raw)
+                        },
+                    );
+                }
             }
         }
         for field in fields {
@@ -926,7 +932,7 @@ fn parse_quantity(raw: &str) -> Option<Quantity> {
         "万亿" => (1e12, QuantityKind::Money),
         "亿元" | "亿" => (1e8, QuantityKind::Money),
         "万元" => (1e4, QuantityKind::Money),
-        "万" => (1e4, QuantityKind::Plain),
+        "万" => (1e4, QuantityKind::Money),
         "元" => (1.0, QuantityKind::Money),
         "%" | "％" => (1.0, QuantityKind::Percent),
         "股" | "手" => (1.0, QuantityKind::Shares),
@@ -1200,6 +1206,23 @@ mod tests {
             report.research.verification.passed(),
             "{:?}",
             report.research.verification.findings
+        );
+    }
+
+    #[test]
+    fn user_constraint_number_passes_only_when_explicitly_an_assumption() {
+        let report = tagged_report("【假设】按用户提供的 2万元 可用资金规划仓位", vec![]);
+        assert!(
+            report.research.verification.passed(),
+            "{:?}",
+            report.research.verification.findings
+        );
+        assert_eq!(report.research.assumptions.len(), 1);
+
+        let asserted = tagged_report("【事实】可用资金为 2万元", vec![]);
+        assert_eq!(
+            asserted.research.verification.status,
+            VerificationStatus::Failed
         );
     }
 

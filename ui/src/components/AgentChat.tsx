@@ -893,17 +893,24 @@ export function ResearchVerificationPanel({ report }: { report: AgentReport }) {
     }
   }
   const failed = research.verification.status === "failed";
+  const notApplicable = research.verification.status === "not_applicable";
   return (
     <details
       className={`mt-3 rounded border ${
         failed
           ? "border-red-300 bg-red-50/70 dark:border-red-900 dark:bg-red-950/20"
+          : notApplicable
+            ? "border-blue-200 bg-blue-50/60 dark:border-blue-900/70 dark:bg-blue-950/20"
           : "border-emerald-200 bg-emerald-50/60 dark:border-emerald-900/70 dark:bg-emerald-950/20"
       }`}
       open={failed}
     >
       <summary className="cursor-pointer select-none px-3 py-2 text-sm font-semibold">
-        {failed ? "报告已被证据校验阻断" : "结论与证据校验已通过"}
+        {failed
+          ? "报告已被证据校验阻断"
+          : notApplicable
+            ? "正在等待你的选择，尚未发布投资结论"
+            : "结论与证据校验已通过"}
         <span className="muted ml-2 text-xs font-normal">
           {research.claims.length} 条结论 · {CONFIDENCE_LABEL[research.confidence] ?? research.confidence} · {research.verification.findings.length} 项校验信息
         </span>

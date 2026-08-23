@@ -253,4 +253,34 @@ describe("Agent history safety", () => {
     expect(screen.getByText(/价格字段已陈旧/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "复制完整校验记录" })).toBeInTheDocument();
   });
+
+  it("shows clarification as waiting input instead of a failed report", () => {
+    const report: AgentReport = {
+      task_id: "run-waiting",
+      answer: "请先选择你的资金定位。",
+      conclusions: [],
+      generated_at: 1,
+      evidence: [],
+      research: {
+        schema_version: "astock-research-report/v1",
+        as_of: "2026-08-23T09:00:00+08:00",
+        confidence: "low",
+        claims: [],
+        calculations: [],
+        assumptions: [],
+        counter_evidence: [],
+        invalidation: [],
+        unknowns: [],
+        verification: {
+          status: "not_applicable",
+          verifier_version: "report-verifier/v1",
+          verified_at: 1,
+          findings: [],
+        },
+      },
+    };
+    const { container } = render(createElement(ResearchVerificationPanel, { report }));
+    expect(container).toHaveTextContent("正在等待你的选择，尚未发布投资结论");
+    expect(container).not.toHaveTextContent("报告已被证据校验阻断");
+  });
 });

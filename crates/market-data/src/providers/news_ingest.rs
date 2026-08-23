@@ -126,6 +126,34 @@ fn valid_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
+/// Split a natural-language research query into bounded OR terms. Requiring
+/// the entire string `"短线 题材 龙头 板块轮动"` to occur verbatim caused a
+/// healthy provider response to be misreported as a provider outage.
+fn search_terms(query: &str) -> Vec<String> {
+    let normalized = query.trim().to_lowercase();
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+    let terms = normalized
+        .split(|character: char| {
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    ',' | '，' | ';' | '；' | '/' | '、' | '|' | '（' | '）' | '(' | ')'
+                )
+        })
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .take(12)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if terms.is_empty() {
+        vec![normalized]
+    } else {
+        terms
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewsIngestRequest {
     pub source_ids: Vec<String>,
@@ -146,6 +174,10 @@ pub struct NewsPage {
     pub etag: Option<String>,
     #[serde(default)]
     pub last_modified: Option<String>,
+    /// Non-fatal provider/channel failures retained when a provider still
+    /// returned usable rows. This keeps partial success observable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<NewsProviderError>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,6 +309,21 @@ pub struct NewsIngestOutcome {
     pub errors: Vec<NewsProviderError>,
 }
 
+/// Detailed, non-sensitive progress for one multi-provider news request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NewsIngestProgress {
+    pub completed: usize,
+    pub total: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub records: usize,
+    pub current_provider: String,
+    pub current_status: String,
+    pub recent_errors: Vec<String>,
+}
+
+pub type NewsIngestProgressReporter = Arc<dyn Fn(NewsIngestProgress) + Send + Sync>;
+
 pub struct NewsIngestor {
     providers: Vec<Arc<dyn NewsProvider>>,
     runtime: DashMap<String, Mutex<ProviderRuntime>>,
@@ -332,6 +379,15 @@ impl NewsIngestor {
         request: NewsIngestRequest,
         selected: Option<&[String]>,
     ) -> NewsIngestOutcome {
+        self.ingest_with_progress(request, selected, None).await
+    }
+
+    pub async fn ingest_with_progress(
+        &self,
+        request: NewsIngestRequest,
+        selected: Option<&[String]>,
+        progress: Option<NewsIngestProgressReporter>,
+    ) -> NewsIngestOutcome {
         let selected = selected.map(|ids| ids.iter().cloned().collect::<HashSet<_>>());
         let providers = self
             .providers
@@ -343,26 +399,88 @@ impl NewsIngestor {
             })
             .cloned()
             .collect::<Vec<_>>();
+        let total = providers.len();
+        if total == 0 {
+            return NewsIngestOutcome {
+                errors: vec![NewsProviderError::configuration(
+                    "provider-registry",
+                    "没有可用于本次查询的已启用资讯来源；请检查来源配置和筛选条件",
+                )],
+                ..Default::default()
+            };
+        }
         let mut pending = FuturesUnordered::new();
         for provider in providers {
             pending.push(self.fetch_named(provider, request.clone()));
         }
-        let mut rows = Vec::new();
-        while let Some(row) = pending.next().await {
-            rows.push(row);
-        }
         let mut outcome = NewsIngestOutcome::default();
-        for (provider_id, result) in rows {
+        let mut completed = 0usize;
+        let mut failed_providers = 0usize;
+        while let Some((provider_id, result)) = pending.next().await {
+            completed += 1;
             match result {
                 Ok((page, stale)) => {
                     if stale {
-                        outcome.stale_providers.push(provider_id);
+                        outcome.stale_providers.push(provider_id.clone());
                     } else {
-                        outcome.successful_providers.push(provider_id);
+                        outcome.successful_providers.push(provider_id.clone());
                     }
+                    outcome.errors.extend(page.diagnostics.iter().cloned());
                     outcome.items.extend(page.items);
+                    if let Some(reporter) = &progress {
+                        reporter(NewsIngestProgress {
+                            completed,
+                            total,
+                            succeeded: outcome.successful_providers.len()
+                                + outcome.stale_providers.len(),
+                            // Channel-level diagnostics do not turn a provider
+                            // with usable records into a failed provider.
+                            failed: failed_providers,
+                            records: outcome.items.len(),
+                            current_provider: provider_id,
+                            current_status: if stale {
+                                "使用最后成功快照".into()
+                            } else {
+                                "采集完成".into()
+                            },
+                            recent_errors: outcome
+                                .errors
+                                .iter()
+                                .rev()
+                                .take(5)
+                                .map(ToString::to_string)
+                                .collect(),
+                        });
+                    }
                 }
-                Err(error) => outcome.errors.push(error),
+                Err(error) => {
+                    failed_providers += 1;
+                    let message = error.to_string();
+                    outcome.errors.push(error);
+                    if let Some(reporter) = &progress {
+                        reporter(NewsIngestProgress {
+                            completed,
+                            total,
+                            succeeded: outcome.successful_providers.len()
+                                + outcome.stale_providers.len(),
+                            failed: failed_providers,
+                            records: outcome.items.len(),
+                            current_provider: provider_id,
+                            current_status: "采集失败，继续使用其他来源".into(),
+                            recent_errors: std::iter::once(message)
+                                .chain(
+                                    outcome
+                                        .errors
+                                        .iter()
+                                        .rev()
+                                        .skip(1)
+                                        .take(4)
+                                        .map(ToString::to_string),
+                                )
+                                .collect(),
+                        });
+                    }
+                }
             }
         }
         let mut seen = HashSet::new();
@@ -430,8 +548,7 @@ impl NewsIngestor {
             let raw_queries = [request.symbol.as_deref(), request.keyword.as_deref()]
                 .into_iter()
                 .flatten()
-                .map(|query| query.trim().to_lowercase())
-                .filter(|query| !query.is_empty())
+                .flat_map(search_terms)
                 .collect::<Vec<_>>();
             outcome.items.retain(|item| {
                 let text = format!("{} {}", item.title, item.summary).to_lowercase();
@@ -1309,7 +1426,13 @@ pub(crate) fn classify_data_error(
     let (kind, retryable) = match error {
         DataError::RateLimited(_) => (NewsErrorKind::RateLimited, true),
         DataError::Timeout(_) => (NewsErrorKind::Timeout, true),
-        DataError::Network { .. } | DataError::WafBlocked(_) => (NewsErrorKind::Network, true),
+        DataError::Network { ref message, .. } if message.starts_with("HTTP 4") => {
+            // Authentication/WAF/client-policy failures do not recover by
+            // immediately replaying the same request three times.
+            (NewsErrorKind::Network, false)
+        }
+        DataError::Network { .. } => (NewsErrorKind::Network, true),
+        DataError::WafBlocked(_) => (NewsErrorKind::Network, false),
         DataError::Parse { .. } => (NewsErrorKind::Parse, false),
         DataError::Empty(_) | DataError::AllFailed { .. } => (NewsErrorKind::Empty, false),
         DataError::NoProvider(_) => (NewsErrorKind::Configuration, false),
@@ -1379,6 +1502,7 @@ mod tests {
                 http_status: Some(200),
                 etag: Some("fixture-etag".into()),
                 last_modified: None,
+                diagnostics: Vec::new(),
             })
         }
     }
@@ -1601,6 +1725,60 @@ mod tests {
             .await;
         assert!(disabled.items.is_empty());
         assert_eq!(disabled.errors[0].kind, NewsErrorKind::Disabled);
+    }
+
+    #[tokio::test]
+    async fn empty_provider_selection_has_actionable_error() {
+        let ingestor = NewsIngestor::new(Vec::new(), None).unwrap();
+        let outcome = ingestor.ingest(NewsIngestRequest::default(), None).await;
+        assert!(outcome.items.is_empty());
+        assert_eq!(outcome.errors.len(), 1);
+        assert_eq!(outcome.errors[0].provider_id, "provider-registry");
+        assert!(!outcome.errors[0].message.trim().is_empty());
+    }
+
+    #[tokio::test]
+    async fn natural_language_terms_match_individually_and_report_progress() {
+        let mut provider = FakeProvider::new("topics", 0, NewsTrustTier::LicensedMedia);
+        provider.title = "新能源板块轮动与龙头跟踪".into();
+        let ingestor = NewsIngestor::new(vec![Arc::new(provider)], None).unwrap();
+        let snapshots = Arc::new(Mutex::new(Vec::<NewsIngestProgress>::new()));
+        let sink = Arc::clone(&snapshots);
+        let outcome = ingestor
+            .ingest_with_progress(
+                NewsIngestRequest {
+                    keyword: Some("短线 题材 龙头 板块轮动".into()),
+                    limit: 30,
+                    ..Default::default()
+                },
+                None,
+                Some(Arc::new(move |progress| sink.lock().push(progress))),
+            )
+            .await;
+        assert_eq!(outcome.items.len(), 1);
+        let snapshots = snapshots.lock();
+        let final_progress = snapshots.last().unwrap();
+        assert_eq!(final_progress.completed, 1);
+        assert_eq!(final_progress.records, 1);
+        assert_eq!(final_progress.failed, 0);
+        assert_eq!(final_progress.current_provider, "topics");
+    }
+
+    #[test]
+    fn http_403_and_waf_are_not_immediately_retried() {
+        let forbidden = classify_data_error(
+            "news",
+            astock_core::DataError::Network {
+                host: "example.com".into(),
+                message: "HTTP 403 Forbidden".into(),
+            },
+        );
+        assert!(!forbidden.retryable);
+        let waf = classify_data_error(
+            "news",
+            astock_core::DataError::WafBlocked("challenge".into()),
+        );
+        assert!(!waf.retryable);
     }
 
     #[test]

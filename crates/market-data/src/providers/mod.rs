@@ -34,8 +34,8 @@ pub use iwencai_openapi::{IwencaiOpenApi, StockEvents, WencaiRows};
 pub use joinquant::JoinQuantProvider;
 pub use news_ingest::{
     ConfiguredJsonNewsProvider, JsonNewsProviderConfig, NewsCapabilities, NewsDeliveryMode,
-    NewsErrorKind, NewsIngestRequest, NewsProvider, NewsProviderError, NewsProviderHealth,
-    NewsTrustTier,
+    NewsErrorKind, NewsIngestProgress, NewsIngestProgressReporter, NewsIngestRequest, NewsProvider,
+    NewsProviderError, NewsProviderHealth, NewsTrustTier,
 };
 pub use sec_edgar::{SecEdgarProvider, SecFiling};
 pub use sina::SinaKline;
