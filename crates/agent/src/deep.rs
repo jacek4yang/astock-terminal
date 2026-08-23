@@ -26,6 +26,10 @@ use astock_backtest::strategies::{FormulaStrategy, FormulaStrategySpec};
 use astock_backtest::strategy::{BuyHold, MaCross, Strategy, TurtleBreakout};
 use astock_core::{Adjust, Bar, KlinePeriod, Symbol};
 use astock_disclosure::{DisclosureQuery, DisclosureStore};
+use astock_event_intelligence::{
+    analyze_price_in, extract_structured_event, EventEntityRef, EventExtractionInput, EventStore,
+    PriceInInput, PriceSeriesPoint,
+};
 use astock_fundamental::model::{
     BalanceSheet, CashFlowStatement, FundamentalBundle, IncomeStatement, PeriodMeta, ReportType,
     ValuationPoint,
@@ -108,6 +112,338 @@ fn bounded_text(value: Option<&Value>, max_chars: usize) -> String {
         .unwrap_or_default()
         .chars()
         .take(max_chars)
+        .collect()
+}
+
+// ---------------------------------------------------------------------
+// analyze_event_price_in
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct AnalyzeEventPriceInArgs {
+    /// 不可变资讯/公告修订 ID；必须来自 research_news/research_disclosures
+    revision_id: String,
+    /// 需要分析市场定价的 6 位 A 股代码；省略时只返回事件事实与证据
+    security_code: Option<String>,
+    /// 有来源支持的结构化经营影响估计（基点）；不得由模型凭感觉填写
+    structured_impact_bps: Option<i64>,
+    /// 有来源支持的市场一致预期（基点）；缺失时预期差保持不可量化
+    consensus_impact_bps: Option<i64>,
+}
+
+pub struct AnalyzeEventPriceIn;
+
+#[async_trait]
+impl AgentTool for AnalyzeEventPriceIn {
+    fn name(&self) -> &'static str {
+        "analyze_event_price_in"
+    }
+
+    fn description(&self) -> &'static str {
+        "把指定不可变来源修订转换为逐字段带证据的事件对象，并将基本面影响与股价机会分开；price-in 读取事件前异常收益、成交量、市场/板块相对表现、估值、一致预期和历史同类样本，缺失项明确返回，绝不把情绪直接变成买卖方向"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        schema_value::<AnalyzeEventPriceInArgs>()
+    }
+
+    fn cache_ttl_secs(&self) -> i64 {
+        300
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
+        let args: AnalyzeEventPriceInArgs = parse_args(self.name(), args)?;
+        let revision_id = args.revision_id.trim();
+        if revision_id.is_empty() {
+            return Err(invalid_args(self.name(), "revision_id 不能为空"));
+        }
+        let revision = ctx
+            .storage
+            .news_archive_revision(revision_id)
+            .await
+            .map_err(|error| tool_err(self.name(), error.to_string()))?
+            .ok_or_else(|| tool_err(self.name(), format!("来源修订不存在：{revision_id}")))?;
+        ctx.report_progress(ToolProgressDetail {
+            completed: 0,
+            total: 4,
+            succeeded: 0,
+            failed: 0,
+            cache_hits: 0,
+            records: 0,
+            active: vec![ToolWorkItem {
+                label: revision.title.clone(),
+                stage: "逐字段绑定原文证据并区分事实、公司指引、市场预期、假设与情景".into(),
+            }],
+            recent_errors: Vec::new(),
+        });
+        let subjects = event_subjects(&ctx.storage, revision_id)
+            .await
+            .unwrap_or_default();
+        let store = EventStore::new(ctx.storage.clone());
+        let event = match store.event_by_revision(revision_id).await {
+            Ok(Some(value)) => value,
+            _ => {
+                let value = extract_structured_event(EventExtractionInput {
+                    source_revision_id: revision.revision_id.clone(),
+                    source_version_id: None,
+                    title: revision.title.clone(),
+                    factual_summary: revision.factual_summary.clone(),
+                    original_language: revision.language.clone(),
+                    source_is_primary: event_source_is_primary(
+                        &revision.source_id,
+                        &revision.content_type,
+                        &revision.license,
+                    ),
+                    event_time_utc: revision.event_time.utc,
+                    first_seen_at: revision.first_seen_time_utc,
+                    subjects,
+                })
+                .map_err(|error| tool_err(self.name(), error.to_string()))?;
+                store
+                    .upsert_event(value.clone())
+                    .await
+                    .map_err(|error| tool_err(self.name(), error.to_string()))?;
+                value
+            }
+        };
+        ctx.report_progress(ToolProgressDetail {
+            completed: 1,
+            total: 4,
+            succeeded: 1,
+            failed: 0,
+            cache_hits: 0,
+            records: event.evidence.len(),
+            active: vec![ToolWorkItem {
+                label: event.kind.chinese_name().into(),
+                stage: format!(
+                    "事件状态 {}；事实缺口 {} 项",
+                    event.lifecycle.chinese_name(),
+                    event.missing_fields.len()
+                ),
+            }],
+            recent_errors: Vec::new(),
+        });
+
+        let mut assessment = None;
+        if let Some(raw_code) = args.security_code.as_deref() {
+            let symbol = parse_symbol(self.name(), raw_code)?;
+            let benchmark = Symbol::new("000300").expect("static benchmark");
+            ctx.report_progress(ToolProgressDetail {
+                completed: 1,
+                total: 4,
+                succeeded: 1,
+                failed: 0,
+                cache_hits: 0,
+                records: event.evidence.len(),
+                active: vec![ToolWorkItem {
+                    label: symbol.code().into(),
+                    stage: "并行读取个股与沪深300事件前行情、成交量".into(),
+                }],
+                recent_errors: Vec::new(),
+            });
+            let (stock_result, benchmark_result) = tokio::join!(
+                ctx.market
+                    .kline(&symbol, KlinePeriod::Day, Adjust::Qfq, 180),
+                ctx.market
+                    .kline(&benchmark, KlinePeriod::Day, Adjust::None, 180)
+            );
+            let (stock, stock_source) = stock_result
+                .map(|value| (event_bar_points(&value.data), value.source.to_string()))
+                .unwrap_or_else(|_| (Vec::new(), "missing".into()));
+            let (benchmark, benchmark_source) = benchmark_result
+                .map(|value| (event_bar_points(&value.data), value.source.to_string()))
+                .unwrap_or_else(|_| (Vec::new(), "missing".into()));
+            let valuation = match ctx.fundamental.as_deref() {
+                Some(client) => client
+                    .valuation_history(&symbol)
+                    .await
+                    .map(|value| {
+                        value
+                            .data
+                            .into_iter()
+                            .map(|point| PriceSeriesPoint {
+                                date: point.date.to_string(),
+                                close: point.close.unwrap_or(0.0),
+                                volume: 0.0,
+                                pe_ttm: point.pe_ttm,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            };
+            ctx.report_progress(ToolProgressDetail {
+                completed: 3,
+                total: 4,
+                succeeded: 3,
+                failed: 0,
+                cache_hits: 0,
+                records: stock.len() + benchmark.len() + valuation.len(),
+                active: vec![ToolWorkItem {
+                    label: symbol.code().into(),
+                    stage: "计算异常收益、异常成交、估值、预期差与历史同类校准".into(),
+                }],
+                recent_errors: Vec::new(),
+            });
+            let rules = RuleSet::from_json(astock_trading_rules::EMBEDDED_RULES_JSON)
+                .map_err(|error| tool_err(self.name(), error.to_string()))?;
+            let event_date = classify_news_session(
+                &rules,
+                &NewsSessionInput {
+                    event_time_utc: revision.event_time.utc,
+                    publish_time_utc: revision.publish_time.utc,
+                    first_seen_time_utc: revision.first_seen_time_utc,
+                    revision_time_utc: revision.revision_time.utc,
+                    publication_precision: publication_precision_from_source(
+                        revision.publish_time.utc,
+                        Some(&revision.parser_version),
+                    ),
+                    stale: false,
+                    verified: event_source_is_primary(
+                        &revision.source_id,
+                        &revision.content_type,
+                        &revision.license,
+                    ),
+                    discovery_only: revision.source_id.contains("newsnow"),
+                    old_republication: false,
+                },
+            )
+            .map(|session| session.target_trading_date.to_string())
+            .unwrap_or_else(|_| {
+                chrono::DateTime::from_timestamp(revision.first_seen_time_utc, 0)
+                    .map(|value| value.date_naive().to_string())
+                    .unwrap_or_else(|| "1970-01-01".into())
+            });
+            let analogs = store
+                .historical_analogs(event.kind, 200)
+                .await
+                .unwrap_or_default();
+            let value = analyze_price_in(PriceInInput {
+                event: event.clone(),
+                security_code: symbol.code().into(),
+                event_date,
+                as_of_date: stock
+                    .last()
+                    .map(|point| point.date.clone())
+                    .unwrap_or_else(|| "1970-01-01".into()),
+                stock,
+                benchmark,
+                // Agent does not invent a sector proxy. The deterministic
+                // engine reports this missing input explicitly.
+                sector: Vec::new(),
+                valuation,
+                structured_impact_bps: args.structured_impact_bps,
+                consensus_impact_bps: args.consensus_impact_bps,
+                historical_analogs: analogs,
+                data_versions: json!({
+                    "price_in_model": astock_event_intelligence::PRICE_IN_MODEL_VERSION,
+                    "stock_bars": stock_source,
+                    "benchmark_bars": benchmark_source,
+                    "sector": "missing_not_fabricated",
+                }),
+            })
+            .map_err(|error| tool_err(self.name(), error.to_string()))?;
+            store
+                .save_assessment(value.clone())
+                .await
+                .map_err(|error| tool_err(self.name(), error.to_string()))?;
+            assessment = Some(value);
+        }
+        let calibration = store
+            .calibration_summary(event.kind)
+            .await
+            .map_err(|error| tool_err(self.name(), error.to_string()))?;
+        ctx.report_progress(ToolProgressDetail {
+            completed: 4,
+            total: 4,
+            succeeded: 4,
+            failed: 0,
+            cache_hits: 0,
+            records: event.evidence.len() + calibration.sample_count,
+            active: Vec::new(),
+            recent_errors: Vec::new(),
+        });
+        let full = json!({
+            "event": event,
+            "assessment": assessment,
+            "calibration": calibration,
+            "usage_contract": {
+                "facts": "每个非空事实字段必须引用 source_revision_id 与原文摘录；missing_fields 不得补造",
+                "provenance": "observed_fact/company_guidance/market_consensus/agent_assumption/scenario 必须分开表述",
+                "separation": "fundamental 是经营影响；market_opportunity 是市场是否已交易，两者可以方向不同",
+                "price_in": "必须逐项报告行情、成交量、板块、估值、预期和历史同类输入；缺失就降低量化程度",
+                "decision": "本工具不生成买入/卖出指令，必须说明失效条件和后续验证日期",
+            }
+        });
+        let summary = json!({
+            "event": full["event"],
+            "assessment": full["assessment"],
+            "calibration": full["calibration"],
+            "usage_contract": full["usage_contract"],
+        });
+        Ok(ToolResult {
+            summary_json: summary,
+            full_json: Some(full),
+            cache_key: format!(
+                "event_price_in:{}:{}:{}:{}",
+                revision_id,
+                args.security_code.unwrap_or_default(),
+                args.structured_impact_bps.unwrap_or_default(),
+                args.consensus_impact_bps.unwrap_or_default()
+            ),
+            source: "event_evidence_and_market_engine".into(),
+            fetched_at: now_rfc3339(),
+        })
+    }
+}
+
+async fn event_subjects(
+    storage: &astock_storage::Storage,
+    revision_id: &str,
+) -> astock_storage::Result<Vec<EventEntityRef>> {
+    let revision_id = revision_id.to_string();
+    storage
+        .run(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT l.final_entity_id,COALESCE(e.canonical_name,l.span_text),e.listed_code
+                 FROM document_entity_links l LEFT JOIN research_entities e ON e.entity_id=l.final_entity_id
+                 WHERE l.revision_id=?1 AND l.status='accepted' AND l.final_entity_id IS NOT NULL
+                 ORDER BY l.confidence DESC LIMIT 20",
+            )?;
+            let rows = stmt.query_map([revision_id], |row| {
+                Ok(EventEntityRef {
+                    entity_id: row.get(0)?,
+                    name: row.get(1)?,
+                    listed_code: row.get(2)?,
+                    role: "subject".into(),
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+        .await
+}
+
+fn event_source_is_primary(source_id: &str, content_type: &str, license: &str) -> bool {
+    let source = source_id.to_ascii_lowercase();
+    let content = content_type.to_ascii_lowercase();
+    source.contains("official")
+        || source.contains("cninfo")
+        || source.contains("sse")
+        || source.contains("szse")
+        || source.contains("sec")
+        || content.contains("announcement")
+        || content.contains("disclosure")
+        || license.contains("正式披露")
+}
+
+fn event_bar_points(bars: &[Bar]) -> Vec<PriceSeriesPoint> {
+    bars.iter()
+        .map(|bar| PriceSeriesPoint {
+            date: bar.date.to_string(),
+            close: bar.close,
+            volume: bar.volume,
+            pe_ttm: None,
+        })
         .collect()
 }
 

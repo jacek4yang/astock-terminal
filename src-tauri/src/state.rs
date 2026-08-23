@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use astock_event_intelligence::EventResearchBundle;
 use astock_fundamental::FundamentalClient;
 use astock_graph::GraphStore;
 use astock_market_data::{EastMoneyF10, MarketData};
@@ -187,6 +188,40 @@ pub struct GlobalSyncState {
     pub cancel: Mutex<Option<CancellationToken>>,
 }
 
+/// One persistent background structured-event / price-in analysis. The
+/// snapshot survives page switches and keeps partial diagnostics visible.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EventAnalysisSnapshot {
+    pub job_id: String,
+    pub revision_id: String,
+    pub security_code: Option<String>,
+    pub running: bool,
+    pub status: String,
+    pub phase: String,
+    pub progress: u8,
+    pub current_item: String,
+    pub estimated_remaining_seconds: Option<u32>,
+    pub recent_logs: Vec<String>,
+    pub result: Option<EventResearchBundle>,
+    pub error: Option<String>,
+    pub started_at: i64,
+    pub updated_at: i64,
+}
+
+pub struct EventAnalysisState {
+    pub jobs: Mutex<HashMap<String, EventAnalysisSnapshot>>,
+    pub cancels: Mutex<HashMap<String, CancellationToken>>,
+}
+
+impl Default for EventAnalysisState {
+    fn default() -> Self {
+        Self {
+            jobs: Mutex::new(HashMap::new()),
+            cancels: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
 impl Default for GlobalSyncState {
     fn default() -> Self {
         Self {
@@ -263,6 +298,8 @@ pub struct AppState {
     pub disclosure_sync: Arc<DisclosureSyncState>,
     /// Overseas primary-source collection and Global -> A-share mapping.
     pub global_sync: Arc<GlobalSyncState>,
+    /// Background evidence-bound event and market price-in analyses.
+    pub event_analysis: Arc<EventAnalysisState>,
     /// Live agent event-forwarder tasks, keyed by task id. Entries are
     /// removed when the event stream ends (Completed / Failed / Suspended)
     /// or on `agent_cancel`.
@@ -356,6 +393,7 @@ impl AppState {
             backtest: Arc::new(BacktestState::default()),
             disclosure_sync: Arc::new(DisclosureSyncState::default()),
             global_sync: Arc::new(GlobalSyncState::default()),
+            event_analysis: Arc::new(EventAnalysisState::default()),
             agent_handles: Arc::new(Mutex::new(HashMap::new())),
         })
     }

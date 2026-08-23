@@ -104,6 +104,7 @@ const TOOL_GROUPS = [
       "research_news",
       "research_disclosures",
       "research_global_transmission",
+      "analyze_event_price_in",
       "search_web",
       "fetch_source_document",
       "read_document",

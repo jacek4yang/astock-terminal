@@ -42,6 +42,7 @@ export const DEFAULT_AGENT_TOOLS = [
   "research_news",
   "research_disclosures",
   "research_global_transmission",
+  "analyze_event_price_in",
 ] as const;
 
 export interface ToolCallItem {

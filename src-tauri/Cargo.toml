@@ -29,12 +29,14 @@ astock-entity-linking = { path = "../crates/entity-linking" }
 astock-source-verification = { path = "../crates/source-verification" }
 astock-disclosure = { path = "../crates/disclosure" }
 astock-global-intelligence = { path = "../crates/global-intelligence" }
+astock-event-intelligence = { path = "../crates/event-intelligence" }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-store = "2"
 tauri-plugin-dialog = "2"
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

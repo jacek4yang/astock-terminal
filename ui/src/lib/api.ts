@@ -663,6 +663,121 @@ export interface NewsEventClusterDetail {
   conflicts: NewsEventConflict[];
 }
 
+export interface EventEntityRef {
+  entity_id: string;
+  name: string;
+  listed_code: string | null;
+  role: string;
+}
+
+export interface EventFieldEvidence {
+  evidence_id: string;
+  event_id: string;
+  field_name: string;
+  provenance: string;
+  source_revision_id: string | null;
+  source_version_id: string | null;
+  quote_original: string | null;
+  quote_zh: string | null;
+  location: unknown;
+  observed_at: number;
+  confidence_bps: number;
+}
+
+export interface StructuredEvent {
+  event_id: string;
+  source_revision_id: string;
+  kind: string;
+  title: string;
+  subjects: EventEntityRef[];
+  objects: EventEntityRef[];
+  amount_text: string | null;
+  quantity_text: string | null;
+  unit_original: string | null;
+  currency_original: string | null;
+  baseline_period: string | null;
+  starts_at: number | null;
+  ends_at: number | null;
+  region: string | null;
+  conditions: string[];
+  official_effective: boolean | null;
+  reversibility: string;
+  impact_horizon: string;
+  lifecycle: string;
+  catalyst_path: string[];
+  validation_dates: number[];
+  invalidation_conditions: string[];
+  missing_fields: string[];
+  evidence: EventFieldEvidence[];
+  extraction_version: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface EventMetricContribution {
+  metric: string;
+  available: boolean;
+  value_bps: number | null;
+  score_contribution: number;
+  explanation: string;
+}
+
+export interface EventMarketAssessment {
+  assessment_id: string;
+  event_id: string;
+  security_code: string;
+  as_of_date: string;
+  fundamental: { direction: string; impact_bps: number | null; quantifiable: boolean; rationale: string; provenance: string };
+  market_opportunity: { price_in_state: string; opportunity: string; price_in_score: number | null; rationale: string; no_trade_directive: string };
+  expectation_gap: { structured_impact_bps: number | null; consensus_impact_bps: number | null; gap_bps: number | null; quantifiable: boolean; rationale: string };
+  diagnostics: {
+    pre_stock_return_bps: number | null;
+    pre_benchmark_return_bps: number | null;
+    pre_abnormal_return_bps: number | null;
+    sector_relative_bps: number | null;
+    abnormal_volume_bps: number | null;
+    valuation_change_bps: number | null;
+    historical_median_post_bps: number | null;
+    historical_sample_count: number;
+    components: EventMetricContribution[];
+  };
+  missing_inputs: string[];
+  data_versions: unknown;
+  created_at: number;
+}
+
+export interface EventResearchBundle {
+  event: StructuredEvent;
+  timeline: Array<{ transition_id: string; event_id: string; from_status: string; to_status: string; reason: string; evidence_id: string | null; transitioned_at: number }>;
+  assessment: EventMarketAssessment | null;
+  calibration: { ontology_kind: string; sample_count: number; median_post_abnormal_return_bps: number | null; positive_sample_ratio_bps: number | null; data_versions: string[] };
+}
+
+export interface EventAnalysisSnapshot {
+  job_id: string;
+  revision_id: string;
+  security_code: string | null;
+  running: boolean;
+  status: string;
+  phase: string;
+  progress: number;
+  current_item: string;
+  estimated_remaining_seconds: number | null;
+  recent_logs: string[];
+  result: EventResearchBundle | null;
+  error: string | null;
+  started_at: number;
+  updated_at: number;
+}
+
+export interface EventAnalysisStartResponse {
+  job_id: string;
+  started: boolean;
+  reused: boolean;
+  estimated_seconds: number;
+  note: string;
+}
+
 export interface AgentConclusionReview {
   task_id: string;
   conclusion_key: string;
@@ -880,6 +995,26 @@ export const mergeNewsEventClusters = (fromClusterId: string, toClusterId: strin
 
 export const splitNewsEventRevision = (revisionId: string, reason: string) =>
   cmd<NewsEventClusterDetail>("split_news_event_revision", { revision_id: revisionId, reason });
+
+export const startEventAnalysis = (
+  revisionId: string,
+  securityCode: string | null = null,
+  structuredImpactBps: number | null = null,
+  consensusImpactBps: number | null = null,
+) => cmd<EventAnalysisStartResponse>("event_analysis_start", {
+  request: {
+    revision_id: revisionId,
+    security_code: securityCode,
+    structured_impact_bps: structuredImpactBps,
+    consensus_impact_bps: consensusImpactBps,
+  },
+});
+
+export const getEventAnalysisStatus = (jobId: string) =>
+  cmd<EventAnalysisSnapshot>("event_analysis_status", { job_id: jobId });
+
+export const cancelEventAnalysis = (jobId: string) =>
+  cmd<{ cancelled: boolean }>("event_analysis_cancel", { job_id: jobId });
 
 export const getPendingNewsEvidenceReviews = (limit = 50) =>
   cmd<AgentConclusionReview[]>("get_pending_news_evidence_reviews", { limit });

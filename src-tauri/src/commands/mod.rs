@@ -8,6 +8,7 @@ pub mod datacenter;
 pub mod deep;
 pub mod disclosure;
 pub mod entities;
+pub mod event;
 pub mod fundamental;
 pub mod global;
 pub mod market;

@@ -25,6 +25,7 @@ members = [
     "crates/source-verification",
     "crates/disclosure",
     "crates/global-intelligence",
+    "crates/event-intelligence",
 ]
 
 [workspace.package]

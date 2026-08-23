@@ -2132,6 +2132,7 @@ fn tool_estimated_secs(name: &str) -> u64 {
         | "research_news"
         | "research_disclosures"
         | "research_global_transmission"
+        | "analyze_event_price_in"
         | "search_web"
         | "fetch_source_document" => 60,
         _ => 45,
@@ -2154,6 +2155,7 @@ fn tool_progress_stage(name: &str, elapsed_ms: u64, estimated_ms: u64) -> &'stat
         "research_news" => "并行读取多家财经快讯并核验可用的个股事件",
         "research_disclosures" => "查询正式披露、修订链、附件与原文核验状态",
         "research_global_transmission" => "核验海外一级来源、原时区/币种与逐边 A 股传导证据",
+        "analyze_event_price_in" => "逐字段核验事件，并分离基本面影响与市场 price-in",
         "search_web" => "通过 MiniMax 联网检索权威来源并保留原始链接",
         "fetch_source_document" => "正在安全打开原始页面并提取页码、段落、原值与单位",
         "read_document" => "读取不可变文档版本与字段级证据",

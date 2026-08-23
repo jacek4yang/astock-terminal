@@ -304,6 +304,7 @@ dependencies = [
  "astock-chanlun",
  "astock-core",
  "astock-disclosure",
+ "astock-event-intelligence",
  "astock-fundamental",
  "astock-global-intelligence",
  "astock-graph",
@@ -338,6 +339,7 @@ dependencies = [
  "astock-core",
  "astock-disclosure",
  "astock-entity-linking",
+ "astock-event-intelligence",
  "astock-fundamental",
  "astock-global-intelligence",
  "astock-graph",
@@ -353,6 +355,7 @@ dependencies = [
  "futures",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -453,6 +456,23 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "astock-event-intelligence"
+version = "5.0.1"
+dependencies = [
+ "astock-storage",
+ "chrono",
+ "once_cell",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]

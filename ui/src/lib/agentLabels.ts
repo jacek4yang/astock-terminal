@@ -29,6 +29,7 @@ const TOOL_NAMES: Record<string, string> = {
   research_news: "财经新闻与公告研究",
   research_disclosures: "正式披露与修订核验",
   research_global_transmission: "海外一级来源与 A 股传导核验",
+  analyze_event_price_in: "结构化事件与市场定价核验",
   get_market_regime: "市场环境识别",
   market_regime: "市场环境识别",
   industry_chain: "产业链位置分析",
@@ -73,6 +74,10 @@ const ARG_NAMES: Record<string, string> = {
   root_entity_id: "海外实体",
   provider_id: "海外官方来源",
   as_of_utc: "历史截面时间",
+  revision_id: "来源修订",
+  security_code: "关联股票",
+  structured_impact_bps: "经营影响估计",
+  consensus_impact_bps: "市场一致预期",
 };
 
 const VALUE_NAMES: Record<string, string> = {

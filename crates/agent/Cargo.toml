@@ -20,6 +20,7 @@ astock-security = { path = "../security" }
 astock-source-verification = { path = "../source-verification" }
 astock-disclosure = { path = "../disclosure" }
 astock-global-intelligence = { path = "../global-intelligence" }
+astock-event-intelligence = { path = "../event-intelligence" }
 tokio.workspace = true
 futures.workspace = true
 async-trait.workspace = true

@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
+  cancelEventAnalysis,
   errMsg,
+  getEventAnalysisStatus,
   getNewsArchiveRevisions,
   getNewsEventClusterDetail,
   getNewsProviderHealth,
   queryNewsCenter,
   refreshNewsCenter,
   setNewsItemState,
+  startEventAnalysis,
   type ArchivedNewsRevision,
+  type EventAnalysisSnapshot,
   type NewsCenterItem,
   type NewsCenterPage,
   type NewsCenterQuery,
@@ -16,6 +20,7 @@ import {
   type NewsProviderHealthItem,
 } from "../lib/api";
 import { useAgentSession } from "../agentSession";
+import { EventAnalysisPanel } from "../components/EventAnalysisPanel";
 import { ErrorBox, Loading } from "../components/ui";
 
 const CATEGORY = [
@@ -210,6 +215,10 @@ function DetailPanel({
   onGraph,
   onAgent,
   onIgnore,
+  eventAnalysis,
+  eventAnalysisError,
+  onRetryEventAnalysis,
+  onCancelEventAnalysis,
 }: {
   item: NewsCenterItem;
   cluster: NewsEventClusterDetail | null;
@@ -220,6 +229,10 @@ function DetailPanel({
   onGraph: () => void;
   onAgent: (priceIn: boolean) => void;
   onIgnore: () => void;
+  eventAnalysis: EventAnalysisSnapshot | null;
+  eventAnalysisError: string | null;
+  onRetryEventAnalysis: () => void;
+  onCancelEventAnalysis: () => void;
 }) {
   const revision = item.revision;
   return (
@@ -253,6 +266,7 @@ function DetailPanel({
           <div className="mt-1 leading-5">{item.effective_session.rationale}</div>
           {!item.effective_session.can_increase_confidence && <div className="mt-1 font-medium text-amber-700 dark:text-amber-300">仅作核验线索/历史背景，不得据此提高仓位或结论置信度。</div>}
         </section>
+        <EventAnalysisPanel snapshot={eventAnalysis} error={eventAnalysisError} onRetry={onRetryEventAnalysis} onCancel={onCancelEventAnalysis} />
         <div className="flex flex-wrap gap-2">
           <button type="button" className="btn-primary" onClick={() => onAgent(false)}>交给智能助手深度分析</button>
           <button type="button" className="btn" onClick={() => onAgent(true)}>分析是否已被市场交易</button>
@@ -329,6 +343,9 @@ export default function NewsPage() {
   const [cluster, setCluster] = useState<NewsEventClusterDetail | null>(null);
   const [revisions, setRevisions] = useState<ArchivedNewsRevision[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [eventAnalysis, setEventAnalysis] = useState<EventAnalysisSnapshot | null>(null);
+  const [eventAnalysisError, setEventAnalysisError] = useState<string | null>(null);
+  const [eventAnalysisNonce, setEventAnalysisNonce] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -372,6 +389,37 @@ export default function NewsPage() {
     const timer = setInterval(updateHealth, 30_000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (!selected) {
+      setEventAnalysis(null);
+      setEventAnalysisError(null);
+      return;
+    }
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const code = selected.entity_links.find((link) => link.eligible_for_agent && link.listed_code)?.listed_code ?? null;
+    const poll = async (jobId: string) => {
+      try {
+        const snapshot = await getEventAnalysisStatus(jobId);
+        if (disposed) return;
+        setEventAnalysis(snapshot);
+        setEventAnalysisError(null);
+        if (snapshot.running) timer = setTimeout(() => void poll(jobId), 900);
+      } catch (reason) {
+        if (!disposed) setEventAnalysisError(errMsg(reason));
+      }
+    };
+    setEventAnalysis(null);
+    setEventAnalysisError(null);
+    startEventAnalysis(selected.revision.revision_id, code)
+      .then((started) => poll(started.job_id))
+      .catch((reason) => { if (!disposed) setEventAnalysisError(errMsg(reason)); });
+    return () => {
+      disposed = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [selected?.revision.revision_id, eventAnalysisNonce]);
 
   useEffect(() => {
     const timer = setInterval(async () => {
@@ -455,8 +503,8 @@ export default function NewsPage() {
   const handToAgent = (priceIn: boolean) => {
     if (!selected) return;
     const prompt = priceIn
-      ? `基于事件证据 ${selected.revision.revision_id}，分析“${selected.revision.title}”是否已经被市场交易。必须核对事件前异常收益、成交量、板块相对表现、估值变化和反方证据。`
-      : `深度分析资讯“${selected.revision.title}”。精确证据修订号：${selected.revision.revision_id}；事件簇：${selected.event?.cluster_id ?? "尚未聚类"}。请核验原始来源、关联公司、产业链路径、反方证据和失效条件。`;
+      ? `基于不可变事件证据 ${selected.revision.revision_id}，分析“${selected.revision.title}”是否已经被市场交易。先调用“结构化事件与市场定价核验”工具，逐项核对事件前异常收益、成交量、板块相对表现、估值变化、一致预期和历史同类事件；把基本面影响与市场机会分开，缺失项不得猜测。`
+      : `深度分析资讯“${selected.revision.title}”。精确证据修订号：${selected.revision.revision_id}；事件簇：${selected.event?.cluster_id ?? "尚未聚类"}。请先调用“结构化事件与市场定价核验”工具，再核验原始来源、关联公司、产业链路径、反方证据和失效条件。`;
     useAgentSession.getState().setInput(prompt);
     navigate("/agent");
   };
@@ -556,7 +604,27 @@ export default function NewsPage() {
           </footer>
         </section>
 
-        {selected && <DetailPanel item={selected} cluster={cluster} revisions={revisions} loading={detailLoading} onClose={() => setSelected(null)} onStock={(code) => navigate(`/stock/${code}`)} onGraph={() => navigate(`/graph?evidence=${encodeURIComponent(selected.revision.revision_id)}`)} onAgent={handToAgent} onIgnore={() => void updateState(selected, "ignored", true)} />}
+        {selected && <DetailPanel
+          item={selected}
+          cluster={cluster}
+          revisions={revisions}
+          loading={detailLoading}
+          eventAnalysis={eventAnalysis}
+          eventAnalysisError={eventAnalysisError}
+          onRetryEventAnalysis={() => setEventAnalysisNonce((value) => value + 1)}
+          onCancelEventAnalysis={() => {
+            if (!eventAnalysis) return;
+            void cancelEventAnalysis(eventAnalysis.job_id)
+              .then(() => getEventAnalysisStatus(eventAnalysis.job_id))
+              .then(setEventAnalysis)
+              .catch((reason) => setEventAnalysisError(errMsg(reason)));
+          }}
+          onClose={() => setSelected(null)}
+          onStock={(code) => navigate(`/stock/${code}`)}
+          onGraph={() => navigate(`/graph?evidence=${encodeURIComponent(selected.revision.revision_id)}`)}
+          onAgent={handToAgent}
+          onIgnore={() => void updateState(selected, "ignored", true)}
+        />}
       </div>
     </div>
   );

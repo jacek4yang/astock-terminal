@@ -946,6 +946,113 @@ pub(crate) const MIGRATIONS: &[(u32, &str)] = &[
     );
     "#,
     ),
+    (
+        16,
+        r#"
+    -- Evidence-bound event ontology and market price-in research. These
+    -- tables deliberately separate source facts, analytical assumptions,
+    -- lifecycle transitions and market assessments.
+    CREATE TABLE IF NOT EXISTS structured_events (
+        event_id                TEXT PRIMARY KEY,
+        source_revision_id      TEXT NOT NULL UNIQUE,
+        ontology_kind           TEXT NOT NULL,
+        title                   TEXT NOT NULL,
+        subjects_json           TEXT NOT NULL DEFAULT '[]',
+        objects_json            TEXT NOT NULL DEFAULT '[]',
+        amount_text             TEXT,
+        quantity_text           TEXT,
+        unit_original           TEXT,
+        currency_original       TEXT,
+        baseline_period         TEXT,
+        starts_at               INTEGER,
+        ends_at                 INTEGER,
+        region                  TEXT,
+        conditions_json         TEXT NOT NULL DEFAULT '[]',
+        official_effective      INTEGER,
+        reversibility           TEXT NOT NULL,
+        impact_horizon          TEXT NOT NULL,
+        lifecycle_status        TEXT NOT NULL,
+        catalyst_path_json      TEXT NOT NULL DEFAULT '[]',
+        validation_dates_json   TEXT NOT NULL DEFAULT '[]',
+        invalidation_json       TEXT NOT NULL DEFAULT '[]',
+        missing_fields_json     TEXT NOT NULL DEFAULT '[]',
+        extraction_version      TEXT NOT NULL,
+        created_at              INTEGER NOT NULL,
+        updated_at              INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_structured_events_timeline
+        ON structured_events(updated_at DESC,ontology_kind,lifecycle_status);
+
+    CREATE TABLE IF NOT EXISTS event_field_evidence (
+        evidence_id             TEXT PRIMARY KEY,
+        event_id                TEXT NOT NULL REFERENCES structured_events(event_id),
+        field_name              TEXT NOT NULL,
+        provenance_kind         TEXT NOT NULL,
+        source_revision_id      TEXT,
+        source_version_id       TEXT,
+        quote_original          TEXT,
+        quote_zh                TEXT,
+        location_json           TEXT NOT NULL DEFAULT '{}',
+        observed_at             INTEGER NOT NULL,
+        confidence_bps          INTEGER NOT NULL CHECK(confidence_bps BETWEEN 0 AND 10000),
+        created_at              INTEGER NOT NULL,
+        UNIQUE(event_id,field_name,provenance_kind,source_revision_id,quote_original)
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_field_evidence_event
+        ON event_field_evidence(event_id,field_name);
+
+    CREATE TABLE IF NOT EXISTS event_state_transitions (
+        transition_id           TEXT PRIMARY KEY,
+        event_id                TEXT NOT NULL REFERENCES structured_events(event_id),
+        from_status             TEXT NOT NULL,
+        to_status               TEXT NOT NULL,
+        reason                  TEXT NOT NULL,
+        evidence_id             TEXT REFERENCES event_field_evidence(evidence_id),
+        transitioned_at         INTEGER NOT NULL,
+        created_at              INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_state_transitions_event
+        ON event_state_transitions(event_id,transitioned_at);
+
+    CREATE TABLE IF NOT EXISTS event_market_assessments (
+        assessment_id           TEXT PRIMARY KEY,
+        event_id                TEXT NOT NULL REFERENCES structured_events(event_id),
+        security_code           TEXT NOT NULL,
+        as_of_date              TEXT NOT NULL,
+        fundamental_json        TEXT NOT NULL,
+        market_opportunity_json TEXT NOT NULL,
+        expectation_gap_json    TEXT NOT NULL,
+        diagnostics_json        TEXT NOT NULL,
+        missing_inputs_json     TEXT NOT NULL DEFAULT '[]',
+        data_versions_json      TEXT NOT NULL DEFAULT '{}',
+        created_at              INTEGER NOT NULL,
+        UNIQUE(event_id,security_code,as_of_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_market_assessments_latest
+        ON event_market_assessments(event_id,security_code,created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS event_study_samples (
+        sample_id               TEXT PRIMARY KEY,
+        event_id                TEXT NOT NULL REFERENCES structured_events(event_id),
+        ontology_kind           TEXT NOT NULL,
+        security_code           TEXT NOT NULL,
+        event_date              TEXT NOT NULL,
+        pre_window_days         INTEGER NOT NULL,
+        post_window_days        INTEGER NOT NULL,
+        pre_abnormal_return_bps INTEGER,
+        post_abnormal_return_bps INTEGER,
+        abnormal_volume_bps     INTEGER,
+        valuation_change_bps    INTEGER,
+        fundamental_direction  TEXT NOT NULL,
+        source_revision_id      TEXT NOT NULL,
+        data_version            TEXT NOT NULL,
+        created_at              INTEGER NOT NULL,
+        UNIQUE(event_id,security_code,post_window_days,data_version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_study_calibration
+        ON event_study_samples(ontology_kind,post_window_days,event_date);
+    "#,
+    ),
 ];
 
 /// Current unix time in seconds. All timestamps in this crate are stored as
@@ -1115,6 +1222,11 @@ mod tests {
             "global_relations",
             "global_observations",
             "global_fx_rates",
+            "structured_events",
+            "event_field_evidence",
+            "event_state_transitions",
+            "event_market_assessments",
+            "event_study_samples",
         ] {
             let count: i64 = conn
                 .query_row(
