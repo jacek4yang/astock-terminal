@@ -130,10 +130,7 @@ pub async fn global_sync_start(
                 let gaps = snapshot.source_gaps;
                 push_log(
                     &mut snapshot,
-                    format!(
-                        "来源登记完成：{} 个可直接访问，{} 个等待用户配置凭据",
-                        ready, gaps
-                    ),
+                    format!("来源登记完成：{ready} 个可直接访问，{gaps} 个等待用户配置凭据"),
                 );
             }
             Err(error) => {

@@ -25,10 +25,12 @@ members = [
     "crates/source-verification",
     "crates/disclosure",
     "crates/global-intelligence",
+    "crates/event-intelligence",
+    "crates/relation-extraction",
 ]
 
 [workspace.package]
-version = "5.0.1"
+version = "5.0.2"
 edition = "2021"
 license = "Proprietary"
 rust-version = "1.88"
@@ -56,7 +58,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 arrow = { version = "54", features = ["prettyprint"] }
 parquet = { version = "54", features = ["arrow"] }
 # utils
-lru = "0.13"
+lru = "0.18.2"
 parking_lot = "0.12"
 dashmap = "6"
 governor = "0.8"

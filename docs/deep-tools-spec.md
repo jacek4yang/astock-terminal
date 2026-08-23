@@ -11,7 +11,7 @@
    数据源:astock-graph `GraphStore::{neighbors, subgraph}`。
 4. `run_supply_chain_shock(subject, direction, magnitude_pct)` → 事件传导报告:一级受益/一级受损/二级/潜在映射,每条含完整逻辑链、预期滞后、量级估计(标注粗略)、置信度;例:subject="铜", direction="up", magnitude_pct=10。
    数据源:astock-graph `engine::propagate`。
-5. `build_relationship_graph(symbols[], window_days=250)` → 两两 Pearson 相关 + lead-lag 最优滞后 + 显著性;输出节点/边(权重=相关系数,标注显著性),供 UI 网络图与 Agent 解读;明确标注"相关不等于因果,小样本/ regime 依赖风险"。
+5. `build_relationship_graph(symbols[], window_days=250)` → 快速两两 Pearson + lead-lag 网络图。正式推断使用 `run_quant_research`：可配置完整研究口径，输出 Bootstrap/置换区间与 p 值、默认 FDR、多维稳健性、有效 N、性能预算和不可变快照；严格区分相关、预测领先、Granger 预测因果和结构因果。
    数据源:market-data 取历史 K 线 → astock-quant correlation/leadlag。
 6. `run_backtest(symbol, strategy, params?, years?)` → MaCross/Turtle/BuyHold 回测:CAGR/Sharpe/最大回撤/胜率/交易次数+过拟合警告(若跑网格);强调历史不代表未来由 UI 固定提示,不在文本重复。
    数据源:astock-backtest,K线来自缓存/市场层。

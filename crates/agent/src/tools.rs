@@ -360,17 +360,24 @@ fn dataset_for_tool(name: &str, args: &Value) -> DatasetKind {
         "compute_indicators" | "run_full_analysis" | "run_chanlun" | "compare_stocks"
         | "scan_market" | "get_market_regime" => DatasetKind::DailyKline,
         "get_fund_flow" => DatasetKind::FundFlow,
-        "get_fundamentals" | "run_joinquant_research" => DatasetKind::Fundamentals,
+        "get_fundamentals" | "analyze_earnings_drivers" | "run_joinquant_research" => {
+            DatasetKind::Fundamentals
+        }
         "run_valuation" => DatasetKind::Valuation,
         "research_news" => DatasetKind::News,
-        "research_disclosures" | "research_global_transmission" => DatasetKind::Announcement,
+        "research_disclosures"
+        | "research_global_transmission"
+        | "analyze_event_price_in"
+        | "research_supply_chain_relations" => DatasetKind::Announcement,
         "search_web" => DatasetKind::SearchDiscovery,
         "fetch_source_document" | "read_document" | "compare_source_evidence" => {
             DatasetKind::Announcement
         }
-        "get_industry_chain" | "run_supply_chain_shock" | "build_relationship_graph" => {
-            DatasetKind::KnowledgeGraph
-        }
+        "get_industry_chain"
+        | "run_supply_chain_shock"
+        | "build_relationship_graph"
+        | "run_quant_research"
+        | "query_graph_as_of" => DatasetKind::KnowledgeGraph,
         "run_backtest" | "iterate_strategy" => DatasetKind::Backtest,
         _ => DatasetKind::Other,
     }
@@ -469,11 +476,11 @@ fn quality_for_result(
             format!("检测到 {conflicts} 个未解决的跨源冲突"),
         ));
     }
-    if name == "run_valuation" {
+    if matches!(name, "run_valuation" | "analyze_earnings_drivers") {
         flags.push(QualityFlag::warning(
             QualityFlagCode::Unverified,
             None,
-            "本次 Agent 估值未在同一工具内完成独立估值源对账，置信上限降为中等",
+            "本次盈利/估值分析未在同一工具内完成独立预测源对账，置信上限降为中等",
         ));
     }
     if matches!(name, "run_backtest" | "iterate_strategy") {
@@ -625,7 +632,15 @@ pub fn schema_value<T: JsonSchema>() -> Value {
 pub fn parse_args<T: DeserializeOwned>(tool: &str, args: Value) -> Result<T> {
     serde_json::from_value(args).map_err(|e| AgentError::InvalidArgs {
         tool: tool.to_string(),
-        msg: e.to_string(),
+        // serde_json may include the rejected raw string in Display output.
+        // Tool arguments can contain credentials, so diagnostics must only
+        // expose the error category and never echo the submitted value.
+        msg: match e.classify() {
+            serde_json::error::Category::Data => "参数字段或数据类型不符合工具声明".to_string(),
+            serde_json::error::Category::Syntax => "参数不是有效的 JSON".to_string(),
+            serde_json::error::Category::Eof => "参数 JSON 不完整".to_string(),
+            serde_json::error::Category::Io => "读取参数时发生内部错误".to_string(),
+        },
     })
 }
 
@@ -691,6 +706,21 @@ mod tests {
         assert_eq!(parse_adjust(None).unwrap(), Adjust::Qfq);
         assert_eq!(parse_adjust(Some("none")).unwrap(), Adjust::None);
         assert!(parse_adjust(Some("xxx")).is_err());
+    }
+
+    #[test]
+    fn typed_argument_errors_never_echo_raw_values() {
+        #[derive(Debug, serde::Deserialize)]
+        struct Args {
+            #[allow(dead_code)]
+            symbol: String,
+        }
+
+        let error = parse_args::<Args>("fixture", json!("api_key=must-not-leak"))
+            .expect_err("string must not deserialize as an object");
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("参数字段或数据类型"));
+        assert!(!diagnostic.contains("must-not-leak"));
     }
 
     #[tokio::test]

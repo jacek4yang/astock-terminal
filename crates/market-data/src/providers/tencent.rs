@@ -141,8 +141,20 @@ impl TencentKline {
 
     /// Index kline fallback: unadjusted daily bars via the plain `day` key.
     pub async fn index_kline(&self, index_code: &str, count: u32) -> Result<Vec<Bar>, DataError> {
+        self.index_kline_period(index_code, KlinePeriod::Day, count)
+            .await
+    }
+
+    /// Index kline for a supported day/week/month period. Adjustment is
+    /// intentionally disabled because indices have no corporate actions.
+    pub async fn index_kline_period(
+        &self,
+        index_code: &str,
+        period: KlinePeriod,
+        count: u32,
+    ) -> Result<Vec<Bar>, DataError> {
         let tc = Symbol::index_tencent(index_code);
-        self.fetch(&tc, KlinePeriod::Day, Adjust::None, count, VolumeUnit::Lots)
+        self.fetch(&tc, period, Adjust::None, count, VolumeUnit::Lots)
             .await
     }
 }
