@@ -101,3 +101,119 @@ pub fn reconcile_completed(
 } {
   was_completed || has_durable_result
 }
+
+///|
+/// Abstract pending/completed accounting. A valid tool ledger never has a
+/// negative bucket and never accounts for more operations than were issued.
+pub fn pending_correspondence(
+  pending : Int,
+  completed : Int,
+  issued : Int,
+) -> Bool where {
+  proof_require: 0 <= pending,
+  proof_require: 0 <= completed,
+  proof_require: 0 <= issued,
+  proof_ensure: result => result == (pending + completed <= issued),
+  proof_ensure: result => !result || pending <= issued,
+  proof_ensure: result => !result || completed <= issued,
+} {
+  pending + completed <= issued
+}
+
+///|
+/// A durable tool call can be completed exactly once. Replayed delivery is
+/// rejected after the completed bit has been committed.
+pub fn complete_once(
+  was_completed : Bool,
+  has_single_result : Bool,
+) -> Bool where {
+  proof_ensure: result => result == (!was_completed && has_single_result),
+  proof_ensure: result => !result || !was_completed,
+  proof_ensure: result => !result || has_single_result,
+  proof_ensure: result => was_completed || !has_single_result || result,
+} {
+  !was_completed && has_single_result
+}
+
+///|
+/// The abstract durable result counter is a set cardinality, not a delivery
+/// count: duplicate delivery cannot increase it beyond one.
+pub fn unique_result_count(
+  was_completed : Bool,
+  has_durable_result : Bool,
+) -> Int where {
+  proof_ensure: result => 0 <= result,
+  proof_ensure: result => result <= 1,
+  proof_ensure: result => (!was_completed && !has_durable_result) || result == 1,
+  proof_ensure: result => was_completed || has_durable_result || result == 0,
+} {
+  if was_completed || has_durable_result {
+    1
+  } else {
+    0
+  }
+}
+
+///|
+/// Replaying the same abstract state/event pair is deterministic. The runtime
+/// event decoder and full production state remain a documented trusted
+/// refinement boundary.
+pub fn replay_deterministic(
+  first_state : Int,
+  replay_state : Int,
+  first_event : Int,
+  replay_event : Int,
+) -> Bool where {
+  proof_require: first_state == replay_state,
+  proof_require: first_event == replay_event,
+  proof_ensure: result => {
+    result == (first_state + first_event == replay_state + replay_event)
+  },
+  proof_ensure: result => result,
+} {
+  first_state + first_event == replay_state + replay_event
+}
+
+///|
+/// Applying reconcile twice with the same durable fact has the same result as
+/// applying it once.
+pub fn reconcile_idempotent(
+  was_completed : Bool,
+  has_durable_result : Bool,
+) -> Bool where {
+  proof_ensure: result => result == true,
+} {
+  let once = was_completed || has_durable_result
+  let twice = once || has_durable_result
+  (once && twice) || (!once && !twice)
+}
+
+///|
+/// Context compression is publishable only when its required structural
+/// sections survive: TaskSpec, evidence index, pending-effect ledger and the
+/// visible summary. Content selection correctness remains property-tested.
+pub fn compression_structure_complete(
+  has_task_spec : Bool,
+  has_evidence_index : Bool,
+  has_pending_ledger : Bool,
+  has_visible_summary : Bool,
+) -> Bool where {
+  proof_ensure: result => {
+    result ==
+    (
+      has_task_spec &&
+      has_evidence_index &&
+      has_pending_ledger &&
+      has_visible_summary
+    )
+  },
+  proof_ensure: result => !result || has_task_spec,
+  proof_ensure: result => !result || has_evidence_index,
+  proof_ensure: result => !result || has_pending_ledger,
+  proof_ensure: result => !result || has_visible_summary,
+} {
+  has_task_spec &&
+  has_evidence_index &&
+  has_pending_ledger &&
+  has_visible_summary
+}

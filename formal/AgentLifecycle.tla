@@ -1,21 +1,21 @@
 --------------------------- MODULE AgentLifecycle ---------------------------
 EXTENDS Naturals, FiniteSets, TLC
 
-CONSTANTS Tools, MaxRetries, MaxSeq
+CONSTANTS Tools, MaxRetries, MaxCrashes, MaxSeq
 
 Phases == {
-  "Idle", "Preparing", "Reasoning", "AwaitingTools", "Reviewing",
+  "Idle", "Preparing", "WaitingForUser", "Reasoning", "AwaitingTools", "Reviewing",
   "Synthesizing", "Verifying", "VerificationFailed", "Suspended",
   "Completed", "Cancelled", "HardFailed"
 }
 
-Terminal == {"Completed", "Cancelled", "HardFailed"}
+Terminal == {"Completed", "VerificationFailed", "Cancelled", "HardFailed"}
 
 VARIABLES phase, seq, pending, completed, resultCount, retries,
-          evidenceCount, published, checkpointed
+          evidenceCount, published, checkpointed, crashed, crashCount
 
 vars == <<phase, seq, pending, completed, resultCount, retries,
-          evidenceCount, published, checkpointed>>
+          evidenceCount, published, checkpointed, crashed, crashCount>>
 
 Init ==
   /\ phase = "Idle"
@@ -27,12 +27,16 @@ Init ==
   /\ evidenceCount = 0
   /\ published = FALSE
   /\ checkpointed = TRUE
+  /\ crashed = FALSE
+  /\ crashCount = 0
 
 Commit(nextPhase) ==
   /\ seq < MaxSeq
   /\ phase' = nextPhase
   /\ seq' = seq + 1
   /\ checkpointed' = TRUE
+  /\ crashed' = crashed
+  /\ crashCount' = crashCount
 
 Start ==
   /\ phase = "Idle"
@@ -42,6 +46,16 @@ Start ==
 Prepared ==
   /\ phase = "Preparing"
   /\ Commit("Reasoning")
+  /\ UNCHANGED <<pending, completed, resultCount, retries, evidenceCount, published>>
+
+NeedClarification ==
+  /\ phase = "Preparing"
+  /\ Commit("WaitingForUser")
+  /\ UNCHANGED <<pending, completed, resultCount, retries, evidenceCount, published>>
+
+AnswerClarification ==
+  /\ phase = "WaitingForUser"
+  /\ Commit("Preparing")
   /\ UNCHANGED <<pending, completed, resultCount, retries, evidenceCount, published>>
 
 RequestTool(t) ==
@@ -69,7 +83,7 @@ RetryTool(t) ==
   /\ seq' = seq + 1
   /\ retries' = [retries EXCEPT ![t] = @ + 1]
   /\ checkpointed' = TRUE
-  /\ UNCHANGED <<phase, pending, completed, resultCount, evidenceCount, published>>
+  /\ UNCHANGED <<phase, pending, completed, resultCount, evidenceCount, published, crashed, crashCount>>
 
 Review ==
   /\ phase = "Reviewing"
@@ -115,31 +129,53 @@ HardFail ==
   /\ pending' = {}
   /\ UNCHANGED <<completed, resultCount, retries, evidenceCount, published>>
 
-CrashAndRecover ==
+Crash ==
   /\ phase \notin Terminal
   /\ checkpointed
-  /\ UNCHANGED vars
+  /\ ~crashed
+  /\ crashCount < MaxCrashes
+  /\ crashed' = TRUE
+  /\ crashCount' = crashCount + 1
+  /\ UNCHANGED <<phase, seq, pending, completed, resultCount, retries,
+                  evidenceCount, published, checkpointed>>
+
+Restart ==
+  /\ crashed
+  /\ crashed' = FALSE
+  /\ UNCHANGED <<phase, seq, pending, completed, resultCount, retries,
+                  evidenceCount, published, checkpointed, crashCount>>
 
 DuplicateOrStaleFrame == UNCHANGED vars
 
+ForwardStep ==
+  /\ ~crashed
+  /\ (\/ Start
+      \/ Prepared
+      \/ NeedClarification
+      \/ AnswerClarification
+      \/ (\E t \in Tools: RequestTool(t))
+      \/ (\E t \in Tools: ToolResult(t))
+      \/ (\E t \in Tools: RetryTool(t))
+      \/ Review
+      \/ Synthesize
+      \/ VerifyPass
+      \/ VerifyReject
+      \/ Suspend
+      \/ Resume
+      \/ Cancel
+      \/ HardFail)
+
 Next ==
-  \/ Start
-  \/ Prepared
-  \/ \E t \in Tools: RequestTool(t)
-  \/ \E t \in Tools: ToolResult(t)
-  \/ \E t \in Tools: RetryTool(t)
-  \/ Review
-  \/ Synthesize
-  \/ VerifyPass
-  \/ VerifyReject
-  \/ Suspend
-  \/ Resume
-  \/ Cancel
-  \/ HardFail
-  \/ CrashAndRecover
+  \/ ForwardStep
+  \/ Crash
+  \/ Restart
   \/ DuplicateOrStaleFrame
 
 Spec == Init /\ [][Next]_vars
+ProgressSpec ==
+  /\ Spec
+  /\ WF_vars(ForwardStep)
+  /\ WF_vars(Restart)
 
 TypeOK ==
   /\ phase \in Phases
@@ -152,6 +188,8 @@ TypeOK ==
   /\ evidenceCount \in Nat
   /\ published \in BOOLEAN
   /\ checkpointed \in BOOLEAN
+  /\ crashed \in BOOLEAN
+  /\ crashCount \in 0..MaxCrashes
 
 PendingCorrespondence == pending \cap completed = {}
 ResultUniqueness == \A t \in Tools: resultCount[t] <= 1
@@ -161,5 +199,11 @@ FailureSafety == phase = "HardFailed" => pending = {}
 ReleaseSafety == published => (phase = "Completed" /\ evidenceCount > 0)
 NoUnpublishedCompletion == phase = "Completed" => published
 RetryBounded == \A t \in Tools: retries[t] <= MaxRetries
+
+SeqDoesNotDecrease == seq' >= seq
+TerminalDoesNotChange == (phase \in Terminal) => phase' = phase
+SeqMonotonic == [][SeqDoesNotDecrease]_vars
+TerminalAbsorbing == [][TerminalDoesNotChange]_vars
+FiniteRangeLiveness == <>((phase \in Terminal) \/ (seq = MaxSeq))
 
 =============================================================================

@@ -60,6 +60,9 @@ const performanceEvidence = fs.readFileSync(path.join(root, "scripts", "performa
 const performanceCdp = fs.readFileSync(path.join(root, "scripts", "performance-cdp.mjs"), "utf8");
 const releasePublisher = fs.readFileSync(path.join(root, "scripts", "publish-v6.ps1"), "utf8");
 const buildCommon = fs.readFileSync(path.join(root, "scripts", "Build.Common.ps1"), "utf8");
+const moonFormalModel = fs.readFileSync(path.join(root, "app-moon", "agent_formal", "model.mbt"), "utf8");
+const tlaLifecycleModel = fs.readFileSync(path.join(root, "formal", "AgentLifecycle.tla"), "utf8");
+const tlaLifecycleConfig = fs.readFileSync(path.join(root, "formal", "AgentLifecycle.cfg"), "utf8");
 const desktopCdpSession = fs.readFileSync(path.join(root, "scripts", "desktop-cdp-session.ps1"), "utf8");
 const desktopRendererFault = fs.readFileSync(path.join(root, "scripts", "desktop-renderer-fault.mjs"), "utf8");
 const desktopFaultEvidence = fs.readFileSync(path.join(root, "scripts", "fault-injection-desktop.ps1"), "utf8");
@@ -693,6 +696,53 @@ for (const marker of [
   "skeleton_cold_start_ms",
 ]) {
   if (!performanceCdp.includes(marker)) failures.push(`packaged performance CDP runner is missing ${marker}`);
+}
+
+for (const proofFunction of [
+  "accept_sequence",
+  "next_bounded_round",
+  "consume_pending",
+  "pending_correspondence",
+  "complete_once",
+  "unique_result_count",
+  "cancel_pending",
+  "publication_allowed",
+  "event_accepted",
+  "replay_deterministic",
+  "reconcile_idempotent",
+  "compression_structure_complete",
+]) {
+  if (!moonFormalModel.includes(`pub fn ${proofFunction}(`)) {
+    failures.push(`MoonBit formal model is missing named obligation: ${proofFunction}`);
+  }
+}
+for (const temporalMarker of [
+  "MaxCrashes",
+  "NeedClarification ==",
+  "Crash ==",
+  "Restart ==",
+  "ProgressSpec ==",
+  "WF_vars(ForwardStep)",
+  "WF_vars(Restart)",
+  "SeqMonotonic ==",
+  "TerminalAbsorbing ==",
+  "FiniteRangeLiveness ==",
+]) {
+  if (!tlaLifecycleModel.includes(temporalMarker)) {
+    failures.push(`TLA+ Agent lifecycle is missing bounded recovery/liveness marker: ${temporalMarker}`);
+  }
+}
+for (const configMarker of [
+  "SPECIFICATION ProgressSpec",
+  "MaxCrashes = 2",
+  "PROPERTIES",
+  "SeqMonotonic",
+  "TerminalAbsorbing",
+  "FiniteRangeLiveness",
+]) {
+  if (!tlaLifecycleConfig.includes(configMarker)) {
+    failures.push(`TLC release configuration is missing temporal check: ${configMarker}`);
+  }
 }
 
 const moon = fs.readFileSync(path.join(root, "desktop-moon", "backend", "moon.mod"), "utf8");
