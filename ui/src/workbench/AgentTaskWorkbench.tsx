@@ -33,6 +33,15 @@ type AgentEffect = {
   detail?: string;
   cache_hit?: boolean;
   evidence_count?: number;
+  analysis_modules?: string[];
+  module_activities?: AgentModuleActivity[];
+  status?: "succeeded" | "failed" | "skipped";
+};
+type AgentModuleActivity = {
+  module?: string;
+  scope?: string;
+  status?: "succeeded" | "failed" | "skipped";
+  error?: string | null;
 };
 export type DeterministicVerification = {
   version?: string;
@@ -134,6 +143,35 @@ const effectCopy: Record<string, [string, string]> = {
   verify_report: ["发布前校验", "逐行复现数字，并检查证据编号、来源时点、版本、质量状态和研究边界"],
   publish_report: ["发布报告", "报告已通过校验并保存"],
 };
+const moduleLabel: Record<string, string> = {
+  earnings_driver: "盈利驱动树",
+  industry_graph: "产业关系图谱",
+  relationship: "跨证券关系",
+  market_regime: "市场状态识别",
+  historical_backtest: "历史回测",
+};
+
+export function expandAgentActivities(activities: AgentEffect[] = []): AgentEffect[] {
+  return activities.flatMap((effect) => {
+    const modules = Array.isArray(effect.module_activities) ? effect.module_activities : [];
+    const expanded = modules.map((activity) => {
+      const module = activity.module ?? "unknown";
+      const status = activity.status ?? "failed";
+      const scope = activity.scope === "portfolio" ? "组合" : activity.scope ?? "范围未知";
+      const statusLabel = status === "succeeded" ? "完成" : status === "skipped" ? "已跳过" : "失败";
+      const failure = activity.error ? ` · ${activity.error}` : "";
+      return {
+        kind: "advanced_module",
+        tool: module,
+        call_id: `${effect.call_id ?? "advanced"}:${module}:${activity.scope ?? "unknown"}`,
+        title: `${moduleLabel[module] ?? module} ${statusLabel}`,
+        detail: `${scope} · 高级研究模块${statusLabel}${failure}`,
+        status,
+      } satisfies AgentEffect;
+    });
+    return [effect, ...expanded];
+  });
+}
 
 function timeNow(): string {
   return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(new Date());
@@ -392,7 +430,7 @@ export default function AgentTaskWorkbench() {
                 : "工具结果与缓存状态已持久化，正在进入下一轮复核",
             } satisfies AgentEffect]
           : [];
-        return [...activities, ...tool];
+        return expandAgentActivities([...activities, ...tool]);
       });
       if (streamed.length) {
         setEffects((current) => {
@@ -528,7 +566,7 @@ export default function AgentTaskWorkbench() {
   const applyTransition = (reply: TaskTransition) => {
     const next = reply.state ?? {};
     setTask(next);
-    setEffects(reply.activities ?? reply.effects ?? []);
+    setEffects(expandAgentActivities(reply.activities ?? reply.effects ?? []));
     if (reply.verification) setVerification(reply.verification);
     if (reply.checkpoint !== undefined) setCheckpoint(reply.checkpoint);
     const generated = reply.clarification ?? next.clarification ?? null;
@@ -719,7 +757,7 @@ export default function AgentTaskWorkbench() {
     setToolPolicy(saved.toolPolicy ?? "auto");
     setMessages(saved.messages ?? []);
     setTask(saved.task ?? null);
-    setEffects(saved.effects ?? []);
+    setEffects(expandAgentActivities(saved.effects ?? []));
     setVerification(saved.verification ?? null);
     setClarification(saved.clarification ? normalizeClarification(saved.clarification) : null);
     setDraft(saved.draft ?? emptyClarificationDraft());
@@ -881,7 +919,8 @@ export default function AgentTaskWorkbench() {
         {activity.length ? activity.map((effect, index) => {
           const [title, detail] = effectCopy[effect.kind ?? ""] ?? [effect.title ?? effect.tool ?? "任务活动", effect.detail ?? "Worker 已记录此项活动"];
           const showVerification = effect.kind === "verify_report" && index === finalVerificationActivity && verification;
-          return <article key={`${effect.call_id ?? effect.kind}-${index}`}><i className={effect.cache_hit || showVerification && status === "completed" ? "cache" : "running"} /><div><b>{title}</b><p>{detail}</p><small>{effect.call_id && `调用 ${effect.call_id}`}{effect.cache_hit && " · 命中缓存"}{effect.evidence_count ? ` · ${effect.evidence_count} 条证据` : ""}{showVerification && ` · ${deterministicVerificationSummary(verification)}`}</small>{showVerification && <small className="block break-all">校验器 {verification.version ?? "版本未知"}</small>}</div></article>;
+          const activityClass = effect.status === "failed" ? "failed" : effect.status === "skipped" ? "skipped" : effect.cache_hit || showVerification && status === "completed" || effect.status === "succeeded" ? "cache" : "running";
+          return <article key={`${effect.call_id ?? effect.kind}-${index}`}><i className={activityClass} /><div><b>{title}</b><p>{detail}</p><small>{effect.call_id && `调用 ${effect.call_id}`}{effect.cache_hit && " · 命中缓存"}{effect.evidence_count ? ` · ${effect.evidence_count} 条证据` : ""}{showVerification && ` · ${deterministicVerificationSummary(verification)}`}</small>{showVerification && <small className="block break-all">校验器 {verification.version ?? "版本未知"}</small>}</div></article>;
         }) : <div className="activity-empty"><b>等待任务</b><p>开始研究后，这里会按顺序展示计划、工具调用、缓存、证据与报告校验，不显示模型私有推理链。</p></div>}
       </div>
       <footer><span>已取得证据</span><b>{task?.evidence_ids?.length ?? 0}</b><span>完成工具</span><b>{task?.completed_tool_count ?? 0}</b></footer>

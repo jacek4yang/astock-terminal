@@ -183,6 +183,14 @@ async function executeAgentEffect(parent, effect) {
   if (effect?.target !== "engine") {
     return { call_id: effect?.call_id ?? "invalid", ok: false, payload: null, error: "Agent requested a target outside the Engine allowlist", cache_hit: false };
   }
+  const permittedKinds = new Set([
+    "research.agent_prepare_context",
+    "research.agent_security_context",
+    "research.agent_report_verify",
+  ]);
+  if (!permittedKinds.has(effect.kind)) {
+    return { call_id: effect.call_id, ok: false, payload: null, error: "Agent requested an Engine kind outside the bounded research Effect allowlist", cache_hit: false };
+  }
   const history = await enginePayload(parent, `effect-list:${effect.call_id}`, "agent.effect.list", { task_id: effect.task_id });
   const prior = (history.items ?? []).filter((item) => item.idempotency_key === effect.idempotency_key || item.idempotency_key?.startsWith(`${effect.idempotency_key}:retry:`));
   const completed = prior.find((item) => item.status === "succeeded" && item.result != null);

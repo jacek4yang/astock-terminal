@@ -3,6 +3,28 @@ import path from "node:path";
 
 const root = path.resolve(import.meta.dirname, "..");
 const failures = [];
+
+function quotedStrings(source) {
+  return [...source.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+}
+
+function exactStringSet(label, actual, expected) {
+  const normalizedActual = [...new Set(actual)].sort();
+  const normalizedExpected = [...new Set(expected)].sort();
+  if (JSON.stringify(normalizedActual) !== JSON.stringify(normalizedExpected)) {
+    failures.push(`${label} drifted: expected ${normalizedExpected.join(", ")}; found ${normalizedActual.join(", ")}`);
+  }
+}
+
+function requiredCapture(label, source, pattern) {
+  const match = source.match(pattern);
+  if (!match) {
+    failures.push(`${label} cannot be parsed`);
+    return "";
+  }
+  return match[1];
+}
+
 const cargo = fs.readFileSync(path.join(root, "Cargo.toml"), "utf8");
 const ui = JSON.parse(fs.readFileSync(path.join(root, "ui", "package.json"), "utf8"));
 const agentWorkbench = fs.readFileSync(path.join(root, "ui", "src", "workbench", "AgentTaskWorkbench.tsx"), "utf8");
@@ -10,6 +32,7 @@ const moonAgent = fs.readFileSync(path.join(root, "app-moon", "agent_worker", "m
 const moonProvider = fs.readFileSync(path.join(root, "app-moon", "agent_worker", "provider.mbt"), "utf8");
 const moonKernel = fs.readFileSync(path.join(root, "app-moon", "agent_core", "state.mbt"), "utf8");
 const moonHost = fs.readFileSync(path.join(root, "desktop-moon", "backend", "host", "backend.mbt"), "utf8");
+const moonHostTests = fs.readFileSync(path.join(root, "desktop-moon", "backend", "host", "worker_supervision_wbtest.mbt"), "utf8");
 const moonEntry = fs.readFileSync(path.join(root, "desktop-moon", "backend", "app", "main.mbt"), "utf8");
 const engineSchema = fs.readFileSync(path.join(root, "protocol", "schema", "engine.schema.json"), "utf8");
 const browserBridge = fs.readFileSync(path.join(root, "scripts", "browser-dev-bridge.mjs"), "utf8");
@@ -37,6 +60,7 @@ const gpuPolicyPatch = fs.readFileSync(path.join(root, "patches", "proton-0.2.1-
 const qualityWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "quality.yml"), "utf8");
 const engineCredentials = fs.readFileSync(path.join(root, "crates", "engine", "src", "credentials.rs"), "utf8");
 const engineRuntime = fs.readFileSync(path.join(root, "crates", "engine", "src", "lib.rs"), "utf8");
+const engineAgentContext = fs.readFileSync(path.join(root, "crates", "engine", "src", "agent_context.rs"), "utf8");
 const marketHub = fs.readFileSync(path.join(root, "crates", "market-data", "src", "hub.rs"), "utf8");
 const marketHttp = fs.readFileSync(path.join(root, "crates", "market-data", "src", "http.rs"), "utf8");
 const credentialRuntimeSources = [
@@ -136,7 +160,13 @@ for (const marker of [
   if (!researchDataGate.includes(marker)) failures.push(`public research-data gate is missing ${marker}`);
 }
 for (const [name, source] of activeRuntimeDocs) {
-  for (const staleDocMarker of ["cargo check -p astock-app", "真实 Tauri 桌面进程", "稳定 Tauri 响应"]) {
+  for (const staleDocMarker of [
+    "cargo check -p astock-app",
+    "真实 Tauri 桌面进程",
+    "稳定 Tauri 响应",
+    "`AgentEngine` 外层监督",
+    "Tokio `OnceCell`",
+  ]) {
     if (source.includes(staleDocMarker)) failures.push(`${name} still instructs the obsolete v5 runtime: ${staleDocMarker}`);
   }
   for (const unsafeCredentialInstruction of [
@@ -174,6 +204,12 @@ for (const publicationGateMarker of [
   }
 }
 if (!moonAgent.includes('payload.stringify()')) failures.push("Agent tool cache identity does not include the complete Engine payload");
+for (const capability of ["advanced_tool_planning", "closed_engine_effects"]) {
+  if (!moonAgent.includes(`"${capability}"`)) failures.push(`MoonBit Agent handshake is missing ${capability}`);
+}
+if (!engineRuntime.includes('"agent_advanced_analysis_v1"')) {
+  failures.push("Rust Engine handshake is missing agent_advanced_analysis_v1");
+}
 if (!agentWorkbench.includes('agent.task.load') || !agentWorkbench.includes('recoverLatestCheckpoint')) {
   failures.push("React does not restore the newest durable Agent checkpoint before resuming");
 }
@@ -186,6 +222,10 @@ if (moonAgent.includes('"agent.research" =>') || moonAgent.includes('"agent.plan
 if (!moonHost.includes("execute_agent_effect") || !moonHost.includes('effect.target != "engine"')) {
   failures.push("MoonBit Host does not enforce the generic Engine-only Agent effect runner");
 }
+if (!moonHost.includes("if !permitted_agent_effect_kind(effect.kind)") ||
+    !moonHostTests.includes('permitted_agent_effect_kind("credentials.provider.delete")')) {
+  failures.push("MoonBit Host does not deny non-research Agent Engine effects before execution");
+}
 if (!moonHost.includes('effect.kind != "research.agent_prepare_context"') ||
     !moonHost.includes('effect.kind != "research.agent_security_context"') ||
     !moonHost.includes('effect.kind != "research.agent_report_verify"')) {
@@ -193,6 +233,74 @@ if (!moonHost.includes('effect.kind != "research.agent_prepare_context"') ||
 }
 if (!browserBridge.includes("executeAgentEffect") || !browserBridge.includes('effect?.target !== "engine"')) {
   failures.push("browser test Bridge does not preserve the production Agent effect contract");
+}
+if (!browserBridge.includes("const permittedKinds = new Set") ||
+    !browserBridge.includes("if (!permittedKinds.has(effect.kind))")) {
+  failures.push("browser test Bridge does not enforce the production bounded Agent Effect allowlist");
+}
+const expectedAgentEffectKinds = [
+  "research.agent_prepare_context",
+  "research.agent_security_context",
+  "research.agent_report_verify",
+];
+exactStringSet(
+  "MoonBit Host Agent Effect allowlist",
+  quotedStrings(requiredCapture(
+    "MoonBit Host Agent Effect allowlist",
+    moonHost,
+    /fn permitted_agent_effect_kind\([^)]*\)[^{]*\{([\s\S]*?)\n\}/,
+  )),
+  expectedAgentEffectKinds,
+);
+exactStringSet(
+  "browser Bridge Agent Effect allowlist",
+  quotedStrings(requiredCapture(
+    "browser Bridge Agent Effect allowlist",
+    browserBridge,
+    /const permittedKinds = new Set\(\[([\s\S]*?)\]\);/,
+  )),
+  expectedAgentEffectKinds,
+);
+const expectedAnalysisModules = [
+  "earnings_driver",
+  "industry_graph",
+  "relationship",
+  "market_regime",
+  "historical_backtest",
+];
+exactStringSet(
+  "MoonBit Agent advanced-analysis allowlist",
+  quotedStrings(requiredCapture(
+    "MoonBit Agent advanced-analysis allowlist",
+    moonProvider,
+    /fn available_analysis_modules\([^)]*\)[^{]*\{([\s\S]*?)\n\}/,
+  )),
+  expectedAnalysisModules,
+);
+exactStringSet(
+  "Rust Engine advanced-analysis allowlist",
+  quotedStrings(requiredCapture(
+    "Rust Engine advanced-analysis allowlist",
+    engineAgentContext,
+    /const ADVANCED_ANALYSIS_MODULES[^=]*=\s*\[([\s\S]*?)\];/,
+  )),
+  expectedAnalysisModules,
+);
+for (const analysisModule of expectedAnalysisModules) {
+  if (!moonProvider.includes(`\"${analysisModule}\"`) || !engineAgentContext.includes(`\"${analysisModule}\"`)) {
+    failures.push(`Agent advanced analysis module is not planned and executed end-to-end: ${analysisModule}`);
+  }
+}
+for (const toolBoundaryMarker of [
+  "analysis_modules_for_policy",
+  "model_selected_unknown_analysis_module",
+  "analysis_module_policy_is_closed_and_never_silently_escalates",
+  '"quality_blocking": true',
+  '"tool_activities": tool_activities',
+]) {
+  if (!moonProvider.includes(toolBoundaryMarker) && !engineAgentContext.includes(toolBoundaryMarker)) {
+    failures.push(`Agent advanced tool boundary is missing ${toolBoundaryMarker}`);
+  }
 }
 for (const acceptanceMarker of [
   "codex-in-app-browser",

@@ -597,6 +597,8 @@
 .activity-feed i { z-index: 1; width: 11px; height: 11px; margin-top: 2px; border: 2px solid #4d6c91; border-radius: 50%; background: #0a1726; }
 .activity-feed i.running { border-top-color: #63a1f5; animation: agent-spin .9s linear infinite; }
 .activity-feed i.cache { border-color: #36a67c; background: #26785b; }
+.activity-feed i.failed { border-color: #d75b66; background: #7e303a; }
+.activity-feed i.skipped { border-color: #c69546; background: #73582e; }
 .activity-feed b { color: #b9c7d8; font-size: 10px; font-weight: 600; }
 .activity-feed p { margin: 3px 0; color: #71859d; font-size: 9px; line-height: 1.45; }
 .activity-feed small { color: #536a84; font: 8px ui-monospace, monospace; }

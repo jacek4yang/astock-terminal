@@ -148,7 +148,7 @@ impl Engine {
             "system.handshake" => Ok(json!({
                 "protocol_version": PROTOCOL_VERSION,
                 "engine_version": ENGINE_VERSION,
-                "capabilities": ["market", "research", "fundamentals", "valuation", "multi_source_news", "security_events", "global_context", "data_quality", "market_scan", "backtest_v2", "market_regime", "storage", "credentials", "agent_event_store_v2"],
+                "capabilities": ["market", "research", "fundamentals", "valuation", "multi_source_news", "security_events", "global_context", "data_quality", "market_scan", "backtest_v2", "market_regime", "agent_advanced_analysis_v1", "storage", "credentials", "agent_event_store_v2"],
                 "max_frame_bytes": astock_protocol::MAX_FRAME_BYTES,
                 "max_page_size": astock_protocol::MAX_PAGE_SIZE
             })),

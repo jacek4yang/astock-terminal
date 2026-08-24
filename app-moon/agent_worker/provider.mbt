@@ -163,6 +163,9 @@ struct ResearchCandidate {
 /// before any expensive per-security tools run.
 struct ResearchPlan {
   symbols : Array[String]
+  /// Missing in pre-v6.0.0-release-candidate checkpoints; `None` restores as
+  /// the policy's safe default instead of making durable history unreadable.
+  analysis_modules : Array[String]?
   selection_summary : String
   verification_focus : Array[String]
   rejected_risks : Array[String]
@@ -177,7 +180,47 @@ extend ResearchPlan with ToJson::{to_json}
 /// control tool execution; all other visible planning notes are deterministic.
 struct ResearchPlanSelection {
   symbols : Array[String]
+  analysis_modules : Array[String]?
 } derive(FromJson)
+
+///|
+/// Advanced deterministic Engine modules that the Agent may request inside
+/// the crash-recoverable security-context Effect. The list intentionally has
+/// no trading, credential, storage mutation or arbitrary request kind.
+fn available_analysis_modules() -> Array[String] {
+  [
+    "earnings_driver", "industry_graph", "relationship", "market_regime", "historical_backtest",
+  ]
+}
+
+///|
+/// Apply the user's tool boundary after model planning. `auto` lets the model
+/// choose a validated subset; every other policy is deterministic and cannot
+/// be escalated by Provider output.
+fn analysis_modules_for_policy(
+  tool_policy : String,
+  requested : Array[String],
+) -> Array[String] raise {
+  let available = available_analysis_modules()
+  let selected = match tool_policy {
+    "market" => []
+    "evidence" =>
+      ["earnings_driver", "industry_graph", "relationship", "market_regime"]
+    "full" => available.copy()
+    "auto" => requested
+    _ => fail("invalid_agent_tool_policy")
+  }
+  let unique : Array[String] = []
+  for analysis_module in selected {
+    if !available.contains(analysis_module) {
+      fail("model_selected_unknown_analysis_module:" + analysis_module)
+    }
+    if !unique.contains(analysis_module) {
+      unique.push(analysis_module)
+    }
+  }
+  unique
+}
 
 ///|
 fn provider_headers(key : String) -> @http.Headers {
@@ -702,15 +745,18 @@ async fn generate_research_plan(
   spec : @protocol.TaskSpec,
   candidates : Array[ResearchCandidate],
   market_context : Json,
+  tool_policy : String,
 ) -> ResearchPlan {
   if candidates.is_empty() {
     fail("research_candidate_pool_empty")
   }
-  let system = "你是A股研究工具规划器。候选池只是按流动性得到的发现列表，不代表推荐。只能从candidate_pool的symbol中选1至5个进入深度取证；考虑用户资金、A股100股一手、分散度、成交活跃度、当日极端波动和任务边界。此阶段不能给最终买卖结论。只输出形如{\"symbols\":[\"000001\"]}的JSON对象，不要任何其他字段。"
+  let system = "你是A股研究工具规划器。候选池只是按流动性得到的发现列表，不代表推荐。只能从candidate_pool的symbol中选1至5个进入深度取证；考虑用户资金、A股100股一手、分散度、成交活跃度、当日极端波动和任务边界。analysis_modules只能从earnings_driver、industry_graph、relationship、market_regime、historical_backtest中选择与目标真正相关的子集；不要为了显得全面而调用无关模块。tool_policy不是auto时模块集合最终会由程序强制收窄。此阶段不能给最终买卖结论。只输出JSON对象，且只能包含symbols与analysis_modules。"
   let user : Json = {
     "task_spec": spec.to_json(),
     "candidate_pool": candidates.to_json(),
     "market_context": market_context,
+    "tool_policy": tool_policy,
+    "available_analysis_modules": available_analysis_modules(),
   }
   let value = chat_json(provider, key, system, user.stringify())
   let selection : ResearchPlanSelection = @json.from_json(value)
@@ -729,8 +775,13 @@ async fn generate_research_plan(
   if unique.is_empty() {
     fail("research_plan_has_no_valid_symbol")
   }
+  let modules = analysis_modules_for_policy(
+    tool_policy,
+    selection.analysis_modules.unwrap_or([]),
+  )
   ResearchPlan::{
     symbols: unique,
+    analysis_modules: Some(modules),
     selection_summary: "候选仅用于进入深度取证；最终报告可淘汰全部候选并保留现金",
     verification_focus: [
       "行情与K线跨源一致性", "资金流、财务三表与估值的相互印证",
@@ -740,6 +791,57 @@ async fn generate_research_plan(
       "风险警示或退市名称已由Engine预筛除", "最低一手成本超出资金约束的证券已由Engine预筛除",
       "最终仍须依据详细证据排除冲突或缺失严重的候选",
     ],
+  }
+}
+
+///|
+/// When the user fixed one or more securities, the model may still choose a
+/// bounded analysis subset in `auto` mode. It cannot add or replace symbols.
+async fn generate_explicit_research_plan(
+  provider : ProviderConfig,
+  key : String,
+  spec : @protocol.TaskSpec,
+  symbols : Array[String],
+  market_context : Json,
+  tool_policy : String,
+) -> ResearchPlan {
+  if tool_policy != "auto" {
+    return ResearchPlan::{
+      symbols: symbols.copy(),
+      analysis_modules: Some(analysis_modules_for_policy(tool_policy, [])),
+      selection_summary: "研究标的由用户明确指定；工具范围严格服从用户选择的工具策略",
+      verification_focus: [
+        "逐项核对行情、财务、资金、公告、新闻与估值证据",
+        "重大跨源冲突会阻止发布",
+      ],
+      rejected_risks: ["未完成详细取证前不形成买卖结论"],
+    }
+  }
+  let system = "你是A股研究工具规划器。证券代码已由用户固定，不得增加、删除、替换或重排。只决定需要的高级分析模块。analysis_modules只能从earnings_driver、industry_graph、relationship、market_regime、historical_backtest中选择与用户目标相关的子集；基础行情、基本面、新闻、公告与跨源对账无论如何都会执行，不要把它们写入analysis_modules。只输出JSON对象，且只能包含symbols与analysis_modules。"
+  let user : Json = {
+    "task_spec": spec.to_json(),
+    "fixed_symbols": symbols,
+    "market_context": market_context,
+    "available_analysis_modules": available_analysis_modules(),
+  }
+  let value = chat_json(provider, key, system, user.stringify())
+  let selection : ResearchPlanSelection = @json.from_json(value)
+  if selection.symbols != symbols {
+    fail("research_plan_changed_user_fixed_symbols")
+  }
+  ResearchPlan::{
+    symbols: symbols.copy(),
+    analysis_modules: Some(
+      analysis_modules_for_policy(
+        tool_policy,
+        selection.analysis_modules.unwrap_or([]),
+      ),
+    ),
+    selection_summary: "研究标的由用户明确指定；Agent只在安全白名单内选择与目标相关的高级分析模块",
+    verification_focus: [
+      "逐项核对行情、财务、资金、公告、新闻与估值证据", "重大跨源冲突会阻止发布",
+    ],
+    rejected_risks: ["未完成详细取证前不形成买卖结论"],
   }
 }
 

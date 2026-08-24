@@ -27,14 +27,19 @@ The research renderer submits one `agent.research.workflow` request containing
 only user-selected depth/tool policy and the current symbol preference. The
 MoonBit Agent emits a bounded, allowlisted `host_effects + continuation`
 contract: it first requests the market/macro/news/candidate snapshot, reviews
-that result (and invokes MiniMax for candidate selection when necessary), then
-requests the selected securities' evidence snapshot before three report review
-rounds. The Host does not choose a symbol, data source, tool, parameter or stop
-condition; it persists the Agent checkpoint/effect intent, executes only
-`target=engine`, persists the result, and returns it to the continuation. The
-Rust aggregate services window repetitive rows and reject any context that
-would approach the 8 MiB frame boundary. `release-architecture-check.mjs`
-fails if Engine tool selection returns to the React workbench.
+that result, validates model-selected symbols and a closed advanced-analysis
+set (earnings driver, industry graph, relationship, market regime and
+historical backtest), then requests the selected securities' evidence snapshot
+before three report review rounds. Non-`auto` tool policies deterministically
+override model output; no module can add trading, credential or storage
+mutation. The Host does not choose a symbol, data source, tool, parameter or
+stop condition; it persists the Agent checkpoint/effect intent and accepts only
+the three declared research aggregate kinds, including on the first attempt.
+The browser Bridge enforces the same allowlist. Results are persisted before
+they are returned to the continuation. The Rust aggregate services window
+repetitive rows and reject any context that would approach the 8 MiB frame
+boundary. `release-architecture-check.mjs` fails if Engine tool selection
+returns to the React workbench or either Host allowlist weakens.
 
 Every reducer call id remains unique, while an Engine snapshot cache key is
 derived from the task, tool kind and full JSON payload. If Host/Agent/renderer

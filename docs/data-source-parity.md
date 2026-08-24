@@ -62,7 +62,7 @@ newly exposed through the bounded global-context service.
 | EastMoney announcement mirror | A-share announcement discovery | `research.news` | READY | Treated as official-mirror discovery; material claims must follow the exchange/company source link. |
 | CNInfo | Statutory disclosure index and PDF original links | `research.security_events.cninfo_disclosures_1y`, `research.disclosures.*` | ENRICHED | The new path resolves the mandatory `orgId` before querying; this fixes the legacy bare-code query that silently returned zero rows. Cancellable sync, status, detail and provider health are reachable, while any upstream/PDF parse failure remains explicit. |
 | Source verifier | Fetch, version, compare webpage/PDF evidence | `research.sources.*` | READY | Content-addressed versions are retained; external source windows remain zero privilege. |
-| JoinQuant | Adjusted daily, constituents, valuation, macro | `research.joinquant_context` + Credential Manager | READY / TRUSTED BOUNDARY | The Agent consumes one bounded explicit-call research package when configured. The current machine has no configured JoinQuant credential, so contract and missing-credential behavior are tested but no live upstream verification claim is permitted. |
+| JoinQuant | Adjusted daily, constituents, valuation, macro | `research.joinquant_context` + Credential Manager | READY / TRUSTED BOUNDARY | The Agent consumes one bounded explicit-call research package when configured. A previously exposed credential is quarantined on the release machine: public gates force credentialed providers off, and no live upstream verification claim is permitted until the user revokes it, writes a rotated value through Credential Manager, and records read-back evidence. |
 | Tushare Pro | Raw daily, calendar, adjustment-factor cross-check, dividends, daily basics | `research.optional_sources` | ENRICHED / TRUSTED BOUNDARY | Token and tier gated; raw daily remains usable at the lower tier, while Pro-only datasets report permission failure independently. It is not inserted into automatic failover. |
 | iWencai | Natural-language screening / OpenAPI event and board data | `research.optional_sources` | ENRICHED / TRUSTED BOUNDARY | Credential/captcha/rate-limit dependent; exposed only as an explicit supplemental discovery layer with per-dataset failure state. |
 | World Bank / global asset providers | Official macro series, COMEX/SGE gold, World Gold Council/SGE primary publications | `research.global_context` | ENRICHED | Five independently failing datasets retain observation periods and source identities. Annual macro observations are context, never mislabeled as real-time trading signals. |
@@ -101,7 +101,7 @@ failure state so the boundary remains visible.
 | Credentials/cache | MiniMax, JoinQuant, quota, cache stats/cleanup | coarse Engine services + Credential Manager | READY for exposed providers |
 | Data directory | adopt/migrate/transactional switch/rollback | `storage.data_root.migrate` plus `storage.data_root.rollback`; schema upgrades first create a verified SQLite online backup, migration uses a checked file manifest, and both activation and rollback atomically switch only the pointer while retaining both copies | ENRICHED |
 | Agent task core | dynamic clarification, Agent-best choice, checkpoints, cancel/recovery | MoonBit reducer + Engine event/checkpoint store | ENRICHED |
-| Agent research | candidate plan and final answer | `agent.research.workflow` emits durable Engine effects for `research.agent_prepare_context`, `research.agent_security_context` and the independent `research.agent_report_verify`; candidate planning plus three report-review model rounds, followed by field-level citation and numeric reproduction | ENRICHED |
+| Agent research | candidate plan and final answer | `agent.research.workflow` emits durable Engine effects for `research.agent_prepare_context`, `research.agent_security_context` and the independent `research.agent_report_verify`; the model may select only a closed advanced-analysis set (earnings driver, industry graph, cross-security relationship, market regime and historical backtest), user tool policy is applied after model planning, and every module failure remains visible; candidate/tool planning plus three report-review model rounds are followed by field-level citation and numeric reproduction | ENRICHED |
 | Agent history | durable tasks/conversations, list/load/rename/soft-delete and branch-from-point | Engine SQLite event/conversation store + three-page Agent UI; renderer local storage is not a truth source | ENRICHED |
 
 ## Live audit evidence (2026-08-24)
@@ -136,7 +136,10 @@ classes. Industry enrichment is independently fallible and never replaces the
 liquid-universe result. The same audit observed JoinQuant as explicitly
 unconfigured and returned no synthetic JoinQuant dataset. With the expanded
 candidate and optional-source checks, total audit latency was approximately
-10.1 seconds.
+10.1 seconds. That historical observation is not current credentialed release
+evidence. The v6 public-data gate now requires
+`credentialed_providers_tested: false`; a new live Provider claim is forbidden
+until credential rotation and read-back evidence pass.
 
 Classification: `INTEGRATION TESTED`. This is a time-specific observation, not
 a guarantee that an upstream will remain available.

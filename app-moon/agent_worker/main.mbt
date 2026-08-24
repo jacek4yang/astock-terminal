@@ -86,6 +86,9 @@ struct AgentPrepareContext {
 struct AgentSecurityContext {
   securities : Array[Json]
   evidence_registry : Json
+  analysis_modules : Array[String]?
+  cross_security_analysis : Json?
+  tool_activities : Array[Json]?
 } derive(FromJson)
 
 ///|
@@ -349,9 +352,13 @@ fn host_engine_effect(
 }
 
 ///|
-fn explicit_research_plan(symbols : Array[String]) -> ResearchPlan {
+fn explicit_research_plan(
+  symbols : Array[String],
+  tool_policy : String,
+) -> ResearchPlan raise {
   ResearchPlan::{
     symbols: symbols.copy(),
+    analysis_modules: Some(analysis_modules_for_policy(tool_policy, [])),
     selection_summary: "优先研究用户明确指定或上次已持久化的证券；最终报告仍可拒绝全部候选并保留现金",
     verification_focus: [
       "逐项核对行情、财务、资金、公告、新闻与估值证据", "重大跨源冲突会阻止发布",
@@ -506,7 +513,8 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
         "reducer_version": "moonbit-agent-kernel-v1",
         "capabilities": [
           "pure_reducer", "replay", "evidence_gate", "provider_discovery", "candidate_planning",
-          "multi_pass_review", "deterministic_report_verification", "sse_stream_recovery",
+          "advanced_tool_planning", "closed_engine_effects", "multi_pass_review",
+          "deterministic_report_verification", "sse_stream_recovery",
         ],
         "max_frame_bytes": @protocol.max_frame_bytes,
       })
@@ -829,14 +837,15 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
               payload.workflow.preferred_symbols,
               maximum,
             )
-            let plan = if symbols.is_empty() {
+            state = transition_state(state, MoreEvidenceRequired)
+            let plan = if symbols.is_empty() ||
+              payload.workflow.tool_policy == "auto" {
               let key = read_minimax_key()
               if key.trim().is_empty() {
                 return self.workflow_provider_suspended(
                   request, state, "provider_credential_missing",
                 )
               }
-              state = transition_state(state, MoreEvidenceRequired)
               state = transition_state(state, ModelRoundStarted)
               let provider = self.provider_config(key) catch {
                 error =>
@@ -846,25 +855,43 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
                     error.to_string(),
                   )
               }
-              let selected : ResearchPlan = generate_research_plan(
-                provider,
-                key,
-                state.spec.unwrap(),
-                prepared.candidates.items,
-                prepared.market_overview,
-              ) catch {
-                error =>
-                  return self.workflow_provider_suspended(
-                    request,
-                    state,
-                    error.to_string(),
-                  )
+              let selected : ResearchPlan = if symbols.is_empty() {
+                generate_research_plan(
+                  provider,
+                  key,
+                  state.spec.unwrap(),
+                  prepared.candidates.items,
+                  prepared.market_overview,
+                  payload.workflow.tool_policy,
+                ) catch {
+                  error =>
+                    return self.workflow_provider_suspended(
+                      request,
+                      state,
+                      error.to_string(),
+                    )
+                }
+              } else {
+                generate_explicit_research_plan(
+                  provider,
+                  key,
+                  state.spec.unwrap(),
+                  symbols,
+                  prepared.market_overview,
+                  payload.workflow.tool_policy,
+                ) catch {
+                  error =>
+                    return self.workflow_provider_suspended(
+                      request,
+                      state,
+                      error.to_string(),
+                    )
+                }
               }
               symbols = selected.symbols.copy()
               selected
             } else {
-              state = transition_state(state, MoreEvidenceRequired)
-              explicit_research_plan(symbols)
+              explicit_research_plan(symbols, payload.workflow.tool_policy)
             }
             state = transition_state(state, ResearchPlanSelected(symbols))
             let call_id = "security-context-" +
@@ -925,6 +952,7 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
                     "symbols": symbols,
                     "depth": payload.workflow.depth,
                     "tool_policy": payload.workflow.tool_policy,
+                    "analysis_modules": plan.analysis_modules.unwrap_or([]),
                     "benchmark": spec.comparison_benchmark,
                     "start": spec.research_start,
                     "end": spec.research_end,
@@ -1056,6 +1084,12 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
               "global_context": prepared.global_context,
               "market_news": prepared.market_news,
               "securities": security.securities,
+              "advanced_analysis": {
+                "selected_modules": plan.analysis_modules.unwrap_or([]),
+                "executed_modules": security.analysis_modules.unwrap_or([]),
+                "cross_security": security.cross_security_analysis.unwrap_or({}),
+                "tool_activities": security.tool_activities.unwrap_or([]),
+              },
               "prepare_evidence": {
                 "evidence_registry": prepared.evidence_registry,
               },
@@ -1064,6 +1098,7 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
               },
               "evidence_inventory": {
                 "requested_symbols": plan.symbols,
+                "advanced_modules": plan.analysis_modules.unwrap_or([]),
                 "dimensions": [
                   "quote", "kline", "technical_analysis", "fund_flow", "market_pools",
                   "global_macro", "financial_statements", "valuation_history", "security_events",
@@ -1105,6 +1140,8 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
                 "call_id": result.call_id,
                 "cache_hit": result.cache_hit,
                 "evidence_count": plan.symbols.length() * 7,
+                "analysis_modules": plan.analysis_modules.unwrap_or([]),
+                "module_activities": security.tool_activities.unwrap_or([]),
               },
               {
                 "kind": "review_evidence",

@@ -7,7 +7,7 @@ vi.mock("../bridge", () => ({
   requestNative,
 }));
 
-import { deterministicVerificationSummary, requestDurableAgent, workerProgressMatchesTask } from "./AgentTaskWorkbench";
+import { deterministicVerificationSummary, expandAgentActivities, requestDurableAgent, workerProgressMatchesTask } from "./AgentTaskWorkbench";
 
 const spec = {
   objective: "分析两万元最新投资计划",
@@ -145,5 +145,25 @@ describe("durable Agent operation journal", () => {
     expect(workerProgressMatchesTask({ state: { task_id: "task-1" } }, "task-1")).toBe(true);
     expect(workerProgressMatchesTask({ state: { task_id: "task-1" } }, "conversation-1")).toBe(false);
     expect(workerProgressMatchesTask({ stage: "diagnostic" }, "task-1")).toBe(true);
+  });
+
+  it("expands advanced Engine modules into visible success, skip and failure activities", () => {
+    const activities = expandAgentActivities([{
+      kind: "execute_tool",
+      call_id: "security-context-1",
+      module_activities: [
+        { module: "earnings_driver", scope: "300308", status: "succeeded", error: null },
+        { module: "relationship", scope: "portfolio", status: "skipped", error: "relationship_requires_two_symbols" },
+        { module: "industry_graph", scope: "300308", status: "failed", error: "provider_unavailable" },
+      ],
+    }]);
+    expect(activities).toHaveLength(4);
+    expect(activities.slice(1).map((item) => item.title)).toEqual([
+      "盈利驱动树 完成",
+      "跨证券关系 已跳过",
+      "产业关系图谱 失败",
+    ]);
+    expect(activities[2]).toMatchObject({ status: "skipped", detail: expect.stringContaining("relationship_requires_two_symbols") });
+    expect(activities[3]).toMatchObject({ status: "failed", detail: expect.stringContaining("provider_unavailable") });
   });
 });

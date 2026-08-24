@@ -108,6 +108,26 @@ test "model routing selects only catalog models" {
 }
 
 ///|
+test "Agent analysis modules obey the user policy and reject unsafe tools" {
+  assert_eq(analysis_modules_for_policy("market", ["market_regime"]), [])
+  assert_eq(analysis_modules_for_policy("evidence", ["historical_backtest"]), [
+    "earnings_driver", "industry_graph", "relationship", "market_regime",
+  ])
+  assert_eq(
+    analysis_modules_for_policy("auto", [
+      "market_regime", "industry_graph", "market_regime",
+    ]),
+    ["market_regime", "industry_graph"],
+  )
+  let rejected : Array[String]? = Some(
+    analysis_modules_for_policy("auto", ["place_order"]),
+  ) catch {
+    _ => None
+  }
+  assert_true(rejected is None)
+}
+
+///|
 test "publication verifier rejects thin drafts and accepts complete manual plans" {
   let task = @protocol.TaskSpec::{
     objective: "两万元投资计划",

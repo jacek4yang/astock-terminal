@@ -392,6 +392,13 @@ async fn Backend::persist_workflow_checkpoint(
 }
 
 ///|
+fn permitted_agent_effect_kind(kind : String) -> Bool {
+  kind == "research.agent_prepare_context" ||
+  kind == "research.agent_security_context" ||
+  kind == "research.agent_report_verify"
+}
+
+///|
 async fn Backend::execute_agent_effect(
   self : Backend,
   parent_id : String,
@@ -403,6 +410,15 @@ async fn Backend::execute_agent_effect(
       "ok": false,
       "payload": null,
       "error": "Agent requested a target outside the Engine allowlist",
+      "cache_hit": false,
+    }
+  }
+  if !permitted_agent_effect_kind(effect.kind) {
+    return {
+      "call_id": effect.call_id,
+      "ok": false,
+      "payload": null,
+      "error": "Agent requested an Engine kind outside the bounded research Effect allowlist",
       "cache_hit": false,
     }
   }
@@ -433,7 +449,7 @@ async fn Backend::execute_agent_effect(
   }
   for item in prior {
     if item.status == "pending" {
-      // These two aggregate services are read-only snapshots. If the process
+      // These aggregate services are replay-safe research snapshots. If the process
       // died after intent persistence, a new attempt is safe and is recorded
       // under a retry key; every mutating/future target remains fail-closed.
       if effect.kind != "research.agent_prepare_context" &&

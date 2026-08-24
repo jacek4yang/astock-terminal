@@ -58,3 +58,13 @@ async test "dead worker restarts after three misses and re-handshakes" {
   assert_true(worker_process_running(worker.pid))
   assert_eq(worker.status, "ready")
 }
+
+///|
+test "Agent Effect permissions allow only bounded research aggregates" {
+  assert_true(permitted_agent_effect_kind("research.agent_prepare_context"))
+  assert_true(permitted_agent_effect_kind("research.agent_security_context"))
+  assert_true(permitted_agent_effect_kind("research.agent_report_verify"))
+  assert_false(permitted_agent_effect_kind("credentials.provider.delete"))
+  assert_false(permitted_agent_effect_kind("storage.data_root.migrate"))
+  assert_false(permitted_agent_effect_kind("research.backtest.start"))
+}

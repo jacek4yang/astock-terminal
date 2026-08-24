@@ -9,6 +9,7 @@ use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 
 const MAX_EVIDENCE_FACTS: usize = 3_000;
 
@@ -61,9 +62,82 @@ pub(super) struct SecurityContextPayload {
     symbols: Vec<String>,
     depth: String,
     tool_policy: String,
+    #[serde(default)]
+    analysis_modules: Vec<String>,
     benchmark: String,
     start: String,
     end: String,
+}
+
+const ADVANCED_ANALYSIS_MODULES: [&str; 5] = [
+    "earnings_driver",
+    "industry_graph",
+    "relationship",
+    "market_regime",
+    "historical_backtest",
+];
+
+fn analysis_modules(
+    tool_policy: &str,
+    requested: Vec<String>,
+) -> Result<Vec<String>, ServiceError> {
+    let allowed = match tool_policy {
+        "market" => &[][..],
+        "evidence" => &ADVANCED_ANALYSIS_MODULES[..4],
+        "auto" | "full" => &ADVANCED_ANALYSIS_MODULES[..],
+        _ => {
+            return Err(ServiceError::new(
+                "invalid_agent_tool_policy",
+                "Agent tool policy must be auto, market, evidence or full",
+                false,
+            ))
+        }
+    };
+    let requested = if tool_policy == "full" {
+        allowed.iter().map(|value| (*value).to_string()).collect()
+    } else {
+        requested
+    };
+    let mut unique = BTreeSet::new();
+    for module in requested {
+        if !allowed.contains(&module.as_str()) {
+            return Err(ServiceError::new(
+                "invalid_agent_analysis_module",
+                format!("Agent requested an unavailable analysis module: {module}"),
+                false,
+            ));
+        }
+        unique.insert(module);
+    }
+    Ok(unique.into_iter().collect())
+}
+
+fn captured_module(result: Result<Value, ServiceError>) -> Value {
+    match result {
+        Ok(data) => json!({"ok": true, "data": data}),
+        Err(error) => json!({
+            "ok": false,
+            "error": error.code,
+            "message": error.message,
+            "retryable": error.retryable,
+            "quality_blocking": true,
+        }),
+    }
+}
+
+fn module_activity(module: &str, scope: &str, result: &Value) -> Value {
+    json!({
+        "module": module,
+        "scope": scope,
+        "status": if result.get("skipped").and_then(Value::as_bool) == Some(true) {
+            "skipped"
+        } else if result.get("ok").and_then(Value::as_bool) == Some(true) {
+            "succeeded"
+        } else {
+            "failed"
+        },
+        "error": result.get("error").cloned().unwrap_or(Value::Null),
+    })
 }
 
 fn exhaustive(depth: &str) -> Result<bool, ServiceError> {
@@ -200,6 +274,16 @@ fn compact_security_bundle(bundle: &mut Map<String, Value>, is_exhaustive: bool)
             ("sec_edgar_filings", 120),
         ] {
             compact_dataset(optional, key, limit);
+        }
+    }
+    if let Some(analysis) = bundle.get_mut("advanced_analysis") {
+        if let Some(rows) = array_at_mut(analysis, &["historical_backtest", "data", "equity_curve"])
+        {
+            trim_tail(rows, if is_exhaustive { 500 } else { 250 });
+        }
+        if let Some(rows) = array_at_mut(analysis, &["historical_backtest", "data", "trades_tail"])
+        {
+            trim_tail(rows, 50);
         }
     }
 }
@@ -401,16 +485,7 @@ pub(super) async fn security(
     payload: SecurityContextPayload,
 ) -> Result<Value, ServiceError> {
     let is_exhaustive = exhaustive(&payload.depth)?;
-    if !matches!(
-        payload.tool_policy.as_str(),
-        "auto" | "market" | "evidence" | "full"
-    ) {
-        return Err(ServiceError::new(
-            "invalid_agent_tool_policy",
-            "Agent tool policy must be auto, market, evidence or full",
-            false,
-        ));
-    }
+    let selected_modules = analysis_modules(&payload.tool_policy, payload.analysis_modules)?;
     if payload.symbols.is_empty() || payload.symbols.len() > 5 {
         return Err(ServiceError::new(
             "invalid_research_symbol_count",
@@ -436,11 +511,13 @@ pub(super) async fn security(
     let benchmark = payload.benchmark;
     let start = payload.start;
     let end = payload.end;
+    let selected_symbols = unique.clone();
     let bundles = join_all(unique.into_iter().map(|symbol| {
         let benchmark = benchmark.clone();
         let start = start.clone();
         let end = end.clone();
         let tool_policy = tool_policy.clone();
+        let selected_modules = selected_modules.clone();
         async move {
             let count = if is_exhaustive { 500 } else { 250 };
             let (market, reconciliation) = tokio::join!(
@@ -471,6 +548,70 @@ pub(super) async fn security(
                 });
                 (Ok(skipped.clone()), Ok(skipped))
             };
+            let earnings_driver = async {
+                if selected_modules.iter().any(|item| item == "earnings_driver") {
+                    captured_module(
+                        engine
+                            .dispatch_internal(
+                                "research.earnings_driver.tree",
+                                json!({"symbol": symbol}),
+                            )
+                            .await,
+                    )
+                } else {
+                    Value::Null
+                }
+            };
+            let industry_graph = async {
+                if selected_modules.iter().any(|item| item == "industry_graph") {
+                    captured_module(
+                        engine
+                            .dispatch_internal(
+                                "research.graph.subgraph",
+                                json!({"symbol_or_node": symbol, "hops": 2}),
+                            )
+                            .await,
+                    )
+                } else {
+                    Value::Null
+                }
+            };
+            let historical_backtest = async {
+                if selected_modules
+                    .iter()
+                    .any(|item| item == "historical_backtest")
+                {
+                    captured_module(
+                        engine
+                            .dispatch_internal(
+                                "research.backtest.run",
+                                json!({
+                                    "symbol": symbol,
+                                    "strategy": "ma_cross",
+                                    "bars": if is_exhaustive { 1000 } else { 500 },
+                                }),
+                            )
+                            .await,
+                    )
+                } else {
+                    Value::Null
+                }
+            };
+            let (earnings_driver, industry_graph, historical_backtest) = tokio::join!(
+                earnings_driver,
+                industry_graph,
+                historical_backtest
+            );
+            let mut advanced_analysis = Map::new();
+            for (module, result) in [
+                ("earnings_driver", earnings_driver),
+                ("industry_graph", industry_graph),
+                ("historical_backtest", historical_backtest),
+            ] {
+                if !result.is_null() {
+                    advanced_analysis.insert(module.to_string(), result);
+                }
+            }
             let mut bundle = Map::new();
             bundle.insert("symbol".into(), json!(symbol));
             bundle.insert("market".into(), market?);
@@ -480,6 +621,10 @@ pub(super) async fn security(
             bundle.insert("reconciliation".into(), reconciliation?);
             bundle.insert("joinquant".into(), joinquant?);
             bundle.insert("optional_sources".into(), optional?);
+            bundle.insert(
+                "advanced_analysis".into(),
+                Value::Object(advanced_analysis),
+            );
             compact_security_bundle(&mut bundle, is_exhaustive);
             Ok::<Value, ServiceError>(Value::Object(bundle))
         }
@@ -487,11 +632,69 @@ pub(super) async fn security(
     .await
     .into_iter()
     .collect::<Result<Vec<_>, _>>()?;
+    let relationship = if selected_modules.iter().any(|item| item == "relationship") {
+        if selected_symbols.len() < 2 {
+            json!({
+                "ok": false,
+                "skipped": true,
+                "error": "relationship_requires_two_symbols",
+                "message": "跨证券关系分析至少需要两个研究标的",
+                "quality_blocking": false,
+            })
+        } else {
+            captured_module(
+                engine
+                    .dispatch_internal(
+                        "research.market.relationship",
+                        json!({"symbols": selected_symbols, "window_days": 250}),
+                    )
+                    .await,
+            )
+        }
+    } else {
+        Value::Null
+    };
+    let market_regime = if selected_modules.iter().any(|item| item == "market_regime") {
+        captured_module(
+            engine
+                .dispatch_internal("research.market.regime", json!({}))
+                .await,
+        )
+    } else {
+        Value::Null
+    };
+    let mut cross_security_analysis = Map::new();
+    for (module, result) in [
+        ("relationship", relationship),
+        ("market_regime", market_regime),
+    ] {
+        if !result.is_null() {
+            cross_security_analysis.insert(module.to_string(), result);
+        }
+    }
+    let mut tool_activities = Vec::new();
+    for bundle in &bundles {
+        let scope = bundle
+            .get("symbol")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        if let Some(advanced) = bundle.get("advanced_analysis").and_then(Value::as_object) {
+            for (module, result) in advanced {
+                tool_activities.push(module_activity(module, scope, result));
+            }
+        }
+    }
+    for (module, result) in &cross_security_analysis {
+        tool_activities.push(module_activity(module, "portfolio", result));
+    }
     let mut payload = json!({
         "source": "engine_agent_security_aggregate",
         "retrieved_at": astock_core::time::utc_now(),
         "depth": depth,
+        "analysis_modules": selected_modules,
         "securities": bundles,
+        "cross_security_analysis": cross_security_analysis,
+        "tool_activities": tool_activities,
     });
     attach_evidence_registry(&mut payload, "agent_security_context");
     let encoded = serde_json::to_vec(&payload).map_err(super::serialize_error)?;
@@ -533,6 +736,58 @@ mod tests {
     #[test]
     fn unknown_depth_is_rejected() {
         assert!(exhaustive("unbounded").is_err());
+    }
+
+    #[test]
+    fn analysis_module_policy_is_closed_and_never_silently_escalates() {
+        assert!(analysis_modules("market", vec![]).unwrap().is_empty());
+        assert_eq!(
+            analysis_modules(
+                "evidence",
+                vec!["industry_graph".into(), "earnings_driver".into()]
+            )
+            .unwrap(),
+            vec!["earnings_driver", "industry_graph"]
+        );
+        assert_eq!(
+            analysis_modules("full", vec![]).unwrap(),
+            vec![
+                "earnings_driver",
+                "historical_backtest",
+                "industry_graph",
+                "market_regime",
+                "relationship",
+            ]
+        );
+        let error = analysis_modules("auto", vec!["place_order".into()]).unwrap_err();
+        assert_eq!(error.code, "invalid_agent_analysis_module");
+        assert!(analysis_modules("market", vec!["market_regime".into()]).is_err());
+    }
+
+    #[test]
+    fn advanced_module_activity_keeps_failures_and_skips_visible() {
+        let failed = captured_module(Err(ServiceError::new(
+            "provider_unavailable",
+            "upstream unavailable",
+            true,
+        )));
+        assert_eq!(failed["ok"], false);
+        assert_eq!(failed["quality_blocking"], true);
+        assert_eq!(failed["retryable"], true);
+        assert_eq!(
+            module_activity("industry_graph", "300308", &failed)["status"],
+            "failed"
+        );
+
+        let skipped = json!({
+            "ok": false,
+            "skipped": true,
+            "error": "relationship_requires_two_symbols",
+            "quality_blocking": false,
+        });
+        let activity = module_activity("relationship", "portfolio", &skipped);
+        assert_eq!(activity["status"], "skipped");
+        assert_eq!(activity["error"], "relationship_requires_two_symbols");
     }
 
     #[test]
