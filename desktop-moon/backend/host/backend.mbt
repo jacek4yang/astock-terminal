@@ -371,7 +371,8 @@ async fn Backend::execute_agent_effect(
       // died after intent persistence, a new attempt is safe and is recorded
       // under a retry key; every mutating/future target remains fail-closed.
       if effect.kind != "research.agent_prepare_context" &&
-        effect.kind != "research.agent_security_context" {
+        effect.kind != "research.agent_security_context" &&
+        effect.kind != "research.agent_report_verify" {
         return {
           "call_id": effect.call_id,
           "ok": false,

@@ -54,6 +54,8 @@ struct ResearchWorkflowState {
   capital : Double?
   prepare_context : Json?
   research_plan : ResearchPlan?
+  report : String?
+  activities : Array[Json]
 } derive(FromJson, ToJson)
 
 ///|
@@ -77,11 +79,23 @@ struct AgentPrepareContext {
   global_context : Json
   market_news : Json
   candidates : CandidatePage
+  evidence_registry : Json
 } derive(FromJson)
 
 ///|
 struct AgentSecurityContext {
   securities : Array[Json]
+  evidence_registry : Json
+} derive(FromJson)
+
+///|
+struct AgentReportVerification {
+  passed : Bool
+  findings : Array[String]
+  distinct_citations : Int
+  numeric_claims_checked : Int
+  registry_facts : Int
+  verification_version : String
 } derive(FromJson)
 
 ///|
@@ -714,6 +728,12 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
               ToolRequested(call_id~, tool="research.agent_prepare_context"),
             )
             self.tasks[payload.task_id] = state
+            let activities : Array[Json] = [
+              {
+                "kind": "prepare_research",
+                "detail": "Agent已根据任务边界安排市场、宏观、资讯和候选池取证",
+              },
+            ]
             let workflow = ResearchWorkflowState::{
               task_id: payload.task_id,
               stage: "prepared",
@@ -723,6 +743,8 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
               capital: payload.capital,
               prepare_context: None,
               research_plan: None,
+              report: None,
+              activities,
             }
             response(request, true, {
               "accepted": true,
@@ -735,12 +757,7 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
                   tool="research.agent_prepare_context",
                 ),
               ].map(effect_json),
-              "activities": [
-                {
-                  "kind": "prepare_research",
-                  "detail": "Agent已根据任务边界安排市场、宏观、资讯和候选池取证",
-                },
-              ],
+              "activities": activities,
               "host_effects": [
                 host_engine_effect(
                   payload.task_id,
@@ -860,6 +877,20 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
             )
             self.tasks[payload.workflow.task_id] = state
             let spec = state.spec.unwrap()
+            let activities : Array[Json] = [
+              ..payload.workflow.activities,
+              {
+                "kind": "execute_tool",
+                "tool": "市场、宏观与资讯研究包",
+                "call_id": result.call_id,
+                "cache_hit": result.cache_hit,
+                "evidence_count": 16,
+              },
+              {
+                "kind": "prepare_research",
+                "detail": "Agent已完成候选复核并安排逐证券深度取证；此时仍未形成投资结论",
+              },
+            ]
             let workflow = ResearchWorkflowState::{
               task_id: payload.workflow.task_id,
               stage: "security",
@@ -869,6 +900,8 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
               capital: payload.workflow.capital,
               prepare_context: Some(result.payload),
               research_plan: Some(plan),
+              report: None,
+              activities,
             }
             response(request, true, {
               "accepted": true,
@@ -881,19 +914,7 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
                   tool="research.agent_security_context",
                 ),
               ].map(effect_json),
-              "activities": [
-                {
-                  "kind": "execute_tool",
-                  "tool": "市场、宏观与资讯研究包",
-                  "call_id": result.call_id,
-                  "cache_hit": result.cache_hit,
-                  "evidence_count": 16,
-                },
-                {
-                  "kind": "prepare_research",
-                  "detail": "Agent已完成候选复核并安排逐证券深度取证；此时仍未形成投资结论",
-                },
-              ],
+              "activities": activities,
               "host_effects": [
                 host_engine_effect(
                   payload.workflow.task_id,
@@ -952,9 +973,79 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
                 )
             }
             let spec = state.spec.unwrap()
+            let contract_facts : Array[Json] = [
+              {
+                "evidence_id": "evf_contract_a_share_lot",
+                "path": "/contract/a_share_lot",
+                "value": 100,
+                "source": "AStock trading-rules v6",
+                "observed_at": spec.as_of,
+                "source_version_id": "trading-rules-v6",
+                "quality_blocking": false,
+              },
+              {
+                "evidence_id": "evf_task_as_of",
+                "path": "/task_spec/as_of",
+                "value": spec.as_of,
+                "source": "user_task_spec",
+                "observed_at": spec.as_of,
+                "source_version_id": "task-spec-v1",
+                "quality_blocking": false,
+              },
+              {
+                "evidence_id": "evf_task_benchmark",
+                "path": "/task_spec/comparison_benchmark",
+                "value": spec.comparison_benchmark,
+                "source": "user_task_spec",
+                "observed_at": spec.as_of,
+                "source_version_id": "task-spec-v1",
+                "quality_blocking": false,
+              },
+              {
+                "evidence_id": "evf_task_research_start",
+                "path": "/task_spec/research_start",
+                "value": spec.research_start,
+                "source": "user_task_spec",
+                "observed_at": spec.as_of,
+                "source_version_id": "task-spec-v1",
+                "quality_blocking": false,
+              },
+              {
+                "evidence_id": "evf_task_research_end",
+                "path": "/task_spec/research_end",
+                "value": spec.research_end,
+                "source": "user_task_spec",
+                "observed_at": spec.as_of,
+                "source_version_id": "task-spec-v1",
+                "quality_blocking": false,
+              },
+              {
+                "evidence_id": "evf_task_investment_horizon",
+                "path": "/task_spec/investment_horizon",
+                "value": spec.investment_horizon,
+                "source": "user_task_spec",
+                "observed_at": spec.as_of,
+                "source_version_id": "task-spec-v1",
+                "quality_blocking": false,
+              },
+            ]
+            match payload.workflow.capital {
+              Some(capital) =>
+                contract_facts.push({
+                  "evidence_id": "evf_user_capital",
+                  "path": "/task_constraints/capital",
+                  "value": capital,
+                  "source": "user_task_spec",
+                  "observed_at": spec.as_of,
+                  "source_version_id": "task-spec-v1",
+                  "quality_blocking": false,
+                })
+              None => ()
+            }
             let context : Json = {
               "source": "moonbit_agent_orchestrated_engine",
               "retrieved_at": spec.as_of,
+              "task_spec": spec.to_json(),
               "run_options": {
                 "depth": payload.workflow.depth,
                 "tool_policy": payload.workflow.tool_policy,
@@ -965,6 +1056,12 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
               "global_context": prepared.global_context,
               "market_news": prepared.market_news,
               "securities": security.securities,
+              "prepare_evidence": {
+                "evidence_registry": prepared.evidence_registry,
+              },
+              "security_evidence": {
+                "evidence_registry": security.evidence_registry,
+              },
               "evidence_inventory": {
                 "requested_symbols": plan.symbols,
                 "dimensions": [
@@ -974,6 +1071,14 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
                   "optional_joinquant", "optional_tushare_iwencai_sec",
                 ],
                 "review_rounds": 3,
+              },
+              "contract_evidence": {
+                "evidence_registry": {
+                  "version": "astock-field-evidence/v1",
+                  "scope": "task_contract",
+                  "facts": contract_facts,
+                  "truncated": false,
+                },
               },
             }
             let report : String = generate_research_report(
@@ -992,17 +1097,134 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
             let verification_errors = verify_research_report(
               report, spec, context,
             )
-            state = if verification_errors.is_empty() {
+            let activities : Array[Json] = [
+              ..payload.workflow.activities,
+              {
+                "kind": "execute_tool",
+                "tool": "逐证券综合研究包",
+                "call_id": result.call_id,
+                "cache_hit": result.cache_hit,
+                "evidence_count": plan.symbols.length() * 7,
+              },
+              {
+                "kind": "review_evidence",
+                "detail": "已复核缺失、时点、来源冲突、可成交性和组合约束",
+              },
+              {
+                "kind": "synthesize_report",
+                "detail": "MiniMax Plus 完成证据审查、反方挑战和最终综合三轮模型工作",
+              },
+            ]
+            if !verification_errors.is_empty() {
+              state = transition_state(
+                state,
+                VerificationRejected(verification_errors),
+              )
+              self.tasks[payload.workflow.task_id] = state
+              return response(request, true, {
+                "accepted": true,
+                "state": state_json(state),
+                "checkpoint": state.to_json(),
+                "effects": [@agent.PersistCheckpoint].map(effect_json),
+                "report": null,
+                "verification_findings": verification_errors,
+                "activities": [
+                  ..activities,
+                  {
+                    "kind": "verify_report",
+                    "detail": "MoonBit结构与安全边界校验失败，报告未发送到确定性Engine事实校验",
+                  },
+                ],
+              })
+            }
+            let verify_call_id = "verify-report-" +
+              payload.workflow.task_id +
+              "-" +
+              state.accepted_seq.to_string()
+            state = transition_state(
+              state,
+              VerificationToolRequested(
+                call_id=verify_call_id,
+                tool="research.agent_report_verify",
+              ),
+            )
+            self.tasks[payload.workflow.task_id] = state
+            let workflow = ResearchWorkflowState::{
+              task_id: payload.workflow.task_id,
+              stage: "verify",
+              depth: payload.workflow.depth,
+              tool_policy: payload.workflow.tool_policy,
+              preferred_symbols: payload.workflow.preferred_symbols,
+              capital: payload.workflow.capital,
+              prepare_context: None,
+              research_plan: Some(plan),
+              report: Some(report),
+              activities: [
+                ..activities,
+                {
+                  "kind": "verify_report",
+                  "detail": "MoonBit结构门禁通过；正在由Engine复现数字、证据编号和质量状态",
+                },
+              ],
+            }
+            response(request, true, {
+              "accepted": true,
+              "state": state_json(state),
+              "checkpoint": state.to_json(),
+              "effects": [
+                @agent.PersistCheckpoint,
+                @agent.ExecuteTool(
+                  call_id=verify_call_id,
+                  tool="research.agent_report_verify",
+                ),
+              ].map(effect_json),
+              "report": null,
+              "verification_findings": [],
+              "activities": workflow.activities,
+              "host_effects": [
+                host_engine_effect(
+                  payload.workflow.task_id,
+                  state.accepted_seq,
+                  verify_call_id,
+                  "research.agent_report_verify",
+                  {
+                    "report": report,
+                    "context": context,
+                    "task_spec": spec.to_json(),
+                  },
+                  120000,
+                ),
+              ],
+              "continuation": {
+                "kind": "agent.research.workflow.continue",
+                "workflow": workflow.to_json(),
+              },
+            })
+          } else if payload.workflow.stage == "verify" {
+            let verification : AgentReportVerification = @json.from_json(
+              result.payload,
+            )
+            let report = payload.workflow.report.unwrap()
+            let mut state = transition_state(
+              current,
+              VerificationToolSucceeded(call_id=result.call_id, evidence_ids=[
+                "engine-report-verifier-v1",
+              ]),
+            )
+            state = if verification.passed {
               transition_state(state, VerificationPassed)
             } else {
-              transition_state(state, VerificationRejected(verification_errors))
+              transition_state(
+                state,
+                VerificationRejected(verification.findings),
+              )
             }
             self.tasks[payload.workflow.task_id] = state
             response(request, true, {
               "accepted": true,
               "state": state_json(state),
               "checkpoint": state.to_json(),
-              "effects": if verification_errors.is_empty() {
+              "effects": if verification.passed {
                 [
                   @agent.PersistCheckpoint,
                   @agent.PublishReport,
@@ -1011,34 +1233,26 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
               } else {
                 [@agent.PersistCheckpoint].map(effect_json)
               },
-              "report": if verification_errors.is_empty() {
+              "report": if verification.passed {
                 report
               } else {
                 null
               },
-              "verification_findings": verification_errors,
+              "verification_findings": verification.findings,
+              "verification": {
+                "version": verification.verification_version,
+                "distinct_citations": verification.distinct_citations,
+                "numeric_claims_checked": verification.numeric_claims_checked,
+                "registry_facts": verification.registry_facts,
+              },
               "activities": [
-                {
-                  "kind": "execute_tool",
-                  "tool": "逐证券综合研究包",
-                  "call_id": result.call_id,
-                  "cache_hit": result.cache_hit,
-                  "evidence_count": plan.symbols.length() * 7,
-                },
-                {
-                  "kind": "review_evidence",
-                  "detail": "已复核缺失、时点、来源冲突、可成交性和组合约束",
-                },
-                {
-                  "kind": "synthesize_report",
-                  "detail": "MiniMax Plus 完成证据审查、反方挑战和最终综合三轮模型工作",
-                },
+                ..payload.workflow.activities,
                 {
                   "kind": "verify_report",
-                  "detail": if verification_errors.is_empty() {
-                    "结构、证据清单、人工计划要素和发布边界校验通过"
+                  "detail": if verification.passed {
+                    "Engine已复现报告数字并验证证据编号、来源时点和质量状态"
                   } else {
-                    "校验失败，报告未发布"
+                    "Engine事实校验失败，报告未发布"
                   },
                 },
               ],

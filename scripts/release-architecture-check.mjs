@@ -57,13 +57,15 @@ if (moonAgent.includes('"agent.research" =>') || moonAgent.includes('"agent.plan
 if (!moonHost.includes("execute_agent_effect") || !moonHost.includes('effect.target != "engine"')) {
   failures.push("MoonBit Host does not enforce the generic Engine-only Agent effect runner");
 }
-if (!moonHost.includes('effect.kind != "research.agent_prepare_context"') || !moonHost.includes('effect.kind != "research.agent_security_context"')) {
+if (!moonHost.includes('effect.kind != "research.agent_prepare_context"') ||
+    !moonHost.includes('effect.kind != "research.agent_security_context"') ||
+    !moonHost.includes('effect.kind != "research.agent_report_verify"')) {
   failures.push("MoonBit Host cannot reconcile a persisted pending read-only research effect");
 }
 if (!browserBridge.includes("executeAgentEffect") || !browserBridge.includes('effect?.target !== "engine"')) {
   failures.push("browser test Bridge does not preserve the production Agent effect contract");
 }
-for (const kind of ["research.agent_prepare_context", "research.agent_security_context"]) {
+for (const kind of ["research.agent_prepare_context", "research.agent_security_context", "research.agent_report_verify"]) {
   if (!engineSchema.includes(`\"${kind}\"`)) failures.push(`Engine protocol is missing ${kind}`);
 }
 for (const kind of ["storage.data_root.migrate", "storage.data_root.rollback"]) {

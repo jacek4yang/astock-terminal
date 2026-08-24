@@ -94,7 +94,10 @@ async function executeEffect(effect) {
   const prior = (history.items ?? []).filter((item) => item.idempotency_key === effect.idempotency_key || item.idempotency_key?.startsWith(`${effect.idempotency_key}:retry:`));
   const cached = prior.find((item) => item.status === "succeeded" && item.result != null);
   if (cached) return { call_id: effect.call_id, ok: true, payload: cached.result, error: null, cache_hit: true };
-  if (prior.some((item) => item.status === "pending")) throw new Error(`pending effect cannot be replayed: ${effect.call_id}`);
+  const replayableRead = effect.kind === "research.agent_prepare_context" ||
+    effect.kind === "research.agent_security_context" ||
+    effect.kind === "research.agent_report_verify";
+  if (prior.some((item) => item.status === "pending") && !replayableRead) throw new Error(`pending effect cannot be replayed: ${effect.call_id}`);
   const retry = prior.length;
   const effectId = `live-tool:${effect.task_id}:${effect.call_id}:${retry}`;
   await engine.request("agent.effect.begin", {
@@ -173,6 +176,9 @@ try {
   if (researched.state?.phase !== "completed") throw new Error(`unexpected final phase ${researched.state?.phase}`);
   if (researched.state?.model_rounds !== 4) throw new Error(`expected 4 model rounds, got ${researched.state?.model_rounds}`);
   if (typeof researched.report !== "string" || researched.report.length < 800) throw new Error("final report is missing or too short");
+  if (researched.verification?.version !== "engine-report-verifier-v1" || researched.verification.numeric_claims_checked < 1) {
+    throw new Error("deterministic Engine report verification evidence is missing");
+  }
   if (researched.report.includes("<think>")) throw new Error("private reasoning leaked into final report");
   if (!/(2万元|20000|20,000)/.test(researched.report)) throw new Error("final report lost the 20,000 CNY capital constraint");
   console.log(JSON.stringify({

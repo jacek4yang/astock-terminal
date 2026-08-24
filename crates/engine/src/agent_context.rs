@@ -6,8 +6,31 @@
 
 use super::{Engine, ServiceError};
 use futures::future::join_all;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
+
+const MAX_EVIDENCE_FACTS: usize = 3_000;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct EvidenceFact {
+    pub evidence_id: String,
+    pub path: String,
+    pub value: Value,
+    pub source: String,
+    pub observed_at: Option<String>,
+    pub source_version_id: Option<String>,
+    pub quality_blocking: bool,
+}
+
+#[derive(Clone, Default)]
+struct EvidenceMetadata {
+    source: Option<String>,
+    observed_at: Option<String>,
+    source_version_id: Option<String>,
+    quality_blocking: bool,
+}
 
 const NEWS_SOURCES: [&str; 12] = [
     "cls-telegraph",
@@ -181,6 +204,131 @@ fn compact_security_bundle(bundle: &mut Map<String, Value>, is_exhaustive: bool)
     }
 }
 
+fn metadata_text(object: &Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .map(str::to_owned)
+}
+
+fn scalar_fact(value: &Value) -> bool {
+    match value {
+        Value::Number(_) | Value::Bool(_) => true,
+        Value::String(text) => !text.is_empty() && text.chars().count() <= 160,
+        _ => false,
+    }
+}
+
+fn escape_pointer(value: &str) -> String {
+    value.replace('~', "~0").replace('/', "~1")
+}
+
+fn collect_evidence_facts(
+    value: &Value,
+    path: &str,
+    scope: &str,
+    inherited: &EvidenceMetadata,
+    facts: &mut Vec<EvidenceFact>,
+) {
+    if facts.len() >= MAX_EVIDENCE_FACTS {
+        return;
+    }
+    match value {
+        Value::Object(object) => {
+            let mut metadata = inherited.clone();
+            metadata.source =
+                metadata_text(object, &["source", "provider", "provider_id"]).or(metadata.source);
+            metadata.observed_at = metadata_text(
+                object,
+                &[
+                    "retrieved_at",
+                    "fetched_at",
+                    "observed_at",
+                    "published_at",
+                    "trade_date",
+                    "date",
+                ],
+            )
+            .or(metadata.observed_at);
+            metadata.source_version_id =
+                metadata_text(object, &["source_version_id", "revision_id"])
+                    .or(metadata.source_version_id);
+            metadata.quality_blocking = metadata.quality_blocking
+                || object
+                    .get("blocking")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                || object
+                    .get("quality_blocking")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            for (key, child) in object {
+                if key == "evidence_registry" {
+                    continue;
+                }
+                collect_evidence_facts(
+                    child,
+                    &format!("{path}/{}", escape_pointer(key)),
+                    scope,
+                    &metadata,
+                    facts,
+                );
+                if facts.len() >= MAX_EVIDENCE_FACTS {
+                    break;
+                }
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                let remaining_items = items.len() - index;
+                let fair_share = (MAX_EVIDENCE_FACTS - facts.len()) / remaining_items.max(1);
+                let before = facts.len();
+                collect_evidence_facts(child, &format!("{path}/{index}"), scope, inherited, facts);
+                facts.truncate((before + fair_share).min(MAX_EVIDENCE_FACTS));
+                if facts.len() >= MAX_EVIDENCE_FACTS {
+                    break;
+                }
+            }
+        }
+        _ if scalar_fact(value) => {
+            let canonical = serde_json::to_string(value).unwrap_or_default();
+            let digest = format!(
+                "{:x}",
+                Sha256::digest(format!("{scope}|{path}|{canonical}"))
+            );
+            facts.push(EvidenceFact {
+                evidence_id: format!("evf_{}", &digest[..24]),
+                path: path.to_owned(),
+                value: value.clone(),
+                source: inherited.source.clone().unwrap_or_else(|| "engine".into()),
+                observed_at: inherited.observed_at.clone(),
+                source_version_id: inherited
+                    .source_version_id
+                    .clone()
+                    .or_else(|| Some(format!("field:{}", &digest[..24]))),
+                quality_blocking: inherited.quality_blocking,
+            });
+        }
+        _ => {}
+    }
+}
+
+fn attach_evidence_registry(payload: &mut Value, scope: &str) {
+    let mut facts = Vec::new();
+    collect_evidence_facts(payload, "", scope, &EvidenceMetadata::default(), &mut facts);
+    let truncated = facts.len() == MAX_EVIDENCE_FACTS;
+    if let Some(root) = payload.as_object_mut() {
+        root.insert(
+            "evidence_registry".into(),
+            json!({
+                "version": "astock-field-evidence/v1",
+                "scope": scope,
+                "facts": facts,
+                "truncated": truncated,
+            }),
+        );
+    }
+}
+
 pub(super) async fn prepare(
     engine: &Engine,
     payload: PrepareContextPayload,
@@ -226,14 +374,26 @@ pub(super) async fn prepare(
             json!("一次有界采集覆盖12类频道；重要判断仍须回链一级来源"),
         );
     }
-    Ok(json!({
+    let mut payload = json!({
+        "source": "engine_agent_prepare_aggregate",
+        "retrieved_at": astock_core::time::utc_now(),
         "depth": payload.depth,
         "market_overview": market_overview?,
         "market_context": market_context,
         "global_context": global_context?,
         "market_news": market_news,
         "candidates": candidates?,
-    }))
+    });
+    attach_evidence_registry(&mut payload, "agent_prepare_context");
+    let encoded = serde_json::to_vec(&payload).map_err(super::serialize_error)?;
+    if encoded.len() > astock_protocol::MAX_FRAME_BYTES - 512 * 1024 {
+        return Err(ServiceError::new(
+            "agent_context_frame_too_large",
+            "有界市场研究快照超过安全 IPC 预算；请使用较低研究深度",
+            false,
+        ));
+    }
+    Ok(payload)
 }
 
 pub(super) async fn security(
@@ -327,7 +487,13 @@ pub(super) async fn security(
     .await
     .into_iter()
     .collect::<Result<Vec<_>, _>>()?;
-    let payload = json!({"depth": depth, "securities": bundles});
+    let mut payload = json!({
+        "source": "engine_agent_security_aggregate",
+        "retrieved_at": astock_core::time::utc_now(),
+        "depth": depth,
+        "securities": bundles,
+    });
+    attach_evidence_registry(&mut payload, "agent_security_context");
     let encoded = serde_json::to_vec(&payload).map_err(super::serialize_error)?;
     if encoded.len() > astock_protocol::MAX_FRAME_BYTES - 512 * 1024 {
         return Err(ServiceError::new(
@@ -367,5 +533,33 @@ mod tests {
     #[test]
     fn unknown_depth_is_rejected() {
         assert!(exhaustive("unbounded").is_err());
+    }
+
+    #[test]
+    fn evidence_registry_is_stable_and_inherits_quality_metadata() {
+        let mut payload = json!({
+            "retrieved_at": "2026-08-25T01:00:00Z",
+            "source": "provider-a",
+            "dataset": {"blocking": true, "price": 12.34, "symbol": "000001"}
+        });
+        attach_evidence_registry(&mut payload, "test");
+        let facts = payload["evidence_registry"]["facts"].as_array().unwrap();
+        let price = facts
+            .iter()
+            .find(|fact| fact["path"] == "/dataset/price")
+            .unwrap();
+        assert_eq!(price["value"], json!(12.34));
+        assert_eq!(price["source"], "provider-a");
+        assert_eq!(price["observed_at"], "2026-08-25T01:00:00Z");
+        assert_eq!(price["quality_blocking"], true);
+        let first_id = price["evidence_id"].clone();
+        attach_evidence_registry(&mut payload, "test");
+        let repeated = payload["evidence_registry"]["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|fact| fact["path"] == "/dataset/price")
+            .unwrap();
+        assert_eq!(repeated["evidence_id"], first_id);
     }
 }

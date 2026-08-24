@@ -187,7 +187,9 @@ async function executeAgentEffect(parent, effect) {
   const prior = (history.items ?? []).filter((item) => item.idempotency_key === effect.idempotency_key || item.idempotency_key?.startsWith(`${effect.idempotency_key}:retry:`));
   const completed = prior.find((item) => item.status === "succeeded" && item.result != null);
   if (completed) return { call_id: effect.call_id, ok: true, payload: completed.result, error: null, cache_hit: true };
-  const replayableRead = effect.kind === "research.agent_prepare_context" || effect.kind === "research.agent_security_context";
+  const replayableRead = effect.kind === "research.agent_prepare_context" ||
+    effect.kind === "research.agent_security_context" ||
+    effect.kind === "research.agent_report_verify";
   if (prior.some((item) => item.status === "pending") && !replayableRead) {
     return { call_id: effect.call_id, ok: false, payload: null, error: "相同工具 Effect 仍为 pending；为防止重复副作用已停止执行", cache_hit: false };
   }

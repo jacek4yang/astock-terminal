@@ -13,6 +13,7 @@ mod market_regime;
 mod news_center;
 mod quant_research;
 mod relation_extraction;
+mod report_verification;
 mod scan;
 mod settings;
 
@@ -1553,6 +1554,11 @@ impl Engine {
                 let payload: agent_context::SecurityContextPayload =
                     decode_payload(&request.payload)?;
                 agent_context::security(self, payload).await
+            }
+            "research.agent_report_verify" => {
+                let payload: report_verification::VerifyReportPayload =
+                    decode_payload(&request.payload)?;
+                report_verification::verify(payload)
             }
             "research.market_pool" => {
                 let payload: MarketPoolPayload = decode_payload(&request.payload)?;

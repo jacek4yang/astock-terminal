@@ -28,6 +28,7 @@
         { "const": "research.market_context" },
         { "const": "research.agent_prepare_context" },
         { "const": "research.agent_security_context" },
+        { "const": "research.agent_report_verify" },
         { "const": "research.global_context" },
         { "const": "research.global.sync.start" },
         { "const": "research.global.sync.status" },

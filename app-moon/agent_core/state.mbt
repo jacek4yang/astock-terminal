@@ -212,6 +212,8 @@ pub(all) enum AgentEvent {
   ModelRoundStarted
   ToolRequested(call_id~ : String, tool~ : String)
   ToolSucceeded(call_id~ : String, evidence_ids~ : Array[String])
+  VerificationToolRequested(call_id~ : String, tool~ : String)
+  VerificationToolSucceeded(call_id~ : String, evidence_ids~ : Array[String])
   ToolFailed(call_id~ : String, retryable~ : Bool)
   ResearchPlanSelected(Array[String])
   ReconcileInterruptedWorkflow
@@ -410,6 +412,40 @@ pub fn reduce(state : AgentState, seq : Int, event : AgentEvent) -> Transition {
         )
       } else {
         rejected(state, "tool_result_without_pending_call")
+      }
+    VerificationToolRequested(call_id~, tool~) =>
+      if state.phase == Verifying &&
+        !contains(state.completed_call_ids, call_id) &&
+        !state.has_pending(call_id) {
+        accepted(
+          evolve(
+            state,
+            accepted_seq=seq,
+            pending_tools=[
+              ..state.pending_tools,
+              PendingTool::{ call_id, tool },
+            ],
+          ),
+          [PersistCheckpoint, ExecuteTool(call_id~, tool~)],
+        )
+      } else {
+        rejected(state, "verification_tool_request_not_unique_or_wrong_phase")
+      }
+    VerificationToolSucceeded(call_id~, evidence_ids~) =>
+      if state.phase == Verifying && state.has_pending(call_id) {
+        accepted(
+          evolve(
+            state,
+            accepted_seq=seq,
+            pending_tools=remove_pending(state.pending_tools, call_id),
+            completed_call_ids=[..state.completed_call_ids, call_id],
+            evidence_ids=[..state.evidence_ids, ..evidence_ids],
+            retry_count=0,
+          ),
+          [PersistCheckpoint],
+        )
+      } else {
+        rejected(state, "verification_tool_result_without_pending_call")
       }
     ToolFailed(call_id~, retryable~) =>
       if !state.has_pending(call_id) {

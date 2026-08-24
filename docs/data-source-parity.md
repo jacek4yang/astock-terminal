@@ -4,7 +4,7 @@ Updated: 2026-08-24 (Asia/Shanghai)
 
 This document treats the frozen v5 Tauri command inventory as a historical
 migration oracle, not as the target architecture. The old application
-registered 127 UI commands. The versioned Engine v1 contract now exposes 130
+registered 127 UI commands. The versioned Engine v1 contract now exposes 131
 coarse request kinds. Counts are not compared one-for-one; a feature only
 became migrated after its contract, consumer and tests were present.
 
@@ -94,7 +94,7 @@ failure state so the boundary remains visible.
 | Credentials/cache | MiniMax, JoinQuant, quota, cache stats/cleanup | coarse Engine services + Credential Manager | READY for exposed providers |
 | Data directory | adopt/migrate/transactional switch/rollback | `storage.data_root.migrate` plus `storage.data_root.rollback`; schema upgrades first create a verified SQLite online backup, migration uses a checked file manifest, and both activation and rollback atomically switch only the pointer while retaining both copies | ENRICHED |
 | Agent task core | dynamic clarification, Agent-best choice, checkpoints, cancel/recovery | MoonBit reducer + Engine event/checkpoint store | ENRICHED |
-| Agent research | candidate plan and final answer | `agent.research.workflow` emits durable Engine effects for `research.agent_prepare_context` then `research.agent_security_context`; candidate planning plus three report-review model rounds | ENRICHED |
+| Agent research | candidate plan and final answer | `agent.research.workflow` emits durable Engine effects for `research.agent_prepare_context`, `research.agent_security_context` and the independent `research.agent_report_verify`; candidate planning plus three report-review model rounds, followed by field-level citation and numeric reproduction | ENRICHED |
 | Agent history | durable tasks/conversations, list/load/rename/soft-delete and branch-from-point | Engine SQLite event/conversation store + three-page Agent UI; renderer local storage is not a truth source | ENRICHED |
 
 ## Live audit evidence (2026-08-24)
@@ -143,7 +143,7 @@ run encountered three upstream connection resets. Classification for
 EastMoney-history availability is therefore `NOT VERIFIED`; failover and the
 two-independent-source publication gate are `INTEGRATION TESTED`.
 
-The checked-in `scripts/research-live-smoke.mjs` also completed a real,
+An earlier revision of the checked-in `scripts/research-live-smoke.mjs` completed a real,
 credential-backed but secret-free 20,000 CNY research task on the final
 expanded contract: 60 candidates with market/board/industry metadata, three
 planned securities, 50 market-news items across six populated channels, ten
@@ -153,8 +153,11 @@ in approximately 394 seconds. The report preserved the capital and
 manual-execution boundaries. Three fundamental sections were explicitly
 missing; none was replaced by zero or a model guess. JoinQuant was explicitly
 unconfigured and contributed no synthetic evidence. Classification:
-`INTEGRATION TESTED`, not a claim that the plan's future investment outcome is
-correct.
+`INTEGRATION TESTED` for the pre-field-verifier workflow, not a claim that the
+plan's future investment outcome is correct. The current script additionally
+requires `engine-report-verifier-v1`, field citations and numeric reproduction;
+that upgraded end-to-end path remains `NOT VERIFIED` until compromised
+credentials are rotated and a new live run succeeds.
 
 ## Non-regression release rules
 

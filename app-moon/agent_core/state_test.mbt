@@ -185,6 +185,54 @@ test "report publication requires successful verification" {
 }
 
 ///|
+test "deterministic report verifier is tracked as a pending effect" {
+  let started = reduce(initial("task-verify"), 1, Start(complete_spec())).state
+  let reasoning = reduce(started, 2, Prepared).state
+  let pending = reduce(
+      reasoning,
+      3,
+      ToolRequested(call_id="evidence", tool="research.agent_security_context"),
+    ).state
+  let reviewing = reduce(
+      pending,
+      4,
+      ToolSucceeded(call_id="evidence", evidence_ids=["ev-1"]),
+    ).state
+  let synthesizing = reduce(reviewing, 5, ReviewReady).state
+  let verifying = reduce(synthesizing, 6, SynthesisReady).state
+  let requested = reduce(
+    verifying,
+    7,
+    VerificationToolRequested(
+      call_id="verify-1",
+      tool="research.agent_report_verify",
+    ),
+  )
+  assert_true(requested.accepted)
+  assert_eq(requested.state.phase, Verifying)
+  assert_true(requested.state.has_pending("verify-1"))
+  let wrong = reduce(
+    requested.state,
+    8,
+    VerificationToolSucceeded(call_id="verify-other", evidence_ids=[]),
+  )
+  assert_false(wrong.accepted)
+  let checked = reduce(
+    requested.state,
+    8,
+    VerificationToolSucceeded(call_id="verify-1", evidence_ids=[
+      "engine-report-verifier-v1",
+    ]),
+  )
+  assert_true(checked.accepted)
+  assert_eq(checked.state.phase, Verifying)
+  assert_false(checked.state.has_pending("verify-1"))
+  let published = reduce(checked.state, 9, VerificationPassed)
+  assert_true(published.accepted)
+  assert_eq(published.state.phase, Completed)
+}
+
+///|
 test "review may request another bounded tool wave" {
   let preparing = reduce(
       initial("task-more-evidence"),
