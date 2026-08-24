@@ -30,6 +30,12 @@ const desktopWindowProbe = fs.readFileSync(path.join(root, "scripts", "desktop-w
 const desktopWindowEvidence = fs.readFileSync(path.join(root, "scripts", "desktop-window-e2e.ps1"), "utf8");
 const rendererRecoveryPatch = fs.readFileSync(path.join(root, "patches", "proton-0.2.1-windows-renderer-recovery.patch"), "utf8");
 const gpuPolicyPatch = fs.readFileSync(path.join(root, "patches", "proton-0.2.1-windows-gpu-policy.patch"), "utf8");
+const qualityWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "quality.yml"), "utf8");
+const activeRuntimeDocs = [
+  "docs/agent-runtime-hardening.md",
+  "docs/data-contracts.md",
+  "docs/news-center.md",
+].map((name) => [name, fs.readFileSync(path.join(root, ...name.split("/")), "utf8")]);
 
 if (fs.existsSync(path.join(root, "src-tauri"))) failures.push("src-tauri differential oracle has not been removed");
 if (/"src-tauri"/.test(cargo)) failures.push("Cargo workspace still contains src-tauri");
@@ -41,6 +47,35 @@ for (const section of ["dependencies", "devDependencies"]) {
   }
 }
 if (ui.scripts?.tauri) failures.push("ui scripts still expose the obsolete Tauri entrypoint");
+for (const staleWorkflowMarker of [
+  "Tauri",
+  "cargo check -p astock-app",
+  "rust-toolchain@1.88.0",
+  "hustcer/setup-moonbit@",
+]) {
+  if (qualityWorkflow.includes(staleWorkflowMarker)) {
+    failures.push(`quality workflow still contains obsolete v5 marker: ${staleWorkflowMarker}`);
+  }
+}
+for (const requiredWorkflowMarker of [
+  "ASTOCK_BUILD_ROOT",
+  "protocol/codegen.mjs --check",
+  "capability-parity-check.mjs --release",
+  "release-architecture-check.mjs",
+  "https://cli.moonbitlang.com/binaries/0.1.20260819/moonbit-linux-x86_64.tar.gz",
+  "moon version | grep -F 'moon 0.1.20260819'",
+  "moon test --target native",
+  "cargo check --locked --workspace --all-targets --all-features",
+]) {
+  if (!qualityWorkflow.includes(requiredWorkflowMarker)) {
+    failures.push(`quality workflow is missing v6 check: ${requiredWorkflowMarker}`);
+  }
+}
+for (const [name, source] of activeRuntimeDocs) {
+  for (const staleDocMarker of ["cargo check -p astock-app", "真实 Tauri 桌面进程", "稳定 Tauri 响应"]) {
+    if (source.includes(staleDocMarker)) failures.push(`${name} still instructs the obsolete v5 runtime: ${staleDocMarker}`);
+  }
+}
 if (agentWorkbench.includes("requestDurableTool")) failures.push("React Agent workbench still owns Engine tool execution");
 for (const leakedTool of ["market.overview", "research.market_context", "research.market_candidates", "research.data_reconcile"]) {
   if (agentWorkbench.includes(`\"${leakedTool}\"`)) failures.push(`React Agent workbench still selects ${leakedTool}`);

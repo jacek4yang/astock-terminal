@@ -122,7 +122,18 @@ npm --prefix ui ci
 npm --prefix ui test -- --run
 npm --prefix ui run build
 cargo fmt --all -- --check
-cargo test --workspace
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo check -p astock-app
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo check --locked --workspace --all-targets --all-features
+node protocol/codegen.mjs --check
+node scripts/capability-parity-check.mjs --release
+Push-Location app-moon
+moon fmt --check --target-dir D:\astock-build\astock-terminal\moon-target\agent
+moon check --target native --target-dir D:\astock-build\astock-terminal\moon-target\agent
+moon test --target native --target-dir D:\astock-build\astock-terminal\moon-target\agent
+Pop-Location
 ```
+
+上述列表是普通质量回归，不构成生产发布证明。双求解器 MoonBit/Why3、
+TLA+/TLC、故障注入、浏览器、打包桌面、迁移、真实性能、外部服务和
+Authenticode 证据必须由不可变提交上的 `scripts/release-gate.ps1` 生成。

@@ -115,6 +115,12 @@ Tauri 源码已删除。本文只保留审计语义，不得作为可调用接�
 - `minimax_quota() -> QuotaStatus`
 
 ### 数据源凭证与代理(可选 provider)
+
+> 以下 `settings_*` 描述只用于冻结 v5 差异基线，v6 已将凭据写入 Windows
+> Credential Manager，并只通过 Engine 的粗粒度设置服务返回“是否配置”的状态。
+> v6 禁止把密码、Token 或代理秘密写入 SQLite、环境变量、命令行、日志、IPC
+> 录制或 React 状态；不得照此段恢复旧 base64 包装实现。
+
 - `settings_set_provider_credentials({tushare_token?, iwencai_key?, jq_user?, jq_pwd?, socks5?}) -> {status: ProviderStatus, message: string}`
   - 每个字段都是 `Option<string>`:**不传/传 null 或空串 = 清除该项**;非空 = 覆盖保存。
   - 保存到 storage kv 表(key 前缀 `provider.`),同时 `set_var`/`remove_var` 写入进程环境变量(`TUSHARE_TOKEN` / `IWENCAI_KEY` / `JQ_USER` / `JQ_PWD` / `ASTOCK_SOCKS5`),即时生效;返回的 `message` 提示"部分 provider 需重启后重新建连"(已构造的 provider 实例持有旧配置)。

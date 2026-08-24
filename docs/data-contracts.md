@@ -36,4 +36,7 @@ run_id, conversation_id, seq, event
 
 ## 兼容策略
 
-外部 schema 使用容忍式 optional 解析，稳定 Tauri 响应优先强类型。旧 Agent 记录若不是合法 provider message，则作为纯文本返回并标记 `malformed`，不能让历史页崩溃。
+外部 schema 使用容忍式 optional 解析，稳定 Engine 协议响应优先强类型。
+Renderer 只使用生成的 Proton typed bridge，不保留 Tauri/WebView2 兼容层。
+旧 Agent 记录若不是合法 provider message，则作为纯文本返回并标记
+`malformed`，不能让历史页崩溃。
