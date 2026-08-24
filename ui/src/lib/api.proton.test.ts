@@ -19,6 +19,7 @@ import {
   cancelEventAnalysis,
   cancelRelationExtraction,
   getBoardConstituents,
+  getASharesPage,
   getDisclosureDetail,
   getDisclosureProviderHealth,
   getEntityLinkReviews,
@@ -118,6 +119,40 @@ describe("Proton global research bridge", () => {
     expect(requestNative.mock.calls[0][2]).toEqual({ symbol: "300308" });
     expect(requestNative.mock.calls[1][2]).toEqual({ pool: "strong", date: "2026-08-24" });
     expect(requestNative.mock.calls[2][2]).toEqual({ board_code: "bk0447" });
+  });
+
+  it("keeps all-market filtering, sorting and snapshot paging inside the Engine", async () => {
+    await getASharesPage({
+      cursor: 100,
+      limit: 50,
+      snapshot_id: "market-shares:eastmoney:1780000000000:query",
+      keyword: "中际旭创",
+      market: "SZ",
+      board: "chi_next",
+      pct_filter: "up",
+      min_price: 10,
+      max_price: 200,
+      min_amount: 100_000_000,
+      available_only: true,
+      sort_by: "amount",
+      sort_asc: false,
+    });
+
+    expect(requestNative).toHaveBeenCalledWith("engine", "market.shares.page", {
+      cursor: 100,
+      limit: 50,
+      snapshot_id: "market-shares:eastmoney:1780000000000:query",
+      keyword: "中际旭创",
+      market: "SZ",
+      board: "chi_next",
+      pct_filter: "up",
+      min_price: 10,
+      max_price: 200,
+      min_amount: 100_000_000,
+      available_only: true,
+      sort_by: "amount",
+      sort_asc: false,
+    }, { deadlineMs: 60_000 });
   });
 
   it("routes the complete disclosure workflow through the Engine", async () => {

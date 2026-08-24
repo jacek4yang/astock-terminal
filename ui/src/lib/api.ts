@@ -478,6 +478,38 @@ export interface AllShare {
   fetched_at: string;
 }
 
+export interface AllSharePageQuery {
+  cursor: number;
+  limit: number;
+  snapshot_id?: string;
+  keyword?: string;
+  market?: "all" | "SH" | "SZ" | "BJ";
+  board?: "all" | "main" | "chi_next" | "star" | "beijing" | "fund" | "other";
+  pct_filter?: "all" | "up" | "down" | "flat" | "limit_up" | "limit_down";
+  min_price?: number;
+  max_price?: number;
+  min_amount?: number;
+  available_only?: boolean;
+  sort_by?: "code" | "name" | "market" | "board" | "price" | "pct" | "amount";
+  sort_asc?: boolean;
+}
+
+export interface AllSharePage {
+  items: AllShare[];
+  cursor: number;
+  next_cursor: number | null;
+  total: number;
+  universe_total: number;
+  limit: number;
+  snapshot_id: string;
+  source_version_id: string;
+  source: string;
+  fetched_at: string;
+}
+
+export const getASharesPage = (query: AllSharePageQuery) =>
+  requestNative<AllSharePage>("engine", "market.shares.page", query, { deadlineMs: 60_000 });
+
 export interface FundFlow {
   date: string;
   main_net: number;

@@ -17,12 +17,14 @@ mod report_verification;
 mod scan;
 mod settings;
 
-use astock_core::{Adjust, KlinePeriod, Symbol};
+use astock_core::{normalize_security_name, Adjust, Board, KlinePeriod, StockListItem, Symbol};
 use astock_fundamental::{
     apply_driver_shocks, build_earnings_driver_tree, DriverShock, EarningsDriverTree,
     FundamentalClient, ShockBridge,
 };
-use astock_market_data::{DataProvider, EastMoneyF10, MarketData, FINANCE_NEWS_SOURCES};
+use astock_market_data::{
+    DataProvider, EastMoneyF10, MarketData, SecurityMaster, FINANCE_NEWS_SOURCES,
+};
 use astock_protocol::{RequestEnvelope, ResponseEnvelope, PROTOCOL_VERSION};
 use astock_source_verification::SourceVerifier;
 use astock_storage::{CleanupPolicy, Storage};
@@ -30,8 +32,10 @@ use astock_trading_rules::RuleSet;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveTime, TimeZone};
 use data_root::DataRootDecision;
 use rusqlite::{params, OptionalExtension};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
@@ -248,10 +252,13 @@ impl Engine {
                     .unwrap_or(astock_protocol::MAX_PAGE_SIZE)
                     .clamp(1, astock_protocol::MAX_PAGE_SIZE);
                 let fetched = self.market.all_a_shares().await.map_err(upstream)?;
+                let universe_total = fetched.data.len();
+                let query_id = shares_query_id(&payload)?;
                 let snapshot_id = format!(
-                    "market-shares:{}:{}",
+                    "market-shares:{}:{}:{}",
                     fetched.source,
-                    fetched.fetched_at.timestamp_millis()
+                    fetched.fetched_at.timestamp_millis(),
+                    query_id,
                 );
                 if payload
                     .snapshot_id
@@ -264,42 +271,30 @@ impl Engine {
                         true,
                     ));
                 }
-                if cursor > fetched.data.len() {
+                let rows = shares_query(&fetched.data, &self.market.security_master, &payload)?;
+                if cursor > rows.len() {
                     return Err(ServiceError::new(
                         "invalid_cursor",
-                        format!(
-                            "cursor {cursor} exceeds market row count {}",
-                            fetched.data.len()
-                        ),
+                        format!("cursor {cursor} exceeds market row count {}", rows.len()),
                         false,
                     ));
                 }
-                let end = cursor.saturating_add(limit).min(fetched.data.len());
+                let end = cursor.saturating_add(limit).min(rows.len());
                 let source = fetched.source.to_string();
                 let fetched_at = fetched.fetched_at;
-                let items = fetched.data[cursor..end]
+                let items = rows[cursor..end]
                     .iter()
-                    .map(|item| {
-                        let identity = self.market.security_master.get(&item.code);
+                    .map(|row| {
                         json!({
-                            "code": item.code,
-                            "name": identity.as_ref().map_or_else(
-                                || item.name.clone(),
-                                |row| row.canonical_name.clone()
-                            ),
-                            "market": identity.as_ref().map_or_else(
-                                || "unknown".to_string(),
-                                |row| row.market.to_string()
-                            ),
-                            "board": identity.as_ref().map_or_else(
-                                || "other".to_string(),
-                                |row| format!("{:?}", row.board).to_lowercase()
-                            ),
-                            "price": item.price,
-                            "pct": item.pct,
-                            "amount": item.amount,
+                            "code": row.code,
+                            "name": row.name,
+                            "market": row.market,
+                            "board": row.board,
+                            "price": row.price,
+                            "pct": row.pct,
+                            "amount": row.amount,
                             "source": source,
-                            "fetched_at": fetched_at
+                            "fetched_at": fetched_at,
                         })
                     })
                     .collect::<Vec<_>>();
@@ -310,13 +305,14 @@ impl Engine {
                 Ok(json!({
                     "items": items,
                     "cursor": cursor,
-                    "next_cursor": (end < fetched.data.len()).then_some(end),
-                    "total": fetched.data.len(),
+                    "next_cursor": (end < rows.len()).then_some(end),
+                    "total": rows.len(),
+                    "universe_total": universe_total,
                     "limit": limit,
                     "snapshot_id": snapshot_id,
                     "source_version_id": snapshot_id,
-                    "source": fetched.source,
-                    "fetched_at": fetched.fetched_at
+                    "source": source,
+                    "fetched_at": fetched_at
                 }))
             }
             "market.security_snapshot" => {
@@ -2330,7 +2326,7 @@ struct IndexKlinePayload {
     count: u32,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SharesPagePayload {
     #[serde(default)]
@@ -2339,6 +2335,305 @@ struct SharesPagePayload {
     limit: Option<usize>,
     #[serde(default)]
     snapshot_id: Option<String>,
+    #[serde(default)]
+    keyword: Option<String>,
+    #[serde(default)]
+    market: Option<String>,
+    #[serde(default)]
+    board: Option<String>,
+    #[serde(default)]
+    pct_filter: Option<String>,
+    #[serde(default)]
+    min_price: Option<f64>,
+    #[serde(default)]
+    max_price: Option<f64>,
+    #[serde(default)]
+    min_amount: Option<f64>,
+    #[serde(default)]
+    available_only: Option<bool>,
+    #[serde(default)]
+    sort_by: Option<String>,
+    #[serde(default)]
+    sort_asc: Option<bool>,
+}
+
+#[derive(Clone, Serialize)]
+struct SharePageRow {
+    code: String,
+    name: String,
+    market: String,
+    board: Board,
+    price: Option<f64>,
+    pct: Option<f64>,
+    amount: Option<f64>,
+}
+
+#[derive(Clone, Copy)]
+enum ShareSort {
+    Code,
+    Name,
+    Market,
+    Board,
+    Price,
+    Pct,
+    Amount,
+}
+
+fn parse_share_sort(value: Option<&str>) -> Result<ShareSort, ServiceError> {
+    match value.unwrap_or("amount") {
+        "code" => Ok(ShareSort::Code),
+        "name" => Ok(ShareSort::Name),
+        "market" => Ok(ShareSort::Market),
+        "board" => Ok(ShareSort::Board),
+        "price" => Ok(ShareSort::Price),
+        "pct" => Ok(ShareSort::Pct),
+        "amount" => Ok(ShareSort::Amount),
+        _ => Err(ServiceError::new(
+            "invalid_payload",
+            "sort_by must be code, name, market, board, price, pct or amount",
+            false,
+        )),
+    }
+}
+
+fn validate_optional_number(value: Option<f64>, name: &str) -> Result<Option<f64>, ServiceError> {
+    match value {
+        Some(number) if !number.is_finite() || number < 0.0 => Err(ServiceError::new(
+            "invalid_payload",
+            format!("{name} must be a finite non-negative number"),
+            false,
+        )),
+        _ => Ok(value),
+    }
+}
+
+fn normalized_share_query(payload: &SharesPagePayload) -> Result<String, ServiceError> {
+    let market = payload
+        .market
+        .as_deref()
+        .unwrap_or("all")
+        .trim()
+        .to_ascii_uppercase();
+    if !matches!(market.as_str(), "ALL" | "SH" | "SZ" | "BJ") {
+        return Err(ServiceError::new(
+            "invalid_payload",
+            "market must be all, SH, SZ or BJ",
+            false,
+        ));
+    }
+    let board = payload
+        .board
+        .as_deref()
+        .unwrap_or("all")
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(
+        board.as_str(),
+        "all" | "main" | "chi_next" | "star" | "beijing" | "fund" | "other"
+    ) {
+        return Err(ServiceError::new(
+            "invalid_payload",
+            "board contains an unsupported classification",
+            false,
+        ));
+    }
+    let pct_filter = payload
+        .pct_filter
+        .as_deref()
+        .unwrap_or("all")
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(
+        pct_filter.as_str(),
+        "all" | "up" | "down" | "flat" | "limit_up" | "limit_down"
+    ) {
+        return Err(ServiceError::new(
+            "invalid_payload",
+            "pct_filter contains an unsupported value",
+            false,
+        ));
+    }
+    let min_price = validate_optional_number(payload.min_price, "min_price")?;
+    let max_price = validate_optional_number(payload.max_price, "max_price")?;
+    let min_amount = validate_optional_number(payload.min_amount, "min_amount")?;
+    if min_price.zip(max_price).is_some_and(|(min, max)| min > max) {
+        return Err(ServiceError::new(
+            "invalid_payload",
+            "min_price cannot exceed max_price",
+            false,
+        ));
+    }
+    let sort = match parse_share_sort(payload.sort_by.as_deref())? {
+        ShareSort::Code => "code",
+        ShareSort::Name => "name",
+        ShareSort::Market => "market",
+        ShareSort::Board => "board",
+        ShareSort::Price => "price",
+        ShareSort::Pct => "pct",
+        ShareSort::Amount => "amount",
+    };
+    Ok(json!({
+        "keyword": normalize_security_name(payload.keyword.as_deref().unwrap_or(""))
+            .trim()
+            .to_lowercase(),
+        "market": market,
+        "board": board,
+        "min_price": min_price,
+        "max_price": max_price,
+        "min_amount": min_amount,
+        "available_only": payload.available_only.unwrap_or(false),
+        "pct_filter": pct_filter,
+        "sort_by": sort,
+        "sort_asc": payload.sort_asc.unwrap_or(false),
+    })
+    .to_string())
+}
+
+fn shares_query_id(payload: &SharesPagePayload) -> Result<String, ServiceError> {
+    let normalized = normalized_share_query(payload)?;
+    Ok(format!("{:x}", Sha256::digest(normalized.as_bytes()))[..16].to_string())
+}
+
+fn board_label(board: Board) -> &'static str {
+    match board {
+        Board::Main => "main",
+        Board::ChiNext => "chi_next",
+        Board::Star => "star",
+        Board::Beijing => "beijing",
+        Board::Fund => "fund",
+        Board::Other => "other",
+    }
+}
+
+fn compare_optional_number(left: Option<f64>, right: Option<f64>, ascending: bool) -> Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            let order = left.total_cmp(&right);
+            if ascending {
+                order
+            } else {
+                order.reverse()
+            }
+        }
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn shares_query(
+    source: &[StockListItem],
+    master: &SecurityMaster,
+    payload: &SharesPagePayload,
+) -> Result<Vec<SharePageRow>, ServiceError> {
+    normalized_share_query(payload)?;
+    let keyword = normalize_security_name(payload.keyword.as_deref().unwrap_or(""))
+        .trim()
+        .to_lowercase();
+    let market = payload
+        .market
+        .as_deref()
+        .unwrap_or("all")
+        .trim()
+        .to_ascii_uppercase();
+    let board = payload
+        .board
+        .as_deref()
+        .unwrap_or("all")
+        .trim()
+        .to_ascii_lowercase();
+    let min_price = validate_optional_number(payload.min_price, "min_price")?;
+    let max_price = validate_optional_number(payload.max_price, "max_price")?;
+    let min_amount = validate_optional_number(payload.min_amount, "min_amount")?;
+    let pct_filter = payload
+        .pct_filter
+        .as_deref()
+        .unwrap_or("all")
+        .trim()
+        .to_ascii_lowercase();
+    let available_only = payload.available_only.unwrap_or(false);
+    let sort = parse_share_sort(payload.sort_by.as_deref())?;
+    let ascending = payload.sort_asc.unwrap_or(false);
+
+    let mut rows = source
+        .iter()
+        .filter_map(|item| {
+            let identity = master.get(&item.code)?;
+            let row = SharePageRow {
+                code: item.code.clone(),
+                name: identity.canonical_name,
+                market: identity.market.to_string(),
+                board: identity.board,
+                price: item.price,
+                pct: item.pct,
+                amount: item.amount,
+            };
+            let name = row.name.to_lowercase();
+            if (!keyword.is_empty()
+                && !row.code.contains(keyword.as_str())
+                && !name.contains(keyword.as_str()))
+                || (market != "ALL" && row.market != market.as_str())
+                || (board != "all" && board_label(row.board) != board.as_str())
+                || (available_only && (row.price.is_none() || row.pct.is_none()))
+                || min_price.is_some_and(|minimum| row.price.is_none_or(|value| value < minimum))
+                || max_price.is_some_and(|maximum| row.price.is_none_or(|value| value > maximum))
+                || min_amount.is_some_and(|minimum| row.amount.is_none_or(|value| value < minimum))
+                || match pct_filter.as_str() {
+                    "up" => row.pct.is_none_or(|value| value <= 0.0),
+                    "down" => row.pct.is_none_or(|value| value >= 0.0),
+                    "flat" => row.pct != Some(0.0),
+                    "limit_up" => row.pct.is_none_or(|value| value < 9.8),
+                    "limit_down" => row.pct.is_none_or(|value| value > -9.8),
+                    _ => false,
+                }
+            {
+                None
+            } else {
+                Some(row)
+            }
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        let order = match sort {
+            ShareSort::Code => {
+                let order = left.code.cmp(&right.code);
+                if ascending {
+                    order
+                } else {
+                    order.reverse()
+                }
+            }
+            ShareSort::Name => {
+                let order = left.name.cmp(&right.name);
+                if ascending {
+                    order
+                } else {
+                    order.reverse()
+                }
+            }
+            ShareSort::Market => {
+                let order = left.market.cmp(&right.market);
+                if ascending {
+                    order
+                } else {
+                    order.reverse()
+                }
+            }
+            ShareSort::Board => {
+                let order = board_label(left.board).cmp(board_label(right.board));
+                if ascending {
+                    order
+                } else {
+                    order.reverse()
+                }
+            }
+            ShareSort::Price => compare_optional_number(left.price, right.price, ascending),
+            ShareSort::Pct => compare_optional_number(left.pct, right.pct, ascending),
+            ShareSort::Amount => compare_optional_number(left.amount, right.amount, ascending),
+        };
+        order.then_with(|| left.code.cmp(&right.code))
+    });
+    Ok(rows)
 }
 
 #[derive(Deserialize)]
@@ -3566,6 +3861,92 @@ mod tests {
         let error = parse_live_symbol("430002").unwrap_err();
         assert_eq!(error.code, "unsupported_live_symbol");
         assert!(error.message.contains("920xxx"));
+    }
+
+    #[test]
+    fn market_share_pages_filter_sort_and_keep_standard_board_names() {
+        let master = SecurityMaster::default();
+        let rows = vec![
+            StockListItem {
+                code: "300308".into(),
+                name: "中 际 旭 创".into(),
+                price: Some(120.0),
+                pct: Some(2.5),
+                amount: Some(8_000_000_000.0),
+            },
+            StockListItem {
+                code: "600519".into(),
+                name: "贵州茅台".into(),
+                price: Some(1_500.0),
+                pct: Some(-1.0),
+                amount: Some(5_000_000_000.0),
+            },
+            StockListItem {
+                code: "920001".into(),
+                name: "北交样本".into(),
+                price: Some(20.0),
+                pct: None,
+                amount: None,
+            },
+        ];
+        master.merge_stock_list(&rows, "test");
+        let payload = SharesPagePayload {
+            board: Some("chi_next".into()),
+            available_only: Some(true),
+            sort_by: Some("amount".into()),
+            ..SharesPagePayload::default()
+        };
+        let page = shares_query(&rows, &master, &payload).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].code, "300308");
+        assert_eq!(page[0].name, "中际旭创");
+        assert_eq!(serde_json::to_value(&page[0]).unwrap()["board"], "chi_next");
+
+        let descending = shares_query(
+            &rows,
+            &master,
+            &SharesPagePayload {
+                available_only: Some(true),
+                sort_by: Some("price".into()),
+                sort_asc: Some(false),
+                ..SharesPagePayload::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            descending
+                .iter()
+                .map(|row| row.code.as_str())
+                .collect::<Vec<_>>(),
+            ["600519", "300308"]
+        );
+    }
+
+    #[test]
+    fn market_share_snapshot_identity_binds_filters_and_rejects_bad_ranges() {
+        let base = SharesPagePayload {
+            keyword: Some("中际".into()),
+            market: Some("SZ".into()),
+            ..SharesPagePayload::default()
+        };
+        let changed = SharesPagePayload {
+            keyword: Some("中际".into()),
+            market: Some("SH".into()),
+            ..SharesPagePayload::default()
+        };
+        assert_ne!(
+            shares_query_id(&base).unwrap(),
+            shares_query_id(&changed).unwrap()
+        );
+        let invalid = SharesPagePayload {
+            min_price: Some(10.0),
+            max_price: Some(5.0),
+            ..SharesPagePayload::default()
+        };
+        assert_eq!(
+            shares_query_id(&invalid).unwrap_err().code,
+            "invalid_payload"
+        );
     }
 
     #[test]
