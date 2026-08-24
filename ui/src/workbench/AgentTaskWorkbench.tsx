@@ -4,6 +4,8 @@ import { isProton, requestNative, subscribeNativeEvent } from "../bridge";
 import type { ClarificationDraft, ClarificationQuestion, ClarificationRequest } from "../lib/agentClarification";
 import { emptyClarificationDraft } from "../lib/agentClarification";
 import { createEventBatcher } from "../lib/eventBatcher";
+import { consumeAgentDraft, subscribeAgentDraft } from "./agentDraft";
+import { sanitizeAgentVisibleText } from "./agentVisibleText";
 import { useResearchContext } from "./store";
 
 type Depth = "fast" | "balanced" | "deep" | "exhaustive";
@@ -240,6 +242,17 @@ export function deterministicVerificationSummary(verification: DeterministicVeri
   return `复现 ${claims} 个数字 · ${citations} 个不同证据引用 · ${facts} 条字段事实`;
 }
 
+export function durableCheckpointState(durable: DurableTask, expectedTaskId: string): TaskView {
+  const acceptedSeq = durable.task.accepted_seq;
+  const checkpoint = durable.task.checkpoint;
+  if (!Number.isInteger(acceptedSeq) || acceptedSeq < 1) throw new Error("持久化任务序列无效");
+  if (!checkpoint || typeof checkpoint !== "object" || Array.isArray(checkpoint)) throw new Error("持久化任务没有可恢复检查点");
+  const state = checkpoint as TaskView;
+  if (state.task_id !== expectedTaskId) throw new Error("持久化检查点与任务不匹配");
+  if (state.accepted_seq !== acceptedSeq) throw new Error("持久化检查点序列与任务日志不一致");
+  return state;
+}
+
 export default function AgentTaskWorkbench() {
   const [sessionId, setSessionId] = useState<string>(() => crypto.randomUUID());
   const [title, setTitle] = useState("");
@@ -261,12 +274,25 @@ export default function AgentTaskWorkbench() {
   const [clarification, setClarification] = useState<ClarificationRequest | null>(null);
   const [draft, setDraft] = useState<ClarificationDraft>(emptyClarificationDraft);
   const [checkpoint, setCheckpoint] = useState<unknown>();
+  const [durableTaskReady, setDurableTaskReady] = useState(true);
   const [verification, setVerification] = useState<DeterministicVerification | null>(null);
   const [busy, setBusy] = useState(false);
   const [busyStage, setBusyStage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const restoredTaskRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const applyDraft = (prompt: string) => {
+      consumeAgentDraft();
+      setInput(prompt);
+      setError(null);
+      requestAnimationFrame(() => composerRef.current?.focus());
+    };
+    const pending = consumeAgentDraft();
+    if (pending) applyDraft(pending);
+    return subscribeAgentDraft(applyDraft);
+  }, []);
 
   useEffect(() => {
     if (!isProton()) {
@@ -416,48 +442,42 @@ export default function AgentTaskWorkbench() {
     };
   }, [historyOpen, historyQuery]);
 
-  const recoverLatestCheckpoint = async (taskId: string, fallback: unknown, localSeq: number) => {
-    let recovered = fallback;
-    let recoveredSeq = localSeq;
-    try {
-      const durable = await requestNative<DurableTask>("engine", "agent.task.load", { task_id: taskId });
-      if (durable.task.checkpoint != null && durable.task.accepted_seq >= recoveredSeq) {
-        recovered = durable.task.checkpoint;
-        recoveredSeq = durable.task.accepted_seq;
-      }
-    } catch {
-      // A locally saved checkpoint is still useful when the task journal is
-      // temporarily unavailable. The next stateful request asks Host to
-      // restore durable Engine truth before it reaches Agent.
-    }
-    if (!recovered) throw new Error("没有可恢复的 Agent 检查点");
-    if (typeof recovered === "object" && recovered !== null && recoveredSeq >= localSeq) {
-      setCheckpoint(recovered);
-      setTask(recovered as TaskView);
-    }
-    return recovered as TaskView;
+  const recoverLatestCheckpoint = async (taskId: string) => {
+    setDurableTaskReady(false);
+    const durable = await requestNative<DurableTask>("engine", "agent.task.load", { task_id: taskId });
+    const recovered = durableCheckpointState(durable, taskId);
+    setCheckpoint(durable.task.checkpoint);
+    setTask(recovered);
+    setDurableTaskReady(true);
+    return recovered;
   };
 
   useEffect(() => {
-    if (!isProton() || !checkpoint || !task?.task_id || restoredTaskRef.current === task.task_id) return;
+    if (!isProton() || !task?.task_id || restoredTaskRef.current === task.task_id) return;
     restoredTaskRef.current = task.task_id;
-    void recoverLatestCheckpoint(task.task_id, checkpoint, task.accepted_seq ?? 0).catch((cause) => {
+    void recoverLatestCheckpoint(task.task_id).catch((cause) => {
       restoredTaskRef.current = null;
       setError(`恢复 Agent 任务失败：${cause instanceof Error ? cause.message : String(cause)}`);
     });
-  }, [checkpoint, task?.accepted_seq, task?.task_id]);
+  }, [task?.task_id]);
 
   const cacheRequests = task?.cache_requests ?? 0;
   const cacheHits = task?.cache_hits ?? 0;
   const completedClarification = useMemo(() => clarification?.questions.every((question) => questionComplete(question, draft)) ?? false, [clarification, draft]);
 
-  const append = (role: MessageRole, text: string) => setMessages((current) => [
-    ...current,
-    { id: crypto.randomUUID(), role, text, timestamp: timeNow() },
-  ]);
+  const append = (role: MessageRole, text: string) => {
+    const visible = role === "user" ? text : sanitizeAgentVisibleText(text);
+    if (!visible.trim()) return;
+    setMessages((current) => [
+      ...current,
+      { id: crypto.randomUUID(), role, text: visible, timestamp: timeNow() },
+    ]);
+  };
 
   const applyTransition = (reply: TaskTransition) => {
     const next = reply.state ?? {};
+    restoredTaskRef.current = next.task_id ?? null;
+    setDurableTaskReady(true);
     setTask(next);
     setEffects(expandAgentActivities(reply.activities ?? reply.effects ?? []));
     if (reply.verification) setVerification(reply.verification);
@@ -472,6 +492,10 @@ export default function AgentTaskWorkbench() {
 
   const executeResearch = async (state: TaskView) => {
     if (!state.task_id) return;
+    if (!durableTaskReady) {
+      setError("任务尚未从 Engine 持久化日志完成核验，暂不能继续执行");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -497,7 +521,7 @@ export default function AgentTaskWorkbench() {
       setError(message);
       append("system", `研究暂停：${message}。任务检查点已保留，可直接重试。`);
       try {
-        const recovered = await recoverLatestCheckpoint(state.task_id, checkpoint, state.accepted_seq ?? 0);
+        const recovered = await recoverLatestCheckpoint(state.task_id);
         append("system", `已从持久化日志恢复到“${phaseLabel[recovered.phase ?? "idle"]}”，重试会先对账未完成工具。`);
       } catch {
         // Keep the original failure visible; recovery diagnostics are exposed
@@ -536,6 +560,7 @@ export default function AgentTaskWorkbench() {
     setEffects([]);
     setVerification(null);
     setCheckpoint(undefined);
+    setDurableTaskReady(true);
     restoredTaskRef.current = null;
     setClarification(null);
     setDraft(emptyClarificationDraft());
@@ -632,6 +657,7 @@ export default function AgentTaskWorkbench() {
     setClarification(null);
     setDraft(emptyClarificationDraft());
     setCheckpoint(undefined);
+    setDurableTaskReady(true);
     setError(null);
     setHistoryOpen(false);
     setSessionId(crypto.randomUUID());
@@ -648,13 +674,17 @@ export default function AgentTaskWorkbench() {
     setInput(saved.input ?? "");
     setDepth(saved.depth ?? "deep");
     setToolPolicy(saved.toolPolicy ?? "auto");
-    setMessages(saved.messages ?? []);
+    setMessages((saved.messages ?? []).map((message) => ({
+      ...message,
+      text: message.role === "user" ? message.text : sanitizeAgentVisibleText(message.text),
+    })).filter((message) => message.text.trim()));
     setTask(saved.task ?? null);
     setEffects(expandAgentActivities(saved.effects ?? []));
     setVerification(saved.verification ?? null);
     setClarification(saved.clarification ? normalizeClarification(saved.clarification) : null);
     setDraft(saved.draft ?? emptyClarificationDraft());
     setCheckpoint(saved.checkpoint);
+    setDurableTaskReady(!saved.task?.task_id);
     setError(null);
     restoredTaskRef.current = null;
     setHistoryOpen(false);
@@ -757,7 +787,7 @@ export default function AgentTaskWorkbench() {
   return <div className="agent-console agent-golden-layout">
     <header className="agent-console-header">
       <div><span className="agent-orb" /><strong>AStock Agent</strong><span className={`status-pill phase-${status}`}>{phaseLabel[status]}</span></div>
-      <div className="agent-run-metrics"><span>工具 {task?.completed_tool_count ?? 0}/{(task?.completed_tool_count ?? 0) + (task?.pending_tool_count ?? 0)}</span><span>证据 {task?.evidence_ids?.length ?? 0}</span><span title="仅展示 Worker 返回的真实缓存统计">缓存命中 {cacheRequests ? `${Math.round(cacheHits / cacheRequests * 100)}% (${cacheHits}/${cacheRequests})` : "— 暂无样本"}</span><button onClick={() => setHistoryOpen(true)} disabled={busy}>历史 {history.length || ""}</button><button onClick={newResearch} disabled={busy}>＋ 新对话</button></div>
+      <div className="agent-run-metrics"><span>工具 {task?.completed_tool_count ?? 0}/{(task?.completed_tool_count ?? 0) + (task?.pending_tool_count ?? 0)}</span><span>证据 {task?.evidence_ids?.length ?? 0}</span><span title="仅展示 Worker 返回的真实缓存统计">缓存命中 {cacheRequests ? `${Math.round(cacheHits / cacheRequests * 100)}% (${cacheHits}/${cacheRequests})` : "— 暂无样本"}</span>{task?.task_id && <span title="历史会话只负责展示；此状态表示执行检查点已从 Engine 日志核验">任务日志 {durableTaskReady ? "已核验" : "核验中"}</span>}<button onClick={() => setHistoryOpen(true)} disabled={busy}>历史 {history.length || ""}</button><button onClick={newResearch} disabled={busy}>＋ 新对话</button></div>
     </header>
 
     {historyOpen && <div className="agent-history-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setHistoryOpen(false); }}>
@@ -821,7 +851,7 @@ export default function AgentTaskWorkbench() {
 
     <footer className="agent-composer-wrap">
       {busyStage && <div className="agent-busy-stage"><span className="send-spinner" />{busyStage}</div>}
-      {error && <div className="agent-error"><span>{error}</span><div>{task && ["preparing", "awaiting_tools", "suspended"].includes(task.phase ?? "") && <button onClick={() => void executeResearch(task)} disabled={busy}>{task.phase === "suspended" ? "继续研究" : "重试研究"}</button>}<button onClick={() => setError(null)}>×</button></div></div>}
+      {error && <div className="agent-error"><span>{error}</span><div>{task && ["preparing", "awaiting_tools", "suspended"].includes(task.phase ?? "") && <button onClick={() => void executeResearch(task)} disabled={busy || !durableTaskReady}>{task.phase === "suspended" ? "继续研究" : "重试研究"}</button>}<button onClick={() => setError(null)}>×</button></div></div>}
       <div className="agent-composer">
         <textarea ref={composerRef} value={input} disabled={busy || status === "waiting_for_user"} onChange={(event) => setInput(event.target.value)} placeholder={status === "waiting_for_user" ? "请先回答上方模型生成的问题…" : "向 AStock Agent 描述你的研究问题…"} rows={3} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void start(); } }} />
         <div className="composer-toolbar">

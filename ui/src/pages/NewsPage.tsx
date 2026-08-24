@@ -19,9 +19,10 @@ import {
   type NewsEventClusterDetail,
   type NewsProviderHealthItem,
 } from "../lib/api";
-import { useAgentSession } from "../agentSession";
 import { EventAnalysisPanel } from "../components/EventAnalysisPanel";
 import { ErrorBox, Loading } from "../components/ui";
+import { queueAgentDraft } from "../workbench/agentDraft";
+import { useWorkspaceStore } from "../workbench/store";
 
 const CATEGORY = [
   ["all", "实时流"],
@@ -505,8 +506,9 @@ export default function NewsPage() {
     const prompt = priceIn
       ? `基于不可变事件证据 ${selected.revision.revision_id}，分析“${selected.revision.title}”是否已经被市场交易。先调用“结构化事件与市场定价核验”工具，逐项核对事件前异常收益、成交量、板块相对表现、估值变化、一致预期和历史同类事件；把基本面影响与市场机会分开，缺失项不得猜测。`
       : `深度分析资讯“${selected.revision.title}”。精确证据修订号：${selected.revision.revision_id}；事件簇：${selected.event?.cluster_id ?? "尚未聚类"}。请先调用“结构化事件与市场定价核验”工具，再核验原始来源、关联公司、产业链路径、反方证据和失效条件。`;
-    useAgentSession.getState().setInput(prompt);
-    navigate("/agent");
+    queueAgentDraft(prompt);
+    useWorkspaceStore.getState().setPreset("agent");
+    navigate("/");
   };
 
   const rangeWindow = virtualRange(scrollTop, viewportHeight, data?.items.length ?? 0);

@@ -28,6 +28,8 @@ function requiredCapture(label, source, pattern) {
 const cargo = fs.readFileSync(path.join(root, "Cargo.toml"), "utf8");
 const ui = JSON.parse(fs.readFileSync(path.join(root, "ui", "package.json"), "utf8"));
 const agentWorkbench = fs.readFileSync(path.join(root, "ui", "src", "workbench", "AgentTaskWorkbench.tsx"), "utf8");
+const workspaceStore = fs.readFileSync(path.join(root, "ui", "src", "workbench", "store.ts"), "utf8");
+const agentVisibleText = fs.readFileSync(path.join(root, "ui", "src", "workbench", "agentVisibleText.ts"), "utf8");
 const moonAgent = fs.readFileSync(path.join(root, "app-moon", "agent_worker", "main.mbt"), "utf8");
 const moonProvider = fs.readFileSync(path.join(root, "app-moon", "agent_worker", "provider.mbt"), "utf8");
 const moonKernel = fs.readFileSync(path.join(root, "app-moon", "agent_core", "state.mbt"), "utf8");
@@ -98,6 +100,27 @@ for (const section of ["dependencies", "devDependencies"]) {
   }
 }
 if (ui.scripts?.tauri) failures.push("ui scripts still expose the obsolete Tauri entrypoint");
+if (ui.dependencies?.["dockview-react"] || ui.devDependencies?.["dockview-react"]) {
+  failures.push("v6 three-page renderer still depends on the retired Dockview IDE shell");
+}
+for (const legacyRendererPath of [
+  "ui/src/agentSession.ts",
+  "ui/src/components/AgentChat.tsx",
+  "ui/src/components/Layout.tsx",
+  "ui/src/pages/AgentPage.tsx",
+  "ui/src/workbench/panelRegistry.tsx",
+  "ui/src/workbench/presets.ts",
+]) {
+  if (fs.existsSync(path.join(root, ...legacyRendererPath.split("/")))) {
+    failures.push(`retired v5 renderer path is still present: ${legacyRendererPath}`);
+  }
+}
+if (!workspaceStore.includes('export type WorkbenchPreset = "market" | "agent" | "settings"')) {
+  failures.push("renderer navigation is not closed to the three v6 primary pages");
+}
+if (!workspaceStore.includes('name: "astock-workspace-v6"') || workspaceStore.includes('name: "astock-workspace-v5"')) {
+  failures.push("v6 renderer can accidentally adopt the retired workspace layout schema");
+}
 for (const [name, source] of credentialRuntimeSources) {
   for (const forbiddenSecretPath of [
     "std::env::set_var",
@@ -186,6 +209,18 @@ for (const [name, source] of activeRuntimeDocs) {
   }
 }
 if (agentWorkbench.includes("requestDurableTool")) failures.push("React Agent workbench still owns Engine tool execution");
+for (const visibleTextMarker of ["stripPrivateReasoning", "sanitizeAgentVisibleText", "Bearer [已隐藏敏感信息]"]) {
+  if (!agentVisibleText.includes(visibleTextMarker)) failures.push(`v6 Agent visible-text boundary is missing ${visibleTextMarker}`);
+}
+if (!agentWorkbench.includes("sanitizeAgentVisibleText(message.text)")) {
+  failures.push("persisted Agent history bypasses the v6 visible-text publication boundary");
+}
+for (const durableRecoveryMarker of ["durableCheckpointState", "agent.task.load", "持久化检查点与任务不匹配", "setDurableTaskReady(false)"]) {
+  if (!agentWorkbench.includes(durableRecoveryMarker)) failures.push(`React Agent recovery is missing Engine-truth guard: ${durableRecoveryMarker}`);
+}
+if (agentWorkbench.includes("locally saved checkpoint") || /recoverLatestCheckpoint\([^)]*fallback/.test(agentWorkbench)) {
+  failures.push("React Agent can still use a presentation-session checkpoint as executable task truth");
+}
 for (const obsoleteCredentialWrapper of ["settings_set_provider_credentials", "jq_pwd", "ProviderCredentials"]) {
   if (agentWorkbench.includes(obsoleteCredentialWrapper) || fs.readFileSync(path.join(root, "ui", "src", "lib", "api.ts"), "utf8").includes(obsoleteCredentialWrapper)) {
     failures.push(`React still exposes the obsolete aggregate credential wrapper: ${obsoleteCredentialWrapper}`);

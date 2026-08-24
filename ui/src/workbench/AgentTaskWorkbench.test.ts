@@ -7,7 +7,7 @@ vi.mock("../bridge", () => ({
   requestNative,
 }));
 
-import { deterministicVerificationSummary, expandAgentActivities, requestDurableAgent, workerProgressMatchesTask } from "./AgentTaskWorkbench";
+import { deterministicVerificationSummary, durableCheckpointState, expandAgentActivities, requestDurableAgent, workerProgressMatchesTask } from "./AgentTaskWorkbench";
 
 const spec = {
   objective: "分析两万元最新投资计划",
@@ -63,6 +63,24 @@ describe("Host-owned durable Agent bridge", () => {
     expect(workerProgressMatchesTask({ state: { task_id: "task-1" } }, "task-1")).toBe(true);
     expect(workerProgressMatchesTask({ state: { task_id: "task-1" } }, "conversation-1")).toBe(false);
     expect(workerProgressMatchesTask({ stage: "diagnostic" }, "task-1")).toBe(true);
+  });
+
+  it("accepts recovery state only from a matching Engine journal checkpoint", () => {
+    expect(durableCheckpointState({
+      task: { accepted_seq: 4, checkpoint: { task_id: "task-1", accepted_seq: 4, phase: "suspended" } },
+      events: [{ seq: 1 }, { seq: 4 }],
+    }, "task-1")).toMatchObject({ task_id: "task-1", accepted_seq: 4, phase: "suspended" });
+
+    expect(() => durableCheckpointState({
+      task: { accepted_seq: 4, checkpoint: { task_id: "forged", accepted_seq: 4 } },
+      events: [],
+    }, "task-1")).toThrow("持久化检查点与任务不匹配");
+    expect(() => durableCheckpointState({
+      task: { accepted_seq: 4, checkpoint: { task_id: "task-1", accepted_seq: 3 } },
+      events: [],
+    }, "task-1")).toThrow("持久化检查点序列与任务日志不一致");
+    expect(() => durableCheckpointState({ task: { accepted_seq: 4 }, events: [] }, "task-1"))
+      .toThrow("持久化任务没有可恢复检查点");
   });
 
   it("expands advanced Engine modules into visible success, skip and failure activities", () => {

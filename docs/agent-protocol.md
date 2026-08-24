@@ -18,7 +18,7 @@ Host 是通用 Effect runner，不包含金融算法。当前生产路径只允�
 
 稳定阶段包括 `Idle`、`Preparing`、`WaitingForUser`、`Reasoning`、`AwaitingTools`、`Reviewing`、`Synthesizing`、`Verifying`、`Suspended`、`Completed`、`VerificationFailed`、`Cancelled` 和 `HardFailed`。任务事件序列单调；终态吸收；取消和 Effect 结果写入具有幂等语义。
 
-页面切换不会卸载 Agent 主视图。会话、任务、事件、Effect、检查点和报告保存在 Engine 数据库中，React 状态只用于当前视图和恢复快照。会话支持列表、服务端搜索、新建、重命名、软删除、恢复，以及从指定用户消息或检查点分支为新研究。搜索最多返回协议页大小范围内的结果，不会把全部历史搬入 Renderer。
+页面切换不会卸载 Agent 主视图。会话、任务、事件、Effect、检查点和报告保存在 Engine 数据库中，React 状态只用于当前视图；会话中的任务快照只能展示，不能作为可执行恢复状态。打开历史或重试前，Renderer 必须读取 `agent.task.load`，核对 `task_id` 与 `accepted_seq` 后才允许继续，读取失败时按钮保持关闭。会话支持列表、服务端搜索、新建、重命名、软删除、恢复，以及从指定用户消息或检查点分支为新研究。搜索最多返回协议页大小范围内的结果，不会把全部历史搬入 Renderer。
 
 Provider 额度不足、已知的额度暂停和可恢复断流进入 `Suspended` 并保留检查点；用户可在额度恢复后继续。无法恢复的协议错误、损坏状态或校验失败会进入显式失败状态，不伪装成完成。
 

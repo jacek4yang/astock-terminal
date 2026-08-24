@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useAgentSession } from "../agentSession";
 import { ErrorBox, Loading } from "../components/ui";
 import {
   errMsg,
@@ -16,6 +15,8 @@ import {
   type GlobalProviderRuntime,
   type GlobalSyncSnapshot,
 } from "../lib/api";
+import { queueAgentDraft } from "../workbench/agentDraft";
+import { useWorkspaceStore } from "../workbench/store";
 
 const EMPTY_PAGE: GlobalDocumentPage = { items: [], total: 0, page: 1, page_size: 50, total_pages: 0 };
 
@@ -153,7 +154,11 @@ export default function GlobalPage() {
   useEffect(() => { if (!sync?.running && sync?.status.startsWith("completed")) { void load(); void getGlobalProviderHealth().then(setProviders); } }, [sync?.running, sync?.status, load]);
 
   const startSync = async () => { setError(null); try { await globalSyncStart({ sec_cik: cik || undefined, include_world_bank: true, max_sec_filings: 20 }); setSyncExpanded(true); setSync(await globalSyncStatus()); } catch (reason) { setError(errMsg(reason)); } };
-  const askAgent = (item: GlobalDocumentListItem) => { useAgentSession.getState().setInput(`请核验海外一级来源文档 ${item.document_id}（${item.provider_name}，证据版本 ${item.source_version_id ?? "尚未归档"}），先保留原始时区、数字、单位和币种，再分析它可能通过哪些有证据的客户/供应商/产品/商品路径影响 A 股。逐边给出 source_version_id、原文位置、置信度和失效条件；没有双侧正式证据的路径不得补全。`); navigate("/agent"); };
+  const askAgent = (item: GlobalDocumentListItem) => {
+    queueAgentDraft(`请核验海外一级来源文档 ${item.document_id}（${item.provider_name}，证据版本 ${item.source_version_id ?? "尚未归档"}），先保留原始时区、数字、单位和币种，再分析它可能通过哪些有证据的客户/供应商/产品/商品路径影响 A 股。逐边给出 source_version_id、原文位置、置信度和失效条件；没有双侧正式证据的路径不得补全。`);
+    useWorkspaceStore.getState().setPreset("agent");
+    navigate("/");
+  };
   const ready = useMemo(() => providers.filter((provider) => provider.enabled).length, [providers]);
 
   return <div className="relative flex h-full min-w-0 flex-col gap-3 overflow-hidden p-3">

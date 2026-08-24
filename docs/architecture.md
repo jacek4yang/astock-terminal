@@ -87,6 +87,13 @@ differential oracle, while `scripts/release-architecture-check.mjs` prevents
 either legacy runtime from returning. There is no browser or Tauri production
 fallback.
 
+The retired Dockview registry, v5 `AgentChat`, local Agent session store and
+route/layout shell are also absent from production sources and dependencies.
+News, disclosures and global-source views can hand a text draft to the single
+v6 Agent composer, but that transient handoff cannot create or recover a task.
+The workspace persistence key is v6-specific, so an obsolete IDE layout cannot
+be silently adopted after upgrade.
+
 ## Contract and persistence
 
 `protocol/schema` is the contract source. Frames use a four-byte little-endian
