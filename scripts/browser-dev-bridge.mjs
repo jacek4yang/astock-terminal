@@ -1,24 +1,27 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 
-const [engineExecutable, agentExecutable, bindHost = "127.0.0.1"] = process.argv.slice(2);
+const [engineExecutable, agentExecutable] = process.argv.slice(2);
 if (!engineExecutable || !agentExecutable) {
-  throw new Error("usage: node scripts/browser-dev-bridge.mjs <engine.exe> <agent-worker.exe> [private-bind-host]");
+  throw new Error("usage: node scripts/browser-dev-bridge.mjs <engine.exe> <agent-worker.exe>");
 }
 
-const privateIpv4 = /^(?:127(?:\.\d{1,3}){3}|10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})$/;
-if (bindHost !== "0.0.0.0" && !privateIpv4.test(bindHost)) {
-  throw new Error("browser test bridge may only bind to loopback or an RFC1918 IPv4 address");
-}
-
+const bindHost = "127.0.0.1";
+const bridgeToken = randomBytes(32).toString("base64url");
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const ALLOWED_ORIGINS = new Set([
-  `http://${bindHost}:5173`,
-  "http://host.docker.internal:5173",
-  "http://host.containers.internal:5173",
   "http://127.0.0.1:5173",
   "http://localhost:5173",
 ]);
+
+function hasValidToken(request) {
+  const supplied = request.headers["x-astock-test-token"];
+  if (typeof supplied !== "string") return false;
+  const left = Buffer.from(supplied);
+  const right = Buffer.from(bridgeToken);
+  return left.length === right.length && timingSafeEqual(left, right);
+}
 
 class WorkerChannel {
   constructor(name, executable) {
@@ -146,11 +149,14 @@ const server = createServer(async (request, response) => {
     response.writeHead(204, {
       "Access-Control-Allow-Origin": allowedOrigin,
       "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Headers": "Content-Type,X-AStock-Test-Token",
       "Access-Control-Max-Age": "600",
       Vary: "Origin",
     });
     return response.end();
+  }
+  if (!hasValidToken(request)) {
+    return json(response, 401, { error: "invalid browser test token" }, allowedOrigin);
   }
   if (request.method === "GET" && request.url === "/health") {
     return json(response, 200, { status: "ready", engine: engine.diagnostics(), agent: agent.diagnostics() }, allowedOrigin);
@@ -168,8 +174,20 @@ const server = createServer(async (request, response) => {
   }
 });
 
-server.listen(4174, bindHost, () => {
-  console.log(JSON.stringify({ status: "ready", url: `http://${bindHost}:4174`, engine_pid: engine.child.pid, agent_pid: agent.child.pid }));
+server.listen(0, bindHost, () => {
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("browser bridge did not receive a TCP port");
+  const uiUrl = new URL("http://127.0.0.1:5173/");
+  uiUrl.searchParams.set("nativeTest", "1");
+  uiUrl.searchParams.set("bridgePort", String(address.port));
+  uiUrl.searchParams.set("bridgeToken", bridgeToken);
+  console.log(JSON.stringify({
+    status: "ready",
+    bridge_url: `http://${bindHost}:${address.port}`,
+    ui_url: uiUrl.toString(),
+    engine_pid: engine.child.pid,
+    agent_pid: agent.child.pid,
+  }));
 });
 
 const shutdown = () => {

@@ -24,20 +24,19 @@ export interface NativeRequestOptions {
   cancellationId?: string;
 }
 
-function isPrivateBrowserTestHost(hostname: string): boolean {
-  if (hostname === "localhost" || hostname === "host.docker.internal" || hostname === "host.containers.internal") return true;
-  const parts = hostname.split(".").map(Number);
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
-  return parts[0] === 127
-    || parts[0] === 10
-    || (parts[0] === 192 && parts[1] === 168)
-    || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31);
+function browserTestConfig(): { port: number; token: string } | null {
+  if (!import.meta.env.DEV || typeof window === "undefined") return null;
+  if (window.location.hostname !== "127.0.0.1" && window.location.hostname !== "localhost") return null;
+  const search = new URLSearchParams(window.location.search);
+  if (search.get("nativeTest") !== "1") return null;
+  const port = Number(search.get("bridgePort"));
+  const token = search.get("bridgeToken") ?? "";
+  if (!Number.isInteger(port) || port < 1024 || port > 65535 || token.length < 32) return null;
+  return { port, token };
 }
 
 export function isBrowserTestBridge(): boolean {
-  if (!import.meta.env.DEV || typeof window === "undefined") return false;
-  return isPrivateBrowserTestHost(window.location.hostname)
-    && new URLSearchParams(window.location.search).get("nativeTest") === "1";
+  return browserTestConfig() !== null;
 }
 
 export function isProton(): boolean {
@@ -68,11 +67,15 @@ export async function requestNative<T>(
     deadline_ms: options.deadlineMs ?? 30_000,
     ...(options.cancellationId ? { cancellation_id: options.cancellationId } : {}),
   };
+  const testConfig = browserTestConfig();
   const raw = invokeOp
     ? await invokeOp("app:request", { target, request })
-    : await fetch(`http://${window.location.hostname}:4174/request`, {
+    : await fetch(`http://127.0.0.1:${testConfig?.port}/request`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-AStock-Test-Token": testConfig?.token ?? "",
+        },
         body: JSON.stringify({ target, request }),
         cache: "no-store",
       }).then(async (response) => {
