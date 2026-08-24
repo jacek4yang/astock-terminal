@@ -282,7 +282,12 @@ shortcut = "4"
         if ($LASTEXITCODE -ne 0) { throw 'Desktop fault-injection execution failed.' }
         Assert-ReleaseEvidence -FileName 'fault-injection.json' -Gate 'fault-injection'
     }
-    Invoke-ReleaseGateStep 'desktop-e2e-evidence' 'desktop' 'INTEGRATION TESTED' -Requires @('browser-cdp-evidence','package-proton-cef') -Action {
+    Invoke-ReleaseGateStep 'desktop-window-native-evidence' 'desktop' 'INTEGRATION TESTED' -Requires @('browser-cdp-evidence','package-proton-cef') -Action {
+        & (Join-Path $PSScriptRoot 'desktop-window-e2e.ps1') -EvidenceDirectory $EvidenceDirectory -AllowInteractiveInput -SkipSpaceCheck
+        if ($LASTEXITCODE -ne 0) { throw 'Native desktop window acceptance failed.' }
+        Assert-ReleaseEvidence -FileName 'desktop-window-native.json' -Gate 'desktop-window-native'
+    }
+    Invoke-ReleaseGateStep 'desktop-e2e-evidence' 'desktop' 'INTEGRATION TESTED' -Requires @('browser-cdp-evidence','package-proton-cef','desktop-window-native-evidence') -Action {
         Assert-ReleaseEvidence -FileName 'desktop-e2e.json' -Gate 'desktop-e2e-40'
     }
     Invoke-ReleaseGateStep 'migration-evidence' 'storage' 'INTEGRATION TESTED' -Requires @('browser-cdp-evidence','package-proton-cef') -Action {
@@ -324,6 +329,7 @@ shortcut = "4"
         'package-proton-cef',
         'fault-injection-core',
         'fault-injection-desktop-evidence',
+        'desktop-window-native-evidence',
         'desktop-e2e-evidence',
         'migration-evidence',
         'performance-evidence',

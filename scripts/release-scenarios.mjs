@@ -13,6 +13,17 @@ export const BROWSER_CDP_SCENARIOS = Object.freeze([
   "console-clean",
 ]);
 
+export const NATIVE_WINDOW_SCENARIOS = Object.freeze([
+  "packaged-launch",
+  "window-drag",
+  "window-double-click-maximize",
+  "window-restore",
+  "window-edge-resize",
+  "window-minimize",
+  "taskbar-icon-high-dpi",
+  "native-context-menu",
+]);
+
 // These are the v6 three-surface acceptance scenarios. They retain the
 // applicable cases from the original workbench brief while replacing generic
 // IDE docking/command-palette checks with the later user-approved adjustable,
@@ -62,6 +73,7 @@ export const DESKTOP_E2E_SCENARIOS = Object.freeze([
 
 for (const [name, scenarios, expected] of [
   ["browser", BROWSER_CDP_SCENARIOS, 12],
+  ["native-window", NATIVE_WINDOW_SCENARIOS, 8],
   ["desktop", DESKTOP_E2E_SCENARIOS, 40],
 ]) {
   if (scenarios.length !== expected || new Set(scenarios).size !== expected) {

@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { validateEvidence } from "./release-evidence-check.mjs";
-import { BROWSER_CDP_SCENARIOS, DESKTOP_E2E_SCENARIOS } from "./release-scenarios.mjs";
+import { BROWSER_CDP_SCENARIOS, DESKTOP_E2E_SCENARIOS, NATIVE_WINDOW_SCENARIOS } from "./release-scenarios.mjs";
 
 const commit = "a".repeat(40);
 const artifactRoot = fs.mkdtempSync(path.join(os.tmpdir(), "astock-release-evidence-"));
@@ -90,11 +90,20 @@ test("requires all named browser scenarios", () => {
 test("pins exactly the approved v6 browser and desktop scenario catalogs", () => {
   assert.equal(BROWSER_CDP_SCENARIOS.length, 12);
   assert.equal(new Set(BROWSER_CDP_SCENARIOS).size, 12);
+  assert.equal(NATIVE_WINDOW_SCENARIOS.length, 8);
+  assert.equal(new Set(NATIVE_WINDOW_SCENARIOS).size, 8);
   assert.equal(DESKTOP_E2E_SCENARIOS.length, 40);
   assert.equal(new Set(DESKTOP_E2E_SCENARIOS).size, 40);
   assert.ok(DESKTOP_E2E_SCENARIOS.includes("normal-agent-research"));
   assert.ok(DESKTOP_E2E_SCENARIOS.includes("window-double-click-maximize"));
   assert.ok(DESKTOP_E2E_SCENARIOS.includes("release-no-debug-leakage-local-gate-disclosure"));
+});
+
+test("requires every native window case to carry a hashed trace", () => {
+  const evidence = base("desktop-window-native", NATIVE_WINDOW_SCENARIOS);
+  assert.throws(() => validateEvidence(evidence, "desktop-window-native", commit), /no assertions/);
+  evidence.cases = evidencedCases(NATIVE_WINDOW_SCENARIOS);
+  assert.doesNotThrow(() => validateEvidence(evidence, "desktop-window-native", commit));
 });
 
 test("rejects desktop cases padded with unnamed placeholders", () => {

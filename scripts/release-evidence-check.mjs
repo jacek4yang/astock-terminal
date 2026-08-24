@@ -2,7 +2,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { BROWSER_CDP_SCENARIOS, DESKTOP_E2E_SCENARIOS } from "./release-scenarios.mjs";
+import { BROWSER_CDP_SCENARIOS, DESKTOP_E2E_SCENARIOS, NATIVE_WINDOW_SCENARIOS } from "./release-scenarios.mjs";
 
 const HEX_SHA256 = /^[a-f0-9]{64}$/i;
 const GIT_COMMIT = /^[a-f0-9]{40}$/i;
@@ -40,6 +40,7 @@ const REQUIRED_CASES = Object.freeze({
     "gpu-failure",
   ],
   "browser-cdp": BROWSER_CDP_SCENARIOS,
+  "desktop-window-native": NATIVE_WINDOW_SCENARIOS,
   "desktop-e2e-40": DESKTOP_E2E_SCENARIOS,
   "migration-install-upgrade-uninstall": [
     "clean-install",
@@ -93,7 +94,7 @@ function validateCases(evidence, gate) {
     ids.add(item.id);
     invariant(item.status === STATUS, `${gate}: case ${item.id} is not PASSED`);
     invariant(Number.isFinite(item.duration_ms) && item.duration_ms >= 0, `${gate}: case ${item.id} has invalid duration_ms`);
-    const requiresArtifacts = gate === "browser-cdp" || gate === "desktop-e2e-40" ||
+    const requiresArtifacts = gate === "browser-cdp" || gate === "desktop-window-native" || gate === "desktop-e2e-40" ||
       (gate === "fault-injection" && (item.id === "renderer-kill" || item.id === "gpu-failure"));
     if (requiresArtifacts) {
       invariant(Number.isInteger(item.assertion_count) && item.assertion_count > 0, `${gate}: case ${item.id} has no assertions`);

@@ -8,6 +8,14 @@ It is not a manually authored pass marker. Every evidence JSON must contain:
 - unique, individually passed cases with measured durations;
 - every gate-specific scenario required by `scripts/release-evidence-check.mjs`.
 
+Before the complete desktop gate, a separate native-window gate exercises the
+actual packaged Proton HWND. It verifies the exact executable path before any
+operation, uses an isolated D-drive profile, and covers launch, bounded titlebar
+drag, double-click maximize/restore, edge resize, minimize, taskbar icon/high
+DPI, and the native titlebar context menu. Real mouse input is opt-in, bounded
+to the isolated test process, and restores the prior cursor position. The gate
+cannot run until Codex in-app browser evidence and packaging both pass.
+
 The desktop gate requires the exact 40 named v6 scenarios in
 `scripts/release-scenarios.mjs`; unrelated placeholder cases cannot satisfy the
 count. Every browser and desktop case must record a positive assertion count
@@ -35,5 +43,8 @@ Authenticode evidence lists every shipped PE with an absolute path, SHA-256 and
 `Valid` status, including Host, Engine, Agent, CEF helper and NSIS installer.
 
 `scripts/release-gate.ps1` validates the complete contract and then hashes each
-evidence file into the immutable release report. A minimal JSON containing only
-`gate`, `status` and `commit` is deliberately rejected.
+evidence file into the immutable release report. Failed prerequisites mark
+dependent gates as `SKIPPED` without executing them, and skipped gates still
+fail the overall report. Production signing depends on every critical gate. A
+minimal JSON containing only `gate`, `status` and `commit` is deliberately
+rejected.

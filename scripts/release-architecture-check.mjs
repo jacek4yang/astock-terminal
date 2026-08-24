@@ -21,6 +21,8 @@ const buildCommon = fs.readFileSync(path.join(root, "scripts", "Build.Common.ps1
 const desktopCdpSession = fs.readFileSync(path.join(root, "scripts", "desktop-cdp-session.ps1"), "utf8");
 const desktopRendererFault = fs.readFileSync(path.join(root, "scripts", "desktop-renderer-fault.mjs"), "utf8");
 const desktopFaultEvidence = fs.readFileSync(path.join(root, "scripts", "fault-injection-desktop.ps1"), "utf8");
+const desktopWindowProbe = fs.readFileSync(path.join(root, "scripts", "desktop-window-probe.ps1"), "utf8");
+const desktopWindowEvidence = fs.readFileSync(path.join(root, "scripts", "desktop-window-e2e.ps1"), "utf8");
 const rendererRecoveryPatch = fs.readFileSync(path.join(root, "patches", "proton-0.2.1-windows-renderer-recovery.patch"), "utf8");
 const gpuPolicyPatch = fs.readFileSync(path.join(root, "patches", "proton-0.2.1-windows-gpu-policy.patch"), "utf8");
 
@@ -110,12 +112,20 @@ for (const faultMarker of ["Page.crash", "renderer_fault_injected", "host_restar
 for (const faultMarker of ["renderer-kill", "gpu-failure", "PROTON_DISABLE_GPU=1", "fault-injection.json", "production_data_touched = $false"]) {
   if (!desktopFaultEvidence.includes(faultMarker)) failures.push(`desktop fault evidence harness is missing ${faultMarker}`);
 }
+for (const probeMarker of ["ExpectedExecutablePath", "Refusing to control an unrelated process", "AllowInteractiveInput", "GetDpiForWindow", "HasLargeIcon", "TaskbarEligible"]) {
+  if (!desktopWindowProbe.includes(probeMarker)) failures.push(`native desktop window probe is missing ${probeMarker}`);
+}
+for (const windowMarker of ["window-drag", "window-double-click-maximize", "window-edge-resize", "native-context-menu", "production_data_touched = $false", "desktop-window-native.json"]) {
+  if (!desktopWindowEvidence.includes(windowMarker)) failures.push(`native desktop window evidence harness is missing ${windowMarker}`);
+}
 if (releaseGate.indexOf("browser-cdp-evidence") > releaseGate.indexOf("package-proton-cef")) {
   failures.push("release gate can launch the packaged desktop before Codex browser evidence passes");
 }
 for (const dependencyMarker of [
   "'package-proton-cef' 'package' 'INTEGRATION TESTED' -Requires @('browser-cdp-evidence') -Action",
   "'fault-injection-desktop-evidence' 'reliability' 'FAULT-INJECTION TESTED' -Requires @('browser-cdp-evidence','package-proton-cef','fault-injection-core') -Action",
+  "'desktop-window-native-evidence' 'desktop' 'INTEGRATION TESTED' -Requires @('browser-cdp-evidence','package-proton-cef') -Action",
+  "'desktop-e2e-evidence' 'desktop' 'INTEGRATION TESTED' -Requires @('browser-cdp-evidence','package-proton-cef','desktop-window-native-evidence') -Action",
   "'authenticode' 'signing' 'ASSUMED/TRUSTED BOUNDARY' -Requires $productionSigningPrerequisites -Action",
   "'credential-rotation-evidence'",
   "'external-services-evidence'",
