@@ -1,4 +1,4 @@
-import { parseResponseEnvelope, type RequestEnvelope } from "./generated";
+import { MAX_FRAME_BYTES, parseResponseEnvelope, type RequestEnvelope } from "./generated";
 
 const PROTOCOL_VERSION = 1;
 
@@ -33,6 +33,30 @@ function browserTestConfig(): { port: number; token: string } | null {
   const token = search.get("bridgeToken") ?? "";
   if (!Number.isInteger(port) || port < 1024 || port > 65535 || token.length < 32) return null;
   return { port, token };
+}
+
+export async function parseBrowserBridgeResponse(response: Response): Promise<unknown> {
+  const declaredLength = Number(response.headers.get("content-length") ?? 0);
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_FRAME_BYTES) {
+    throw new Error(`本地浏览器测试桥响应超过 ${MAX_FRAME_BYTES / 1024 / 1024} MiB 安全上限。`);
+  }
+  const text = await response.text();
+  if (new TextEncoder().encode(text).byteLength > MAX_FRAME_BYTES) {
+    throw new Error(`本地浏览器测试桥响应超过 ${MAX_FRAME_BYTES / 1024 / 1024} MiB 安全上限。`);
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new Error(`本地浏览器测试桥返回了非 JSON 响应（HTTP ${response.status}）；请确认 Bridge 仍在运行且端口未被代理或其他程序占用。`);
+  }
+  if (!response.ok) {
+    const message = value && typeof value === "object" && "error" in value
+      ? String((value as { error: unknown }).error).slice(0, 400)
+      : `HTTP ${response.status}`;
+    throw new Error(`本地浏览器测试桥失败：${message}`);
+  }
+  return value;
 }
 
 export function isBrowserTestBridge(): boolean {
@@ -78,14 +102,7 @@ export async function requestNative<T>(
         },
         body: JSON.stringify({ target, request }),
         cache: "no-store",
-      }).then(async (response) => {
-        const value = await response.json() as unknown;
-        if (!response.ok) {
-          const message = value && typeof value === "object" && "error" in value ? String(value.error) : `HTTP ${response.status}`;
-          throw new Error(`本地浏览器测试桥失败：${message}`);
-        }
-        return value;
-      });
+      }).then(parseBrowserBridgeResponse);
   const response = parseResponseEnvelope<T>(raw);
   if (!response || response.request_id !== request.request_id) {
     throw new Error("Host 返回了无法关联的响应。");
