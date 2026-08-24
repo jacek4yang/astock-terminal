@@ -6,8 +6,8 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 [dependencies]
-astock-storage = { path = "../storage" }
-astock-trading-rules = { path = "../trading-rules" }
+astock-storage = { version = "6.0.0", path = "../storage" }
+astock-trading-rules = { version = "6.0.0", path = "../trading-rules" }
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true

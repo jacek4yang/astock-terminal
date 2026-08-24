@@ -6,9 +6,9 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 [dependencies]
-astock-storage = { path = "../storage" }
-astock-source-verification = { path = "../source-verification" }
-astock-graph = { path = "../graph" }
+astock-storage = { version = "6.0.0", path = "../storage" }
+astock-source-verification = { version = "6.0.0", path = "../source-verification" }
+astock-graph = { version = "6.0.0", path = "../graph" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

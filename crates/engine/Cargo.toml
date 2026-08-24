@@ -6,25 +6,25 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 [dependencies]
-astock-core = { path = "../core" }
-astock-chanlun = { path = "../chanlun" }
-astock-backtest = { path = "../backtest" }
-astock-disclosure = { path = "../disclosure" }
-astock-entity-linking = { path = "../entity-linking" }
-astock-event-intelligence = { path = "../event-intelligence" }
-astock-fundamental = { path = "../fundamental" }
-astock-global-intelligence = { path = "../global-intelligence" }
-astock-graph = { path = "../graph" }
-astock-market-data = { path = "../market-data" }
-astock-minimax = { path = "../minimax" }
-astock-news-intelligence = { path = "../news-intelligence" }
-astock-protocol = { path = "../protocol" }
-astock-quant = { path = "../quant" }
-astock-relation-extraction = { path = "../relation-extraction" }
-astock-source-verification = { path = "../source-verification" }
-astock-storage = { path = "../storage" }
-astock-technical = { path = "../technical" }
-astock-trading-rules = { path = "../trading-rules" }
+astock-core = { version = "6.0.0", path = "../core" }
+astock-chanlun = { version = "6.0.0", path = "../chanlun" }
+astock-backtest = { version = "6.0.0", path = "../backtest" }
+astock-disclosure = { version = "6.0.0", path = "../disclosure" }
+astock-entity-linking = { version = "6.0.0", path = "../entity-linking" }
+astock-event-intelligence = { version = "6.0.0", path = "../event-intelligence" }
+astock-fundamental = { version = "6.0.0", path = "../fundamental" }
+astock-global-intelligence = { version = "6.0.0", path = "../global-intelligence" }
+astock-graph = { version = "6.0.0", path = "../graph" }
+astock-market-data = { version = "6.0.0", path = "../market-data" }
+astock-minimax = { version = "6.0.0", path = "../minimax" }
+astock-news-intelligence = { version = "6.0.0", path = "../news-intelligence" }
+astock-protocol = { version = "6.0.0", path = "../protocol" }
+astock-quant = { version = "6.0.0", path = "../quant" }
+astock-relation-extraction = { version = "6.0.0", path = "../relation-extraction" }
+astock-source-verification = { version = "6.0.0", path = "../source-verification" }
+astock-storage = { version = "6.0.0", path = "../storage" }
+astock-technical = { version = "6.0.0", path = "../technical" }
+astock-trading-rules = { version = "6.0.0", path = "../trading-rules" }
 base64 = "0.22"
 chrono.workspace = true
 futures.workspace = true
