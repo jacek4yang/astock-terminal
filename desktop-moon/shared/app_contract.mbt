@@ -1,4 +1,5 @@
-///| Single coarse-grained, versioned Host route. Domain operations remain
+///|
+/// Single coarse-grained, versioned Host route. Domain operations remain
 /// coarse-grained inside Engine and Agent; the Host does not mirror hundreds
 /// of legacy Tauri commands.
 pub(all) struct AppRequest {
@@ -17,7 +18,8 @@ pub let app_request : @proton_contract.Command[AppRequest, Json] = @proton_contr
   "request",
 )
 
-///| Batched Worker event stream; renderer coalesces these to at most 10 Hz.
+///|
+/// Batched Worker event stream; renderer coalesces these to at most 10 Hz.
 pub let worker_event : @proton_contract.Event[Json] = @proton_contract.event(
   "worker_event",
 )

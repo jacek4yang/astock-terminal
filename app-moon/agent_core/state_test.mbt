@@ -125,10 +125,10 @@ test "tool result requires matching pending call and completes once" {
   let started = reduce(initial("task-1"), 1, Start(complete_spec())).state
   let reasoning = reduce(started, 2, Prepared).state
   let pending = reduce(
-    reasoning,
-    3,
-    ToolRequested(call_id="call-1", tool="market.quote"),
-  ).state
+      reasoning,
+      3,
+      ToolRequested(call_id="call-1", tool="market.quote"),
+    ).state
   let wrong = reduce(
     pending,
     4,
@@ -136,10 +136,10 @@ test "tool result requires matching pending call and completes once" {
   )
   assert_false(wrong.accepted)
   let done = reduce(
-    pending,
-    4,
-    ToolSucceeded(call_id="call-1", evidence_ids=["ev-1"]),
-  ).state
+      pending,
+      4,
+      ToolSucceeded(call_id="call-1", evidence_ids=["ev-1"]),
+    ).state
   assert_eq(done.phase, Reviewing)
   let duplicate = reduce(
     done,
@@ -163,22 +163,22 @@ test "report publication requires successful verification" {
   let started = reduce(initial("task-1"), 1, Start(complete_spec())).state
   let reasoning = reduce(started, 2, Prepared).state
   let pending = reduce(
-    reasoning,
-    3,
-    ToolRequested(call_id="call-1", tool="market.quote"),
-  ).state
+      reasoning,
+      3,
+      ToolRequested(call_id="call-1", tool="market.quote"),
+    ).state
   let reviewing = reduce(
-    pending,
-    4,
-    ToolSucceeded(call_id="call-1", evidence_ids=["ev-1"]),
-  ).state
+      pending,
+      4,
+      ToolSucceeded(call_id="call-1", evidence_ids=["ev-1"]),
+    ).state
   let synthesizing = reduce(reviewing, 5, ReviewReady).state
   let verifying = reduce(synthesizing, 6, SynthesisReady).state
   let failed = reduce(
-    verifying,
-    7,
-    VerificationRejected(["claim_without_evidence"]),
-  ).state
+      verifying,
+      7,
+      VerificationRejected(["claim_without_evidence"]),
+    ).state
   assert_eq(failed.phase, VerificationFailed)
   let publish = reduce(failed, 8, VerificationPassed)
   assert_false(publish.accepted)

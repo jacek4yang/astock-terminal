@@ -1,10 +1,12 @@
-///| A pending tool call. `call_id` is globally unique for one task history.
+///|
+/// A pending tool call. `call_id` is globally unique for one task history.
 pub(all) struct PendingTool {
   call_id : String
   tool : String
 } derive(Debug, Eq, ToJson, FromJson)
 
-///| Pure, replayable logical Agent state. It contains no sockets, handles,
+///|
+/// Pure, replayable logical Agent state. It contains no sockets, handles,
 /// clocks, random generators, clients or database references.
 pub(all) struct AgentState {
   task_id : String
@@ -25,7 +27,8 @@ pub(all) struct AgentState {
   terminal_reason : String?
 } derive(Debug, Eq, ToJson, FromJson)
 
-///| Construct the only valid idle state.
+///|
+/// Construct the only valid idle state.
 pub fn initial(task_id : String) -> AgentState {
   AgentState::{
     task_id,
@@ -47,7 +50,8 @@ pub fn initial(task_id : String) -> AgentState {
   }
 }
 
-///| States that ordinary events can never leave.
+///|
+/// States that ordinary events can never leave.
 pub fn AgentState::is_terminal(self : AgentState) -> Bool {
   match self.phase {
     Completed | Cancelled | HardFailed => true
@@ -55,7 +59,8 @@ pub fn AgentState::is_terminal(self : AgentState) -> Bool {
   }
 }
 
-///| Stable wire token for diagnostics and event-store checkpoints.
+///|
+/// Stable wire token for diagnostics and event-store checkpoints.
 pub fn AgentState::phase_name(self : AgentState) -> String {
   match self.phase {
     Idle => "idle"
@@ -74,57 +79,80 @@ pub fn AgentState::phase_name(self : AgentState) -> String {
   }
 }
 
-///| Fields required before autonomous research may begin. Business fields
+///|
+/// Fields required before autonomous research may begin. Business fields
 /// never receive silent defaults.
 pub fn missing_task_fields(spec : @protocol.TaskSpec) -> Array[String] {
   let missing : Array[String] = []
-  if spec.objective.trim().is_empty() { missing.push("objective") }
-  if spec.security_universe.is_empty() { missing.push("security_universe") }
-  if spec.as_of.trim().is_empty() { missing.push("as_of") }
-  if spec.research_start.trim().is_empty() { missing.push("research_start") }
-  if spec.research_end.trim().is_empty() { missing.push("research_end") }
+  if spec.objective.trim().is_empty() {
+    missing.push("objective")
+  }
+  if spec.security_universe.is_empty() {
+    missing.push("security_universe")
+  }
+  if spec.as_of.trim().is_empty() {
+    missing.push("as_of")
+  }
+  if spec.research_start.trim().is_empty() {
+    missing.push("research_start")
+  }
+  if spec.research_end.trim().is_empty() {
+    missing.push("research_end")
+  }
   if spec.investment_horizon.trim().is_empty() {
     missing.push("investment_horizon")
   }
   if spec.comparison_benchmark.trim().is_empty() {
     missing.push("comparison_benchmark")
   }
-  if spec.output_type.trim().is_empty() { missing.push("output_type") }
+  if spec.output_type.trim().is_empty() {
+    missing.push("output_type")
+  }
   if spec.evidence_requirement.trim().is_empty() {
     missing.push("evidence_requirement")
   }
   missing
 }
 
-///| Check a membership relation without exposing mutable state.
+///|
+/// Check a membership relation without exposing mutable state.
 fn contains(values : Array[String], needle : String) -> Bool {
   for value in values {
-    if value == needle { return true }
+    if value == needle {
+      return true
+    }
   }
   false
 }
 
-///| Remove exactly one pending call, returning a fresh array.
+///|
+/// Remove exactly one pending call, returning a fresh array.
 fn remove_pending(
   values : Array[PendingTool],
   call_id : String,
 ) -> Array[PendingTool] {
   let out : Array[PendingTool] = []
   for item in values {
-    if item.call_id != call_id { out.push(item) }
+    if item.call_id != call_id {
+      out.push(item)
+    }
   }
   out
 }
 
-///| Find a matching pending call.
+///|
+/// Find a matching pending call.
 pub fn AgentState::has_pending(self : AgentState, call_id : String) -> Bool {
   for item in self.pending_tools {
-    if item.call_id == call_id { return true }
+    if item.call_id == call_id {
+      return true
+    }
   }
   false
 }
 
-///| Copy with controlled replacement. New arrays passed to this function are
+///|
+/// Copy with controlled replacement. New arrays passed to this function are
 /// never mutated after the state is returned.
 fn evolve(
   state : AgentState,
@@ -162,13 +190,14 @@ fn evolve(
   }
 }
 
-///| Inputs accepted by the pure Agent kernel.
+///|
+/// Inputs accepted by the pure Agent kernel.
 pub(all) enum AgentEvent {
   Start(@protocol.TaskSpec)
   Clarified(@protocol.TaskSpec)
   ClarificationAnswered(
     @protocol.TaskSpec,
-    Array[@protocol.ClarificationAnswer],
+    Array[@protocol.ClarificationAnswer]
   )
   ClarificationGenerated(@protocol.ClarificationRequest)
   Prepared
@@ -186,7 +215,8 @@ pub(all) enum AgentEvent {
   HardFailure(String)
 } derive(Debug, Eq)
 
-///| Effect descriptions interpreted by the worker shell only after the input
+///|
+/// Effect descriptions interpreted by the worker shell only after the input
 /// event and checkpoint have been durably committed.
 pub(all) enum AgentEffect {
   PersistCheckpoint
@@ -202,6 +232,7 @@ pub(all) enum AgentEffect {
   EmitTerminal
 } derive(Debug, Eq)
 
+///|
 pub(all) struct Transition {
   state : AgentState
   effects : Array[AgentEffect]
@@ -209,22 +240,21 @@ pub(all) struct Transition {
   rejection : String?
 } derive(Debug, Eq)
 
+///|
 fn accepted(state : AgentState, effects : Array[AgentEffect]) -> Transition {
   Transition::{ state, effects, accepted: true, rejection: None }
 }
 
+///|
 fn rejected(state : AgentState, reason : String) -> Transition {
   Transition::{ state, effects: [], accepted: false, rejection: Some(reason) }
 }
 
-///| Pure reducer. The caller must persist the input event before executing
+///|
+/// Pure reducer. The caller must persist the input event before executing
 /// returned effects. Duplicate/stale sequences and terminal-state events are
 /// rejected without mutation.
-pub fn reduce(
-  state : AgentState,
-  seq : Int,
-  event : AgentEvent,
-) -> Transition {
+pub fn reduce(state : AgentState, seq : Int, event : AgentEvent) -> Transition {
   if seq <= state.accepted_seq {
     return rejected(state, "duplicate_or_stale_sequence")
   }
@@ -284,23 +314,18 @@ pub fn reduce(
     }
     ClarificationGenerated(request) =>
       if state.phase == WaitingForUser && !request.questions.is_empty() {
-        accepted(
-          evolve(
-            state,
-            accepted_seq=seq,
-            clarification=Some(request),
-          ),
-          [PersistCheckpoint],
-        )
+        accepted(evolve(state, accepted_seq=seq, clarification=Some(request)), [
+          PersistCheckpoint,
+        ])
       } else {
         rejected(state, "clarification_generation_requires_waiting")
       }
     Prepared =>
       if state.phase == Preparing {
-        accepted(
-          evolve(state, phase=Reasoning, accepted_seq=seq),
-          [PersistCheckpoint, RequestModel],
-        )
+        accepted(evolve(state, phase=Reasoning, accepted_seq=seq), [
+          PersistCheckpoint,
+          RequestModel,
+        ])
       } else {
         rejected(state, "prepared_requires_preparing")
       }
@@ -319,10 +344,9 @@ pub fn reduce(
             [PersistCheckpoint, EmitTerminal],
           )
         } else {
-          accepted(
-            evolve(state, accepted_seq=seq, model_rounds=rounds),
-            [PersistCheckpoint],
-          )
+          accepted(evolve(state, accepted_seq=seq, model_rounds=rounds), [
+            PersistCheckpoint,
+          ])
         }
       } else {
         rejected(state, "model_round_requires_reasoning")
@@ -379,10 +403,10 @@ pub fn reduce(
         rejected(state, "tool_failure_without_pending_call")
       } else if retryable && state.retry_count < state.max_retries {
         let attempt = state.retry_count + 1
-        accepted(
-          evolve(state, accepted_seq=seq, retry_count=attempt),
-          [PersistCheckpoint, ScheduleRetry(call_id~, attempt~)],
-        )
+        accepted(evolve(state, accepted_seq=seq, retry_count=attempt), [
+          PersistCheckpoint,
+          ScheduleRetry(call_id~, attempt~),
+        ])
       } else {
         accepted(
           evolve(
@@ -396,19 +420,19 @@ pub fn reduce(
       }
     ReviewReady =>
       if state.phase == Reviewing {
-        accepted(
-          evolve(state, phase=Synthesizing, accepted_seq=seq),
-          [PersistCheckpoint, SynthesizeReport],
-        )
+        accepted(evolve(state, phase=Synthesizing, accepted_seq=seq), [
+          PersistCheckpoint,
+          SynthesizeReport,
+        ])
       } else {
         rejected(state, "review_ready_requires_reviewing")
       }
     SynthesisReady =>
       if state.phase == Synthesizing {
-        accepted(
-          evolve(state, phase=Verifying, accepted_seq=seq),
-          [PersistCheckpoint, VerifyReport],
-        )
+        accepted(evolve(state, phase=Verifying, accepted_seq=seq), [
+          PersistCheckpoint,
+          VerifyReport,
+        ])
       } else {
         rejected(state, "synthesis_ready_requires_synthesizing")
       }
@@ -429,45 +453,48 @@ pub fn reduce(
     VerificationPassed =>
       if state.phase == Verifying &&
         state.blocking_verification_errors.is_empty() {
-        accepted(
-          evolve(state, phase=Completed, accepted_seq=seq),
-          [PersistCheckpoint, PublishReport, EmitTerminal],
-        )
+        accepted(evolve(state, phase=Completed, accepted_seq=seq), [
+          PersistCheckpoint,
+          PublishReport,
+          EmitTerminal,
+        ])
       } else {
         rejected(state, "publication_blocked")
       }
-    QuotaSuspended => accepted(
-      evolve(state, phase=Suspended, accepted_seq=seq),
-      [PersistCheckpoint],
-    )
+    QuotaSuspended =>
+      accepted(evolve(state, phase=Suspended, accepted_seq=seq), [
+        PersistCheckpoint,
+      ])
     Resume =>
       if state.phase == Suspended {
-        accepted(
-          evolve(state, phase=Reasoning, accepted_seq=seq),
-          [PersistCheckpoint, RequestModel],
-        )
+        accepted(evolve(state, phase=Reasoning, accepted_seq=seq), [
+          PersistCheckpoint,
+          RequestModel,
+        ])
       } else {
         rejected(state, "resume_requires_suspended")
       }
-    Cancel => accepted(
-      evolve(
-        state,
-        phase=Cancelled,
-        accepted_seq=seq,
-        pending_tools=[],
-        terminal_reason=Some("cancelled_by_user"),
-      ),
-      [PersistCheckpoint, EmitTerminal],
-    )
-    HardFailure(reason) => accepted(
-      evolve(
-        state,
-        phase=HardFailed,
-        accepted_seq=seq,
-        pending_tools=[],
-        terminal_reason=Some(reason),
-      ),
-      [PersistCheckpoint, EmitTerminal],
-    )
+    Cancel =>
+      accepted(
+        evolve(
+          state,
+          phase=Cancelled,
+          accepted_seq=seq,
+          pending_tools=[],
+          terminal_reason=Some("cancelled_by_user"),
+        ),
+        [PersistCheckpoint, EmitTerminal],
+      )
+    HardFailure(reason) =>
+      accepted(
+        evolve(
+          state,
+          phase=HardFailed,
+          accepted_seq=seq,
+          pending_tools=[],
+          terminal_reason=Some(reason),
+        ),
+        [PersistCheckpoint, EmitTerminal],
+      )
   }
 }

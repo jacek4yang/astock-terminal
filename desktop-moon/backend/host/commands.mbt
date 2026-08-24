@@ -1,3 +1,4 @@
+///|
 using @shared {app_request}
 
 ///|
@@ -5,6 +6,6 @@ using @shared {app_request}
 async fn Backend::app_request(
   self : Backend,
   request : @shared.AppRequest,
-) -> Json raise {
+) -> Json {
   self.route(request)
 }

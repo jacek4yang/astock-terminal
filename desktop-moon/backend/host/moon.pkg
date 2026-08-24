@@ -11,10 +11,6 @@ import {
 
 supported_targets = "native"
 
-options(
-  "native-stub": [ "window_win.c" ],
-)
-
 dev_build(
   rule: "proton_codegen",
   input: "commands.mbt",
@@ -22,3 +18,7 @@ dev_build(
 )
 
 formatter(ignore: [ "commands.g.mbt" ])
+
+options(
+  "native-stub": [ "window_win.c" ],
+)

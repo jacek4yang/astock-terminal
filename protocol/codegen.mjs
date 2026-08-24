@@ -246,15 +246,25 @@ export function parseResponseEnvelope<T = unknown>(value: unknown): ResponseEnve
 `;
 
 const moonbit = `${header("//")}
+///|
 pub let protocol_version : Int = 1
+
+///|
 pub let max_frame_bytes : Int = 8 * 1024 * 1024
+
+///|
 pub let max_page_size : Int = 500
 
+///|
 pub(all) enum AgentPhase {${phases.map((phase) => `\n  ${phase.split("_").map((part) => part[0].toUpperCase() + part.slice(1)).join("")}`).join("")}\n} derive(Debug, Eq, ToJson, FromJson)
 
+///|
 pub extend AgentPhase with ToJson::{to_json}
+
+///|
 pub extend AgentPhase with FromJson::{from_json}
 
+///|
 pub(all) struct TaskSpec {
   objective : String
   security_universe : Array[String]
@@ -267,9 +277,13 @@ pub(all) struct TaskSpec {
   evidence_requirement : String
 } derive(Debug, Eq, ToJson, FromJson)
 
+///|
 pub extend TaskSpec with ToJson::{to_json}
+
+///|
 pub extend TaskSpec with FromJson::{from_json}
 
+///|
 pub(all) struct ClarificationOption {
   id : String
   label : String
@@ -277,9 +291,13 @@ pub(all) struct ClarificationOption {
   recommended : Bool
 } derive(Debug, Eq, ToJson, FromJson)
 
+///|
 pub extend ClarificationOption with ToJson::{to_json}
+
+///|
 pub extend ClarificationOption with FromJson::{from_json}
 
+///|
 pub(all) struct ClarificationQuestion {
   id : String
   header : String?
@@ -290,18 +308,26 @@ pub(all) struct ClarificationQuestion {
   target_fields : Array[String]
 } derive(Debug, Eq, ToJson, FromJson)
 
+///|
 pub extend ClarificationQuestion with ToJson::{to_json}
+
+///|
 pub extend ClarificationQuestion with FromJson::{from_json}
 
+///|
 pub(all) struct ClarificationRequest {
   title : String
   description : String?
   questions : Array[ClarificationQuestion]
 } derive(Debug, Eq, ToJson, FromJson)
 
+///|
 pub extend ClarificationRequest with ToJson::{to_json}
+
+///|
 pub extend ClarificationRequest with FromJson::{from_json}
 
+///|
 pub(all) struct ClarificationAnswer {
   question_id : String
   option_ids : Array[String]
@@ -309,7 +335,10 @@ pub(all) struct ClarificationAnswer {
   decision_mode : String
 } derive(Debug, Eq, ToJson, FromJson)
 
+///|
 pub extend ClarificationAnswer with ToJson::{to_json}
+
+///|
 pub extend ClarificationAnswer with FromJson::{from_json}
 `;
 
