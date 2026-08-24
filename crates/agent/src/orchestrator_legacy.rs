@@ -3361,6 +3361,11 @@ mod tests {
                 break;
             }
         }
+        // ToolCallStarted is emitted immediately before the tool future is
+        // polled. Yield once so the paused clock observes SlowTool's timer
+        // before advancing; otherwise parallel test scheduling can advance
+        // past an outer guard before the inner timer exists.
+        tokio::task::yield_now().await;
         tokio::time::advance(std::time::Duration::from_secs(130)).await;
         tokio::task::yield_now().await;
         events.extend(stream.collect::<Vec<_>>().await);

@@ -2652,7 +2652,7 @@ mod tests {
         assert_eq!(market.calls.load(Ordering::SeqCst), 4);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn scan_market_stops_after_three_attempts_and_reports_final_failures() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(StorageConfig::with_base_dir(dir.path())).unwrap();

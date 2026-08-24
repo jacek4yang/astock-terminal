@@ -296,9 +296,8 @@ impl AgentEngine {
                     }
                 }
 
-                let reason = retry_reason.unwrap_or_else(|| {
-                    "Agent 执行流在没有终态事件的情况下意外结束".to_string()
-                });
+                let reason = retry_reason
+                    .unwrap_or_else(|| "Agent 执行流在没有终态事件的情况下意外结束".to_string());
                 if attempt >= engine.max_runtime_retries {
                     let error = format!(
                         "{reason}；已达到自动恢复上限 {} 次，任务已保留为可继续状态",
@@ -388,10 +387,7 @@ impl AgentEngine {
         }
 
         let mut state: Value = serde_json::from_str(&record.state_json)?;
-        let completed_rounds = state
-            .pointer("/round")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as u32;
+        let completed_rounds = state.pointer("/round").and_then(Value::as_u64).unwrap_or(0) as u32;
         let max_rounds = state
             .pointer("/spec/max_rounds")
             .and_then(Value::as_u64)
@@ -469,6 +465,7 @@ pub fn is_retryable_runtime_error(error: &str) -> bool {
         "连接",
         "超时",
         "断流",
+        "流连续",
         "空闲看门狗",
         "终止标记前关闭",
         "执行流在没有终态",
@@ -540,8 +537,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn transient_model_failure_recovers_from_persisted_round() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(astock_storage::StorageConfig::with_base_dir(dir.path()))
-            .unwrap();
+        let storage =
+            Storage::open(astock_storage::StorageConfig::with_base_dir(dir.path())).unwrap();
         let backend = Arc::new(ScriptedChat::new("test-model"));
         backend
             .push(ScriptedReply::Error(MinimaxError::Network(

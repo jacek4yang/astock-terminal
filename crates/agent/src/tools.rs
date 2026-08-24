@@ -22,16 +22,58 @@ use tokio::sync::OnceCell;
 
 use crate::error::{AgentError, Result};
 
+pub(crate) use legacy::{now_secs, CacheEnvelope};
 pub use legacy::{
     parse_adjust, parse_args, parse_period, schema_value, AgentTool, ToolContext,
     ToolProgressDetail, ToolProgressReporter, ToolResult, ToolWorkItem,
 };
-pub(crate) use legacy::{now_secs, CacheEnvelope};
 
 #[derive(Debug, Clone)]
 enum SharedToolOutcome {
     Success(ToolResult),
-    Failure(String),
+    Failure(SharedToolFailure),
+}
+
+/// Cloneable representation of the error variants whose public meaning must
+/// survive single-flight fan-out. Errors with non-cloneable sources are
+/// intentionally reduced to a normal tool failure, but validation,
+/// cancellation and task lifecycle errors retain their typed contract.
+#[derive(Debug, Clone)]
+enum SharedToolFailure {
+    Tool { tool: String, msg: String },
+    UnknownTool(String),
+    InvalidArgs { tool: String, msg: String },
+    TaskNotFound(String),
+    NotResumable(String, String),
+    Cancelled(String),
+}
+
+impl SharedToolFailure {
+    fn capture(error: AgentError, fallback_tool: &str) -> Self {
+        match error {
+            AgentError::Tool { tool, msg } => Self::Tool { tool, msg },
+            AgentError::UnknownTool(tool) => Self::UnknownTool(tool),
+            AgentError::InvalidArgs { tool, msg } => Self::InvalidArgs { tool, msg },
+            AgentError::TaskNotFound(task) => Self::TaskNotFound(task),
+            AgentError::NotResumable(task, status) => Self::NotResumable(task, status),
+            AgentError::Cancelled(task) => Self::Cancelled(task),
+            other => Self::Tool {
+                tool: fallback_tool.to_string(),
+                msg: other.to_string(),
+            },
+        }
+    }
+
+    fn into_error(self) -> AgentError {
+        match self {
+            Self::Tool { tool, msg } => AgentError::Tool { tool, msg },
+            Self::UnknownTool(tool) => AgentError::UnknownTool(tool),
+            Self::InvalidArgs { tool, msg } => AgentError::InvalidArgs { tool, msg },
+            Self::TaskNotFound(task) => AgentError::TaskNotFound(task),
+            Self::NotResumable(task, status) => AgentError::NotResumable(task, status),
+            Self::Cancelled(task) => AgentError::Cancelled(task),
+        }
+    }
 }
 
 type SharedFlight = Arc<OnceCell<SharedToolOutcome>>;
@@ -82,10 +124,7 @@ impl ToolRegistry {
         self.inner.get(name)
     }
 
-    pub fn permission_domain(
-        &self,
-        name: &str,
-    ) -> Option<astock_security::ToolPermissionDomain> {
+    pub fn permission_domain(&self, name: &str) -> Option<astock_security::ToolPermissionDomain> {
         self.inner.permission_domain(name)
     }
 
@@ -117,9 +156,9 @@ impl ToolRegistry {
 
     fn remove_flight_if_idle(&self, cache_key: &str, flight: &SharedFlight) {
         let mut flights = self.lock_flights();
-        let removable = flights.get(cache_key).is_some_and(|current| {
-            Arc::ptr_eq(current, flight) && Arc::strong_count(current) <= 2
-        });
+        let removable = flights
+            .get(cache_key)
+            .is_some_and(|current| Arc::ptr_eq(current, flight) && Arc::strong_count(current) <= 2);
         if removable {
             flights.remove(cache_key);
         }
@@ -150,11 +189,16 @@ impl ToolRegistry {
             .get_or_init(|| async {
                 match tokio::time::timeout(budget, self.inner.dispatch(name, args, ctx)).await {
                     Ok(Ok(result)) => SharedToolOutcome::Success(result),
-                    Ok(Err(error)) => SharedToolOutcome::Failure(error.to_string()),
-                    Err(_) => SharedToolOutcome::Failure(format!(
-                        "运行超过安全上限 {} 秒，已取消该数据源调用；主 Agent 应继续使用其他已成功证据并明确标注此项缺失",
-                        budget.as_secs()
-                    )),
+                    Ok(Err(error)) => {
+                        SharedToolOutcome::Failure(SharedToolFailure::capture(error, name))
+                    }
+                    Err(_) => SharedToolOutcome::Failure(SharedToolFailure::Tool {
+                        tool: name.to_string(),
+                        msg: format!(
+                            "运行超过安全上限 {} 秒，已取消该数据源调用；主 Agent 应继续使用其他已成功证据并明确标注此项缺失",
+                            budget.as_secs()
+                        ),
+                    }),
                 }
             })
             .await
@@ -178,10 +222,7 @@ impl ToolRegistry {
 
         match outcome {
             SharedToolOutcome::Success(result) => Ok(result),
-            SharedToolOutcome::Failure(msg) => Err(AgentError::Tool {
-                tool: name.to_string(),
-                msg,
-            }),
+            SharedToolOutcome::Failure(error) => Err(error.into_error()),
         }
     }
 }
@@ -259,10 +300,7 @@ pub fn tool_cache_key(tool: &str, args: &Value) -> String {
 pub fn tool_runtime_budget(name: &str) -> Duration {
     let seconds = match name {
         "get_quote" | "search_stock" | "get_watchlist" | "get_cached_detail" => 90,
-        "get_kline"
-        | "compute_indicators"
-        | "get_fund_flow"
-        | "get_market_breadth"
+        "get_kline" | "compute_indicators" | "get_fund_flow" | "get_market_breadth"
         | "get_market_regime" => 180,
         "run_full_analysis"
         | "run_chanlun"
@@ -353,9 +391,8 @@ mod tests {
         let registry = ToolRegistry::new(vec![echo.clone()]);
         let ctx = ToolContext::new(Arc::new(NoopMarket), storage);
 
-        let calls = (0..16).map(|_| {
-            registry.dispatch("echo", json!({"text": "same request"}), &ctx)
-        });
+        let calls =
+            (0..16).map(|_| registry.dispatch("echo", json!({"text": "same request"}), &ctx));
         let results = futures::future::join_all(calls).await;
         assert!(results.iter().all(|result| result.is_ok()));
         assert_eq!(
