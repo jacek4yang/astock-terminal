@@ -14,6 +14,7 @@ const moonEntry = fs.readFileSync(path.join(root, "desktop-moon", "backend", "ap
 const engineSchema = fs.readFileSync(path.join(root, "protocol", "schema", "engine.schema.json"), "utf8");
 const browserBridge = fs.readFileSync(path.join(root, "scripts", "browser-dev-bridge.mjs"), "utf8");
 const acceptanceEvidence = fs.readFileSync(path.join(root, "scripts", "acceptance-evidence.mjs"), "utf8");
+const researchDataGate = fs.readFileSync(path.join(root, "scripts", "research-data-release-gate.mjs"), "utf8");
 const releaseGate = fs.readFileSync(path.join(root, "scripts", "release-gate.ps1"), "utf8");
 const releaseSigner = fs.readFileSync(path.join(root, "scripts", "sign-release.ps1"), "utf8");
 const releaseEvidenceValidator = fs.readFileSync(path.join(root, "scripts", "release-evidence-check.mjs"), "utf8");
@@ -115,6 +116,7 @@ for (const requiredWorkflowMarker of [
   "capability-parity-check.mjs --release",
   "release-architecture-check.mjs",
   "acceptance-evidence.test.mjs",
+  "research-data-release-gate.test.mjs",
   "https://cli.moonbitlang.com/binaries/0.1.20260819/moonbit-linux-x86_64.tar.gz",
   "moon version | grep -F 'moon 0.1.20260819'",
   "moon test --target native",
@@ -123,6 +125,15 @@ for (const requiredWorkflowMarker of [
   if (!qualityWorkflow.includes(requiredWorkflowMarker)) {
     failures.push(`quality workflow is missing v6 check: ${requiredWorkflowMarker}`);
   }
+}
+for (const marker of [
+  'gate: "public-research-data"',
+  'credentialed_providers_tested: false',
+  'assertIdentity(standard.data, "300308", "中际旭创")',
+  'assertIdentity(beijing.data, "920001", "纬达光电")',
+  'legacy.data.reconciliation?.blocking === true',
+]) {
+  if (!researchDataGate.includes(marker)) failures.push(`public research-data gate is missing ${marker}`);
 }
 for (const [name, source] of activeRuntimeDocs) {
   for (const staleDocMarker of ["cargo check -p astock-app", "真实 Tauri 桌面进程", "稳定 Tauri 响应"]) {
@@ -325,6 +336,8 @@ for (const dependencyMarker of [
   "ASTOCK_DESKTOP_ACCEPTANCE_SESSION",
   "Complete-InteractiveEvidence -SessionDirectory $BrowserAcceptanceSession",
   "Complete-InteractiveEvidence -SessionDirectory $DesktopAcceptanceSession",
+  "'public-research-data' 'data' 'INTEGRATION TESTED'",
+  "research-data-release-gate.mjs",
 ]) {
   if (!releaseGate.includes(dependencyMarker)) failures.push(`release gate dependency control is missing ${dependencyMarker}`);
 }

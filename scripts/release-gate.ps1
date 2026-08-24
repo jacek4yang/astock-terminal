@@ -179,7 +179,8 @@ try {
         Invoke-Checked -FilePath 'node' -Arguments @(
             '--test',
             'scripts/release-evidence-check.test.mjs',
-            'scripts/acceptance-evidence.test.mjs'
+            'scripts/acceptance-evidence.test.mjs',
+            'scripts/research-data-release-gate.test.mjs'
         )
     }
 
@@ -207,6 +208,22 @@ try {
     }
     Invoke-ReleaseGateStep 'dependency-policy' 'security' 'INTEGRATION TESTED' {
         Invoke-Checked -FilePath 'cargo' -Arguments @('deny', 'check', 'advisories', 'bans', 'licenses', 'sources')
+    }
+
+    Invoke-ReleaseGateStep 'public-research-data' 'data' 'INTEGRATION TESTED' {
+        Invoke-Checked -FilePath 'cargo' -Arguments @('build', '--locked', '-p', 'astock-engine')
+        $engine = Join-Path $build.Paths.Cargo 'debug\astock-engine.exe'
+        if (-not (Test-Path -LiteralPath $engine -PathType Leaf)) {
+            throw "Public research-data gate Engine is missing: $engine"
+        }
+        $testRoot = Join-Path $build.Paths.FormalCache "public-research-data-$($commit.Substring(0, 12))"
+        Invoke-Checked -FilePath 'node' -Arguments @(
+            'scripts/research-data-release-gate.mjs',
+            $engine,
+            $testRoot,
+            $commit,
+            $build.Paths.Root
+        )
     }
 
     Invoke-ReleaseGateStep 'renderer-tests-and-build' 'renderer' 'INTEGRATION TESTED' {
@@ -358,6 +375,7 @@ shortcut = "4"
         'rust-clippy',
         'rustsec',
         'dependency-policy',
+        'public-research-data',
         'renderer-tests-and-build',
         'moonbit-check-test',
         'desktop-worker-supervision',

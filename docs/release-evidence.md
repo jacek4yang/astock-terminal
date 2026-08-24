@@ -41,6 +41,15 @@ endpoint, binds the package metadata to the full source commit and places all
 profile/data state under `ASTOCK_BUILD_ROOT`. These variables are release-test
 capabilities and are never set by the installed production shortcut.
 
+The executable local gate also runs `scripts/research-data-release-gate.mjs`
+against an isolated D-drive data root. It never calls credentialed providers.
+The current Shanghai/Shenzhen sample must have two-source quote and K-line
+agreement, `920001` must resolve to the canonical BSE name and remain visibly
+blocking whenever only one source is available, and legacy `430002` must not
+receive fabricated live data. Candidate names and current news-channel breadth
+are checked in the same run. A degraded but non-blocking provider is preserved
+in the report instead of being converted to a false all-green result.
+
 Performance evidence carries the raw samples, aggregation, unit, fixed budget
 and comparison for every release metric. The validator independently recomputes
 p95/p05/max values and p95 regressions instead of trusting the reported value.

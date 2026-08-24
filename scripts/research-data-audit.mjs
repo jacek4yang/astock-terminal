@@ -1,8 +1,11 @@
 import { spawn } from "node:child_process";
 
-const [engineExecutable, requestedSymbol = "000725"] = process.argv.slice(2);
+const arguments_ = process.argv.slice(2);
+const engineExecutable = arguments_[0];
+const requestedSymbol = arguments_.find((value, index) => index > 0 && !value.startsWith("--")) ?? "000725";
+const includeCredentialed = arguments_.includes("--include-credentialed");
 if (!engineExecutable) {
-  throw new Error("usage: node scripts/research-data-audit.mjs <engine.exe> [symbol]");
+  throw new Error("usage: node scripts/research-data-audit.mjs <engine.exe> [symbol] [--include-credentialed]");
 }
 
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
@@ -84,24 +87,49 @@ function sourceSummary(source) {
   };
 }
 
+async function captureRequest(engine, kind, payload, deadlineMs) {
+  try {
+    return { ok: true, kind, value: await engine.request(kind, payload, deadlineMs) };
+  } catch (error) {
+    return { ok: false, kind, error: String(error).slice(0, 500) };
+  }
+}
+
 const engine = new EngineWorker(engineExecutable);
 const startedAt = Date.now();
 const auditEnd = new Date().toISOString().slice(0, 10);
 const auditStart = new Date(Date.now() - 365 * 86_400_000).toISOString().slice(0, 10);
 try {
-  const [handshake, credentials, reconciliation, marketContext, globalContext, securityEvents, candidates, joinquant, newsBatch] = await Promise.all([
+  const [handshake, credentials, identitySearchResult, reconciliationResult, marketContextResult, globalContextResult, securityEventsResult, candidatesResult, joinquant, newsBatch] = await Promise.all([
     engine.request("system.handshake", { app_version: "research-data-audit", protocol_version: 1 }, 15_000),
     engine.request("credentials.status", {}, 15_000),
-    engine.request("research.data_reconcile", { symbol: requestedSymbol }, 180_000),
-    engine.request("research.market_context", {}, 180_000),
-    engine.request("research.global_context", {}, 180_000),
-    engine.request("research.security_events", { symbol: requestedSymbol }, 180_000),
-    engine.request("research.market_candidates", { limit: 60, max_lot_cost: 16_000 }, 120_000),
-    engine.request("research.joinquant_context", { symbol: requestedSymbol, benchmark: "000300", start: auditStart, end: auditEnd }, 180_000),
+    captureRequest(engine, "market.search", { keyword: requestedSymbol }, 30_000),
+    captureRequest(engine, "research.data_reconcile", { symbol: requestedSymbol }, 180_000),
+    captureRequest(engine, "research.market_context", {}, 180_000),
+    captureRequest(engine, "research.global_context", {}, 180_000),
+    captureRequest(engine, "research.security_events", { symbol: requestedSymbol }, 180_000),
+    captureRequest(engine, "research.market_candidates", { limit: 60, max_lot_cost: 16_000 }, 120_000),
+    includeCredentialed
+      ? engine.request("research.joinquant_context", { symbol: requestedSymbol, benchmark: "000300", start: auditStart, end: auditEnd }, 180_000)
+        .then((value) => ({ ok: true, kind: "research.joinquant_context", skipped: false, value }))
+        .catch((error) => ({ ok: false, kind: "research.joinquant_context", skipped: false, error: String(error).slice(0, 500) }))
+      : Promise.resolve({ ok: true, kind: "research.joinquant_context", skipped: true, value: { source: "JoinQuant", datasets: {} } }),
     engine.request("research.news", { sources: NEWS_SOURCE_GROUPS.flat(), limit: 60 }, 120_000)
       .then((value) => ({ ok: true, requested: NEWS_SOURCE_GROUPS.flat(), value }))
       .catch((error) => ({ ok: false, requested: NEWS_SOURCE_GROUPS.flat(), error: String(error) })),
   ]);
+  const identitySearch = identitySearchResult.value ?? { items: [], source: "unavailable" };
+  const reconciliation = reconciliationResult.value ?? { symbol: requestedSymbol, blocking: true, quote_sources: [], quote_checks: [], kline_sources: [], kline_overlap_days: 0, kline_close_checks: [] };
+  const marketContext = marketContextResult.value ?? { datasets: {} };
+  const globalContext = globalContextResult.value ?? { datasets: {} };
+  const securityEvents = securityEventsResult.value ?? { symbol: requestedSymbol, datasets: {} };
+  const candidates = candidatesResult.value ?? { items: [], source: "unavailable" };
+  const requestResults = [identitySearchResult, reconciliationResult, marketContextResult, globalContextResult, securityEventsResult, candidatesResult, joinquant];
+  const requestFailures = requestResults.filter((result) => !result.ok).map((result) => ({
+    kind: result.kind,
+    error: result.error,
+  }));
+  const criticalOk = [identitySearchResult, reconciliationResult, marketContextResult, securityEventsResult, candidatesResult].every((result) => result.ok);
   const news = [newsBatch].map((batch) => batch.ok ? {
     requested: batch.requested,
     item_count: batch.value.items?.length ?? 0,
@@ -117,11 +145,29 @@ try {
       trust_tier: item.trust_tier,
     })),
   } : { requested: batch.requested, error: batch.error });
+  const contextDatasetFailure = [marketContext, globalContext, securityEvents]
+    .flatMap((context) => Object.values(context.datasets ?? {}))
+    .some((dataset) => dataset.ok === false);
+  const providerDegraded = (reconciliation.quote_sources ?? []).some((source) => !source.ok) ||
+    (reconciliation.kline_sources ?? []).some((source) => !source.ok);
+  const joinquantDatasetFailure = joinquant.ok && !joinquant.skipped &&
+    Object.values(joinquant.value.datasets ?? {}).some((dataset) => dataset.ok === false);
+  const newsDegraded = news.some((batch) => batch.error || batch.errors?.length || batch.stale_sources?.length);
+  const auditOk = criticalOk && identitySearch.items?.length > 0 && reconciliation.blocking !== true;
+  const degraded = !auditOk || requestFailures.length > 0 || contextDatasetFailure ||
+    providerDegraded || joinquantDatasetFailure || newsDegraded;
   console.log(JSON.stringify({
-    ok: true,
+    ok: auditOk,
+    degraded,
+    request_failures: requestFailures,
     elapsed_ms: Date.now() - startedAt,
     engine_version: handshake.engine_version,
     credential_configured: credentials.providers,
+    identity_search: {
+      query: requestedSymbol,
+      source: identitySearch.source,
+      items: identitySearch.items ?? [],
+    },
     candidates: {
       count: candidates.items?.length ?? 0,
       source: candidates.source,
@@ -131,15 +177,23 @@ try {
       board_count: new Set((candidates.items ?? []).map((item) => item.board).filter(Boolean)).size,
       samples: (candidates.items ?? []).slice(0, 5).map(({ symbol, name, market, board, industry, lot_cost }) => ({ symbol, name, market, board, industry, lot_cost })),
     },
-    joinquant: {
-      configured: joinquant.configured,
-      source: joinquant.source,
-      datasets: Object.fromEntries(Object.entries(joinquant.datasets ?? {}).map(([key, value]) => [key, {
+    joinquant: joinquant.ok ? {
+      tested: !joinquant.skipped,
+      configured: joinquant.skipped ? credentials.providers?.joinquant === true : joinquant.value.configured,
+      source: joinquant.value.source,
+      ...(joinquant.skipped ? { skipped_reason: "credentialed providers require --include-credentialed after credential rotation" } : {}),
+      datasets: Object.fromEntries(Object.entries(joinquant.value.datasets ?? {}).map(([key, value]) => [key, {
         ok: value.ok,
         total_rows: value.total_rows,
         source: value.source,
         error: value.error,
       }])),
+    } : {
+      tested: true,
+      configured: credentials.providers?.joinquant === true,
+      source: "JoinQuant",
+      datasets: {},
+      error: joinquant.error,
     },
     market_context: {
       trade_date: marketContext.trade_date,
@@ -185,6 +239,7 @@ try {
       policy: reconciliation.policy,
     },
   }, null, 2));
+  if (!auditOk) process.exitCode = 1;
 } finally {
   await engine.close();
 }

@@ -35,8 +35,8 @@ use crate::proxy::ProxyConfig;
 use crate::security_master::SecurityMaster;
 use crate::validate::{filter_valid_bars, filter_valid_index_bars};
 use astock_core::{
-    Adjust, Bar, DataError, Fetched, FundFlowPoint, KlinePeriod, MarketBreadth, MinuteData, Quote,
-    SearchResult, Source, StockListItem, Symbol,
+    normalize_security_name, Adjust, Bar, DataError, Fetched, FundFlowPoint, KlinePeriod,
+    MarketBreadth, MinuteData, Quote, SearchResult, Source, StockListItem, Symbol,
 };
 use astock_storage::Storage;
 use async_trait::async_trait;
@@ -563,6 +563,16 @@ impl Inner {
         }
         Ok(out)
     }
+}
+
+fn retain_resolved_search_hits(rows: &mut Vec<SearchResult>) {
+    for hit in rows.iter_mut() {
+        hit.name = normalize_security_name(&hit.name);
+    }
+    rows.retain(|hit| {
+        !hit.name.is_empty()
+            && Symbol::new(&hit.code).is_ok_and(|symbol| symbol.is_supported_market_instrument())
+    });
 }
 
 fn kline_cache_key(symbol: &Symbol, period: KlinePeriod, adjust: Adjust, count: u32) -> String {
@@ -1100,7 +1110,10 @@ impl DataProvider for MarketData {
                 for hit in &mut fetched.data {
                     if let Some(record) = self.security_master.get(&hit.code) {
                         hit.name = record.canonical_name;
-                    } else if !hit.name.trim().is_empty() {
+                    } else {
+                        hit.name = normalize_security_name(&hit.name);
+                    }
+                    if self.security_master.get(&hit.code).is_none() && !hit.name.is_empty() {
                         self.security_master.upsert(
                             astock_core::SecurityMasterRecord::listed_stock(
                                 hit.code.clone(),
@@ -1110,6 +1123,36 @@ impl DataProvider for MarketData {
                         );
                     }
                 }
+                // The provider deliberately avoids a network round-trip for a
+                // six-digit query, so that raw hit has no name. Resolve the
+                // identity through the normal failover quote path before it
+                // reaches the renderer; a blank or invented display name is
+                // worse than an explicit no-match result.
+                let unresolved: Vec<_> = fetched
+                    .data
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, hit)| hit.name.is_empty())
+                    .filter_map(|(index, hit)| {
+                        Symbol::new(&hit.code).ok().map(|symbol| (index, symbol))
+                    })
+                    .collect();
+                for (index, symbol) in unresolved {
+                    if let Ok(quote) = self.quote(&symbol).await {
+                        let name = normalize_security_name(&quote.data.name);
+                        if !name.is_empty() {
+                            self.security_master.upsert(
+                                astock_core::SecurityMasterRecord::listed_stock(
+                                    symbol.code(),
+                                    name.clone(),
+                                    "market_search_quote",
+                                ),
+                            );
+                            fetched.data[index].name = name;
+                        }
+                    }
+                }
+                retain_resolved_search_hits(&mut fetched.data);
                 if fetched.data.is_empty() && !local.is_empty() {
                     Ok(Fetched::now(local, Source::Tdx))
                 } else {
@@ -1279,5 +1322,30 @@ mod tests {
             !md.chain_names().contains(&"joinquant"),
             "joinquant is explicit-call only, never in the automatic chain"
         );
+    }
+
+    #[test]
+    fn renderer_search_rows_are_named_normalized_and_current() {
+        let mut rows = vec![
+            SearchResult {
+                code: "300308".to_string(),
+                name: "中 际 旭 创".to_string(),
+                classify: "AStock".to_string(),
+            },
+            SearchResult {
+                code: "920001".to_string(),
+                name: String::new(),
+                classify: "BJ".to_string(),
+            },
+            SearchResult {
+                code: "430002".to_string(),
+                name: "历史三板代码".to_string(),
+                classify: "AStock".to_string(),
+            },
+        ];
+        retain_resolved_search_hits(&mut rows);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].code, "300308");
+        assert_eq!(rows[0].name, "中际旭创");
     }
 }
