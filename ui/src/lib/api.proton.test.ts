@@ -48,6 +48,11 @@ import {
   globalSyncStart,
   globalSyncStatus,
   queryGlobalDocuments,
+  quantResearchCancel,
+  quantResearchSnapshotGet,
+  quantResearchSnapshotList,
+  quantResearchStart,
+  quantResearchStatus,
   queryDisclosures,
   queryRelationReviews,
   queryNewsCenter,
@@ -372,5 +377,47 @@ describe("Proton global research bridge", () => {
       symbols: ["300308", "000300"],
       window_days: 250,
     });
+  });
+
+  it("routes persistent Quant Lab jobs and immutable snapshots through the Engine", async () => {
+    const config = {
+      symbols: ["300308", "000300"],
+      metric: "pearson" as const,
+      value_mode: "log_return" as const,
+      frequency: "daily" as const,
+      start_date: null,
+      end_date: null,
+      adjust: "qfq" as const,
+      lookback_bars: 750,
+      missing_policy: "drop" as const,
+      rolling_window: 60,
+      max_lag: 5,
+      controls: [],
+      bootstrap_reps: 199,
+      permutation_reps: 199,
+      alpha: 0.05,
+      fdr_method: "benjamini_hochberg" as const,
+      max_pairs: 2_000,
+      max_observations_per_pair: 500,
+      seed: 42,
+      oos_ratio: 0.3,
+    };
+    await quantResearchStart(config);
+    await quantResearchStatus("quant-job");
+    await quantResearchCancel("quant-job");
+    await quantResearchSnapshotGet("quant-snapshot:one");
+    await quantResearchSnapshotList(25);
+
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "research.quant.start",
+      "research.quant.status",
+      "research.quant.cancel",
+      "research.quant.snapshots.get",
+      "research.quant.snapshots.list",
+    ]);
+    expect(requestNative.mock.calls[0][2]).toEqual(config);
+    expect(requestNative.mock.calls[1][2]).toEqual({ job_id: "quant-job" });
+    expect(requestNative.mock.calls[3][2]).toEqual({ snapshot_id: "quant-snapshot:one" });
+    expect(requestNative.mock.calls[4][2]).toEqual({ limit: 25 });
   });
 });

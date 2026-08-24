@@ -8,6 +8,7 @@ mod event_store;
 mod global_sync;
 mod graph_services;
 mod news_center;
+mod quant_research;
 mod relation_extraction;
 mod scan;
 mod settings;
@@ -44,6 +45,7 @@ pub struct Engine {
     disclosure_sync: disclosure_sync::DisclosureSyncService,
     event_analysis: event_analysis::EventAnalysisService,
     relation_extraction: relation_extraction::RelationExtractionService,
+    quant_research: quant_research::QuantResearchService,
     global_sync: global_sync::GlobalSyncService,
     provider_boot: credentials::BootStatus,
     credential_migration_error: Option<String>,
@@ -80,6 +82,9 @@ impl Engine {
                 .configure(username.expose().to_string(), password.expose().to_string());
         }
         let rules = RuleSet::load(None).map_err(|error| format!("load A-share rules: {error}"))?;
+        let quant_research = quant_research::QuantResearchService::restore(&storage)
+            .await
+            .map_err(|error| format!("restore Quant Lab jobs: {error}"))?;
         if let Ok(records) = storage.securities_list().await {
             market.security_master.merge_records(records);
         }
@@ -94,6 +99,7 @@ impl Engine {
             disclosure_sync: disclosure_sync::DisclosureSyncService::default(),
             event_analysis: event_analysis::EventAnalysisService::default(),
             relation_extraction: relation_extraction::RelationExtractionService::default(),
+            quant_research,
             global_sync: global_sync::GlobalSyncService::default(),
             provider_boot,
             credential_migration_error,
@@ -1065,6 +1071,45 @@ impl Engine {
                 graph_services::relationship(&self.market, &payload.symbols, payload.window_days)
                     .await
                     .map_err(graph_service_error)
+            }
+            "research.quant.start" => {
+                let config: astock_quant::research::ResearchConfig =
+                    decode_payload(&request.payload)?;
+                let snapshot = self
+                    .quant_research
+                    .start(self.market.clone(), self.storage.clone(), config)
+                    .await
+                    .map_err(quant_research_error)?;
+                serde_json::to_value(snapshot).map_err(serialize_error)
+            }
+            "research.quant.status" => {
+                let payload: QuantJobStatusPayload = decode_payload(&request.payload)?;
+                let snapshot = self
+                    .quant_research
+                    .status(payload.job_id.as_deref())
+                    .map_err(quant_research_error)?;
+                serde_json::to_value(snapshot).map_err(serialize_error)
+            }
+            "research.quant.cancel" => {
+                let payload: QuantJobCancelPayload = decode_payload(&request.payload)?;
+                let cancelled = self
+                    .quant_research
+                    .cancel(&payload.job_id)
+                    .map_err(quant_research_error)?;
+                Ok(Value::Bool(cancelled))
+            }
+            "research.quant.snapshots.get" => {
+                let payload: QuantSnapshotPayload = decode_payload(&request.payload)?;
+                let snapshot = quant_research::snapshot_get(&self.storage, &payload.snapshot_id)
+                    .await
+                    .map_err(quant_research_error)?;
+                serde_json::to_value(snapshot).map_err(serialize_error)
+            }
+            "research.quant.snapshots.list" => {
+                let payload: QuantSnapshotListPayload = decode_payload(&request.payload)?;
+                quant_research::snapshot_list(&self.storage, payload.limit)
+                    .await
+                    .map_err(quant_research_error)
             }
             "research.data_reconcile" => {
                 let payload: SymbolPayload = decode_payload(&request.payload)?;
@@ -2535,6 +2580,32 @@ struct MarketRelationshipPayload {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct QuantJobStatusPayload {
+    #[serde(default)]
+    job_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QuantJobCancelPayload {
+    job_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QuantSnapshotPayload {
+    snapshot_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QuantSnapshotListPayload {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TaskIdPayload {
     task_id: String,
 }
@@ -2672,6 +2743,10 @@ fn graph_error(error: astock_graph::Error) -> ServiceError {
 
 fn graph_service_error(error: String) -> ServiceError {
     ServiceError::new("graph", error, false)
+}
+
+fn quant_research_error(error: String) -> ServiceError {
+    ServiceError::new("quant_research", error, false)
 }
 
 async fn persist_driver_tree(
