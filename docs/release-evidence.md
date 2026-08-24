@@ -72,7 +72,11 @@ live MiniMax Plus and JoinQuant smoke test. It must contain a real model-catalog
 lookup, Token Plan quota snapshot, a complete 20,000 CNY manual-plan run over
 MoonBit SSE, the independent Engine verifier summary, a deterministic partial
 stream rejection/retry check, and an authenticated JoinQuant `qfq_daily`
-result with at least one row. The report itself is not retained; evidence keeps
+result. Every returned qfq row is checked for the requested security/date
+window, strict date order, OHLC bounds, lot units and non-negative
+volume/turnover; the latest bar may lag the requested end by at most 14 calendar
+days. Evidence retains the requested window, first/latest dates, checked-row
+count and row-set SHA-256. The report itself is not retained; evidence keeps
 only counts, timestamps and SHA-256. Pass-only case labels are rejected.
 
 Credential evidence records only explicit release-operator rotation/revocation

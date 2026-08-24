@@ -164,6 +164,9 @@ function completeExternalServices() {
   byId.get("joinquant-auth").details = { configured: true };
   byId.get("joinquant-minimal-data").details = {
     dataset: "qfq_daily", row_count: 20, total_rows: 20, source: "JoinQuant", fetched_at: "2026-08-24T00:00:30Z",
+    symbol: "000725", requested_start: "2026-04-26", requested_end: "2026-08-24",
+    first_date: "2026-04-27", latest_date: "2026-08-21", latest_lag_days: 3,
+    structural_rows_checked: 20, volume_unit: "Lots", truncated: false, data_sha256: "e".repeat(64),
   };
   return { ...evidence, trusted_boundary: true, secrets_in_evidence: false };
 }
@@ -399,6 +402,16 @@ test("rejects live evidence that does not preserve the exact 20,000 CNY constrai
   const evidence = completeExternalServices();
   evidence.cases.find((item) => item.id === "minimax-20000-manual-plan").details.capital_cny = 10_000;
   assert.throws(() => validateEvidence(evidence, "minimax-plus-joinquant-live", commit), /capital constraint/);
+});
+
+test("rejects stale or structurally unaudited JoinQuant live data", () => {
+  const evidence = completeExternalServices();
+  const details = evidence.cases.find((item) => item.id === "joinquant-minimal-data").details;
+  details.latest_lag_days = 45;
+  assert.throws(() => validateEvidence(evidence, "minimax-plus-joinquant-live", commit), /latest qfq bar is stale/);
+  details.latest_lag_days = 3;
+  details.structural_rows_checked = 0;
+  assert.throws(() => validateEvidence(evidence, "minimax-plus-joinquant-live", commit), /row structure\/unit\/pagination audit is incomplete/);
 });
 
 test("recomputes every signed release artifact hash", () => {

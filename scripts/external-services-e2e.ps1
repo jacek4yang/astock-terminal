@@ -117,6 +117,16 @@ $cases = @(
             total_rows = [int]$live.joinquant.total_rows
             source = [string]$live.joinquant.source
             fetched_at = [string]$live.joinquant.fetched_at
+            symbol = [string]$live.joinquant.symbol
+            requested_start = [string]$live.joinquant.requested_start
+            requested_end = [string]$live.joinquant.requested_end
+            first_date = [string]$live.joinquant.first_date
+            latest_date = [string]$live.joinquant.latest_date
+            latest_lag_days = [int]$live.joinquant.latest_lag_days
+            structural_rows_checked = [int]$live.joinquant.structural_rows_checked
+            volume_unit = [string]$live.joinquant.volume_unit
+            truncated = [bool]$live.joinquant.truncated
+            data_sha256 = [string]$live.joinquant.data_sha256
         }
     }
 )

@@ -56,6 +56,8 @@ const packageHardener = fs.readFileSync(path.join(root, "scripts", "harden-packa
 const migrationEvidence = fs.readFileSync(path.join(root, "scripts", "migration-e2e.ps1"), "utf8");
 const faultEvidence = fs.readFileSync(path.join(root, "scripts", "fault-injection-e2e.ps1"), "utf8");
 const externalEvidence = fs.readFileSync(path.join(root, "scripts", "external-services-e2e.ps1"), "utf8");
+const liveProviderRunner = fs.readFileSync(path.join(root, "scripts", "research-live-smoke.mjs"), "utf8");
+const liveDataValidator = fs.readFileSync(path.join(root, "scripts", "lib", "live-data-validation.mjs"), "utf8");
 const credentialEvidence = fs.readFileSync(path.join(root, "scripts", "record-credential-rotation.ps1"), "utf8");
 const performanceEvidence = fs.readFileSync(path.join(root, "scripts", "performance-e2e.ps1"), "utf8");
 const performanceCdp = fs.readFileSync(path.join(root, "scripts", "performance-cdp.mjs"), "utf8");
@@ -194,6 +196,7 @@ for (const requiredWorkflowMarker of [
   "capability-parity-check.mjs --release",
   "release-architecture-check.mjs",
   "acceptance-evidence.test.mjs",
+  "live-data-validation.test.mjs",
   "research-data-release-gate.test.mjs",
   "https://cli.moonbitlang.com/binaries/0.1.20260819/moonbit-linux-x86_64.tar.gz",
   "moon version | grep -F 'moon 0.1.20260819'",
@@ -619,8 +622,17 @@ for (const faultMarker of ["fault-injection-core.mjs", "provider-stream-break", 
 for (const streamMarker of ['"stream": true', 'decode_sse_chunks', 'minimax_sse_incomplete_stream', 'retry_complete_text']) {
   if (!moonProvider.includes(streamMarker)) failures.push(`MoonBit Provider SSE recovery is missing ${streamMarker}`);
 }
-for (const externalMarker of ["credential-rotation.json", "research-live-smoke.mjs", "minimax-stream-resume", "joinquant-minimal-data", "secrets_in_evidence = $false"]) {
+for (const externalMarker of ["credential-rotation.json", "research-live-smoke.mjs", "minimax-stream-resume", "joinquant-minimal-data", "data_sha256", "latest_lag_days", "secrets_in_evidence = $false"]) {
   if (!externalEvidence.includes(externalMarker)) failures.push(`external Provider evidence harness is missing ${externalMarker}`);
+}
+for (const liveRunnerMarker of ["validateJoinQuantDaily", "joinquantAudit"]) {
+  if (!liveProviderRunner.includes(liveRunnerMarker)) failures.push(`live Provider runner is missing ${liveRunnerMarker}`);
+}
+for (const liveDataMarker of ["invalid, duplicate or unordered date", "violates OHLC bounds", "latest bar is stale", "data_sha256"]) {
+  if (!liveDataValidator.includes(liveDataMarker)) failures.push(`live Provider data validator is missing ${liveDataMarker}`);
+}
+for (const liveDataMarker of ["audited security identity is invalid", "latest qfq bar is stale", "audited row digest is missing"]) {
+  if (!releaseEvidenceValidator.includes(liveDataMarker)) failures.push(`external Provider evidence validator is missing ${liveDataMarker}`);
 }
 for (const credentialMarker of ["ConfirmOldCredentialsRevoked", "credential-readback-smoke.mjs", "credential_manager_readback_verified = $true", "secrets_in_evidence = $false"]) {
   if (!credentialEvidence.includes(credentialMarker)) failures.push(`credential rotation evidence harness is missing ${credentialMarker}`);

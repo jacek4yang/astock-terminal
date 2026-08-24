@@ -180,7 +180,8 @@ try {
             '--test',
             'scripts/release-evidence-check.test.mjs',
             'scripts/acceptance-evidence.test.mjs',
-            'scripts/research-data-release-gate.test.mjs'
+            'scripts/research-data-release-gate.test.mjs',
+            'scripts/live-data-validation.test.mjs'
         )
     }
 

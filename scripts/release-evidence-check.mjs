@@ -261,6 +261,18 @@ function validateExternalServices(evidence) {
   invariant(Number.isInteger(data.total_rows) && data.total_rows >= data.row_count, "joinquant-minimal-data: total_rows is invalid");
   invariant(data.source === "JoinQuant", "joinquant-minimal-data: source identity is invalid");
   invariant(typeof data.fetched_at === "string" && Number.isFinite(Date.parse(data.fetched_at)), "joinquant-minimal-data: fetched_at is invalid");
+  invariant(data.symbol === "000725", "joinquant-minimal-data: audited security identity is invalid");
+  for (const field of ["requested_start", "requested_end", "first_date", "latest_date"]) {
+    invariant(typeof data[field] === "string" && /^\d{4}-\d{2}-\d{2}$/.test(data[field]) &&
+      Number.isFinite(Date.parse(`${data[field]}T00:00:00Z`)), `joinquant-minimal-data: ${field} is invalid`);
+  }
+  invariant(data.requested_start <= data.first_date && data.first_date <= data.latest_date && data.latest_date <= data.requested_end,
+    "joinquant-minimal-data: returned dates escape the requested window or are unordered");
+  invariant(Number.isInteger(data.latest_lag_days) && data.latest_lag_days >= 0 && data.latest_lag_days <= 14,
+    "joinquant-minimal-data: latest qfq bar is stale");
+  invariant(data.structural_rows_checked === data.row_count && data.volume_unit === "Lots" && data.truncated === false,
+    "joinquant-minimal-data: row structure/unit/pagination audit is incomplete");
+  invariant(HEX_SHA256.test(data.data_sha256 ?? ""), "joinquant-minimal-data: audited row digest is missing");
 }
 
 function validateSignedArtifacts(evidence) {

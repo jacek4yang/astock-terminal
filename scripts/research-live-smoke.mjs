@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { validateJoinQuantDaily } from "./lib/live-data-validation.mjs";
 
 const [engineExecutable, agentExecutable] = process.argv.slice(2);
 if (!engineExecutable || !agentExecutable) throw new Error("usage: node scripts/research-live-smoke.mjs <engine.exe> <agent-worker.exe>");
@@ -212,6 +213,7 @@ try {
   if (joinquant.value.configured !== true || joinquantDaily?.ok !== true || !Array.isArray(joinquantDaily.rows) || joinquantDaily.rows.length < 1) {
     throw new Error(`JoinQuant authenticated call returned no usable qfq daily rows: ${joinquantDaily?.error ?? "missing dataset"}`);
   }
+  const joinquantAudit = validateJoinQuantDaily(joinquant.value, joinquantDaily, "000725", joinquantStart, researchEnd);
 
   const taskId = crypto.randomUUID();
   const taskSpec = {
@@ -270,6 +272,7 @@ try {
       total_rows: joinquantDaily.total_rows,
       source: joinquantDaily.source,
       fetched_at: joinquantDaily.fetched_at,
+      ...joinquantAudit,
     },
     manual_plan: {
       duration_ms: workflow.duration_ms,
