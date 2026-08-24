@@ -711,6 +711,141 @@ impl Engine {
                     "evidence_note": "聚宽为用户凭据授权的显式低频研究源；前复权日线不得与不复权序列直接逐点比较，各子集独立保留失败状态"
                 }))
             }
+            "research.optional_sources" => {
+                let payload: OptionalSourcesPayload = decode_payload(&request.payload)?;
+                let symbol = parse_live_symbol(&payload.symbol)?;
+                let start = parse_research_date(&payload.start, "start")?;
+                let end = parse_research_date(&payload.end, "end")?;
+                if start > end || (end - start).num_days() > 1_830 {
+                    return Err(ServiceError::new(
+                        "invalid_research_window",
+                        "可选来源研究区间必须按时间正序且不超过5年",
+                        false,
+                    ));
+                }
+                let tushare_available = self.market.tushare.available();
+                let iwencai_available = self.market.iwencai.available();
+                let tushare_tier = if tushare_available {
+                    Some(self.market.tushare.detect_tier().await)
+                } else {
+                    None
+                };
+                let tushare_pro = tushare_tier.as_ref().is_some_and(|tier| {
+                    matches!(
+                        tier,
+                        Ok(astock_market_data::providers::TushareTier::Pro2000)
+                    )
+                });
+                let sec_cik = payload
+                    .sec_cik
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                let sec =
+                    astock_market_data::providers::SecEdgarProvider::new(self.market.http.clone());
+                let (
+                    ts_daily,
+                    ts_basic,
+                    ts_adjustment,
+                    ts_dividends,
+                    iw_events,
+                    iw_sectors,
+                    sec_filings,
+                ) = tokio::join!(
+                    async {
+                        // The free 120-point tier still exposes raw daily bars.
+                        // Do not accidentally hide useful evidence behind the
+                        // Pro-only adjustment/valuation capability gate.
+                        if tushare_available {
+                            self.market.tushare.daily(&symbol, start, end).await
+                        } else {
+                            Err(astock_core::DataError::NoProvider(
+                                "tushare（未配置访问凭证）",
+                            ))
+                        }
+                    },
+                    async {
+                        if tushare_pro {
+                            self.market.tushare.daily_basic(&symbol, start, end).await
+                        } else {
+                            Err(tushare_pro_unavailable(&tushare_tier))
+                        }
+                    },
+                    async {
+                        if tushare_pro {
+                            self.market.tushare.adj_factor(&symbol, start, end).await
+                        } else {
+                            Err(tushare_pro_unavailable(&tushare_tier))
+                        }
+                    },
+                    async {
+                        if tushare_pro {
+                            self.market.tushare.dividend(&symbol).await
+                        } else {
+                            Err(tushare_pro_unavailable(&tushare_tier))
+                        }
+                    },
+                    async {
+                        if iwencai_available {
+                            self.market.iwencai.stock_events(symbol.code()).await
+                        } else {
+                            Err(astock_core::DataError::NoProvider(
+                                "iwencai（未配置访问凭证）",
+                            ))
+                        }
+                    },
+                    async {
+                        if iwencai_available {
+                            self.market.iwencai.sector_membership(symbol.code()).await
+                        } else {
+                            Err(astock_core::DataError::NoProvider(
+                                "iwencai（未配置访问凭证）",
+                            ))
+                        }
+                    },
+                    async {
+                        if let Some(cik) = sec_cik {
+                            sec.submissions(cik).await
+                        } else {
+                            Err(astock_core::DataError::NoProvider(
+                                "sec_edgar（本任务未提供CIK）",
+                            ))
+                        }
+                    },
+                );
+                Ok(json!({
+                    "symbol": symbol.code(),
+                    "start": start,
+                    "end": end,
+                    "retrieved_at": astock_core::time::utc_now(),
+                    "configured": {
+                        "tushare": tushare_available,
+                        "iwencai": iwencai_available,
+                        "sec_edgar": std::env::var("ASTOCK_SEC_USER_AGENT").is_ok(),
+                    },
+                    "capabilities": {
+                        "tushare_raw_daily": tushare_available,
+                        "tushare_pro": tushare_pro,
+                        "iwencai_research": iwencai_available,
+                        "sec_edgar_requested": sec_cik.is_some(),
+                    },
+                    "tushare_tier": match tushare_tier {
+                        Some(Ok(tier)) => json!({"ok": true, "tier": format!("{tier:?}")}),
+                        Some(Err(error)) => json!({"ok": false, "tier": null, "error": error.to_string()}),
+                        None => json!({"ok": false, "tier": null, "error": "未配置Tushare访问凭证"}),
+                    },
+                    "datasets": {
+                        "tushare_raw_daily": bounded_research_dataset(ts_daily, 1_250),
+                        "tushare_daily_basic": bounded_plain_dataset(ts_basic, 1_250, "Tushare Pro"),
+                        "tushare_adjustment_factors": bounded_plain_dataset(ts_adjustment, 1_250, "Tushare Pro"),
+                        "tushare_dividends": bounded_plain_dataset(ts_dividends, 500, "Tushare Pro"),
+                        "iwencai_stock_events": research_value_dataset(iw_events, "iWencai OpenAPI"),
+                        "iwencai_sector_membership": research_value_dataset(iw_sectors, "iWencai OpenAPI"),
+                        "sec_edgar_filings": bounded_plain_dataset(sec_filings, 500, "SEC EDGAR"),
+                    },
+                    "evidence_note": "可选来源各自保留未配置、权限不足、失败、来源和抓取时点；Tushare原始日线不得与复权序列直接逐点比较；问财只作补充发现层；SEC仅在用户提供CIK且配置真实Fair Access身份时访问"
+                }))
+            }
             "market.order_book" => {
                 let payload: SymbolPayload = decode_payload(&request.payload)?;
                 let symbol = parse_live_symbol(&payload.symbol)?;
@@ -1464,6 +1599,16 @@ struct JoinQuantResearchPayload {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct OptionalSourcesPayload {
+    symbol: String,
+    start: String,
+    end: String,
+    #[serde(default)]
+    sec_cik: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LimitPayload {
     #[serde(default)]
     limit: Option<usize>,
@@ -1762,6 +1907,26 @@ fn latest_trading_day_on_or_before(rules: &RuleSet, mut date: NaiveDate) -> Naiv
         date -= chrono::Duration::days(1);
     }
     date
+}
+
+fn tushare_pro_unavailable(
+    tier: &Option<Result<astock_market_data::providers::TushareTier, astock_core::DataError>>,
+) -> astock_core::DataError {
+    use astock_market_data::providers::TushareTier;
+
+    match tier {
+        None => astock_core::DataError::NoProvider("tushare（未配置访问凭证）"),
+        Some(Ok(TushareTier::Free120)) => {
+            astock_core::DataError::NoProvider("tushare Pro（积分不足2000）")
+        }
+        Some(Ok(TushareTier::Unknown)) => {
+            astock_core::DataError::NoProvider("tushare Pro（权限尚未确认）")
+        }
+        Some(Ok(TushareTier::Pro2000)) => {
+            astock_core::DataError::NoProvider("tushare Pro（能力状态不一致）")
+        }
+        Some(Err(_)) => astock_core::DataError::NoProvider("tushare Pro（权限探测失败）"),
+    }
 }
 
 fn bounded_research_dataset<T: serde::Serialize>(
@@ -2269,6 +2434,25 @@ mod tests {
         let error = parse_live_symbol("430002").unwrap_err();
         assert_eq!(error.code, "unsupported_live_symbol");
         assert!(error.message.contains("920xxx"));
+    }
+
+    #[test]
+    fn tushare_capability_errors_distinguish_configuration_and_tier() {
+        use astock_market_data::providers::TushareTier;
+
+        assert!(tushare_pro_unavailable(&None)
+            .to_string()
+            .contains("未配置"));
+        assert!(tushare_pro_unavailable(&Some(Ok(TushareTier::Free120)))
+            .to_string()
+            .contains("积分不足2000"));
+        assert!(
+            tushare_pro_unavailable(&Some(Err(astock_core::DataError::Timeout(
+                "tier probe".into()
+            ))))
+            .to_string()
+            .contains("权限探测失败")
+        );
     }
 
     #[tokio::test]

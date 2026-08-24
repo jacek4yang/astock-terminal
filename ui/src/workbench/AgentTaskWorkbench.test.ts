@@ -7,7 +7,7 @@ vi.mock("../bridge", () => ({
   requestNative,
 }));
 
-import { requestDurableAgent, requestDurableTool } from "./AgentTaskWorkbench";
+import { compactSecurityEvidence, requestDurableAgent, requestDurableTool } from "./AgentTaskWorkbench";
 
 const spec = {
   objective: "分析两万元最新投资计划",
@@ -129,5 +129,35 @@ describe("durable Agent operation journal", () => {
       60_000,
     )).resolves.toEqual(quote);
     expect(requestNative).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Agent optional-source evidence", () => {
+  it("keeps capability failures and bounds only repetitive provider rows", () => {
+    const rows = Array.from({ length: 300 }, (_, index) => ({ date: `day-${index}`, close: index }));
+    const compacted = compactSecurityEvidence({
+      symbol: "600519",
+      market: {},
+      fundamentals: {},
+      events: {},
+      news: { items: [], successful_sources: [], stale_sources: [], errors: [] },
+      reconciliation: {},
+      joinquant: {},
+      optionalSources: {
+        configured: { tushare: true, iwencai: false, sec_edgar: false },
+        capabilities: { tushare_raw_daily: true, tushare_pro: false },
+        datasets: {
+          tushare_raw_daily: { ok: true, rows, total_rows: 300, source: "Tushare" },
+          tushare_daily_basic: { ok: false, rows: [], error: "积分不足2000" },
+          iwencai_stock_events: { ok: false, data: null, error: "未配置" },
+        },
+      },
+    }, false) as Record<string, any>;
+
+    expect(compacted.optional_sources.datasets.tushare_raw_daily.rows).toHaveLength(250);
+    expect(compacted.optional_sources.datasets.tushare_raw_daily.total_rows).toBe(300);
+    expect(compacted.optional_sources.datasets.tushare_daily_basic.error).toContain("积分不足");
+    expect(compacted.optional_sources.datasets.iwencai_stock_events.error).toBe("未配置");
+    expect(compacted.optional_sources.capabilities.tushare_pro).toBe(false);
   });
 });

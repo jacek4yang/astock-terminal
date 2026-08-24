@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=2a487097ac099e5cf602f6d43444f153730eae9f7310993933b5d3422eb97f09
+// GENERATED from protocol/schema; schema-sha256=92b32d1fcac34aacfe50e99dea3d10359a34028e012092c59afdcb231034755b
 // Run: node protocol/codegen.mjs
 
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,7 @@ pub const ENGINE_REQUEST_KINDS: &[&str] = &[
     "research.quote_reconcile",
     "research.valuation_reconcile",
     "research.joinquant_context",
+    "research.optional_sources",
     "research.sources.list",
     "research.sources.get",
     "research.sources.fetch",

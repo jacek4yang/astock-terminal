@@ -38,6 +38,7 @@
         { "const": "research.quote_reconcile" },
         { "const": "research.valuation_reconcile" },
         { "const": "research.joinquant_context" },
+        { "const": "research.optional_sources" },
         { "const": "research.sources.list" },
         { "const": "research.sources.get" },
         { "const": "research.sources.fetch" },

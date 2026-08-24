@@ -248,8 +248,8 @@ function compactMarketContext(value: unknown, exhaustive: boolean): unknown {
  * round a bounded, auditable research view. Missing/error/source fields are
  * deliberately retained; only repetitive time-series rows are windowed.
  */
-function compactSecurityEvidence(
-  bundle: { symbol: string; market: unknown; fundamentals: unknown; events: unknown; news: ResearchNews; reconciliation: unknown; joinquant: unknown },
+export function compactSecurityEvidence(
+  bundle: { symbol: string; market: unknown; fundamentals: unknown; events: unknown; news: ResearchNews; reconciliation: unknown; joinquant: unknown; optionalSources: unknown },
   exhaustive: boolean,
 ) {
   const market = asObject(bundle.market);
@@ -284,6 +284,13 @@ function compactSecurityEvidence(
       kline_close_checks: tailRows(reconciliation.kline_close_checks, 20),
     } : bundle.reconciliation,
     joinquant: compactResearchDatasets(bundle.joinquant, { qfq_daily: exhaustive ? 500 : 250, benchmark_components: 500, macro_cpi: 24 }, 500),
+    optional_sources: compactResearchDatasets(bundle.optionalSources, {
+      tushare_raw_daily: exhaustive ? 500 : 250,
+      tushare_daily_basic: exhaustive ? 500 : 250,
+      tushare_adjustment_factors: exhaustive ? 500 : 250,
+      tushare_dividends: 120,
+      sec_edgar_filings: 120,
+    }, exhaustive ? 120 : 80),
   };
 }
 
@@ -647,7 +654,7 @@ export default function AgentTaskWorkbench() {
 
       setBusyStage(`正在并行核验 ${symbols.length} 只证券的行情、资金、财务、估值、公告与新闻…`);
       const rawSecurities = await Promise.all(symbols.map(async (symbol) => {
-        const [market, fundamentals, events, news, reconciliation, joinquant] = await Promise.all([
+        const [market, fundamentals, events, news, reconciliation, joinquant, optionalSources] = await Promise.all([
           requestDurableTool<unknown>(state.task_id!, acceptedSeq, `${symbol}-market`, "market.security_snapshot", { symbol, period: "day", adjust: "qfq", count: depth === "exhaustive" ? 500 : 250 }, 180_000),
           requestDurableTool<unknown>(state.task_id!, acceptedSeq, `${symbol}-fundamentals`, "research.fundamentals", { symbol }, 240_000),
           requestDurableTool<unknown>(state.task_id!, acceptedSeq, `${symbol}-events`, "research.security_events", { symbol }, 180_000),
@@ -663,16 +670,21 @@ export default function AgentTaskWorkbench() {
             start: state.spec?.research_start ?? new Date(Date.now() - 365 * 86_400_000).toISOString().slice(0, 10),
             end: state.spec?.research_end ?? new Date().toISOString().slice(0, 10),
           }, 180_000),
+          requestDurableTool<unknown>(state.task_id!, acceptedSeq, `${symbol}-optional-sources`, "research.optional_sources", {
+            symbol,
+            start: state.spec?.research_start ?? new Date(Date.now() - 365 * 86_400_000).toISOString().slice(0, 10),
+            end: state.spec?.research_end ?? new Date().toISOString().slice(0, 10),
+          }, 240_000),
         ]);
-        return { symbol, market, fundamentals, events, news, reconciliation, joinquant };
+        return { symbol, market, fundamentals, events, news, reconciliation, joinquant, optionalSources };
       }));
       const securities = rawSecurities.map((bundle) => compactSecurityEvidence(bundle, depth === "exhaustive"));
       for (const symbol of symbols) {
         fetchActivities.push({
           kind: "execute_tool",
           tool: `${symbol} 综合研究包`,
-          detail: "行情/K线/资金流 + 财务三表/估值历史 + 调研/股东/预告/解禁/榜单/公告 + 多源新闻 + 跨源核验 + 可选聚宽研究包；缺失项原样保留",
-          evidence_count: 6,
+          detail: "行情/K线/资金流 + 财务三表/估值历史 + 调研/股东/预告/解禁/榜单/公告 + 多源新闻 + 跨源核验 + 聚宽/Tushare/问财/SEC可选研究包；缺失项原样保留",
+          evidence_count: 7,
         });
       }
       setEffects([...fetchActivities]);
@@ -691,7 +703,7 @@ export default function AgentTaskWorkbench() {
           securities,
           evidence_inventory: {
             requested_symbols: symbols,
-            dimensions: ["quote", "kline", "technical_analysis", "fund_flow", "market_pools", "previous_limit_up", "sub_new", "billboard", "margin", "boards", "global_gold", "primary_gold_news", "macro_inflation", "macro_growth", "macro_current_account", "financial_statements", "valuation_history", "org_survey", "holder_count", "earnings_forecast", "unlocks", "suspensions", "block_trade", "announcements", "cninfo_disclosures", "multi_source_news", "cross_provider_reconciliation", "optional_joinquant_daily_valuation_benchmark_macro"],
+            dimensions: ["quote", "kline", "technical_analysis", "fund_flow", "market_pools", "previous_limit_up", "sub_new", "billboard", "margin", "boards", "global_gold", "primary_gold_news", "macro_inflation", "macro_growth", "macro_current_account", "financial_statements", "valuation_history", "org_survey", "holder_count", "earnings_forecast", "unlocks", "suspensions", "block_trade", "announcements", "cninfo_disclosures", "multi_source_news", "cross_provider_reconciliation", "optional_joinquant_daily_valuation_benchmark_macro", "optional_tushare_raw_valuation_adjustment_dividends", "optional_iwencai_events_sectors", "optional_sec_edgar_by_cik"],
             review_rounds: 3,
           },
         },

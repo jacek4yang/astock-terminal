@@ -92,13 +92,13 @@ const marketProviderStatus = {
   em_datacenter: "ENRICHED",
   finance_news: "ENRICHED",
   global_assets: "ENRICHED",
-  iwencai_openapi: "INTERNAL_ONLY",
+  iwencai_openapi: "ENRICHED",
   joinquant: "READY",
   sec_edgar: "INTERNAL_ONLY",
   sina: "READY",
   tdx_adapter: "ENRICHED",
   tencent: "READY",
-  tushare: "INTERNAL_ONLY",
+  tushare: "ENRICHED",
   world_bank: "ENRICHED",
 };
 
