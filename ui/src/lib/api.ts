@@ -126,6 +126,12 @@ async function protonCommand<T>(name: string, args: Record<string, unknown> = {}
       return requestNative<T>("engine", "research.quote_reconcile", args, { deadlineMs: 90_000 });
     case "reconcile_valuation_sources":
       return requestNative<T>("engine", "research.valuation_reconcile", args, { deadlineMs: 90_000 });
+    case "scan_start":
+      return requestNative<T>("engine", "quant.scan.start", {});
+    case "scan_status":
+      return requestNative<T>("engine", "quant.scan.status", {});
+    case "scan_cancel":
+      return requestNative<T>("engine", "quant.scan.cancel", {});
     case "get_all_a_shares":
       return readAllSharePages<T>();
     case "get_stock_bundle": {

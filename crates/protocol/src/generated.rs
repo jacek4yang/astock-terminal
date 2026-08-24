@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=f12794d2b8cca97779bc0b8d8596fb04b818a287e8d818c8118ba632ed2875d4
+// GENERATED from protocol/schema; schema-sha256=ff8d24dbc141c4182f74298b05f229a665815d729264e9cf29abf975390a4dfd
 // Run: node protocol/codegen.mjs
 
 use serde::{Deserialize, Serialize};
@@ -54,6 +54,9 @@ pub const ENGINE_REQUEST_KINDS: &[&str] = &[
     "credentials.joinquant.delete",
     "storage.cache.stats",
     "storage.cache.cleanup",
+    "quant.scan.start",
+    "quant.scan.status",
+    "quant.scan.cancel",
     "agent.task.create",
     "agent.event.append",
     "agent.checkpoint.put",

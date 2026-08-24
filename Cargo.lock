@@ -449,6 +449,7 @@ dependencies = [
  "astock-technical",
  "astock-trading-rules",
  "chrono",
+ "futures",
  "rusqlite",
  "serde",
  "serde_json",

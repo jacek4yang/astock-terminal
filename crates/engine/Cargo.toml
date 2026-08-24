@@ -17,6 +17,7 @@ astock-storage = { path = "../storage" }
 astock-technical = { path = "../technical" }
 astock-trading-rules = { path = "../trading-rules" }
 chrono.workspace = true
+futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true

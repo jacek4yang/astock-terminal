@@ -76,6 +76,9 @@ const migratedHandlers = new Set([
   "agent.agent_resume",
   "agent.agent_tasks",
   "agent.agent_cancel",
+  "scan.scan_start",
+  "scan.scan_status",
+  "scan.scan_cancel",
 ]);
 
 const marketProviderStatus = {

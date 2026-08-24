@@ -74,8 +74,32 @@ pub async fn signal(
 ) -> Value {
     let (index, breadth) =
         tokio::join!(market.index_kline("1.000001", 60), market.market_breadth());
-    let index = index.ok().map(|value| bars_to_klines(&value.data));
-    let breadth = breadth.ok().map(|value| breadth_to_technical(&value.data));
+    let index = index.ok().map(|value| value.data);
+    let breadth = breadth.ok().map(|value| value.data);
+    signal_with_context(
+        rules,
+        symbol,
+        bars,
+        quote,
+        flows,
+        index.as_deref(),
+        breadth.as_ref(),
+        source,
+    )
+}
+
+pub(crate) fn signal_with_context(
+    rules: &RuleSet,
+    symbol: &Symbol,
+    bars: &[Bar],
+    quote: &CoreQuote,
+    flows: Option<&[FundFlowPoint]>,
+    index: Option<&[Bar]>,
+    breadth: Option<&MarketBreadth>,
+    source: &str,
+) -> Value {
+    let index = index.map(bars_to_klines);
+    let breadth = breadth.map(breadth_to_technical);
     let klines = bars_to_klines(bars);
     let technical_quote = quote_to_technical(quote);
     let technical_flows = flows.map(flows_to_technical);

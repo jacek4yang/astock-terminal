@@ -2,6 +2,7 @@ mod analysis;
 mod data_quality;
 mod data_root;
 mod event_store;
+mod scan;
 
 use astock_core::{Adjust, KlinePeriod, Symbol};
 use astock_fundamental::{
@@ -30,6 +31,7 @@ pub struct Engine {
     market: Arc<MarketData>,
     fundamental: Arc<FundamentalClient>,
     rules: RuleSet,
+    scan: scan::ScanService,
     data_root: DataRootDecision,
 }
 
@@ -62,6 +64,7 @@ impl Engine {
             market,
             fundamental,
             rules,
+            scan: scan::ScanService::default(),
             data_root,
         })
     }
@@ -91,7 +94,7 @@ impl Engine {
             "system.handshake" => Ok(json!({
                 "protocol_version": PROTOCOL_VERSION,
                 "engine_version": ENGINE_VERSION,
-                "capabilities": ["market", "research", "fundamentals", "valuation", "multi_source_news", "security_events", "global_context", "data_quality", "storage", "credentials", "agent_event_store_v2"],
+                "capabilities": ["market", "research", "fundamentals", "valuation", "multi_source_news", "security_events", "global_context", "data_quality", "market_scan", "storage", "credentials", "agent_event_store_v2"],
                 "max_frame_bytes": astock_protocol::MAX_FRAME_BYTES,
                 "max_page_size": astock_protocol::MAX_PAGE_SIZE
             })),
@@ -1156,6 +1159,16 @@ impl Engine {
                     }
                 }))
             }
+            "quant.scan.start" => {
+                let snapshot = self
+                    .scan
+                    .start(self.market.clone(), self.rules.clone())
+                    .await
+                    .map_err(|message| ServiceError::new("already_running", message, false))?;
+                Ok(json!({ "started": true, "snapshot": snapshot }))
+            }
+            "quant.scan.status" => Ok(json!(self.scan.status().await)),
+            "quant.scan.cancel" => Ok(json!({ "cancelled": self.scan.cancel().await })),
             "agent.task.create" => {
                 let payload: event_store::CreateTask = decode_payload(&request.payload)?;
                 let inserted = event_store::create_task(&self.storage, payload)
