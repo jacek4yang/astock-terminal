@@ -1,6 +1,6 @@
 import {
   "astock/terminal/agent_core" @agent,
-  "astock/terminal/protocol" @protocol,
+  "astock/terminal/protocol",
   "moonbitlang/core/encoding/utf8",
   "moonbitlang/core/json",
   "moonbitlang/async",
