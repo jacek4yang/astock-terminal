@@ -6,7 +6,13 @@ import os from "node:os";
 import path from "node:path";
 
 import { validateEvidence } from "./release-evidence-check.mjs";
-import { BROWSER_CDP_SCENARIOS, DESKTOP_E2E_SCENARIOS, NATIVE_WINDOW_SCENARIOS } from "./release-scenarios.mjs";
+import {
+  BROWSER_CDP_ASSERTION_ANCHORS,
+  BROWSER_CDP_SCENARIOS,
+  DESKTOP_E2E_ASSERTION_ANCHORS,
+  DESKTOP_E2E_SCENARIOS,
+  NATIVE_WINDOW_SCENARIOS,
+} from "./release-scenarios.mjs";
 
 const commit = "a".repeat(40);
 const artifactRoot = fs.mkdtempSync(path.join(os.tmpdir(), "astock-release-evidence-"));
@@ -64,10 +70,11 @@ function interactiveCases(caseIds, surface) {
       surface,
       viewport: { width: id === "responsive-1200" ? 1199 : id === "responsive-900" ? 899 : 1440, height: 900 },
       console: { error_count: 0, warning_count: 0 },
-      assertions: [
-        { id: "visible", passed: true, expected: "visible", observed: "visible" },
-        { id: "interactive", passed: true, expected: true, observed: true },
-      ],
+      assertions: (surface === "codex-in-app-browser"
+        ? BROWSER_CDP_ASSERTION_ANCHORS[id]
+        : DESKTOP_E2E_ASSERTION_ANCHORS[id]).map((anchor) => ({
+        id: anchor, passed: true, expected: true, observed: true,
+      })),
       ...(surface === "codex-in-app-browser"
         ? { bridge: { real_engine: true, real_agent: true } }
         : { package: { application_version: "6.0.0", commit, isolated_data_root: true } }),
@@ -246,6 +253,32 @@ test("accepts the complete desktop catalog only with auditable artifacts", () =>
   evidence.runner.session_id = "desktop-session";
   evidence.cases = interactiveCases(DESKTOP_E2E_SCENARIOS, "packaged-proton-cef");
   assert.doesNotThrow(() => validateEvidence(evidence, "desktop-e2e-40", commit));
+});
+
+test("rejects complete interactive catalogs whose assertions prove the wrong behavior", () => {
+  const evidence = base("browser-cdp", BROWSER_CDP_SCENARIOS);
+  evidence.secrets_in_evidence = false;
+  evidence.production_data_touched = false;
+  evidence.runner.surface = "codex-in-app-browser";
+  evidence.runner.session_id = "browser-session";
+  evidence.cases = interactiveCases(BROWSER_CDP_SCENARIOS, "codex-in-app-browser");
+  evidence.cases.find((item) => item.id === "stock-detail").details.assertions = [
+    { id: "market-index-values-visible", passed: true, expected: true, observed: true },
+    { id: "market-quality-state-visible", passed: true, expected: true, observed: true },
+  ];
+  assert.throws(() => validateEvidence(evidence, "browser-cdp", commit), /canonical-security-identity/);
+});
+
+test("rejects duplicate interactive assertion ids", () => {
+  const evidence = base("browser-cdp", BROWSER_CDP_SCENARIOS);
+  evidence.secrets_in_evidence = false;
+  evidence.production_data_touched = false;
+  evidence.runner.surface = "codex-in-app-browser";
+  evidence.runner.session_id = "browser-session";
+  evidence.cases = interactiveCases(BROWSER_CDP_SCENARIOS, "codex-in-app-browser");
+  const assertions = evidence.cases[0].details.assertions;
+  assertions[1].id = assertions[0].id;
+  assert.throws(() => validateEvidence(evidence, "browser-cdp", commit), /duplicate assertion ids/);
 });
 
 test("rejects pass-only browser evidence without real Worker and visual provenance", () => {

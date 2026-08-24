@@ -5,7 +5,12 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import zlib from "node:zlib";
 
-import { BROWSER_CDP_SCENARIOS, DESKTOP_E2E_SCENARIOS } from "./release-scenarios.mjs";
+import {
+  BROWSER_CDP_ASSERTION_ANCHORS,
+  BROWSER_CDP_SCENARIOS,
+  DESKTOP_E2E_ASSERTION_ANCHORS,
+  DESKTOP_E2E_SCENARIOS,
+} from "./release-scenarios.mjs";
 
 const MODES = Object.freeze({
   browser: { gate: "browser-cdp", surface: "codex-in-app-browser", scenarios: BROWSER_CDP_SCENARIOS },
@@ -156,7 +161,7 @@ function normalizedUrl(value, mode, scenario) {
   return url.toString();
 }
 
-function validateAssertions(assertions, scenario) {
+function validateAssertions(assertions, scenario, requiredAnchors) {
   invariant(Array.isArray(assertions) && assertions.length >= 2, `${scenario}: at least two concrete assertions are required`);
   const ids = new Set();
   for (const assertion of assertions) {
@@ -167,6 +172,12 @@ function validateAssertions(assertions, scenario) {
     invariant(assertion.passed === true, `${scenario}: assertion ${assertion.id} did not pass`);
     invariant(Object.hasOwn(assertion, "expected") && Object.hasOwn(assertion, "observed"),
       `${scenario}: assertion ${assertion.id} must retain expected and observed values`);
+    invariant(assertion.expected !== null && assertion.expected !== undefined &&
+      assertion.observed !== null && assertion.observed !== undefined,
+    `${scenario}: assertion ${assertion.id} expected/observed values must be concrete`);
+  }
+  for (const anchor of requiredAnchors) {
+    invariant(ids.has(anchor), `${scenario}: required assertion anchor is missing: ${anchor}`);
   }
   return assertions;
 }
@@ -183,7 +194,8 @@ function validateObservation({ mode, scenario, caseDirectory, commit, surface })
   const started = Date.parse(observation.started_at_utc);
   const completed = Date.parse(observation.completed_at_utc);
   invariant(Number.isFinite(started) && Number.isFinite(completed) && completed >= started, `${scenario}: observation timestamps are invalid`);
-  const assertions = validateAssertions(observation.assertions, scenario);
+  const assertionCatalog = mode === "browser" ? BROWSER_CDP_ASSERTION_ANCHORS : DESKTOP_E2E_ASSERTION_ANCHORS;
+  const assertions = validateAssertions(observation.assertions, scenario, assertionCatalog[scenario]);
   invariant(observation.console && Array.isArray(observation.console.errors) && Array.isArray(observation.console.warnings),
     `${scenario}: console capture is required`);
   invariant(observation.console.errors.length === 0 && observation.console.warnings.length === 0,

@@ -47,6 +47,7 @@ const browserBridge = fs.readFileSync(path.join(root, "scripts", "browser-dev-br
 const handshakeContract = fs.readFileSync(path.join(root, "scripts", "lib", "handshake-contract.mjs"), "utf8");
 const rendererBridge = fs.readFileSync(path.join(root, "ui", "src", "bridge", "index.ts"), "utf8");
 const acceptanceEvidence = fs.readFileSync(path.join(root, "scripts", "acceptance-evidence.mjs"), "utf8");
+const releaseScenarios = fs.readFileSync(path.join(root, "scripts", "release-scenarios.mjs"), "utf8");
 const researchDataGate = fs.readFileSync(path.join(root, "scripts", "research-data-release-gate.mjs"), "utf8");
 const releaseGate = fs.readFileSync(path.join(root, "scripts", "release-gate.ps1"), "utf8");
 const releaseSigner = fs.readFileSync(path.join(root, "scripts", "sign-release.ps1"), "utf8");
@@ -534,8 +535,25 @@ for (const acceptanceMarker of [
   "screenshot",
   "observation contains credential or Bridge-token material",
   "flag: \"wx\"",
+  "required assertion anchor is missing",
 ]) {
   if (!acceptanceEvidence.includes(acceptanceMarker)) failures.push(`interactive acceptance evidence recorder is missing ${acceptanceMarker}`);
+}
+for (const scenarioContractMarker of [
+  "BROWSER_CDP_ASSERTION_ANCHORS",
+  "DESKTOP_E2E_ASSERTION_ANCHORS",
+  "model-generated-question-visible",
+  "blocking-finding-prevents-publication",
+  "drag-does-not-white-screen",
+  "source-window-has-zero-app-permissions",
+]) {
+  if (!releaseScenarios.includes(scenarioContractMarker)) failures.push(`interactive scenario contract is missing ${scenarioContractMarker}`);
+}
+for (const evidenceAssertionMarker of [
+  "missing required assertion anchor",
+  "unapproved interactive scenario",
+]) {
+  if (!releaseEvidenceValidator.includes(evidenceAssertionMarker)) failures.push(`interactive evidence validator is missing ${evidenceAssertionMarker}`);
 }
 for (const kind of ["research.agent_prepare_context", "research.agent_security_context", "research.agent_report_verify"]) {
   if (!engineSchema.includes(`\"${kind}\"`)) failures.push(`Engine protocol is missing ${kind}`);

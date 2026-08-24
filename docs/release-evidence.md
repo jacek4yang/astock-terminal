@@ -18,8 +18,11 @@ cannot run until Codex in-app browser evidence and packaging both pass.
 
 The desktop gate requires the exact 40 named v6 scenarios in
 `scripts/release-scenarios.mjs`; unrelated placeholder cases cannot satisfy the
-count. Every browser and desktop case must record a positive assertion count
-and an absolute interaction trace plus PNG screenshot with recomputed SHA-256.
+count. Each named scenario also declares at least two scenario-specific
+assertion anchors. Evidence for a different screen or two generic
+“visible/interactive” assertions cannot satisfy those anchors. Every browser
+and desktop case must record a positive assertion count and an absolute
+interaction trace plus PNG screenshot with recomputed SHA-256.
 Interactive acceptance is never represented by a hand-written `PASSED` list.
 Create a commit-bound D-drive session with `scripts/acceptance-evidence.mjs
 init`, record `observation.json` plus `screenshot.png` for every catalog case,

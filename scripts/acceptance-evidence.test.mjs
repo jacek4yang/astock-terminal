@@ -7,7 +7,11 @@ import zlib from "node:zlib";
 
 import { initializeAcceptanceSession, finalizeAcceptanceSession } from "./acceptance-evidence.mjs";
 import { validateEvidence } from "./release-evidence-check.mjs";
-import { BROWSER_CDP_SCENARIOS, DESKTOP_E2E_SCENARIOS } from "./release-scenarios.mjs";
+import {
+  BROWSER_CDP_ASSERTION_ANCHORS,
+  BROWSER_CDP_SCENARIOS,
+  DESKTOP_E2E_SCENARIOS,
+} from "./release-scenarios.mjs";
 
 const commit = "b".repeat(40);
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "astock-acceptance-"));
@@ -66,10 +70,9 @@ function writeBrowserObservation(session, scenario, mutate = (value) => value) {
     viewport: { width, height: 900, device_scale_factor: 1 },
     bridge: { real_engine: true, real_agent: true },
     console: { errors: [], warnings: [] },
-    assertions: [
-      { id: "visible", passed: true, expected: "visible", observed: "visible" },
-      { id: "interactive", passed: true, expected: true, observed: true },
-    ],
+    assertions: BROWSER_CDP_ASSERTION_ANCHORS[scenario].map((id) => ({
+      id, passed: true, expected: true, observed: true,
+    })),
     screenshot: "screenshot.png",
   });
   fs.writeFileSync(path.join(directory, "observation.json"), `${JSON.stringify(value, null, 2)}\n`);
@@ -102,6 +105,43 @@ test("rejects pass-only observations and Bridge-token leakage", () => {
   assert.throws(() => finalizeAcceptanceSession({
     sessionDirectory: leaked, outputPath: path.join(root, "leaked.json"), expectedCommit: commit, buildRoot: root,
   }), /Bridge-token material/);
+});
+
+test("rejects generic passed assertions that do not prove the named scenario", () => {
+  const session = path.join(root, "browser-wrong-assertions");
+  initializeAcceptanceSession({ mode: "browser", sessionDirectory: session, commit, buildRoot: root });
+  for (const scenario of BROWSER_CDP_SCENARIOS) writeBrowserObservation(session, scenario);
+  writeBrowserObservation(session, "dynamic-clarification", (value) => ({
+    ...value,
+    assertions: [
+      { id: "visible", passed: true, expected: true, observed: true },
+      { id: "interactive", passed: true, expected: true, observed: true },
+    ],
+  }));
+  assert.throws(() => finalizeAcceptanceSession({
+    sessionDirectory: session,
+    outputPath: path.join(root, "wrong-assertions.json"),
+    expectedCommit: commit,
+    buildRoot: root,
+  }), /model-generated-question-visible/);
+});
+
+test("rejects assertions with placeholder expected or observed values", () => {
+  const session = path.join(root, "browser-null-assertion");
+  initializeAcceptanceSession({ mode: "browser", sessionDirectory: session, commit, buildRoot: root });
+  for (const scenario of BROWSER_CDP_SCENARIOS) writeBrowserObservation(session, scenario);
+  writeBrowserObservation(session, "market-overview", (value) => ({
+    ...value,
+    assertions: value.assertions.map((assertion, index) => index === 0
+      ? { ...assertion, observed: null }
+      : assertion),
+  }));
+  assert.throws(() => finalizeAcceptanceSession({
+    sessionDirectory: session,
+    outputPath: path.join(root, "null-assertion.json"),
+    expectedCommit: commit,
+    buildRoot: root,
+  }), /must be concrete/);
 });
 
 test("rejects a renamed or corrupt file masquerading as a screenshot", () => {

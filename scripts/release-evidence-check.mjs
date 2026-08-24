@@ -2,7 +2,13 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { BROWSER_CDP_SCENARIOS, DESKTOP_E2E_SCENARIOS, NATIVE_WINDOW_SCENARIOS } from "./release-scenarios.mjs";
+import {
+  BROWSER_CDP_ASSERTION_ANCHORS,
+  BROWSER_CDP_SCENARIOS,
+  DESKTOP_E2E_ASSERTION_ANCHORS,
+  DESKTOP_E2E_SCENARIOS,
+  NATIVE_WINDOW_SCENARIOS,
+} from "./release-scenarios.mjs";
 
 const HEX_SHA256 = /^[a-f0-9]{64}$/i;
 const GIT_COMMIT = /^[a-f0-9]{40}$/i;
@@ -310,6 +316,7 @@ function validateSignedArtifacts(evidence) {
 function validateInteractiveAcceptance(evidence, gate) {
   const browser = gate === "browser-cdp";
   const expectedSurface = browser ? "codex-in-app-browser" : "packaged-proton-cef";
+  const assertionCatalog = browser ? BROWSER_CDP_ASSERTION_ANCHORS : DESKTOP_E2E_ASSERTION_ANCHORS;
   invariant(evidence.secrets_in_evidence === false, `${gate}: evidence may not retain credentials or Bridge tokens`);
   invariant(evidence.production_data_touched === false, `${gate}: acceptance may not touch production data`);
   invariant(evidence.runner.surface === expectedSurface && typeof evidence.runner.session_id === "string" && evidence.runner.session_id.trim(),
@@ -321,8 +328,16 @@ function validateInteractiveAcceptance(evidence, gate) {
     invariant(Array.isArray(details.assertions) && details.assertions.length >= 2 &&
       details.assertions.every((assertion) => isRecord(assertion) && assertion.passed === true &&
         typeof assertion.id === "string" && assertion.id.trim() &&
-        Object.hasOwn(assertion, "expected") && Object.hasOwn(assertion, "observed")),
+        Object.hasOwn(assertion, "expected") && assertion.expected !== null && assertion.expected !== undefined &&
+        Object.hasOwn(assertion, "observed") && assertion.observed !== null && assertion.observed !== undefined),
     `${gate}: case ${item.id} contains only a pass label or incomplete assertions`);
+    const requiredAnchors = assertionCatalog[item.id];
+    invariant(Array.isArray(requiredAnchors), `${gate}: unapproved interactive scenario ${item.id}`);
+    const assertionIds = new Set(details.assertions.map((assertion) => assertion.id));
+    invariant(assertionIds.size === details.assertions.length, `${gate}: case ${item.id} contains duplicate assertion ids`);
+    for (const anchor of requiredAnchors) {
+      invariant(assertionIds.has(anchor), `${gate}: case ${item.id} is missing required assertion anchor ${anchor}`);
+    }
     invariant(isRecord(details.viewport) && Number.isInteger(details.viewport.width) && Number.isInteger(details.viewport.height),
       `${gate}: case ${item.id} has no viewport recording`);
     invariant(details.console?.error_count === 0 && details.console?.warning_count === 0,
