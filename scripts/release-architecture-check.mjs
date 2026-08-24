@@ -113,6 +113,16 @@ for (const faultMarker of ["renderer-kill", "gpu-failure", "PROTON_DISABLE_GPU=1
 if (releaseGate.indexOf("browser-cdp-evidence") > releaseGate.indexOf("package-proton-cef")) {
   failures.push("release gate can launch the packaged desktop before Codex browser evidence passes");
 }
+for (const dependencyMarker of [
+  "'package-proton-cef' 'package' 'INTEGRATION TESTED' -Requires @('browser-cdp-evidence') -Action",
+  "'fault-injection-desktop-evidence' 'reliability' 'FAULT-INJECTION TESTED' -Requires @('browser-cdp-evidence','package-proton-cef','fault-injection-core') -Action",
+  "'authenticode' 'signing' 'ASSUMED/TRUSTED BOUNDARY' -Requires $productionSigningPrerequisites -Action",
+  "'credential-rotation-evidence'",
+  "'external-services-evidence'",
+  "status = 'SKIPPED'",
+]) {
+  if (!releaseGate.includes(dependencyMarker)) failures.push(`release gate dependency control is missing ${dependencyMarker}`);
+}
 
 const moon = fs.readFileSync(path.join(root, "desktop-moon", "backend", "moon.mod"), "utf8");
 for (const dependency of [

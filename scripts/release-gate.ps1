@@ -28,6 +28,7 @@ $EvidenceDirectory = [System.IO.Path]::GetFullPath($EvidenceDirectory)
 
 $script:results = [System.Collections.Generic.List[object]]::new()
 $script:failed = 0
+$script:gateStatuses = @{}
 
 function Resolve-AStockTool {
     param(
@@ -57,21 +58,31 @@ function Invoke-ReleaseGateStep {
             'ASSUMED/TRUSTED BOUNDARY',
             'NOT VERIFIED'
         )][string]$Classification,
-        [Parameter(Mandatory)][scriptblock]$Action
+        [Parameter(Mandatory)][scriptblock]$Action,
+        [string[]]$Requires = @()
     )
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     $status = 'PASSED'
     $details = [System.Collections.Generic.List[string]]::new()
-    try {
-        & $Action 2>&1 | ForEach-Object { $details.Add($_.ToString()) }
-    } catch {
-        $status = 'FAILED'
+    $unmet = @($Requires | Where-Object {
+        -not $script:gateStatuses.ContainsKey($_) -or $script:gateStatuses[$_] -ne 'PASSED'
+    })
+    if ($unmet.Count -gt 0) {
+        $status = 'SKIPPED'
         $script:failed += 1
-        $details.Add($_.Exception.Message)
-        if ($_.ScriptStackTrace) { $details.Add($_.ScriptStackTrace) }
-    } finally {
-        $watch.Stop()
+        $details.Add("Prerequisite gates did not pass: $($unmet -join ', ')")
+    } else {
+        try {
+            & $Action 2>&1 | ForEach-Object { $details.Add($_.ToString()) }
+        } catch {
+            $status = 'FAILED'
+            $script:failed += 1
+            $details.Add($_.Exception.Message)
+            if ($_.ScriptStackTrace) { $details.Add($_.ScriptStackTrace) }
+        }
     }
+    $watch.Stop()
+    $script:gateStatuses[$Name] = $status
     $safeName = $Name -replace '[^A-Za-z0-9_.-]', '_'
     $logPath = Join-Path $logDirectory "$safeName.log"
     [System.IO.File]::WriteAllLines($logPath, $details, [System.Text.UTF8Encoding]::new($false))
@@ -256,7 +267,7 @@ shortcut = "4"
         Assert-ReleaseEvidence -FileName 'browser-cdp.json' -Gate 'browser-cdp'
     }
 
-    Invoke-ReleaseGateStep 'package-proton-cef' 'package' 'INTEGRATION TESTED' {
+    Invoke-ReleaseGateStep 'package-proton-cef' 'package' 'INTEGRATION TESTED' -Requires @('browser-cdp-evidence') -Action {
         & (Join-Path $PSScriptRoot 'package.ps1')
         if ($LASTEXITCODE -ne 0) { throw 'Proton packaging failed.' }
     }
@@ -266,15 +277,15 @@ shortcut = "4"
         if ($LASTEXITCODE -ne 0) { throw 'Core fault-injection execution failed.' }
         Assert-ReleaseEvidence -FileName 'fault-injection-core.json' -Gate 'fault-injection-core'
     }
-    Invoke-ReleaseGateStep 'fault-injection-desktop-evidence' 'reliability' 'FAULT-INJECTION TESTED' {
+    Invoke-ReleaseGateStep 'fault-injection-desktop-evidence' 'reliability' 'FAULT-INJECTION TESTED' -Requires @('browser-cdp-evidence','package-proton-cef','fault-injection-core') -Action {
         & (Join-Path $PSScriptRoot 'fault-injection-desktop.ps1') -EvidenceDirectory $EvidenceDirectory -SkipSpaceCheck
         if ($LASTEXITCODE -ne 0) { throw 'Desktop fault-injection execution failed.' }
         Assert-ReleaseEvidence -FileName 'fault-injection.json' -Gate 'fault-injection'
     }
-    Invoke-ReleaseGateStep 'desktop-e2e-evidence' 'desktop' 'INTEGRATION TESTED' {
+    Invoke-ReleaseGateStep 'desktop-e2e-evidence' 'desktop' 'INTEGRATION TESTED' -Requires @('browser-cdp-evidence','package-proton-cef') -Action {
         Assert-ReleaseEvidence -FileName 'desktop-e2e.json' -Gate 'desktop-e2e-40'
     }
-    Invoke-ReleaseGateStep 'migration-evidence' 'storage' 'INTEGRATION TESTED' {
+    Invoke-ReleaseGateStep 'migration-evidence' 'storage' 'INTEGRATION TESTED' -Requires @('browser-cdp-evidence','package-proton-cef') -Action {
         & (Join-Path $PSScriptRoot 'migration-e2e.ps1') -EvidenceDirectory $EvidenceDirectory -SkipSpaceCheck
         Assert-ReleaseEvidence -FileName 'migration.json' -Gate 'migration-install-upgrade-uninstall'
     }
@@ -295,7 +306,32 @@ shortcut = "4"
         if (-not (Test-Path -LiteralPath $sbom -PathType Leaf)) { throw 'Syft did not produce the CycloneDX SBOM.' }
     }
 
-    Invoke-ReleaseGateStep 'authenticode' 'signing' 'ASSUMED/TRUSTED BOUNDARY' {
+    $productionSigningPrerequisites = @(
+        'repository-immutable-main',
+        'version-contract',
+        'architecture-cutover',
+        'rust-format',
+        'rust-workspace-tests',
+        'rust-clippy',
+        'rustsec',
+        'dependency-policy',
+        'renderer-tests-and-build',
+        'moonbit-check-test',
+        'desktop-worker-supervision',
+        'moonbit-agent-proofs',
+        'tlc-agent-model',
+        'browser-cdp-evidence',
+        'package-proton-cef',
+        'fault-injection-core',
+        'fault-injection-desktop-evidence',
+        'desktop-e2e-evidence',
+        'migration-evidence',
+        'performance-evidence',
+        'external-services-evidence',
+        'credential-rotation-evidence',
+        'sbom'
+    )
+    Invoke-ReleaseGateStep 'authenticode' 'signing' 'ASSUMED/TRUSTED BOUNDARY' -Requires $productionSigningPrerequisites -Action {
         Assert-SigningCertificate
         if ([string]::IsNullOrWhiteSpace($TimestampUrl)) {
             throw 'ASTOCK_RFC3161_TIMESTAMP_URL is required for production signing.'
@@ -332,7 +368,11 @@ $htmlPath = Join-Path $reportDirectory 'verification-report.html'
 $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $jsonPath -Encoding utf8NoBOM
 
 $rows = foreach ($result in $script:results) {
-    $color = if ($result.status -eq 'PASSED') { '#2fb171' } else { '#e05260' }
+    $color = switch ($result.status) {
+        'PASSED' { '#2fb171' }
+        'SKIPPED' { '#e4aa42' }
+        default { '#e05260' }
+    }
     "<tr><td>$([System.Net.WebUtility]::HtmlEncode($result.name))</td><td>$($result.category)</td><td>$($result.classification)</td><td style='color:$color'>$($result.status)</td><td>$($result.duration_ms)</td><td>$([System.Net.WebUtility]::HtmlEncode($result.log))</td></tr>"
 }
 $html = @"
