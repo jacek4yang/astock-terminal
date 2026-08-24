@@ -4,7 +4,7 @@ Updated: 2026-08-24 (Asia/Shanghai)
 
 This document treats the last Tauri application as a migration oracle, not as
 the target architecture. The old application registers 127 UI commands. The
-versioned Engine v1 contract currently exposes 45 coarse request kinds. A lower
+versioned Engine v1 contract currently exposes 54 coarse request kinds. A lower
 command count is intentional, but a feature is not considered migrated merely
 because its Rust crate still compiles.
 
@@ -25,8 +25,8 @@ The old Tauri baseline must not be removed while any release-required row is
 freezes and classifies all 127 legacy handlers, all 14 concrete market-provider
 modules and all 26 registered official global sources. Registry drift fails CI
 until it is reviewed; deleting `src-tauri` while blockers remain also fails.
-The classification currently exposes 48 legacy handlers through new coarse
-services and keeps 79 as explicit migration blockers. This count is deliberately
+The classification currently exposes 54 legacy handlers through new coarse
+services and keeps 73 as explicit migration blockers. This count is deliberately
 conservative: partial coverage does not count as migrated. Even with all six
 current sentiment pools present, the legacy
 arbitrary-date pool query stays blocked until the coarse service has equivalent
@@ -94,7 +94,7 @@ failure state so the boundary remains visible.
 | Data directory | adopt/migrate/transactional switch | adoption exists; explicit data-move workflow incomplete | INTERNAL ONLY |
 | Agent task core | dynamic clarification, Agent-best choice, checkpoints, cancel/recovery | MoonBit reducer + Engine event/checkpoint store | ENRICHED |
 | Agent research | candidate plan and final answer | market/news/fundamental/security-event/reconciliation tools plus three model rounds | ENRICHED |
-| Agent history | durable tasks/conversations and branch-from-point | task store exists; current conversation UI still uses renderer local storage | GAP |
+| Agent history | durable tasks/conversations, list/load/rename/soft-delete and branch-from-point | Engine SQLite event/conversation store + three-page Agent UI; renderer local storage is not a truth source | ENRICHED |
 
 ## Live audit evidence (2026-08-24)
 

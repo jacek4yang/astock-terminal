@@ -96,6 +96,16 @@ async function protonCommand<T>(name: string, args: Record<string, unknown> = {}
     case "get_stock_bundle": {
       return requestNative<T>("engine", "market.security_snapshot", args, { deadlineMs: 60_000 });
     }
+    case "get_earnings_driver_tree":
+      return requestNative<T>("engine", "research.earnings_driver.tree", args, {
+        deadlineMs: 60_000,
+      });
+    case "run_earnings_driver_shock":
+      return requestNative<T>("engine", "research.earnings_driver.shock", args, {
+        deadlineMs: 60_000,
+      });
+    case "get_earnings_driver_snapshot":
+      return requestNative<T>("engine", "research.earnings_driver.snapshot", args);
     case "get_source_documents":
       return requestNative<T>("engine", "research.sources.list", args);
     case "get_source_document":

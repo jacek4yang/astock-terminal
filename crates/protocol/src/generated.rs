@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=9cd148d9b61673d3d95bfd2d3941d55e34c37fdb1f114ad222326b2ec1762db2
+// GENERATED from protocol/schema; schema-sha256=81c4e1483f2963faef9ee6be198d9a6cc56b09f64141c323ce4d8a9f17e4755e
 // Run: node protocol/codegen.mjs
 
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,9 @@ pub const ENGINE_REQUEST_KINDS: &[&str] = &[
     "research.security_events",
     "research.market_candidates",
     "research.fundamentals",
+    "research.earnings_driver.tree",
+    "research.earnings_driver.shock",
+    "research.earnings_driver.snapshot",
     "research.news",
     "research.data_reconcile",
     "research.joinquant_context",

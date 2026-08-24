@@ -3,7 +3,10 @@ mod data_root;
 mod event_store;
 
 use astock_core::{Adjust, KlinePeriod, Symbol};
-use astock_fundamental::FundamentalClient;
+use astock_fundamental::{
+    apply_driver_shocks, build_earnings_driver_tree, DriverShock, EarningsDriverTree,
+    FundamentalClient, ShockBridge,
+};
 use astock_market_data::{DataProvider, EastMoneyF10, MarketData, FINANCE_NEWS_SOURCES};
 use astock_protocol::{RequestEnvelope, ResponseEnvelope, PROTOCOL_VERSION};
 use astock_source_verification::SourceVerifier;
@@ -11,6 +14,7 @@ use astock_storage::{CleanupPolicy, Storage};
 use astock_trading_rules::RuleSet;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveTime, TimeZone};
 use data_root::DataRootDecision;
+use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
@@ -408,6 +412,36 @@ impl Engine {
                 let symbol = parse_live_symbol(&payload.symbol)?;
                 let outcome = self.fundamental.bundle(&symbol).await;
                 Ok(fundamental_research_payload(&symbol, outcome))
+            }
+            "research.earnings_driver.tree" => {
+                let payload: SymbolPayload = decode_payload(&request.payload)?;
+                let symbol = parse_live_symbol(&payload.symbol)?;
+                let outcome = self.fundamental.bundle(&symbol).await;
+                let tree = build_earnings_driver_tree(symbol.code(), &outcome.bundle, now_secs());
+                persist_driver_tree(&self.storage, &tree).await?;
+                serde_json::to_value(tree).map_err(invalid)
+            }
+            "research.earnings_driver.shock" => {
+                let payload: EarningsDriverShockPayload = decode_payload(&request.payload)?;
+                if payload.shocks.len() > 20 {
+                    return Err(ServiceError::new(
+                        "invalid_payload",
+                        "单次最多计算 20 个冲击",
+                        false,
+                    ));
+                }
+                let symbol = parse_live_symbol(&payload.symbol)?;
+                let outcome = self.fundamental.bundle(&symbol).await;
+                let tree = build_earnings_driver_tree(symbol.code(), &outcome.bundle, now_secs());
+                persist_driver_tree(&self.storage, &tree).await?;
+                let bridge = apply_driver_shocks(&tree, &payload.shocks);
+                persist_driver_shock_bridge(&self.storage, &bridge).await?;
+                serde_json::to_value(bridge).map_err(invalid)
+            }
+            "research.earnings_driver.snapshot" => {
+                let payload: EarningsDriverSnapshotPayload = decode_payload(&request.payload)?;
+                let tree = load_driver_tree(&self.storage, payload.snapshot_id).await?;
+                serde_json::to_value(tree).map_err(invalid)
             }
             "research.news" => {
                 let payload: ResearchNewsPayload = decode_payload(&request.payload)?;
@@ -1234,6 +1268,19 @@ struct SymbolPayload {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct EarningsDriverShockPayload {
+    symbol: String,
+    shocks: Vec<DriverShock>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EarningsDriverSnapshotPayload {
+    snapshot_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct KlinePayload {
     symbol: String,
     period: String,
@@ -1472,6 +1519,99 @@ fn upstream(error: impl std::fmt::Display) -> ServiceError {
 
 fn storage(error: impl std::fmt::Display) -> ServiceError {
     ServiceError::new("storage", error.to_string(), true)
+}
+
+async fn persist_driver_tree(
+    storage_handle: &Storage,
+    tree: &EarningsDriverTree,
+) -> Result<(), ServiceError> {
+    let tree = tree.clone();
+    storage_handle
+        .run(move |conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO earnings_driver_snapshots
+                 (snapshot_id,parameter_snapshot_id,symbol,model_version,report_period,
+                  knowledge_time,tree_json,created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    tree.snapshot_id,
+                    tree.parameter_snapshot_id,
+                    tree.symbol,
+                    tree.model_version,
+                    tree.report_period,
+                    tree.knowledge_time,
+                    serde_json::to_string(&tree)?,
+                    now_secs(),
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .map_err(storage)
+}
+
+async fn persist_driver_shock_bridge(
+    storage_handle: &Storage,
+    bridge: &ShockBridge,
+) -> Result<(), ServiceError> {
+    let bridge = bridge.clone();
+    storage_handle
+        .run(move |conn| {
+            let evidence_ids = bridge
+                .shocks
+                .iter()
+                .filter_map(|shock| shock.evidence_version_id.as_deref())
+                .collect::<Vec<_>>();
+            conn.execute(
+                "INSERT OR IGNORE INTO earnings_driver_shock_bridges
+                 (bridge_id,base_snapshot_id,evidence_version_ids_json,shocks_json,bridge_json,created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                params![
+                    bridge.shocked_snapshot_id,
+                    bridge.base_snapshot_id,
+                    serde_json::to_string(&evidence_ids)?,
+                    serde_json::to_string(&bridge.shocks)?,
+                    serde_json::to_string(&bridge)?,
+                    now_secs(),
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .map_err(storage)
+}
+
+async fn load_driver_tree(
+    storage_handle: &Storage,
+    snapshot_id: String,
+) -> Result<EarningsDriverTree, ServiceError> {
+    let requested_id = snapshot_id.clone();
+    let json = storage_handle
+        .run(move |conn| {
+            conn.query_row(
+                "SELECT tree_json FROM earnings_driver_snapshots WHERE snapshot_id=?1",
+                [snapshot_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(astock_storage::Error::from)
+        })
+        .await
+        .map_err(storage)?
+        .ok_or_else(|| {
+            ServiceError::new(
+                "not_found",
+                format!("未找到盈利驱动快照 {requested_id}"),
+                false,
+            )
+        })?;
+    serde_json::from_str(&json).map_err(|error| {
+        ServiceError::new(
+            "storage_corrupt",
+            format!("盈利驱动快照损坏：{error}"),
+            false,
+        )
+    })
 }
 
 fn event_store_error(error: impl std::fmt::Display) -> ServiceError {
@@ -1987,6 +2127,10 @@ fn now_ms() -> u128 {
         .as_millis()
 }
 
+fn now_secs() -> i64 {
+    (now_ms() / 1_000).min(i64::MAX as u128) as i64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2007,6 +2151,31 @@ mod tests {
         let error = parse_live_symbol("430002").unwrap_err();
         assert_eq!(error.code, "unsupported_live_symbol");
         assert!(error.message.contains("920xxx"));
+    }
+
+    #[tokio::test]
+    async fn earnings_driver_snapshots_round_trip_and_missing_ids_stay_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(astock_storage::StorageConfig::with_base_dir(dir.path()))
+            .expect("open isolated storage");
+        let tree = build_earnings_driver_tree(
+            "603927",
+            &astock_fundamental::FundamentalBundle::default(),
+            1_700_000_000,
+        );
+
+        persist_driver_tree(&storage, &tree)
+            .await
+            .expect("persist driver snapshot");
+        let replayed = load_driver_tree(&storage, tree.snapshot_id.clone())
+            .await
+            .expect("replay driver snapshot");
+        assert_eq!(replayed, tree);
+
+        let missing = load_driver_tree(&storage, "missing-snapshot".into())
+            .await
+            .expect_err("missing snapshots must not be fabricated");
+        assert_eq!(missing.code, "not_found");
     }
 
     #[test]
