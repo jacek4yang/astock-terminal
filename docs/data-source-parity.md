@@ -1,10 +1,10 @@
 # Data-source parity and release gate
 
-Updated: 2026-08-24 (Asia/Shanghai)
+Updated: 2026-08-25 (Asia/Shanghai)
 
 This document treats the frozen v5 Tauri command inventory as a historical
 migration oracle, not as the target architecture. The old application
-registered 127 UI commands. The versioned Engine v1 contract now exposes 131
+registered 127 UI commands. The versioned Engine v1 contract now exposes 134
 coarse request kinds. Counts are not compared one-for-one; a feature only
 became migrated after its contract, consumer and tests were present.
 
@@ -31,6 +31,13 @@ release gate until it is reviewed. The final cutover classification maps all
 blockers. The checker retains the immutable registry count/hash after source
 deletion so later edits cannot rewrite the baseline.
 
+`protocol/legacy-capability-map.json` freezes the complete one-to-many mapping:
+127 legacy handlers map to 113 reachable replacement request kinds, with 57
+classified `READY` and 70 `ENRICHED`. The checker rejects duplicate/missing rows,
+any status other than those two, and every replacement absent from both the
+Engine schema/dispatcher and MoonBit Agent Worker dispatcher. A name in a set is
+therefore no longer sufficient to claim parity.
+
 The 26-entry global catalog must not be confused with 26 working legacy
 collectors. The old `global_sync_start` actively downloads World Bank and an
 explicitly requested SEC CIK; the other entries primarily provide source,
@@ -51,15 +58,15 @@ newly exposed through the bounded global-context service.
 | EastMoney F10/datacenter | Profile, statements, indicators, dividends, valuation snapshot/history | `research.fundamentals` | ENRICHED | Missing numeric fields remain `null`; statement use is point-in-time gated by announcement date. |
 | EastMoney datacenter reports | Limit pools, billboard, block trade, margin, surveys, holder count, earnings forecasts, unlocks, suspensions, notices, boards | `research.market_context`, `research.security_events` | ENRICHED | Ten market-level and nine security-level datasets are exposed as two bounded services. All six legacy sentiment pools are retained. Security filters execute upstream so full-market pagination cannot silently omit a low-frequency security; legitimate empty reports remain distinct from failures. |
 | NewsNow public aggregator | 12 allowlisted finance channels | `research.news` | ENRICHED | Provider and logical channel are separate fields. Live entries without `revision_id` are discovery evidence only. |
-| Durable news archive | Immutable document revisions, observations, clusters and entity links | merged by `research.news` | READY (read), INTERNAL ONLY (review UI) | Archived revisions remain available; cluster merge/split and evidence-review workflows are not yet exposed by the new contract. |
+| Durable news archive | Immutable document revisions, observations, clusters and entity links | `research.news.*`, `research.entities.*` | READY | Read, provider control, cluster merge/split, evidence review and entity review are all exposed as bounded Engine services. |
 | EastMoney announcement mirror | A-share announcement discovery | `research.news` | READY | Treated as official-mirror discovery; material claims must follow the exchange/company source link. |
-| CNInfo | Statutory disclosure index and PDF original links | `research.security_events.cninfo_disclosures_1y` | ENRICHED (research read), INTERNAL ONLY (bulk archive/review) | The new path resolves the mandatory `orgId` before querying; this fixes the legacy bare-code query that silently returned zero rows. Full cancellable bulk sync, PDF text extraction and review UI remain gated. |
+| CNInfo | Statutory disclosure index and PDF original links | `research.security_events.cninfo_disclosures_1y`, `research.disclosures.*` | ENRICHED | The new path resolves the mandatory `orgId` before querying; this fixes the legacy bare-code query that silently returned zero rows. Cancellable sync, status, detail and provider health are reachable, while any upstream/PDF parse failure remains explicit. |
 | Source verifier | Fetch, version, compare webpage/PDF evidence | `research.sources.*` | READY | Content-addressed versions are retained; external source windows remain zero privilege. |
 | JoinQuant | Adjusted daily, constituents, valuation, macro | `research.joinquant_context` + Credential Manager | READY / TRUSTED BOUNDARY | The Agent consumes one bounded explicit-call research package when configured. The current machine has no configured JoinQuant credential, so contract and missing-credential behavior are tested but no live upstream verification claim is permitted. |
-| Tushare Pro | Raw daily, calendar, adjustment-factor cross-check, dividends, daily basics | Rust provider | INTERNAL ONLY | Token-gated; not in automatic failover. |
-| iWencai | Natural-language screening / OpenAPI event and board data | Rust provider and screening crate | INTERNAL ONLY | Credential/captcha/rate-limit dependent. |
+| Tushare Pro | Raw daily, calendar, adjustment-factor cross-check, dividends, daily basics | `research.optional_sources` | ENRICHED / TRUSTED BOUNDARY | Token and tier gated; raw daily remains usable at the lower tier, while Pro-only datasets report permission failure independently. It is not inserted into automatic failover. |
+| iWencai | Natural-language screening / OpenAPI event and board data | `research.optional_sources` | ENRICHED / TRUSTED BOUNDARY | Credential/captcha/rate-limit dependent; exposed only as an explicit supplemental discovery layer with per-dataset failure state. |
 | World Bank / global asset providers | Official macro series, COMEX/SGE gold, World Gold Council/SGE primary publications | `research.global_context` | ENRICHED | Five independently failing datasets retain observation periods and source identities. Annual macro observations are context, never mislabeled as real-time trading signals. |
-| SEC EDGAR | Overseas primary filings | Rust global-intelligence stack | INTERNAL ONLY | Required for issuer-specific overseas transmission research; not silently replaced by media summaries. |
+| SEC EDGAR | Overseas primary filings | `research.optional_sources`, `research.global.*` | READY / TRUSTED BOUNDARY | Explicit CIK and Fair Access identity are required; missing identity stays visible and is never replaced by media summaries. |
 | MiniMax Plus | Clarification, planning, evidence review, adversarial review, final synthesis | MoonBit Worker | ENRICHED | Secrets stay in Windows Credential Manager. Provider output cannot create facts; it may only select tools and synthesize supplied evidence. |
 
 All external providers and the explicitly configured user-managed SOCKS proxy are

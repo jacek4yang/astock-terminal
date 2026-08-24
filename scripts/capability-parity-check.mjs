@@ -9,9 +9,13 @@ const providerDir = path.join(root, "crates", "market-data", "src", "providers")
 const globalCatalogPath = path.join(root, "crates", "global-intelligence", "src", "lib.rs");
 const engineSchemaPath = path.join(root, "protocol", "schema", "engine.schema.json");
 const engineDispatchPath = path.join(root, "crates", "engine", "src", "lib.rs");
+const engineFramingPath = path.join(root, "crates", "engine", "src", "main.rs");
+const agentDispatchPath = path.join(root, "app-moon", "agent_worker", "main.mbt");
+const legacyCapabilityMapPath = path.join(root, "protocol", "legacy-capability-map.json");
 
 const expectedLegacyHandlerCount = 127;
 const expectedLegacyHandlerHash = "b55ed6504d2c97ab3463274cf826e8b34b1f60257e8447a79b43baab26a8e700";
+const expectedLegacyMappingHash = "97f5ee6a6a198e296202d4c55bf14865e295b8a85047778363c6592900613c13";
 
 // Exact legacy capabilities that are reachable through the new coarse Engine
 // contract. Before cutover, everything else in the frozen 127-command registry
@@ -231,6 +235,63 @@ if (unknownDataBearing.length) {
 }
 const engineSchema = fs.readFileSync(engineSchemaPath, "utf8");
 const engineDispatch = fs.readFileSync(engineDispatchPath, "utf8");
+const engineFraming = fs.readFileSync(engineFramingPath, "utf8");
+const agentDispatch = fs.readFileSync(agentDispatchPath, "utf8");
+const engineKinds = new Set(
+  JSON.parse(engineSchema).properties.request_kinds.prefixItems.map((item) => item.const),
+);
+const legacyCapabilityMap = JSON.parse(fs.readFileSync(legacyCapabilityMapPath, "utf8"));
+const capabilityRows = Array.isArray(legacyCapabilityMap.capabilities)
+  ? legacyCapabilityMap.capabilities
+  : [];
+const legacyMappingHash = crypto.createHash("sha256").update(
+  capabilityRows
+    .map((row) => JSON.stringify(row))
+    .sort()
+    .join("\n"),
+).digest("hex");
+const mappedLegacy = new Set();
+const mappedReplacements = new Set();
+const statusCounts = { READY: 0, ENRICHED: 0 };
+
+if (legacyCapabilityMap.schema_version !== 1 ||
+    legacyCapabilityMap.frozen_legacy_count !== expectedLegacyHandlerCount ||
+    legacyCapabilityMap.frozen_legacy_sha256 !== expectedLegacyHandlerHash ||
+    legacyCapabilityMap.frozen_mapping_sha256 !== expectedLegacyMappingHash ||
+    legacyMappingHash !== expectedLegacyMappingHash ||
+    !Array.isArray(legacyCapabilityMap.capabilities)) {
+  fail("legacy capability map metadata does not match the frozen v5 registry");
+}
+for (const row of capabilityRows) {
+  if (!Array.isArray(row) || row.length !== 3 || typeof row[0] !== "string" ||
+      !Array.isArray(row[1]) || row[1].length === 0 || !["READY", "ENRICHED"].includes(row[2])) {
+    fail(`invalid legacy capability map row: ${JSON.stringify(row)}`);
+    continue;
+  }
+  const [legacy, replacements, status] = row;
+  if (mappedLegacy.has(legacy)) fail(`duplicate legacy capability map row: ${legacy}`);
+  mappedLegacy.add(legacy);
+  statusCounts[status] += 1;
+  for (const replacement of replacements) {
+    if (typeof replacement !== "string" || replacement.length === 0) {
+      fail(`invalid replacement request kind for ${legacy}`);
+      continue;
+    }
+    const engineReachable = engineKinds.has(replacement) &&
+      (engineDispatch.includes(`"${replacement}"`) || engineFraming.includes(`"${replacement}"`));
+    const agentReachable = agentDispatch.includes(`"${replacement}" =>`);
+    if (!engineReachable && !agentReachable) {
+      fail(`${legacy} maps to unreachable request kind ${replacement}`);
+    }
+    mappedReplacements.add(replacement);
+  }
+}
+const missingCapabilityRows = legacyHandlers.filter((name) => !mappedLegacy.has(name));
+const unknownCapabilityRows = [...mappedLegacy].filter((name) => !migratedHandlers.has(name));
+if (missingCapabilityRows.length || unknownCapabilityRows.length ||
+    mappedLegacy.size !== expectedLegacyHandlerCount) {
+  fail(`legacy capability map drifted; missing=${missingCapabilityRows.join(",")}; unknown=${unknownCapabilityRows.join(",")}`);
+}
 const globalCatalogVisible = engineSchema.includes('"research.global.providers"')
   && engineDispatch.includes('"research.global.providers" => global_sync::provider_health');
 const catalogVisibilityBlockers = globalCatalogVisible ? [] : globalProviders;
@@ -255,6 +316,10 @@ console.log(JSON.stringify({
   mode: releaseMode ? "release" : "diagnostic",
   legacy_handlers: legacyHandlers.length,
   migrated_handlers: migratedHandlers.size,
+  mapped_legacy_handlers: mappedLegacy.size,
+  legacy_mapping_sha256: legacyMappingHash,
+  reachable_replacement_request_kinds: mappedReplacements.size,
+  mapped_statuses: statusCounts,
   legacy_handler_blockers: blockers.length,
   legacy_blockers: blockers,
   market_provider_modules: actualMarketProviders.length,
