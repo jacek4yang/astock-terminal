@@ -76,6 +76,14 @@ cancellation IDs, deadlines and protocol version are validated at every
 boundary. Large datasets use bounded pages and stable snapshot/source version
 identifiers.
 
+Engine and Agent startup versions plus the minimum production capability sets
+are also schema-pinned. The Host validates the correlated response envelope,
+protocol v1, release 6.0.0, frame/page limits, reducer version and every required
+capability at initial startup and after a supervised restart; extra future
+capabilities are allowed. The browser development Bridge and IPC smoke use the
+same schema-derived contract. A Worker that merely replies `ok` but is missing
+one of these fields is terminated as incompatible instead of entering service.
+
 Agent state changes and effect intent are committed to the Engine SQLite event
 store before Provider or Engine side effects run. An effect result is committed
 before it is reduced. Conversation history, branches, checkpoints, evidence

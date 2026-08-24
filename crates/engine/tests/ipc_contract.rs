@@ -1,5 +1,7 @@
 use astock_protocol::{
-    read_frame, write_frame, RequestEnvelope, ResponseEnvelope, PROTOCOL_VERSION,
+    read_frame, write_frame, RequestEnvelope, ResponseEnvelope,
+    ENGINE_STARTUP_REQUIRED_CAPABILITIES, MAX_FRAME_BYTES, MAX_PAGE_SIZE, PROTOCOL_VERSION,
+    RELEASE_VERSION,
 };
 use serde_json::json;
 use std::process::Stdio;
@@ -45,6 +47,15 @@ async fn worker_stdout_is_protocol_only_and_handshake_is_versioned() {
     assert_eq!(response.protocol_version, PROTOCOL_VERSION);
     assert_eq!(response.request_id, "handshake-1");
     assert_eq!(response.payload["protocol_version"], 1);
+    assert_eq!(response.payload["engine_version"], RELEASE_VERSION);
+    assert_eq!(response.payload["max_frame_bytes"], MAX_FRAME_BYTES);
+    assert_eq!(response.payload["max_page_size"], MAX_PAGE_SIZE);
+    let capabilities = response.payload["capabilities"].as_array().unwrap();
+    for required in ENGINE_STARTUP_REQUIRED_CAPABILITIES {
+        assert!(capabilities
+            .iter()
+            .any(|actual| actual.as_str() == Some(*required)));
+    }
 
     write_frame(
         &mut stdin,

@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=c6f719cde75d63a1b8f66c69e9537a8025e4b7a79e1e743f86683dc775e84cf4
+// GENERATED from protocol/schema; schema-sha256=65b293549628946d86d197ff5440c8f4d71eca233e6c55d503e203eca4c58b43
 // Run: node protocol/codegen.mjs
 
 use serde::{Deserialize, Serialize};
@@ -7,6 +7,25 @@ use serde_json::Value;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_PAGE_SIZE: usize = 500;
+pub const RELEASE_VERSION: &str = "6.0.0";
+pub const ENGINE_STARTUP_REQUIRED_CAPABILITIES: &[&str] = &[
+    "market",
+    "research",
+    "data_quality",
+    "agent_advanced_analysis_v1",
+    "storage",
+    "credentials",
+    "agent_event_store_v2",
+];
+pub const AGENT_STARTUP_REQUIRED_CAPABILITIES: &[&str] = &[
+    "pure_reducer",
+    "replay",
+    "evidence_gate",
+    "advanced_tool_planning",
+    "closed_engine_effects",
+    "deterministic_report_verification",
+    "sse_stream_recovery",
+];
 pub const ENGINE_REQUEST_KINDS: &[&str] = &[
     "system.handshake",
     "system.shutdown",

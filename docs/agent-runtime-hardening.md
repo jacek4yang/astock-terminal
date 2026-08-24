@@ -23,7 +23,7 @@ MoonBit Agent 的纯 reducer 只处理事件并产生 Effect；Rust Engine 保�
 2. 只接受 `target=engine`，且 kind 必须属于 `research.agent_prepare_context`、`research.agent_security_context`、`research.agent_report_verify` 三项闭集。
 3. Host 持久化 Effect 意图后才调用 Engine，Engine 结果持久化成功后才传回 Agent。
 4. 已成功的幂等键直接复用；崩溃留下的 pending 记录只允许上述三个可重放研究聚合以 `:retry:N` 重新执行。
-5. Agent/Engine 连续丢失三次 2 秒心跳后由 Job Object 监督器重启并重新握手；Provider 暂停保留检查点，不发布未完成报告。
+5. Agent/Engine 连续丢失三次 2 秒心跳后由 Job Object 监督器重启并重新握手；首次启动与重启都必须匹配 schema 固定的协议 v1、6.0.0 版本、8 MiB 帧限制、Agent reducer 版本和最低能力子集，只有 `ok=true` 不会被接纳；Provider 暂停保留检查点，不发布未完成报告。
 
 ### 自动恢复分类
 

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { validateHandshakeResponse } from "./lib/handshake-contract.mjs";
 
 const executables = process.argv.slice(2);
 if (!executables.length) throw new Error("usage: node scripts/ipc-smoke.mjs <worker.exe> [...]");
@@ -62,9 +63,7 @@ async function smoke(executable) {
   child.stdin.write(Buffer.concat([header, request]));
   try {
     const response = await withTimeout(readFrame(child.stdout), 10_000, "handshake response timeout");
-    if (!response.ok || response.request_id !== "smoke-handshake" || response.protocol_version !== 1) {
-      throw new Error(`invalid handshake response: ${JSON.stringify(response)}`);
-    }
+    validateHandshakeResponse(response, { requestId: "smoke-handshake" });
     child.stdin.end();
     const [code] = await withTimeout(once(child, "exit"), 5_000, "worker exit timeout");
     if (code !== 0) throw new Error(`${executable} exited ${code}`);

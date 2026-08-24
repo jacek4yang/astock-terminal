@@ -4,6 +4,19 @@
   "title": "AStock Agent task contract v1",
   "type": "object",
   "properties": {
+    "service_version": { "const": "6.0.0" },
+    "startup_required_capabilities": {
+      "type": "array",
+      "prefixItems": [
+        { "const": "pure_reducer" },
+        { "const": "replay" },
+        { "const": "evidence_gate" },
+        { "const": "advanced_tool_planning" },
+        { "const": "closed_engine_effects" },
+        { "const": "deterministic_report_verification" },
+        { "const": "sse_stream_recovery" }
+      ]
+    },
     "request_kinds": {
       "type": "array",
       "prefixItems": [

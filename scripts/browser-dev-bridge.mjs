@@ -4,6 +4,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { validateHandshakeResponse } from "./lib/handshake-contract.mjs";
 
 const [engineExecutable, agentExecutable] = process.argv.slice(2);
 if (!engineExecutable || !agentExecutable) {
@@ -265,10 +266,12 @@ async function routeAgent(request) {
   throw new Error("Agent exceeded the bounded browser-test effect continuation limit");
 }
 
-await Promise.all([
+const [engineHandshake, agentHandshake] = await Promise.all([
   engine.request({ protocol_version: 1, request_id: "browser-engine-handshake", kind: "system.handshake", payload: { app_version: "browser-test", protocol_version: 1 }, deadline_ms: 15_000 }),
   agent.request({ protocol_version: 1, request_id: "browser-agent-handshake", kind: "system.handshake", payload: { app_version: "browser-test", protocol_version: 1 }, deadline_ms: 15_000 }),
 ]);
+validateHandshakeResponse(engineHandshake, { role: "engine", requestId: "browser-engine-handshake" });
+validateHandshakeResponse(agentHandshake, { role: "agent", requestId: "browser-agent-handshake" });
 
 const server = createServer(async (request, response) => {
   const origin = request.headers.origin;

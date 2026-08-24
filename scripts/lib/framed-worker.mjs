@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
+import { inferHandshakeRole, validateHandshakePayload } from "./handshake-contract.mjs";
 
 export const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 
@@ -141,8 +142,5 @@ export async function handshake(worker, client = "release-evidence") {
     app_version: client,
     protocol_version: 1,
   }, { deadlineMs: 15_000 });
-  if (response.protocol_version !== 1 || response.max_frame_bytes !== MAX_FRAME_BYTES) {
-    throw new Error(`${worker.name} returned an incompatible handshake`);
-  }
-  return response;
+  return validateHandshakePayload(inferHandshakeRole(response), response);
 }

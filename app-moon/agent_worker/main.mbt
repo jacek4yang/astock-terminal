@@ -509,7 +509,7 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
     "system.handshake" =>
       response(request, true, {
         "protocol_version": @protocol.protocol_version,
-        "agent_version": "6.0.0",
+        "agent_version": @protocol.release_version,
         "reducer_version": "moonbit-agent-kernel-v1",
         "capabilities": [
           "pure_reducer", "replay", "evidence_gate", "provider_discovery", "candidate_planning",

@@ -2,6 +2,94 @@
 const MAX_FRAME_BYTES : Int = 8 * 1024 * 1024
 
 ///|
+struct WorkerHandshakeEnvelope {
+  protocol_version : Int
+  request_id : String
+  kind : String
+  ok : Bool
+  payload : Json
+} derive(FromJson)
+
+///|
+struct EngineHandshakePayload {
+  protocol_version : Int
+  engine_version : String
+  capabilities : Array[String]
+  max_frame_bytes : Int
+  max_page_size : Int
+} derive(FromJson)
+
+///|
+struct AgentHandshakePayload {
+  protocol_version : Int
+  agent_version : String
+  reducer_version : String
+  capabilities : Array[String]
+  max_frame_bytes : Int
+} derive(FromJson)
+
+///|
+fn require_capabilities(
+  worker_name : String,
+  actual : Array[String],
+  required : Array[String],
+) -> Unit raise {
+  for capability in required {
+    guard actual.contains(capability) else {
+      fail(
+        worker_name +
+        " Worker is missing required startup capability: " +
+        capability,
+      )
+    }
+  }
+}
+
+///|
+fn validate_worker_handshake(
+  worker_name : String,
+  expected_request_id : String,
+  reply : Json,
+) -> Unit raise {
+  let envelope : WorkerHandshakeEnvelope = @json.from_json(reply)
+  guard envelope.ok &&
+    envelope.protocol_version == 1 &&
+    envelope.request_id == expected_request_id &&
+    envelope.kind == "system.handshake" else {
+    fail(worker_name + " Worker returned an incompatible handshake envelope")
+  }
+  if worker_name.has_prefix("engine") {
+    let payload : EngineHandshakePayload = @json.from_json(envelope.payload)
+    guard payload.protocol_version == 1 &&
+      payload.engine_version == protocol_release_version &&
+      payload.max_frame_bytes == MAX_FRAME_BYTES &&
+      payload.max_page_size == 500 else {
+      fail("Engine Worker returned incompatible protocol limits or version")
+    }
+    require_capabilities(
+      "Engine",
+      payload.capabilities,
+      engine_startup_required_capabilities,
+    )
+  } else if worker_name.has_prefix("agent") {
+    let payload : AgentHandshakePayload = @json.from_json(envelope.payload)
+    guard payload.protocol_version == 1 &&
+      payload.agent_version == protocol_release_version &&
+      payload.reducer_version == "moonbit-agent-kernel-v1" &&
+      payload.max_frame_bytes == MAX_FRAME_BYTES else {
+      fail("Agent Worker returned incompatible protocol limits or version")
+    }
+    require_capabilities(
+      "Agent",
+      payload.capabilities,
+      agent_startup_required_capabilities,
+    )
+  } else {
+    fail("Host cannot validate an unknown Worker role: " + worker_name)
+  }
+}
+
+///|
 /// A single full-duplex Worker channel. Calls are serialized so response
 /// framing stays correlated; the renderer can still have requests queued at
 /// the Host boundary where the hard limit is 256.
@@ -163,15 +251,16 @@ async fn WorkerClient::restart(self : WorkerClient) -> Unit {
   self.output = output
   self.restart_count += 1
   self.restart_times.push(@async.now())
-  let handshake : Json = {
-    "protocol_version": 1,
-    "request_id": "host-" +
+  let handshake_request_id = "host-" +
     self.name +
     "-restart-handshake-" +
-    self.restart_count.to_string(),
+    self.restart_count.to_string()
+  let handshake : Json = {
+    "protocol_version": 1,
+    "request_id": handshake_request_id,
     "kind": "system.handshake",
     "payload": {
-      "app_version": "6.0.0",
+      "app_version": protocol_release_version,
       "host_version": "moonbit-proton-0.2.1",
       "protocol_version": 1,
     },
@@ -187,9 +276,7 @@ async fn WorkerClient::restart(self : WorkerClient) -> Unit {
     self.write_frame(handshake)
     self.read_frame()
   })
-  guard reply is { "ok": true, .. } else {
-    fail(self.name + " Worker restart handshake failed")
-  }
+  validate_worker_handshake(self.name, handshake_request_id, reply)
   self.heartbeat_misses = 0
   self.status = "ready"
 }

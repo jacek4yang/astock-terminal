@@ -608,7 +608,7 @@ fn handshake_request(request_id : String) -> Json {
     "request_id": request_id,
     "kind": "system.handshake",
     "payload": {
-      "app_version": "6.0.0",
+      "app_version": protocol_release_version,
       "host_version": "moonbit-proton-0.2.1",
       "protocol_version": 1,
     },
@@ -618,17 +618,18 @@ fn handshake_request(request_id : String) -> Json {
 
 ///|
 async fn Backend::handshake(self : Backend) -> Unit {
+  let engine_request_id = "host-engine-startup"
   let engine_reply = self.engine.request(
-    handshake_request("host-engine-startup"),
+    handshake_request(engine_request_id),
     timeout_ms=15000,
   )
+  validate_worker_handshake("engine", engine_request_id, engine_reply)
+  let agent_request_id = "host-agent-startup"
   let agent_reply = self.agent.request(
-    handshake_request("host-agent-startup"),
+    handshake_request(agent_request_id),
     timeout_ms=15000,
   )
-  guard engine_reply is { "ok": true, .. } && agent_reply is { "ok": true, .. } else {
-    fail("Worker protocol handshake failed")
-  }
+  validate_worker_handshake("agent", agent_request_id, agent_reply)
 }
 
 ///|

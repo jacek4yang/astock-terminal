@@ -78,3 +78,74 @@ test "Renderer request contracts are target-specific and deny internal continuat
   assert_true(renderer_host_request_kind("window.toggle_maximize"))
   assert_false(renderer_host_request_kind("window.unknown"))
 }
+
+///|
+test "startup handshake requires exact protocol versions and capability subsets" {
+  let engine_reply : Json = {
+    "protocol_version": 1,
+    "request_id": "engine-good",
+    "kind": "system.handshake",
+    "ok": true,
+    "payload": {
+      "protocol_version": 1,
+      "engine_version": protocol_release_version,
+      "capabilities": [
+        "market", "research", "data_quality", "agent_advanced_analysis_v1", "storage",
+        "credentials", "agent_event_store_v2", "future_capability",
+      ],
+      "max_frame_bytes": MAX_FRAME_BYTES,
+      "max_page_size": 500,
+    },
+  }
+  validate_worker_handshake("engine", "engine-good", engine_reply)
+  let agent_reply : Json = {
+    "protocol_version": 1,
+    "request_id": "agent-good",
+    "kind": "system.handshake",
+    "ok": true,
+    "payload": {
+      "protocol_version": 1,
+      "agent_version": protocol_release_version,
+      "reducer_version": "moonbit-agent-kernel-v1",
+      "capabilities": agent_startup_required_capabilities,
+      "max_frame_bytes": MAX_FRAME_BYTES,
+    },
+  }
+  validate_worker_handshake("agent", "agent-good", agent_reply)
+  let bad_version : Unit? = Some(
+    validate_worker_handshake("engine", "engine-good", {
+      "protocol_version": 1,
+      "request_id": "engine-good",
+      "kind": "system.handshake",
+      "ok": true,
+      "payload": {
+        "protocol_version": 1,
+        "engine_version": "5.9.9",
+        "capabilities": engine_startup_required_capabilities,
+        "max_frame_bytes": MAX_FRAME_BYTES,
+        "max_page_size": 500,
+      },
+    }),
+  ) catch {
+    _ => None
+  }
+  assert_true(bad_version is None)
+  let missing_capability : Unit? = Some(
+    validate_worker_handshake("agent", "agent-good", {
+      "protocol_version": 1,
+      "request_id": "agent-good",
+      "kind": "system.handshake",
+      "ok": true,
+      "payload": {
+        "protocol_version": 1,
+        "agent_version": protocol_release_version,
+        "reducer_version": "moonbit-agent-kernel-v1",
+        "capabilities": ["pure_reducer", "replay"],
+        "max_frame_bytes": MAX_FRAME_BYTES,
+      },
+    }),
+  ) catch {
+    _ => None
+  }
+  assert_true(missing_capability is None)
+}

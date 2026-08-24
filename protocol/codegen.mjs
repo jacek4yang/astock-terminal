@@ -13,6 +13,12 @@ const sources = await Promise.all(
 const schemas = Object.fromEntries(schemaFiles.map((name, index) => [name, JSON.parse(sources[index])]));
 const hash = createHash("sha256").update(sources.join("\n")).digest("hex");
 const phases = schemas["agent.schema.json"].$defs.agent_phase.enum;
+const engineVersion = schemas["engine.schema.json"].properties.service_version.const;
+const agentVersion = schemas["agent.schema.json"].properties.service_version.const;
+if (engineVersion !== agentVersion) throw new Error("Engine and Agent service versions must match");
+const releaseVersion = engineVersion;
+const engineRequiredCapabilities = schemas["engine.schema.json"].properties.startup_required_capabilities.prefixItems.map((item) => item.const);
+const agentRequiredCapabilities = schemas["agent.schema.json"].properties.startup_required_capabilities.prefixItems.map((item) => item.const);
 const kinds = schemas["engine.schema.json"].properties.request_kinds.prefixItems.map((item) => item.const);
 const engineRendererKinds = schemas["engine.schema.json"].properties.renderer_request_kinds.prefixItems.map((item) => item.const);
 const agentKinds = schemas["agent.schema.json"].properties.request_kinds.prefixItems.map((item) => item.const);
@@ -27,6 +33,9 @@ use serde_json::Value;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_PAGE_SIZE: usize = 500;
+pub const RELEASE_VERSION: &str = "${releaseVersion}";
+pub const ENGINE_STARTUP_REQUIRED_CAPABILITIES: &[&str] = &[${engineRequiredCapabilities.map((capability) => `\n    "${capability}",`).join("")}\n];
+pub const AGENT_STARTUP_REQUIRED_CAPABILITIES: &[&str] = &[${agentRequiredCapabilities.map((capability) => `\n    "${capability}",`).join("")}\n];
 pub const ENGINE_REQUEST_KINDS: &[&str] = &[${kinds.map((kind) => `\n    "${kind}",`).join("")}\n];
 pub const ENGINE_RENDERER_REQUEST_KINDS: &[&str] = &[${engineRendererKinds.map((kind) => `\n    "${kind}",`).join("")}\n];
 pub const AGENT_REQUEST_KINDS: &[&str] = &[${agentKinds.map((kind) => `\n    "${kind}",`).join("")}\n];
@@ -147,6 +156,9 @@ const typescript = `${header("//")}
 export const PROTOCOL_VERSION = 1 as const;
 export const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 export const MAX_PAGE_SIZE = 500;
+export const RELEASE_VERSION = "${releaseVersion}" as const;
+export const ENGINE_STARTUP_REQUIRED_CAPABILITIES = ${JSON.stringify(engineRequiredCapabilities)} as const;
+export const AGENT_STARTUP_REQUIRED_CAPABILITIES = ${JSON.stringify(agentRequiredCapabilities)} as const;
 export const ENGINE_REQUEST_KINDS = ${JSON.stringify(kinds)} as const;
 export type EngineRequestKind = (typeof ENGINE_REQUEST_KINDS)[number];
 export const ENGINE_RENDERER_REQUEST_KINDS = ${JSON.stringify(engineRendererKinds)} as const;
@@ -272,6 +284,15 @@ pub let max_frame_bytes : Int = 8 * 1024 * 1024
 pub let max_page_size : Int = 500
 
 ///|
+pub let release_version : String = "${releaseVersion}"
+
+///|
+pub let engine_startup_required_capabilities : Array[String] = ${JSON.stringify(engineRequiredCapabilities)}
+
+///|
+pub let agent_startup_required_capabilities : Array[String] = ${JSON.stringify(agentRequiredCapabilities)}
+
+///|
 pub let agent_request_kinds : Array[String] = ${JSON.stringify(agentKinds)}
 
 ///|
@@ -374,6 +395,15 @@ fn ${functionName}(kind : String) -> Bool {
 `;
 
 const desktopHostKinds = `${header("///")}
+let protocol_release_version : String = "${releaseVersion}"
+
+///|
+let engine_startup_required_capabilities : Array[String] = ${JSON.stringify(engineRequiredCapabilities)}
+
+///|
+let agent_startup_required_capabilities : Array[String] = ${JSON.stringify(agentRequiredCapabilities)}
+
+///|
 ${moonStringPredicate("renderer_engine_request_kind", engineRendererKinds)}
 ${moonStringPredicate("renderer_agent_request_kind", agentRendererKinds)}
 ${moonStringPredicate("renderer_host_request_kind", hostRendererKinds)}

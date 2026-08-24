@@ -1,6 +1,15 @@
-/// GENERATED from protocol/schema; schema-sha256=c6f719cde75d63a1b8f66c69e9537a8025e4b7a79e1e743f86683dc775e84cf4
+/// GENERATED from protocol/schema; schema-sha256=65b293549628946d86d197ff5440c8f4d71eca233e6c55d503e203eca4c58b43
 /// Run: node protocol/codegen.mjs
 
+let protocol_release_version : String = "6.0.0"
+
+///|
+let engine_startup_required_capabilities : Array[String] = ["market","research","data_quality","agent_advanced_analysis_v1","storage","credentials","agent_event_store_v2"]
+
+///|
+let agent_startup_required_capabilities : Array[String] = ["pure_reducer","replay","evidence_gate","advanced_tool_planning","closed_engine_effects","deterministic_report_verification","sse_stream_recovery"]
+
+///|
 ///|
 fn renderer_engine_request_kind(kind : String) -> Bool {
   kind == "diagnostics.status" ||

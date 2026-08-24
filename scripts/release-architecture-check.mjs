@@ -32,6 +32,7 @@ const moonAgent = fs.readFileSync(path.join(root, "app-moon", "agent_worker", "m
 const moonProvider = fs.readFileSync(path.join(root, "app-moon", "agent_worker", "provider.mbt"), "utf8");
 const moonKernel = fs.readFileSync(path.join(root, "app-moon", "agent_core", "state.mbt"), "utf8");
 const moonHost = fs.readFileSync(path.join(root, "desktop-moon", "backend", "host", "backend.mbt"), "utf8");
+const moonWorkerClient = fs.readFileSync(path.join(root, "desktop-moon", "backend", "host", "worker_client.mbt"), "utf8");
 const moonHostTests = fs.readFileSync(path.join(root, "desktop-moon", "backend", "host", "worker_supervision_wbtest.mbt"), "utf8");
 const moonEntry = fs.readFileSync(path.join(root, "desktop-moon", "backend", "app", "main.mbt"), "utf8");
 const engineSchema = fs.readFileSync(path.join(root, "protocol", "schema", "engine.schema.json"), "utf8");
@@ -39,6 +40,7 @@ const engineSchemaObject = JSON.parse(engineSchema);
 const agentSchema = JSON.parse(fs.readFileSync(path.join(root, "protocol", "schema", "agent.schema.json"), "utf8"));
 const hostSchema = JSON.parse(fs.readFileSync(path.join(root, "protocol", "schema", "host.schema.json"), "utf8"));
 const browserBridge = fs.readFileSync(path.join(root, "scripts", "browser-dev-bridge.mjs"), "utf8");
+const handshakeContract = fs.readFileSync(path.join(root, "scripts", "lib", "handshake-contract.mjs"), "utf8");
 const rendererBridge = fs.readFileSync(path.join(root, "ui", "src", "bridge", "index.ts"), "utf8");
 const acceptanceEvidence = fs.readFileSync(path.join(root, "scripts", "acceptance-evidence.mjs"), "utf8");
 const researchDataGate = fs.readFileSync(path.join(root, "scripts", "research-data-release-gate.mjs"), "utf8");
@@ -310,6 +312,58 @@ if (!rendererBridge.includes("ENGINE_RENDERER_REQUEST_KINDS") ||
 if (!browserBridge.includes("RENDERER_REQUEST_KINDS") ||
     !browserBridge.includes("outside the protocol contract")) {
   failures.push("browser test Bridge does not enforce the generated renderer request contracts");
+}
+const expectedEngineStartupCapabilities = [
+  "market",
+  "research",
+  "data_quality",
+  "agent_advanced_analysis_v1",
+  "storage",
+  "credentials",
+  "agent_event_store_v2",
+];
+const expectedAgentStartupCapabilities = [
+  "pure_reducer",
+  "replay",
+  "evidence_gate",
+  "advanced_tool_planning",
+  "closed_engine_effects",
+  "deterministic_report_verification",
+  "sse_stream_recovery",
+];
+if (engineSchemaObject.properties.service_version.const !== "6.0.0" ||
+    agentSchema.properties.service_version.const !== "6.0.0") {
+  failures.push("Engine and Agent startup service versions are not both schema-pinned to 6.0.0");
+}
+exactStringSet(
+  "Engine startup capability contract",
+  engineSchemaObject.properties.startup_required_capabilities.prefixItems.map((item) => item.const),
+  expectedEngineStartupCapabilities,
+);
+exactStringSet(
+  "Agent startup capability contract",
+  agentSchema.properties.startup_required_capabilities.prefixItems.map((item) => item.const),
+  expectedAgentStartupCapabilities,
+);
+for (const marker of [
+  "validate_worker_handshake(\"engine\", engine_request_id, engine_reply)",
+  "validate_worker_handshake(\"agent\", agent_request_id, agent_reply)",
+]) {
+  if (!moonHost.includes(marker)) failures.push(`Proton Host startup compatibility check is missing ${marker}`);
+}
+for (const marker of [
+  "payload.engine_version == protocol_release_version",
+  "payload.agent_version == protocol_release_version",
+  "payload.max_frame_bytes == MAX_FRAME_BYTES",
+  "require_capabilities(",
+  "validate_worker_handshake(self.name, handshake_request_id, reply)",
+]) {
+  if (!moonWorkerClient.includes(marker)) failures.push(`Proton Host Worker compatibility check is missing ${marker}`);
+}
+if (!browserBridge.includes("validateHandshakeResponse(engineHandshake") ||
+    !browserBridge.includes("validateHandshakeResponse(agentHandshake") ||
+    !handshakeContract.includes("startup_required_capabilities")) {
+  failures.push("browser test Bridge does not fail closed on incompatible Worker startup handshakes");
 }
 const expectedAgentEffectKinds = [
   "research.agent_prepare_context",
