@@ -110,6 +110,15 @@ pub struct ConversationId {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ConversationList {
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub query: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RenameConversation {
     pub conversation_id: String,
     pub title: String,
@@ -624,18 +633,34 @@ pub async fn load_conversation(
 pub async fn list_conversations(
     storage: &Storage,
     limit: usize,
+    query: Option<String>,
 ) -> Result<Vec<ConversationSummary>, String> {
     let limit = limit.clamp(1, astock_protocol::MAX_PAGE_SIZE) as i64;
+    let pattern = conversation_search_pattern(query)?;
     storage
         .run(move |connection| {
-            let mut statement = connection.prepare(
-                "SELECT conversation_id,title,session_json,parent_conversation_id,
-                        branch_from_message_id,created_at,updated_at
-                 FROM agent_conversations_v2
-                 WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT ?1",
-            )?;
+            let (sql, parameters): (&str, Vec<rusqlite::types::Value>) = match pattern {
+                Some(pattern) => (
+                    "SELECT conversation_id,title,session_json,parent_conversation_id,
+                            branch_from_message_id,created_at,updated_at
+                     FROM agent_conversations_v2
+                     WHERE deleted_at IS NULL AND
+                           (title LIKE ?1 ESCAPE '\\' COLLATE NOCASE OR
+                            conversation_id LIKE ?1 ESCAPE '\\' COLLATE NOCASE)
+                     ORDER BY updated_at DESC LIMIT ?2",
+                    vec![pattern.into(), limit.into()],
+                ),
+                None => (
+                    "SELECT conversation_id,title,session_json,parent_conversation_id,
+                            branch_from_message_id,created_at,updated_at
+                     FROM agent_conversations_v2
+                     WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT ?1",
+                    vec![limit.into()],
+                ),
+            };
+            let mut statement = connection.prepare(sql)?;
             let rows = statement
-                .query_map(params![limit], |row| {
+                .query_map(rusqlite::params_from_iter(parameters), |row| {
                     let session_json: String = row.get(2)?;
                     let session =
                         serde_json::from_str::<Value>(&session_json).unwrap_or(Value::Null);
@@ -859,6 +884,25 @@ fn validate_title(title: String) -> Result<String, String> {
     }
 }
 
+fn conversation_search_pattern(query: Option<String>) -> Result<Option<String>, String> {
+    let Some(query) = query else { return Ok(None) };
+    if query.chars().any(char::is_control) {
+        return Err("conversation search query must contain 1..120 visible characters".into());
+    }
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(None);
+    }
+    if query.chars().count() > 120 {
+        return Err("conversation search query must contain 1..120 visible characters".into());
+    }
+    let escaped = query
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    Ok(Some(format!("%{escaped}%")))
+}
+
 fn validate_identity(value: &str, name: &str) -> Result<(), String> {
     if value.is_empty() || value.len() > 128 {
         Err(format!("{name} must contain 1..128 bytes"))
@@ -1024,7 +1068,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let listed = list_conversations(&storage, 20).await.unwrap();
+        let listed = list_conversations(&storage, 20, None).await.unwrap();
         assert_eq!(listed[0].message_count, 2);
         assert_eq!(listed[0].evidence_count, 1);
 
@@ -1052,6 +1096,45 @@ mod tests {
         assert!(load_conversation(&storage, "conversation-1".into())
             .await
             .is_err());
-        assert_eq!(list_conversations(&storage, 20).await.unwrap().len(), 1);
+        assert_eq!(
+            list_conversations(&storage, 20, None).await.unwrap().len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_search_is_bounded_and_treats_sql_wildcards_literally() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(StorageConfig::with_base_dir(dir.path())).unwrap();
+        migrate(&storage).await.unwrap();
+        for (id, title) in [
+            ("conversation-maotai", "贵州茅台估值研究"),
+            ("conversation-percent", "百分比%与下划线_研究"),
+            ("conversation-bank", "银行行业研究"),
+        ] {
+            save_conversation(
+                &storage,
+                SaveConversation {
+                    conversation_id: id.into(),
+                    title: title.into(),
+                    session: serde_json::json!({"sessionId":id,"messages":[]}),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let chinese = list_conversations(&storage, 20, Some("茅台".into()))
+            .await
+            .unwrap();
+        assert_eq!(chinese.len(), 1);
+        assert_eq!(chinese[0].conversation_id, "conversation-maotai");
+        let literal = list_conversations(&storage, 20, Some("%与下划线_".into()))
+            .await
+            .unwrap();
+        assert_eq!(literal.len(), 1);
+        assert_eq!(literal[0].conversation_id, "conversation-percent");
+        assert!(list_conversations(&storage, 20, Some("\n".into()))
+            .await
+            .is_err());
     }
 }

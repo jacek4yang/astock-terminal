@@ -2206,10 +2206,11 @@ impl Engine {
                 serde_json::to_value(conversation).map_err(invalid)
             }
             "agent.conversation.list" => {
-                let payload: TaskListPayload = decode_payload(&request.payload)?;
+                let payload: event_store::ConversationList = decode_payload(&request.payload)?;
                 let conversations = event_store::list_conversations(
                     &self.storage,
                     payload.limit.unwrap_or(astock_protocol::MAX_PAGE_SIZE),
+                    payload.query,
                 )
                 .await
                 .map_err(event_store_error)?;

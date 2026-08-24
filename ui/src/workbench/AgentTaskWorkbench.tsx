@@ -273,6 +273,9 @@ export default function AgentTaskWorkbench() {
   const [history, setHistory] = useState<ConversationSummary[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyQuery, setHistoryQuery] = useState("");
+  const [historySearchResults, setHistorySearchResults] = useState<ConversationSummary[] | null>(null);
+  const [historySearching, setHistorySearching] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const contextSymbol = useResearchContext((state) => state.symbol);
   const [input, setInput] = useState("");
@@ -352,6 +355,35 @@ export default function AgentTaskWorkbench() {
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
   }, [historyOpen]);
+
+  useEffect(() => {
+    if (!historyOpen || !isProton()) return;
+    const query = historyQuery.trim();
+    if (!query) {
+      setHistorySearchResults(null);
+      setHistorySearching(false);
+      return;
+    }
+    let cancelled = false;
+    setHistorySearchResults(null);
+    setHistorySearching(true);
+    const timer = window.setTimeout(() => {
+      void requestNative<{ items: ConversationSummary[] }>("engine", "agent.conversation.list", {
+        limit: MAX_HISTORY_ITEMS,
+        query,
+      }).then((result) => {
+        if (!cancelled) setHistorySearchResults(result.items ?? []);
+      }).catch((cause) => {
+        if (!cancelled) setError(`搜索 Agent 历史失败：${cause instanceof Error ? cause.message : String(cause)}`);
+      }).finally(() => {
+        if (!cancelled) setHistorySearching(false);
+      });
+    }, 220);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [historyOpen, historyQuery]);
 
   const recoverLatestCheckpoint = async (taskId: string, fallback: unknown, localSeq: number) => {
     let recovered = fallback;
@@ -591,6 +623,8 @@ export default function AgentTaskWorkbench() {
     setError(null);
     restoredTaskRef.current = null;
     setHistoryOpen(false);
+    setHistoryQuery("");
+    setHistorySearchResults(null);
   };
 
   const openHistory = async (saved: ConversationSummary) => {
@@ -662,6 +696,7 @@ export default function AgentTaskWorkbench() {
     try {
       await requestNative("engine", "agent.conversation.rename", { conversation_id: saved.conversation_id, title: nextTitle });
       setHistory((current) => current.map((item) => item.conversation_id === saved.conversation_id ? { ...item, title: nextTitle } : item));
+      setHistorySearchResults((current) => current?.map((item) => item.conversation_id === saved.conversation_id ? { ...item, title: nextTitle } : item) ?? null);
       if (saved.conversation_id === sessionId) setTitle(nextTitle);
     } catch (cause) {
       setError(`重命名失败：${cause instanceof Error ? cause.message : String(cause)}`);
@@ -672,6 +707,7 @@ export default function AgentTaskWorkbench() {
     try {
       await requestNative("engine", "agent.conversation.delete", { conversation_id: saved.conversation_id });
       setHistory((current) => current.filter((item) => item.conversation_id !== saved.conversation_id));
+      setHistorySearchResults((current) => current?.filter((item) => item.conversation_id !== saved.conversation_id) ?? null);
       if (saved.conversation_id === sessionId) newResearch();
     } catch (cause) {
       setError(`删除历史研究失败：${cause instanceof Error ? cause.message : String(cause)}`);
@@ -680,6 +716,7 @@ export default function AgentTaskWorkbench() {
 
   const status = task?.phase ?? "idle";
   const activity = effects.filter((effect) => effect.kind !== "persist_checkpoint");
+  const displayedHistory = historyQuery.trim() ? historySearchResults ?? [] : history;
 
   return <div className="agent-console agent-golden-layout">
     <header className="agent-console-header">
@@ -690,11 +727,12 @@ export default function AgentTaskWorkbench() {
     {historyOpen && <div className="agent-history-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setHistoryOpen(false); }}>
       <section className="agent-history-panel" role="dialog" aria-modal="true" aria-label="Agent 历史记录">
         <header><div><span className="eyebrow">RESEARCH HISTORY</span><h2>历史研究</h2><p>打开可查看完整记录；“基于此继续”会新建任务并重新取得最新数据。</p></div><button aria-label="关闭历史记录" onClick={() => setHistoryOpen(false)}>×</button></header>
-        <div className="agent-history-list">{history.length ? history.map((saved) => <article className={saved.conversation_id === sessionId ? "current" : ""} key={saved.conversation_id}>
+        <label className="agent-history-search"><span>搜索</span><input type="search" value={historyQuery} onChange={(event) => setHistoryQuery(event.target.value)} placeholder="标题或会话编号" aria-label="搜索 Agent 历史" /><em>{historySearching ? "查询中…" : historyQuery.trim() ? `${displayedHistory.length} 项` : "最近记录"}</em></label>
+        <div className="agent-history-list">{historySearching ? <div className="agent-history-empty"><b>正在搜索历史研究</b><p>从本机持久化记录中查询，不会向模型或外部服务发送关键词。</p></div> : displayedHistory.length ? displayedHistory.map((saved) => <article className={saved.conversation_id === sessionId ? "current" : ""} key={saved.conversation_id}>
           <button className="history-main" disabled={historyLoading} onClick={() => void openHistory(saved)}><b>{saved.title}</b><span>{historyTime(saved.updated_at)} · {phaseLabel[saved.phase ?? "idle"]}</span><small>{saved.message_count} 条记录 · {saved.evidence_count} 条证据{saved.parent_conversation_id ? " · 研究分支" : ""}</small></button>
           <div><button disabled={historyLoading} onClick={() => void continueHistory(saved)}>基于此继续</button><button onClick={() => void renameHistory(saved)}>重命名</button><button className="danger" aria-label={`删除 ${saved.title || "历史研究"}`} onClick={() => void deleteHistory(saved)}>删除</button></div>
-        </article>) : <div className="agent-history-empty"><b>还没有历史研究</b><p>发送第一条研究任务后会自动保存在本机，切换页面或重启桌面应用也不会丢失。</p></div>}</div>
-        <footer><span>最多保留最近 {MAX_HISTORY_ITEMS} 项 · 不保存 API Key</span><button onClick={newResearch}>开始新对话</button></footer>
+        </article>) : <div className="agent-history-empty"><b>{historyQuery.trim() ? "没有匹配的历史研究" : "还没有历史研究"}</b><p>{historyQuery.trim() ? "尝试输入目标、证券名称或会话编号中的其他关键词。" : "发送第一条研究任务后会自动保存在本机，切换页面或重启桌面应用也不会丢失。"}</p></div>}</div>
+        <footer><span>当前最多显示 {MAX_HISTORY_ITEMS} 项 · 历史保存在本机 · 不保存 API Key</span><button onClick={newResearch}>开始新对话</button></footer>
       </section>
     </div>}
 
