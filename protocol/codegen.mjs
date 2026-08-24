@@ -6,7 +6,10 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const schemaDir = resolve(root, "protocol/schema");
 const schemaFiles = ["envelope.schema.json", "agent.schema.json", "engine.schema.json"];
-const sources = await Promise.all(schemaFiles.map((name) => readFile(resolve(schemaDir, name), "utf8")));
+const canonicalText = (value) => value.replace(/\r\n?/g, "\n");
+const sources = await Promise.all(
+  schemaFiles.map(async (name) => canonicalText(await readFile(resolve(schemaDir, name), "utf8"))),
+);
 const schemas = Object.fromEntries(schemaFiles.map((name, index) => [name, JSON.parse(sources[index])]));
 const hash = createHash("sha256").update(sources.join("\n")).digest("hex");
 const phases = schemas["agent.schema.json"].$defs.agent_phase.enum;
@@ -322,7 +325,10 @@ for (const [path, content] of outputs) {
   if (check) {
     let existing = "";
     try { existing = await readFile(path, "utf8"); } catch { drift = true; console.error(`missing ${path}`); continue; }
-    if (existing !== content) { drift = true; console.error(`out of date ${path}`); }
+    if (canonicalText(existing) !== canonicalText(content)) {
+      drift = true;
+      console.error(`out of date ${path}`);
+    }
   } else {
     await writeFile(path, content, "utf8");
   }
