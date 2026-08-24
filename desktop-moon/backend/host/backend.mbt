@@ -699,6 +699,7 @@ pub async fn Backend::route(
         "diagnostics.status" =>
           host_reply(envelope, {
             "status": "ready",
+            "app_version": protocol_release_version,
             "host_version": "moonbit-proton-0.2.1",
             "engine": self.engine.diagnostics(),
             "agent": self.agent.diagnostics(),

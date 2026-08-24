@@ -38,7 +38,23 @@ for (const file of [
 const proton = JSON.parse(read("desktop-moon/proton.project.json"));
 if (proton.package?.version !== expected) errors.push(`desktop-moon/proton.project.json: version=${proton.package?.version}`);
 requireMatch("packaging-moon/packager/main.mbt", /PackageSpec::new\([\s\S]*?"(\d+\.\d+\.\d+)",\s*\[App/, "packager version mismatch");
-requireMatch("desktop-moon/backend/host/backend.mbt", /"app_version"\s*:\s*"([^"]+)"/, "Host diagnostic version mismatch");
+const engineSchema = JSON.parse(read("protocol/schema/engine.schema.json"));
+const agentSchema = JSON.parse(read("protocol/schema/agent.schema.json"));
+if (engineSchema.properties?.service_version?.const !== expected) {
+  errors.push(`protocol/schema/engine.schema.json: service version=${engineSchema.properties?.service_version?.const ?? "missing"}`);
+}
+if (agentSchema.properties?.service_version?.const !== expected) {
+  errors.push(`protocol/schema/agent.schema.json: service version=${agentSchema.properties?.service_version?.const ?? "missing"}`);
+}
+const hostBackend = read("desktop-moon/backend/host/backend.mbt");
+const hostGenerated = read("desktop-moon/backend/host/request_kinds.g.mbt");
+if (!hostBackend.includes('"app_version": protocol_release_version')) {
+  errors.push("desktop-moon/backend/host/backend.mbt: Host handshake/diagnostics do not use the generated release version");
+}
+const generatedVersion = hostGenerated.match(/let protocol_release_version\s*:\s*String\s*=\s*"([^"]+)"/)?.[1];
+if (generatedVersion !== expected) {
+  errors.push(`desktop-moon/backend/host/request_kinds.g.mbt: generated release version=${generatedVersion ?? "missing"}`);
+}
 
 const envelope = JSON.parse(read("protocol/schema/envelope.schema.json"));
 const protocolVersion = envelope?.$defs?.request?.properties?.protocol_version?.const;
