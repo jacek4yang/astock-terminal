@@ -21,6 +21,7 @@ import {
   getBoardConstituents,
   getDisclosureDetail,
   getDisclosureProviderHealth,
+  getEntityLinkReviews,
   getGlobalGoldenChains,
   getGlobalProviderHealth,
   getGlobalTransmissionPaths,
@@ -29,6 +30,7 @@ import {
   getNewsEventClusterDetail,
   getNewsEventClusters,
   getNewsIngestObservations,
+  getNewsEntityLinks,
   getPendingNewsEvidenceReviews,
   getNewsProviderHealth,
   getPool,
@@ -41,6 +43,7 @@ import {
   refreshNewsCenter,
   mergeNewsEventClusters,
   resolveNewsEvidenceReview,
+  resolveEntityLinkReview,
   setNewsItemState,
   setNewsProviderEnabled,
   splitNewsEventRevision,
@@ -220,6 +223,27 @@ describe("Proton global research bridge", () => {
       task_id: "task:1",
       conclusion_key: "growth",
       triggering_revision: "revision:three",
+    });
+  });
+
+  it("routes entity linking and human review without renderer-side truth", async () => {
+    await getNewsEntityLinks(["revision:one", "revision:two"]);
+    await getEntityLinkReviews(60);
+    await resolveEntityLinkReview("link:one", "entity:listed:300308", true, "证券代码与法定名称一致");
+
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "research.entities.links",
+      "research.entities.reviews",
+      "research.entities.resolve",
+    ]);
+    expect(requestNative.mock.calls[0][2]).toEqual({
+      revision_ids: ["revision:one", "revision:two"],
+    });
+    expect(requestNative.mock.calls[2][2]).toEqual({
+      link_id: "link:one",
+      entity_id: "entity:listed:300308",
+      accept: true,
+      reason: "证券代码与法定名称一致",
     });
   });
 });

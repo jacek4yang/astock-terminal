@@ -149,6 +149,12 @@ async function protonCommand<T>(name: string, args: Record<string, unknown> = {}
       return requestNative<T>("engine", "research.news.reviews.list", args);
     case "resolve_news_evidence_review":
       return requestNative<T>("engine", "research.news.reviews.resolve", args);
+    case "get_news_entity_links":
+      return requestNative<T>("engine", "research.entities.links", args, { deadlineMs: 60_000 });
+    case "get_entity_link_reviews":
+      return requestNative<T>("engine", "research.entities.reviews", args);
+    case "resolve_entity_link_review":
+      return requestNative<T>("engine", "research.entities.resolve", args);
     case "get_market_breadth": {
       const result = await requestNative<{ breadth: unknown }>("engine", "market.overview", {});
       return result.breadth as T;

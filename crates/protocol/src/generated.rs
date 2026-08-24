@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=8f1603bac38077febe95d9d410a95cd62c2a19cb08c4537f54bdd3e4f24af703
+// GENERATED from protocol/schema; schema-sha256=89a092e7ae506940e8d3426af42109fa7000d827fdeeeb3fbb0e4d66211bf3d8
 // Run: node protocol/codegen.mjs
 
 use serde::{Deserialize, Serialize};
@@ -59,6 +59,9 @@ pub const ENGINE_REQUEST_KINDS: &[&str] = &[
     "research.news.clusters.split",
     "research.news.reviews.list",
     "research.news.reviews.resolve",
+    "research.entities.links",
+    "research.entities.reviews",
+    "research.entities.resolve",
     "research.fundamentals",
     "research.earnings_driver.tree",
     "research.earnings_driver.shock",

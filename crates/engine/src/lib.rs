@@ -811,6 +811,55 @@ impl Engine {
                         .map_err(news_intelligence_error)?;
                 Ok(Value::Bool(resolved))
             }
+            "research.entities.links" => {
+                let payload: EntityLinksPayload = decode_payload(&request.payload)?;
+                if payload.revision_ids.is_empty() || payload.revision_ids.len() > 100 {
+                    return Err(ServiceError::new(
+                        "invalid_payload",
+                        "revision_ids 必须包含 1 至 100 个修订 ID",
+                        false,
+                    ));
+                }
+                let linker = astock_entity_linking::EntityLinker::new(self.storage.clone());
+                let mut links = Vec::new();
+                let mut seen = HashSet::new();
+                for revision_id in payload.revision_ids {
+                    let revision_id =
+                        validate_news_identifier(&revision_id, "revision_id")?.to_string();
+                    if seen.insert(revision_id.clone()) {
+                        links.extend(
+                            linker
+                                .link_revision(&revision_id)
+                                .await
+                                .map_err(entity_linking_error)?,
+                        );
+                    }
+                }
+                serde_json::to_value(links).map_err(serialize_error)
+            }
+            "research.entities.reviews" => {
+                let payload: LimitPayload = decode_payload(&request.payload)?;
+                let rows = astock_entity_linking::EntityLinker::new(self.storage.clone())
+                    .pending_reviews(payload.limit.unwrap_or(50).clamp(1, 500))
+                    .await
+                    .map_err(entity_linking_error)?;
+                serde_json::to_value(rows).map_err(serialize_error)
+            }
+            "research.entities.resolve" => {
+                let payload: EntityReviewResolvePayload = decode_payload(&request.payload)?;
+                let link_id = validate_news_identifier(&payload.link_id, "link_id")?;
+                let entity_id = payload
+                    .entity_id
+                    .as_deref()
+                    .map(|value| validate_news_identifier(value, "entity_id"))
+                    .transpose()?;
+                let reason = validate_review_reason(&payload.reason)?;
+                let resolved = astock_entity_linking::EntityLinker::new(self.storage.clone())
+                    .resolve_review(link_id, entity_id, payload.accept, reason)
+                    .await
+                    .map_err(entity_linking_error)?;
+                Ok(Value::Bool(resolved))
+            }
             "research.data_reconcile" => {
                 let payload: SymbolPayload = decode_payload(&request.payload)?;
                 let symbol = parse_live_symbol(&payload.symbol)?;
@@ -2175,6 +2224,22 @@ struct NewsReviewResolvePayload {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct EntityLinksPayload {
+    revision_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EntityReviewResolvePayload {
+    link_id: String,
+    #[serde(default)]
+    entity_id: Option<String>,
+    accept: bool,
+    reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TaskIdPayload {
     task_id: String,
 }
@@ -2296,6 +2361,10 @@ fn serialize_error(error: serde_json::Error) -> ServiceError {
 
 fn news_intelligence_error(error: astock_news_intelligence::Error) -> ServiceError {
     ServiceError::new("news_clustering", error.to_string(), false)
+}
+
+fn entity_linking_error(error: astock_entity_linking::Error) -> ServiceError {
+    ServiceError::new("entity_linking", error.to_string(), false)
 }
 
 async fn persist_driver_tree(
