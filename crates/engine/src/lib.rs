@@ -7,6 +7,7 @@ mod event_analysis;
 mod event_store;
 mod global_sync;
 mod news_center;
+mod relation_extraction;
 mod scan;
 mod settings;
 
@@ -40,6 +41,7 @@ pub struct Engine {
     scan: scan::ScanService,
     disclosure_sync: disclosure_sync::DisclosureSyncService,
     event_analysis: event_analysis::EventAnalysisService,
+    relation_extraction: relation_extraction::RelationExtractionService,
     global_sync: global_sync::GlobalSyncService,
     provider_boot: credentials::BootStatus,
     credential_migration_error: Option<String>,
@@ -84,6 +86,7 @@ impl Engine {
             scan: scan::ScanService::default(),
             disclosure_sync: disclosure_sync::DisclosureSyncService::default(),
             event_analysis: event_analysis::EventAnalysisService::default(),
+            relation_extraction: relation_extraction::RelationExtractionService::default(),
             global_sync: global_sync::GlobalSyncService::default(),
             provider_boot,
             credential_migration_error,
@@ -894,6 +897,66 @@ impl Engine {
                     .cancel(&payload.job_id)
                     .map_err(|error| ServiceError::new("event_analysis", error, false))?;
                 Ok(json!({ "cancelled": cancelled }))
+            }
+            "research.relations.extraction.start" => {
+                let payload: relation_extraction::RelationExtractionRequest =
+                    decode_payload(&request.payload)?;
+                let started = self
+                    .relation_extraction
+                    .start(self.storage.clone(), payload)
+                    .await
+                    .map_err(|error| ServiceError::new("relation_extraction", error, false))?;
+                serde_json::to_value(started).map_err(serialize_error)
+            }
+            "research.relations.extraction.status" => {
+                let payload: RelationJobPayload = decode_payload(&request.payload)?;
+                let snapshot = self
+                    .relation_extraction
+                    .status(&payload.job_id)
+                    .map_err(|error| ServiceError::new("relation_job_not_found", error, false))?;
+                serde_json::to_value(snapshot).map_err(serialize_error)
+            }
+            "research.relations.extraction.cancel" => {
+                let payload: RelationJobPayload = decode_payload(&request.payload)?;
+                let cancelled = self
+                    .relation_extraction
+                    .cancel(&payload.job_id)
+                    .map_err(|error| ServiceError::new("relation_extraction", error, false))?;
+                Ok(json!({ "cancelled": cancelled }))
+            }
+            "research.relations.reviews" => {
+                let payload: RelationReviewPagePayload = decode_payload(&request.payload)?;
+                let page =
+                    astock_relation_extraction::RelationExtractionStore::new(self.storage.clone())
+                        .review_page(
+                            payload.status.as_deref(),
+                            payload.document_kind,
+                            payload.min_confidence_bps,
+                            payload.page,
+                            payload.page_size,
+                        )
+                        .await
+                        .map_err(relation_extraction_error)?;
+                serde_json::to_value(page).map_err(serialize_error)
+            }
+            "research.relations.review" => {
+                let payload: astock_relation_extraction::RelationReviewRequest =
+                    decode_payload(&request.payload)?;
+                let result =
+                    astock_relation_extraction::RelationExtractionStore::new(self.storage.clone())
+                        .review(payload)
+                        .await
+                        .map_err(relation_extraction_error)?;
+                serde_json::to_value(result).map_err(serialize_error)
+            }
+            "research.relations.retract" => {
+                let payload: RelationRetractPayload = decode_payload(&request.payload)?;
+                let result =
+                    astock_relation_extraction::RelationExtractionStore::new(self.storage.clone())
+                        .retract(&payload.candidate_id, &payload.reason)
+                        .await
+                        .map_err(relation_extraction_error)?;
+                serde_json::to_value(result).map_err(serialize_error)
             }
             "research.data_reconcile" => {
                 let payload: SymbolPayload = decode_payload(&request.payload)?;
@@ -2281,6 +2344,32 @@ struct EventJobPayload {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RelationJobPayload {
+    job_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelationReviewPagePayload {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    document_kind: Option<astock_relation_extraction::DocumentKind>,
+    #[serde(default)]
+    min_confidence_bps: Option<u16>,
+    page: usize,
+    page_size: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelationRetractPayload {
+    candidate_id: String,
+    reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TaskIdPayload {
     task_id: String,
 }
@@ -2406,6 +2495,10 @@ fn news_intelligence_error(error: astock_news_intelligence::Error) -> ServiceErr
 
 fn entity_linking_error(error: astock_entity_linking::Error) -> ServiceError {
     ServiceError::new("entity_linking", error.to_string(), false)
+}
+
+fn relation_extraction_error(error: astock_relation_extraction::Error) -> ServiceError {
+    ServiceError::new("relation_extraction", error.to_string(), false)
 }
 
 async fn persist_driver_tree(

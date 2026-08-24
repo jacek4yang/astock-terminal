@@ -449,6 +449,7 @@ dependencies = [
  "astock-minimax",
  "astock-news-intelligence",
  "astock-protocol",
+ "astock-relation-extraction",
  "astock-source-verification",
  "astock-storage",
  "astock-technical",

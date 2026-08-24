@@ -19,6 +19,7 @@ import {
   disclosureSyncStatus,
   checkNewsArchiveIntegrity,
   cancelEventAnalysis,
+  cancelRelationExtraction,
   getBoardConstituents,
   getDisclosureDetail,
   getDisclosureProviderHealth,
@@ -36,20 +37,25 @@ import {
   getNewsProviderHealth,
   getEventAnalysisStatus,
   getPool,
+  getRelationExtractionStatus,
   globalSyncCancel,
   globalSyncStart,
   globalSyncStatus,
   queryGlobalDocuments,
   queryDisclosures,
+  queryRelationReviews,
   queryNewsCenter,
   refreshNewsCenter,
   mergeNewsEventClusters,
   resolveNewsEvidenceReview,
   resolveEntityLinkReview,
+  retractRelationCandidate,
+  reviewRelationCandidate,
   setNewsItemState,
   setNewsProviderEnabled,
   splitNewsEventRevision,
   startEventAnalysis,
+  startRelationExtraction,
 } from "./api";
 
 describe("Proton global research bridge", () => {
@@ -268,5 +274,59 @@ describe("Proton global research bridge", () => {
     });
     expect(requestNative.mock.calls[1][2]).toEqual({ job_id: "event-job" });
     expect(requestNative.mock.calls[2][2]).toEqual({ job_id: "event-job" });
+  });
+
+  it("routes relation extraction, human review and retraction through the Engine", async () => {
+    await startRelationExtraction("source-version:annual", "annual_report");
+    await getRelationExtractionStatus("relation-job");
+    await cancelRelationExtraction("relation-job");
+    await queryRelationReviews("pending_review", "annual_report", 8_500, 1, 50);
+    await reviewRelationCandidate({
+      candidate_id: "candidate:one",
+      decision: "accepted",
+      reviewer: "researcher",
+      reason: "原文、实体和报告期均已复核",
+      subject_text: null,
+      object_text: null,
+      relation: null,
+      product_text: null,
+      merged_entity_id: null,
+      confidential: false,
+      non_inferable: false,
+      publish: true,
+      dataset_split: "dev",
+      training_eligible: true,
+    });
+    await retractRelationCandidate("candidate:one", "来源后续公告已否定该关系");
+
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "research.relations.extraction.start",
+      "research.relations.extraction.status",
+      "research.relations.extraction.cancel",
+      "research.relations.reviews",
+      "research.relations.review",
+      "research.relations.retract",
+    ]);
+    expect(requestNative.mock.calls[0][2]).toEqual({
+      source_version_id: "source-version:annual",
+      document_kind: "annual_report",
+      model_id: null,
+      model_version: null,
+      model_candidates: [],
+    });
+    expect(requestNative.mock.calls[3][2]).toMatchObject({
+      status: "pending_review",
+      min_confidence_bps: 8_500,
+      page_size: 50,
+    });
+    expect(requestNative.mock.calls[4][2]).toMatchObject({
+      candidate_id: "candidate:one",
+      decision: "accepted",
+      publish: true,
+    });
+    expect(requestNative.mock.calls[5][2]).toEqual({
+      candidate_id: "candidate:one",
+      reason: "来源后续公告已否定该关系",
+    });
   });
 });
