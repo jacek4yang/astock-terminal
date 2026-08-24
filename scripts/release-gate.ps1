@@ -275,6 +275,11 @@ try {
         }
     }
 
+    Invoke-ReleaseGateStep 'browser-bridge-auth' 'security' 'INTEGRATION TESTED' {
+        & (Join-Path $PSScriptRoot 'browser-bridge-auth-smoke.ps1') -SkipSpaceCheck
+        if ($LASTEXITCODE -ne 0) { throw 'Development browser Bridge authorization smoke failed.' }
+    }
+
     Invoke-ReleaseGateStep 'moonbit-agent-proofs' 'formal' 'FORMALLY PROVED' {
         $proofTarget = Join-Path $build.Paths.Root 'moon-target\agent-prove-release-bootstrap'
         Invoke-Checked -FilePath 'moon' -WorkingDirectory (Join-Path $repository 'app-moon') -Arguments @('prove', 'agent_formal', '--target-dir', $proofTarget)
@@ -402,6 +407,7 @@ shortcut = "4"
         'renderer-tests-and-build',
         'moonbit-check-test',
         'desktop-worker-supervision',
+        'browser-bridge-auth',
         'moonbit-agent-proofs',
         'tlc-agent-model',
         'browser-cdp-evidence',

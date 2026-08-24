@@ -44,6 +44,7 @@ const engineSchemaObject = JSON.parse(engineSchema);
 const agentSchema = JSON.parse(fs.readFileSync(path.join(root, "protocol", "schema", "agent.schema.json"), "utf8"));
 const hostSchema = JSON.parse(fs.readFileSync(path.join(root, "protocol", "schema", "host.schema.json"), "utf8"));
 const browserBridge = fs.readFileSync(path.join(root, "scripts", "browser-dev-bridge.mjs"), "utf8");
+const browserBridgeAuthSmoke = fs.readFileSync(path.join(root, "scripts", "browser-bridge-auth-smoke.ps1"), "utf8");
 const handshakeContract = fs.readFileSync(path.join(root, "scripts", "lib", "handshake-contract.mjs"), "utf8");
 const rendererBridge = fs.readFileSync(path.join(root, "ui", "src", "bridge", "index.ts"), "utf8");
 const acceptanceEvidence = fs.readFileSync(path.join(root, "scripts", "acceptance-evidence.mjs"), "utf8");
@@ -281,6 +282,19 @@ if (!engineRuntime.includes('"agent_advanced_analysis_v1"')) {
 }
 if (!agentClientSources.includes('agent.task.load') || !agentWorkbench.includes('recoverLatestCheckpoint')) {
   failures.push("React does not restore the newest durable Agent checkpoint before resuming");
+}
+for (const bridgeBootstrapMarker of ["consumeBootstrapToken", 'request.url === "/session"', "bridgeBootstrapToken = null", "uiUrl.hash = bootstrapFragment.toString()"]) {
+  if (!browserBridge.includes(bridgeBootstrapMarker)) failures.push(`browser development Bridge is missing one-time bootstrap protection: ${bridgeBootstrapMarker}`);
+}
+for (const rendererBootstrapMarker of ["initializeBrowserTestConfig", "cleanUrl.hash = \"\"", "window.history.replaceState", "window.sessionStorage.setItem", "await browserTestSession()"]) {
+  if (!rendererBridge.includes(rendererBootstrapMarker)) failures.push(`renderer development Bridge is missing bootstrap consumption/scrubbing: ${rendererBootstrapMarker}`);
+}
+for (const browserAuthMarker of ["replayStatus -ne 401", "healthStatus -ne 200", "wrongOriginStatus -ne 401", "UseProxy = $false"]) {
+  if (!browserBridgeAuthSmoke.includes(browserAuthMarker)) failures.push(`browser Bridge authorization smoke is missing ${browserAuthMarker}`);
+}
+if (!releaseGate.includes("Invoke-ReleaseGateStep 'browser-bridge-auth' 'security' 'INTEGRATION TESTED'") ||
+    !releaseGate.includes("'browser-bridge-auth',")) {
+  failures.push("one-time browser Bridge authorization is not a mandatory signing prerequisite");
 }
 if (!engineEventStore.includes('format!("sha256:{:x}", Sha256::digest(value.as_bytes()))') ||
     !moonHost.includes("durable_operation_effect_matches") ||

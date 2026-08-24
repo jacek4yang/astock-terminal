@@ -44,6 +44,14 @@ endpoint, binds the package metadata to the full source commit and places all
 profile/data state under `ASTOCK_BUILD_ROOT`. These variables are release-test
 capabilities and are never set by the installed production shortcut.
 
+The development Bridge binds only to `127.0.0.1` on a random port. Its
+per-process bootstrap token is single-use and travels in the URL fragment, so
+it is never sent to Vite or an HTTP access log. React removes the fragment
+before first paint, exchanges the bootstrap once for a tab-session token, and
+retains that session only in `sessionStorage` plus the current history entry.
+The Bridge also rejects non-allowlisted origins. None of this path is present in
+the production Proton package.
+
 The executable local gate also runs `scripts/research-data-release-gate.mjs`
 against an isolated D-drive data root. It never calls credentialed providers.
 The current Shanghai/Shenzhen sample must have two-source quote and K-line

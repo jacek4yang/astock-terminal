@@ -13,7 +13,8 @@ if (!engineExecutable || !agentExecutable) {
 }
 
 const bindHost = "127.0.0.1";
-const bridgeToken = randomBytes(32).toString("base64url");
+let bridgeBootstrapToken = randomBytes(32).toString("base64url");
+let bridgeSessionToken = null;
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const ALLOWED_ORIGINS = new Set([
   "http://127.0.0.1:5173",
@@ -32,12 +33,20 @@ const RENDERER_REQUEST_KINDS = {
   host: schemaKinds("host.schema.json", "renderer_request_kinds"),
 };
 
-function hasValidToken(request) {
+function tokenMatches(request, expected) {
+  if (typeof expected !== "string" || expected.length < 32) return false;
   const supplied = request.headers["x-astock-test-token"];
   if (typeof supplied !== "string") return false;
   const left = Buffer.from(supplied);
-  const right = Buffer.from(bridgeToken);
+  const right = Buffer.from(expected);
   return left.length === right.length && timingSafeEqual(left, right);
+}
+
+function consumeBootstrapToken(request) {
+  if (!tokenMatches(request, bridgeBootstrapToken)) return null;
+  bridgeBootstrapToken = null;
+  bridgeSessionToken = randomBytes(32).toString("base64url");
+  return bridgeSessionToken;
 }
 
 class WorkerChannel {
@@ -390,7 +399,12 @@ const server = createServer(async (request, response) => {
     });
     return response.end();
   }
-  if (!hasValidToken(request)) {
+  if (request.method === "POST" && request.url === "/session" && allowedOrigin) {
+    const sessionToken = consumeBootstrapToken(request);
+    if (!sessionToken) return json(response, 401, { error: "invalid or consumed browser bootstrap token" }, allowedOrigin);
+    return json(response, 200, { session_token: sessionToken }, allowedOrigin);
+  }
+  if (!allowedOrigin || !tokenMatches(request, bridgeSessionToken)) {
     return json(response, 401, { error: "invalid browser test token" }, allowedOrigin);
   }
   if (request.method === "GET" && request.url === "/health") {
@@ -422,9 +436,14 @@ server.listen(0, bindHost, () => {
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("browser bridge did not receive a TCP port");
   const uiUrl = new URL("http://127.0.0.1:5173/");
-  uiUrl.searchParams.set("nativeTest", "1");
-  uiUrl.searchParams.set("bridgePort", String(address.port));
-  uiUrl.searchParams.set("bridgeToken", bridgeToken);
+  const bootstrapFragment = new URLSearchParams({
+    nativeTest: "1",
+    bridgePort: String(address.port),
+    bridgeToken: bridgeBootstrapToken,
+  });
+  // Fragments are never sent to Vite or written to an HTTP access log. The
+  // renderer consumes and removes this one-time bootstrap before first paint.
+  uiUrl.hash = bootstrapFragment.toString();
   console.log(JSON.stringify({
     status: "ready",
     bridge_url: `http://${bindHost}:${address.port}`,

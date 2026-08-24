@@ -34,15 +34,67 @@ export interface NativeRequestOptions {
   cancellationId?: string;
 }
 
-function browserTestConfig(): { port: number; token: string } | null {
+interface BrowserTestConfig {
+  port: number;
+  bootstrapToken?: string;
+  sessionToken?: string;
+}
+
+const BROWSER_TEST_HISTORY_KEY = "__astockBrowserBridge";
+const BROWSER_TEST_SESSION_PREFIX = "astock.browser-bridge.session.";
+
+function validBrowserBridgePort(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) >= 1024 && Number(value) <= 65535;
+}
+
+function initializeBrowserTestConfig(): BrowserTestConfig | null {
   if (!import.meta.env.DEV || typeof window === "undefined") return null;
   if (window.location.hostname !== "127.0.0.1" && window.location.hostname !== "localhost") return null;
-  const search = new URLSearchParams(window.location.search);
-  if (search.get("nativeTest") !== "1") return null;
-  const port = Number(search.get("bridgePort"));
-  const token = search.get("bridgeToken") ?? "";
-  if (!Number.isInteger(port) || port < 1024 || port > 65535 || token.length < 32) return null;
-  return { port, token };
+  const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  if (fragment.get("nativeTest") === "1") {
+    const port = Number(fragment.get("bridgePort"));
+    const bootstrapToken = fragment.get("bridgeToken") ?? "";
+    if (!validBrowserBridgePort(port) || bootstrapToken.length < 32) return null;
+    const cleanUrl = new URL(window.location.href);
+    cleanUrl.hash = "";
+    const state = {
+      ...(window.history.state && typeof window.history.state === "object" ? window.history.state : {}),
+      [BROWSER_TEST_HISTORY_KEY]: { port },
+    };
+    window.history.replaceState(state, "", cleanUrl);
+    return { port, bootstrapToken };
+  }
+  const historyConfig = window.history.state?.[BROWSER_TEST_HISTORY_KEY] as { port?: unknown } | undefined;
+  const port = Number(historyConfig?.port);
+  if (!validBrowserBridgePort(port)) return null;
+  const sessionToken = window.sessionStorage.getItem(`${BROWSER_TEST_SESSION_PREFIX}${port}`) ?? "";
+  return sessionToken.length >= 32 ? { port, sessionToken } : null;
+}
+
+const browserTestConfig = initializeBrowserTestConfig();
+let browserTestSessionPromise: Promise<{ port: number; token: string }> | null = null;
+
+async function browserTestSession(): Promise<{ port: number; token: string }> {
+  if (!browserTestConfig) throw new Error("本地浏览器测试 Bridge 未初始化。");
+  if (browserTestConfig.sessionToken) return { port: browserTestConfig.port, token: browserTestConfig.sessionToken };
+  if (!browserTestSessionPromise) {
+    const bootstrapToken = browserTestConfig.bootstrapToken ?? "";
+    browserTestConfig.bootstrapToken = undefined;
+    browserTestSessionPromise = fetch(`http://127.0.0.1:${browserTestConfig.port}/session`, {
+      method: "POST",
+      headers: { "X-AStock-Test-Token": bootstrapToken },
+      cache: "no-store",
+    }).then(parseBrowserBridgeResponse).then((value) => {
+      const sessionToken = value && typeof value === "object" && "session_token" in value
+        ? String((value as { session_token: unknown }).session_token)
+        : "";
+      if (sessionToken.length < 32) throw new Error("本地浏览器测试 Bridge 未返回有效会话。");
+      browserTestConfig.sessionToken = sessionToken;
+      window.sessionStorage.setItem(`${BROWSER_TEST_SESSION_PREFIX}${browserTestConfig.port}`, sessionToken);
+      return { port: browserTestConfig.port, token: sessionToken };
+    });
+  }
+  return browserTestSessionPromise;
 }
 
 const RENDERER_REQUEST_KIND_SETS: Record<WorkerTarget, ReadonlySet<string>> = {
@@ -80,7 +132,7 @@ export async function parseBrowserBridgeResponse(response: Response): Promise<un
 }
 
 export function isBrowserTestBridge(): boolean {
-  return browserTestConfig() !== null;
+  return browserTestConfig !== null;
 }
 
 export function isProton(): boolean {
@@ -132,7 +184,7 @@ export async function requestNative<T>(
     deadline_ms: options.deadlineMs ?? 30_000,
     ...(options.cancellationId ? { cancellation_id: options.cancellationId } : {}),
   };
-  const testConfig = browserTestConfig();
+  const testConfig = invokeOp ? null : await browserTestSession();
   const raw = invokeOp
     ? await invokeOp("app:request", { target, request })
     : await fetch(`http://127.0.0.1:${testConfig?.port}/request`, {
