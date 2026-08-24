@@ -147,6 +147,8 @@
         "evidence_count": { "type": "integer", "minimum": 0 },
         "parent_conversation_id": { "type": ["string", "null"], "maxLength": 128 },
         "branch_from_message_id": { "type": ["string", "null"], "maxLength": 128 },
+        "branch_from_checkpoint_task_id": { "type": ["string", "null"], "maxLength": 128 },
+        "branch_from_checkpoint_seq": { "type": ["integer", "null"], "minimum": 1 },
         "created_at": { "type": "integer", "minimum": 0 },
         "updated_at": { "type": "integer", "minimum": 0 }
       }

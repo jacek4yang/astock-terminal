@@ -167,6 +167,10 @@ pub struct ConversationSummary {
     pub parent_conversation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_from_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_from_checkpoint_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_from_checkpoint_seq: Option<u64>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -355,6 +359,8 @@ export interface ConversationSummary {
   evidence_count: number;
   parent_conversation_id?: string | null;
   branch_from_message_id?: string | null;
+  branch_from_checkpoint_task_id?: string | null;
+  branch_from_checkpoint_seq?: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -568,6 +574,8 @@ pub(all) struct ConversationSummary {
   evidence_count : Int
   parent_conversation_id : String?
   branch_from_message_id : String?
+  branch_from_checkpoint_task_id : String?
+  branch_from_checkpoint_seq : Int?
   created_at : Int64
   updated_at : Int64
 } derive(Debug, Eq, ToJson, FromJson)

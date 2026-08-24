@@ -29,11 +29,22 @@ describe("stable Agent task service facade", () => {
   it("exposes only bounded durable reads and branch operations to history callers", async () => {
     await agentTaskService.list(80, "茅台");
     await agentTaskService.get("task-1");
-    await agentTaskService.branch({ source_conversation_id: "c1", new_conversation_id: "c2", message_id: "m1", title: "分支" });
+    await agentTaskService.branch({
+      source_conversation_id: "c1",
+      new_conversation_id: "c2",
+      message_id: "m1",
+      title: "分支",
+      checkpoint_task_id: "task-1",
+      checkpoint_accepted_seq: 4,
+    });
     expect(requestNative.mock.calls.map((call) => call.slice(0, 2))).toEqual([
       ["engine", "agent.conversation.list"],
       ["engine", "agent.task.load"],
       ["engine", "agent.conversation.branch"],
     ]);
+    expect(requestNative.mock.calls[2][2]).toMatchObject({
+      checkpoint_task_id: "task-1",
+      checkpoint_accepted_seq: 4,
+    });
   });
 });

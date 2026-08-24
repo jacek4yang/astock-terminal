@@ -132,6 +132,10 @@ pub struct BranchConversation {
     pub new_conversation_id: String,
     pub message_id: String,
     pub title: String,
+    #[serde(default)]
+    pub checkpoint_task_id: Option<String>,
+    #[serde(default)]
+    pub checkpoint_accepted_seq: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -154,6 +158,8 @@ pub struct ConversationSummary {
     pub evidence_count: usize,
     pub parent_conversation_id: Option<String>,
     pub branch_from_message_id: Option<String>,
+    pub branch_from_checkpoint_task_id: Option<String>,
+    pub branch_from_checkpoint_seq: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -751,6 +757,61 @@ pub async fn branch_conversation(
             };
             let mut session = serde_json::from_str::<Value>(&source_json)
                 .map_err(|error| astock_storage::Error::Invalid(error.to_string()))?;
+            let checkpoint_origin = match (
+                input.checkpoint_task_id.as_deref(),
+                input.checkpoint_accepted_seq,
+            ) {
+                (None, None) => None,
+                (Some(task_id), Some(accepted_seq)) => {
+                    validate_identity(task_id, "checkpoint_task_id")
+                        .map_err(astock_storage::Error::Invalid)?;
+                    if accepted_seq < 1 {
+                        return Err(astock_storage::Error::Invalid(
+                            "checkpoint_accepted_seq_invalid".into(),
+                        ));
+                    }
+                    if session["task"]["task_id"].as_str() != Some(task_id)
+                        || session["task"]["accepted_seq"].as_i64() != Some(accepted_seq)
+                    {
+                        return Err(astock_storage::Error::Invalid(
+                            "conversation_checkpoint_mismatch".into(),
+                        ));
+                    }
+                    let durable: Option<(i64, Option<String>)> = transaction
+                        .query_row(
+                            "SELECT accepted_seq,checkpoint_json FROM agent_tasks_v2 WHERE task_id=?1",
+                            params![task_id],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()?;
+                    let Some((durable_seq, Some(checkpoint_json))) = durable else {
+                        return Err(astock_storage::Error::Invalid(
+                            "durable_checkpoint_not_found".into(),
+                        ));
+                    };
+                    let checkpoint: Value = serde_json::from_str(&checkpoint_json)
+                        .map_err(|error| astock_storage::Error::Invalid(error.to_string()))?;
+                    if durable_seq != accepted_seq
+                        || checkpoint["task_id"].as_str() != Some(task_id)
+                        || checkpoint["accepted_seq"].as_i64() != Some(accepted_seq)
+                    {
+                        return Err(astock_storage::Error::Invalid(
+                            "durable_checkpoint_mismatch".into(),
+                        ));
+                    }
+                    Some(serde_json::json!({
+                        "kind": "durable_checkpoint",
+                        "task_id": task_id,
+                        "accepted_seq": accepted_seq,
+                        "phase": checkpoint["phase"],
+                    }))
+                }
+                _ => {
+                    return Err(astock_storage::Error::Invalid(
+                        "checkpoint_origin_incomplete".into(),
+                    ));
+                }
+            };
             trim_session_for_branch(
                 &mut session,
                 &input.message_id,
@@ -758,6 +819,9 @@ pub async fn branch_conversation(
                 &title,
                 now,
             )?;
+            if let Some(origin) = checkpoint_origin {
+                session["branchOrigin"] = origin;
+            }
             let session_json = encode_session(&session)
                 .map_err(astock_storage::Error::Invalid)?;
             transaction.execute(
@@ -824,6 +888,10 @@ fn conversation_summary(
         .as_str()
         .unwrap_or("idle")
         .to_string();
+    let branch_from_checkpoint_task_id = session["branchOrigin"]["task_id"]
+        .as_str()
+        .map(ToOwned::to_owned);
+    let branch_from_checkpoint_seq = session["branchOrigin"]["accepted_seq"].as_i64();
     ConversationSummary {
         conversation_id,
         title,
@@ -832,6 +900,8 @@ fn conversation_summary(
         evidence_count,
         parent_conversation_id,
         branch_from_message_id,
+        branch_from_checkpoint_task_id,
+        branch_from_checkpoint_seq,
         created_at,
         updated_at,
     }
@@ -1089,6 +1159,8 @@ mod tests {
                 new_conversation_id: "conversation-2".into(),
                 message_id: "message-1".into(),
                 title: "分支研究".into(),
+                checkpoint_task_id: None,
+                checkpoint_accepted_seq: None,
             },
         )
         .await
@@ -1110,6 +1182,111 @@ mod tests {
             list_conversations(&storage, 20, None).await.unwrap().len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_branch_requires_matching_durable_engine_truth() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(StorageConfig::with_base_dir(dir.path())).unwrap();
+        migrate(&storage).await.unwrap();
+        create_task(
+            &storage,
+            CreateTask {
+                task_id: "task-checkpoint".into(),
+                reducer_version: "moonbit-agent-kernel-v1".into(),
+                task_spec: serde_json::json!({"objective":"核验检查点分支"}),
+                phase: "preparing".into(),
+            },
+        )
+        .await
+        .unwrap();
+        append_event(
+            &storage,
+            AppendEvent {
+                task_id: "task-checkpoint".into(),
+                seq: 1,
+                event_id: "checkpoint-input-1".into(),
+                event_kind: "start".into(),
+                event: serde_json::json!({"objective":"核验检查点分支"}),
+            },
+        )
+        .await
+        .unwrap();
+        put_checkpoint(
+            &storage,
+            PutCheckpoint {
+                task_id: "task-checkpoint".into(),
+                accepted_seq: 1,
+                phase: "preparing".into(),
+                checkpoint: serde_json::json!({
+                    "task_id":"task-checkpoint",
+                    "accepted_seq":1,
+                    "phase":"preparing"
+                }),
+            },
+        )
+        .await
+        .unwrap();
+        save_conversation(
+            &storage,
+            SaveConversation {
+                conversation_id: "checkpoint-conversation".into(),
+                title: "检查点研究".into(),
+                session: serde_json::json!({
+                    "sessionId":"checkpoint-conversation",
+                    "messages":[{"id":"checkpoint-message","role":"user","text":"原目标"}],
+                    "task":{"task_id":"task-checkpoint","accepted_seq":1,"phase":"preparing"}
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        let branched = branch_conversation(
+            &storage,
+            BranchConversation {
+                source_conversation_id: "checkpoint-conversation".into(),
+                new_conversation_id: "checkpoint-branch".into(),
+                message_id: "checkpoint-message".into(),
+                title: "从检查点重研".into(),
+                checkpoint_task_id: Some("task-checkpoint".into()),
+                checkpoint_accepted_seq: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(branched.session["task"].is_null());
+        assert!(branched.session["checkpoint"].is_null());
+        assert_eq!(
+            branched.session["branchOrigin"]["task_id"],
+            "task-checkpoint"
+        );
+        assert_eq!(branched.session["branchOrigin"]["accepted_seq"], 1);
+        let listed = list_conversations(&storage, 20, None).await.unwrap();
+        let summary = listed
+            .iter()
+            .find(|item| item.conversation_id == "checkpoint-branch")
+            .unwrap();
+        assert_eq!(
+            summary.branch_from_checkpoint_task_id.as_deref(),
+            Some("task-checkpoint")
+        );
+        assert_eq!(summary.branch_from_checkpoint_seq, Some(1));
+
+        let mismatch = branch_conversation(
+            &storage,
+            BranchConversation {
+                source_conversation_id: "checkpoint-conversation".into(),
+                new_conversation_id: "checkpoint-invalid".into(),
+                message_id: "checkpoint-message".into(),
+                title: "无效检查点".into(),
+                checkpoint_task_id: Some("task-checkpoint".into()),
+                checkpoint_accepted_seq: Some(2),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(mismatch.contains("conversation_checkpoint_mismatch"));
     }
 
     #[tokio::test]

@@ -67,6 +67,11 @@ The renderer-facing task service is fixed to
 facade rather than a second wire protocol: mutating transitions remain
 Host-journaled Agent calls, while bounded history/task reads and message
 branching remain deterministic Engine calls.
+Checkpoint branching is fail-closed: Engine verifies the source conversation
+snapshot against the current durable task and checkpoint sequence, records the
+origin for audit, then clears executable task/effect/checkpoint state in the
+new conversation. The branch starts a new task and reacquires current data;
+historical results are evidence leads, never silently reused facts.
 Stateful Agent operations are single-flight at the Host boundary. A concurrent
 duplicate waits for the first operation, then reuses its committed result;
 only an orphaned journal intent after a process loss can enter the bounded

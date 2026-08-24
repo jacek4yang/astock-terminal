@@ -80,6 +80,7 @@ type AgentSession = {
   draft?: ClarificationDraft;
   checkpoint?: unknown;
   verification?: DeterministicVerification | null;
+  branchOrigin?: { kind?: "durable_checkpoint"; task_id?: string; accepted_seq?: number; phase?: AgentPhase };
 };
 
 type StoredConversation = StoredAgentConversation<AgentSession>;
@@ -720,7 +721,12 @@ export default function AgentTaskWorkbench() {
     }
   };
 
-  const branchFromMessage = async (messageId: string, sourceConversationId = sessionId) => {
+  const branchFromMessage = async (
+    messageId: string,
+    sourceConversationId = sessionId,
+    checkpointOrigin?: { taskId: string; acceptedSeq: number },
+    sourceTitle?: string,
+  ) => {
     if (busy || historyLoading) return;
     const newConversationId = crypto.randomUUID();
     setHistoryLoading(true);
@@ -730,10 +736,16 @@ export default function AgentTaskWorkbench() {
         source_conversation_id: sourceConversationId,
         new_conversation_id: newConversationId,
         message_id: messageId,
-        title: `${title || sessionTitle(messages)} · 分支`,
+        title: `${sourceTitle || title || sessionTitle(messages)} · 分支`,
+        ...(checkpointOrigin ? {
+          checkpoint_task_id: checkpointOrigin.taskId,
+          checkpoint_accepted_seq: checkpointOrigin.acceptedSeq,
+        } : {}),
       });
       restoreSession(stored.session, stored.title);
-      setInput("基于以上节点重新取得最新数据并继续研究；旧结论只能作为待核验线索，不得直接沿用。 ");
+      setInput(checkpointOrigin
+        ? "从已核验的持久化检查点建立新研究：沿用原任务中用户明确给出的目标与边界，但重新取得最新数据并重新校验全部结论；旧工具结果只作为可审计线索，不得直接当作当前事实。"
+        : "基于以上节点重新取得最新数据并继续研究；旧结论只能作为待核验线索，不得直接沿用。 ");
       setHistory((current) => [{
         conversation_id: stored.conversation_id,
         title: stored.title,
@@ -742,6 +754,8 @@ export default function AgentTaskWorkbench() {
         evidence_count: 0,
         parent_conversation_id: stored.parent_conversation_id,
         branch_from_message_id: stored.branch_from_message_id,
+        branch_from_checkpoint_task_id: stored.session.branchOrigin?.task_id ?? null,
+        branch_from_checkpoint_seq: stored.session.branchOrigin?.accepted_seq ?? null,
         created_at: stored.created_at,
         updated_at: stored.updated_at,
       }, ...current].slice(0, MAX_HISTORY_ITEMS));
@@ -760,9 +774,20 @@ export default function AgentTaskWorkbench() {
       const stored = await agentTaskService.getConversation<AgentSession>(saved.conversation_id);
       const last = stored.session.messages?.at(-1);
       if (!last) throw new Error("该历史研究没有可分支的消息");
+      const taskId = stored.session.task?.task_id;
+      let verifiedOrigin: { taskId: string; acceptedSeq: number } | undefined;
+      if (taskId) {
+        const durable = await agentTaskService.get(taskId);
+        const verified = durableCheckpointState(durable, taskId);
+        const acceptedSeq = verified.accepted_seq ?? durable.task.accepted_seq;
+        if (stored.session.task?.accepted_seq !== acceptedSeq) {
+          throw new Error("历史会话视图落后于最新持久化任务日志；请先打开该记录完成恢复，再创建检查点分支");
+        }
+        verifiedOrigin = { taskId, acceptedSeq };
+      }
       restoreSession(stored.session, stored.title);
       setHistoryLoading(false);
-      await branchFromMessage(last.id, saved.conversation_id);
+      await branchFromMessage(last.id, saved.conversation_id, verifiedOrigin, stored.title);
     } catch (cause) {
       setHistoryLoading(false);
       setError(`继续历史研究失败：${cause instanceof Error ? cause.message : String(cause)}`);
@@ -809,7 +834,7 @@ export default function AgentTaskWorkbench() {
         <header><div><span className="eyebrow">RESEARCH HISTORY</span><h2>历史研究</h2><p>打开可查看完整记录；“基于此继续”会新建任务并重新取得最新数据。</p></div><button aria-label="关闭历史记录" onClick={() => setHistoryOpen(false)}>×</button></header>
         <label className="agent-history-search"><span>搜索</span><input type="search" value={historyQuery} onChange={(event) => setHistoryQuery(event.target.value)} placeholder="标题或会话编号" aria-label="搜索 Agent 历史" /><em>{historySearching ? "查询中…" : historyQuery.trim() ? `${displayedHistory.length} 项` : "最近记录"}</em></label>
         <div className="agent-history-list">{historySearching ? <div className="agent-history-empty"><b>正在搜索历史研究</b><p>从本机持久化记录中查询，不会向模型或外部服务发送关键词。</p></div> : displayedHistory.length ? displayedHistory.map((saved) => <article className={saved.conversation_id === sessionId ? "current" : ""} key={saved.conversation_id}>
-          <button className="history-main" disabled={historyLoading} onClick={() => void openHistory(saved)}><b>{saved.title}</b><span>{historyTime(saved.updated_at)} · {phaseLabel[saved.phase ?? "idle"]}</span><small>{saved.message_count} 条记录 · {saved.evidence_count} 条证据{saved.parent_conversation_id ? " · 研究分支" : ""}</small></button>
+          <button className="history-main" disabled={historyLoading} onClick={() => void openHistory(saved)}><b>{saved.title}</b><span>{historyTime(saved.updated_at)} · {phaseLabel[saved.phase ?? "idle"]}</span><small>{saved.message_count} 条记录 · {saved.evidence_count} 条证据{saved.branch_from_checkpoint_task_id ? ` · 检查点分支 #${saved.branch_from_checkpoint_seq ?? "?"}` : saved.parent_conversation_id ? " · 消息分支" : ""}</small></button>
           <div><button disabled={historyLoading} onClick={() => void continueHistory(saved)}>基于此继续</button><button onClick={() => void renameHistory(saved)}>重命名</button><button className="danger" aria-label={`删除 ${saved.title || "历史研究"}`} onClick={() => void deleteHistory(saved)}>删除</button></div>
         </article>) : <div className="agent-history-empty"><b>{historyQuery.trim() ? "没有匹配的历史研究" : "还没有历史研究"}</b><p>{historyQuery.trim() ? "尝试输入目标、证券名称或会话编号中的其他关键词。" : "发送第一条研究任务后会自动保存在本机，切换页面或重启桌面应用也不会丢失。"}</p></div>}</div>
         <footer><span>当前最多显示 {MAX_HISTORY_ITEMS} 项 · 历史保存在本机 · 不保存 API Key</span><button onClick={newResearch}>开始新对话</button></footer>

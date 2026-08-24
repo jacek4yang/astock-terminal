@@ -41,6 +41,8 @@ export const agentTaskService = {
     new_conversation_id: string;
     message_id: string;
     title: string;
+    checkpoint_task_id?: string;
+    checkpoint_accepted_seq?: number;
   }): Promise<StoredAgentConversation<TSession>> {
     return requestNative("engine", "agent.conversation.branch", payload);
   },

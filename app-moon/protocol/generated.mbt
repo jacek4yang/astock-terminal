@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=30951f97fd73e190476ec8161f3728d1ea65fcec41d5f4d4d0975f94f1765b6d
+// GENERATED from protocol/schema; schema-sha256=c05962bf3738e85026b4c9543e611f41b2d49d19029533a299c5cdc19da598f5
 // Run: node protocol/codegen.mjs
 
 ///|
@@ -143,6 +143,8 @@ pub(all) struct ConversationSummary {
   evidence_count : Int
   parent_conversation_id : String?
   branch_from_message_id : String?
+  branch_from_checkpoint_task_id : String?
+  branch_from_checkpoint_seq : Int?
   created_at : Int64
   updated_at : Int64
 } derive(Debug, Eq, ToJson, FromJson)

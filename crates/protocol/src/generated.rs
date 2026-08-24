@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=30951f97fd73e190476ec8161f3728d1ea65fcec41d5f4d4d0975f94f1765b6d
+// GENERATED from protocol/schema; schema-sha256=c05962bf3738e85026b4c9543e611f41b2d49d19029533a299c5cdc19da598f5
 // Run: node protocol/codegen.mjs
 
 use serde::{Deserialize, Serialize};
@@ -452,6 +452,10 @@ pub struct ConversationSummary {
     pub parent_conversation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_from_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_from_checkpoint_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_from_checkpoint_seq: Option<u64>,
     pub created_at: u64,
     pub updated_at: u64,
 }
