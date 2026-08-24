@@ -1,7 +1,6 @@
 /**
- * Tauri 命令层类型化封装。
- * 契约见 ../docs/command-contract.md;所有命令返回 JSON(snake_case),
- * 错误统一 { error: string, kind: string }。
+ * Proton typed bridge 的领域 API 封装。
+ * 公共协议来自 protocol/schema；所有载荷使用 snake_case，错误保持结构化。
  */
 import { isProton, requestNative } from "../bridge";
 
