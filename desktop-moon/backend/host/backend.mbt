@@ -3,6 +3,7 @@ pub struct Backend {
   engine : WorkerClient
   agent : WorkerClient
   mut window : @proton.WindowHandle?
+  mut window_events : @proton.WindowEventEmitter?
   mut closed : Bool
 }
 
@@ -64,6 +65,8 @@ struct AgentWorkflowPayload {
   checkpoint : Json?
   host_effects : Array[AgentHostEffect]?
   continuation : AgentContinuation?
+  activities : Json?
+  verification_findings : Json?
 } derive(FromJson)
 
 ///|
@@ -87,6 +90,16 @@ struct DurableEventView {
 struct DurableTaskView {
   events : Array[DurableEventView]
 } derive(FromJson)
+
+///|
+struct HostToolProgress {
+  call_id : String
+  ok : Bool
+  cache_hit : Bool
+} derive(FromJson, ToJson)
+
+///|
+extend HostToolProgress with ToJson::{to_json}
 
 ///|
 fn worker_timeout(request : Json, maximum : Int) -> Int {
@@ -131,7 +144,13 @@ pub async fn Backend::start() -> Backend {
     )
   })
   errdefer agent.close()
-  let backend = Backend::{ engine, agent, window: None, closed: false }
+  let backend = Backend::{
+    engine,
+    agent,
+    window: None,
+    window_events: None,
+    closed: false,
+  }
   backend.handshake()
   backend
 }
@@ -162,8 +181,10 @@ pub async fn Backend::supervise(self : Backend) -> Unit {
 pub fn Backend::attach_window(
   self : Backend,
   window : @proton.WindowHandle,
+  events : @proton.WindowEventEmitter,
 ) -> Unit {
   self.window = Some(window)
+  self.window_events = Some(events)
   let icon_path = @env.get_env_var("ASTOCK_ICON_PATH").unwrap_or("")
   ignore(apply_window_icon(icon_path))
 }
@@ -171,6 +192,51 @@ pub fn Backend::attach_window(
 ///|
 pub fn Backend::detach_window(self : Backend) -> Unit {
   self.window = None
+  self.window_events = None
+}
+
+///|
+/// Send only public workflow state and activity summaries after their durable
+/// checkpoint has been committed. The event never contains prompts, model
+/// reasoning, credentials, complete tool payloads or report drafts.
+async fn Backend::emit_workflow_progress(
+  self : Backend,
+  request_id : String,
+  round : Int,
+  projection : AgentWorkflowPayload,
+  stage : String,
+  tool : AgentHostEffect?,
+  tool_result : Json?,
+) -> Unit {
+  guard self.window_events is Some(events) else { return }
+  let tool_summary : Json = match tool {
+    Some(effect) => { "call_id": effect.call_id, "kind": effect.kind }
+    None => null
+  }
+  events.emit(@shared.worker_event, {
+    "request_id": request_id,
+    "round": round,
+    "stage": stage,
+    "state": match projection.state {
+      Some(state) => state.to_json()
+      None => null
+    },
+    "activities": match projection.activities {
+      Some(activities) => activities
+      None => []
+    },
+    "verification_findings": match projection.verification_findings {
+      Some(findings) => findings
+      None => []
+    },
+    "tool": tool_summary,
+    "tool_result": match tool_result {
+      Some(result) => result
+      None => null
+    },
+  }) catch {
+    _ => ()
+  }
 }
 
 ///|
@@ -476,6 +542,14 @@ async fn Backend::route_agent(self : Backend, request : Json) -> Json {
       _ => return correlate_worker_reply(envelope, reply)
     }
     self.persist_workflow_checkpoint(envelope.request_id, projection)
+    self.emit_workflow_progress(
+      envelope.request_id,
+      round,
+      projection,
+      "checkpointed",
+      None,
+      None,
+    )
     let effects = projection.host_effects.unwrap_or([])
     if effects.is_empty() {
       return correlate_worker_reply(envelope, reply)
@@ -485,7 +559,17 @@ async fn Backend::route_agent(self : Backend, request : Json) -> Json {
     }
     let results : Array[Json] = []
     for effect in effects {
-      results.push(self.execute_agent_effect(envelope.request_id, effect))
+      let result = self.execute_agent_effect(envelope.request_id, effect)
+      let progress : HostToolProgress = @json.from_json(result)
+      self.emit_workflow_progress(
+        envelope.request_id,
+        round,
+        projection,
+        "tool_finished",
+        Some(effect),
+        Some(progress.to_json()),
+      )
+      results.push(result)
     }
     round += 1
     reply_json = self.agent.request(

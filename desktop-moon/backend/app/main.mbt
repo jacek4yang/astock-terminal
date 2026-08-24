@@ -41,7 +41,9 @@ async fn main {
     .debug(enabled=environment_flag("ASTOCK_RELEASE_TEST_CDP"))
     .single_instance("com.astock.terminal")
     .window_lifecycle(
-      on_ready=fn(context) { backend.attach_window(context.handle()) },
+      on_ready=fn(context) {
+        backend.attach_window(context.handle(), context.events())
+      },
       on_close=fn(_state) { backend.detach_window() },
     )
     .commands(fn(registrar) raise { backend.register_commands(registrar) })

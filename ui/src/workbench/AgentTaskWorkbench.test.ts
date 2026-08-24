@@ -7,7 +7,7 @@ vi.mock("../bridge", () => ({
   requestNative,
 }));
 
-import { deterministicVerificationSummary, requestDurableAgent } from "./AgentTaskWorkbench";
+import { deterministicVerificationSummary, requestDurableAgent, workerProgressMatchesTask } from "./AgentTaskWorkbench";
 
 const spec = {
   objective: "分析两万元最新投资计划",
@@ -101,5 +101,11 @@ describe("durable Agent operation journal", () => {
       registry_facts: 6_000,
     })).toBe("复现 37 个数字 · 12 个不同证据引用 · 6000 条字段事实");
     expect(deterministicVerificationSummary({})).toBe("复现 0 个数字 · 0 个不同证据引用 · 0 条字段事实");
+  });
+
+  it("routes Worker progress by durable Agent task id, not conversation id", () => {
+    expect(workerProgressMatchesTask({ state: { task_id: "task-1" } }, "task-1")).toBe(true);
+    expect(workerProgressMatchesTask({ state: { task_id: "task-1" } }, "conversation-1")).toBe(false);
+    expect(workerProgressMatchesTask({ stage: "diagnostic" }, "task-1")).toBe(true);
   });
 });

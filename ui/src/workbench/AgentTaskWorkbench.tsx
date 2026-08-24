@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentPhase, TaskSpec } from "../bridge/generated";
-import { isProton, requestNative } from "../bridge";
+import { isProton, requestNative, subscribeNativeEvent } from "../bridge";
 import type { ClarificationDraft, ClarificationQuestion, ClarificationRequest } from "../lib/agentClarification";
 import { emptyClarificationDraft } from "../lib/agentClarification";
+import { createEventBatcher } from "../lib/eventBatcher";
 import { useResearchContext } from "./store";
 
 type Depth = "fast" | "balanced" | "deep" | "exhaustive";
@@ -96,7 +97,23 @@ type DurableTask = {
   events: Array<{ seq: number }>;
 };
 
+type WorkerProgress = {
+  request_id?: string;
+  round?: number;
+  stage?: "checkpointed" | "tool_finished" | string;
+  state?: TaskView | null;
+  activities?: AgentEffect[];
+  verification_findings?: string[];
+  tool?: { call_id?: string; kind?: string } | null;
+  tool_result?: { call_id?: string; ok?: boolean; cache_hit?: boolean } | null;
+};
+
 const MAX_HISTORY_ITEMS = 80;
+const AGENT_RENDER_BATCH_MS = 110;
+
+export function workerProgressMatchesTask(progress: WorkerProgress, taskId?: string) {
+  return !progress.state?.task_id || Boolean(taskId && progress.state.task_id === taskId);
+}
 
 const AGENT_BEST = "__agent_best__";
 const phaseLabel: Record<AgentPhase, string> = {
@@ -337,6 +354,62 @@ export default function AgentTaskWorkbench() {
     // 首次挂载只从 Engine 恢复一次；restoreSession 使用当前组件的稳定 setter。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!isProton()) return;
+    const activeTaskId = task?.task_id;
+    const batcher = createEventBatcher<WorkerProgress>(AGENT_RENDER_BATCH_MS, (batch) => {
+      if (!batch.length) return;
+      const relevant = batch.filter((item) => workerProgressMatchesTask(item, activeTaskId));
+      if (!relevant.length) return;
+      const latestState = [...relevant].reverse().find((item) => item.state)?.state;
+      if (latestState) {
+        setTask((current) => ({ ...(current ?? {}), ...latestState }));
+        if (latestState.phase) setBusyStage(phaseLabel[latestState.phase]);
+      }
+      const streamed = relevant.flatMap((item) => {
+        const activities = Array.isArray(item.activities) ? item.activities : [];
+        const tool = item.stage === "tool_finished" && item.tool
+          ? [{
+              kind: "execute_tool",
+              tool: item.tool.kind,
+              call_id: item.tool.call_id,
+              cache_hit: item.tool_result?.cache_hit ?? false,
+              title: item.tool_result?.ok === false ? "工具执行失败" : "工具执行完成",
+              detail: item.tool_result?.ok === false
+                ? "工具结果已安全持久化；任务不会基于失败结果发布结论"
+                : "工具结果与缓存状态已持久化，正在进入下一轮复核",
+            } satisfies AgentEffect]
+          : [];
+        return [...activities, ...tool];
+      });
+      if (streamed.length) {
+        setEffects((current) => {
+          const merged = [...current];
+          for (const item of streamed) {
+            const key = `${item.kind ?? "activity"}:${item.call_id ?? item.tool ?? item.title ?? item.detail ?? ""}`;
+            const index = merged.findIndex((existing) =>
+              `${existing.kind ?? "activity"}:${existing.call_id ?? existing.tool ?? existing.title ?? existing.detail ?? ""}` === key);
+            if (index >= 0) merged[index] = { ...merged[index], ...item };
+            else merged.push(item);
+          }
+          return merged.slice(-80);
+        });
+      }
+      window.dispatchEvent(new CustomEvent("astock:agent-render-batch", {
+        detail: { at: performance.now(), event_count: relevant.length },
+      }));
+    });
+    const enqueue = (raw: unknown) => {
+      if (!raw || typeof raw !== "object") return;
+      batcher.push(raw as WorkerProgress);
+    };
+    const unsubscribe = subscribeNativeEvent("worker_event", enqueue);
+    return () => {
+      unsubscribe();
+      batcher.dispose();
+    };
+  }, [task?.task_id]);
 
   useEffect(() => {
     if (!hydrated || !isProton() || !messages.length) return;
