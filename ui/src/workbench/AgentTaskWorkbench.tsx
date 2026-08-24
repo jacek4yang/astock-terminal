@@ -287,16 +287,69 @@ function compactSecurityEvidence(
   };
 }
 
+export async function requestDurableTool<T>(
+  taskId: string,
+  causedBySeq: number,
+  callId: string,
+  kind: string,
+  payload: Record<string, unknown>,
+  deadlineMs: number,
+): Promise<T> {
+  const baseKey = `${taskId}:tool:${callId}`;
+  const effects = await requestNative<{ items: DurableEffect[] }>(
+    "engine",
+    "agent.effect.list",
+    { task_id: taskId },
+  );
+  const prior = effects.items.filter((item) => item.idempotency_key === baseKey || item.idempotency_key.startsWith(`${baseKey}:retry:`));
+  const completed = prior.find((item) => item.status === "succeeded" && item.result != null);
+  if (completed) return completed.result as T;
+  if (prior.some((item) => item.status === "pending")) {
+    throw new Error(`工具 ${kind} 的相同请求仍为 pending；已阻止重复执行。`);
+  }
+  const retry = prior.length;
+  const idempotencyKey = retry === 0 ? baseKey : `${baseKey}:retry:${retry}`;
+  const effectId = `tool:${taskId}:${callId}:${retry}`;
+  await requestNative("engine", "agent.effect.begin", {
+    effect_id: effectId,
+    task_id: taskId,
+    caused_by_seq: causedBySeq,
+    effect_kind: `engine.${kind}`,
+    effect: { target: "engine", kind, payload },
+    idempotency_key: idempotencyKey,
+  });
+  try {
+    const result = await requestNative<T>("engine", kind, payload, { deadlineMs });
+    await requestNative("engine", "agent.effect.complete", {
+      effect_id: effectId,
+      status: "succeeded",
+      result,
+    });
+    return result;
+  } catch (cause) {
+    await requestNative("engine", "agent.effect.complete", {
+      effect_id: effectId,
+      status: "failed",
+      result: { error: cause instanceof Error ? cause.message : String(cause) },
+    }).catch(() => undefined);
+    throw cause;
+  }
+}
+
 async function fetchResearchNews(
   filters: { symbol?: string; keyword?: string },
   limit: number,
   minimumItems = 10,
+  durable?: { taskId: string; causedBySeq: number; callId: string },
 ): Promise<ResearchNews> {
-  const batch = await requestNative<ResearchNews>("engine", "research.news", {
+  const payload = {
     ...filters,
     sources: NEWS_SOURCE_GROUPS.flat(),
     limit,
-  }, { deadlineMs: 120_000 });
+  };
+  const batch = durable
+    ? await requestDurableTool<ResearchNews>(durable.taskId, durable.causedBySeq, durable.callId, "research.news", payload, 120_000)
+    : await requestNative<ResearchNews>("engine", "research.news", payload, { deadlineMs: 120_000 });
   if (batch.items.length < minimumItems) {
     throw new Error(`有效资讯仅 ${batch.items.length} 条，低于研究发布门槛；${batch.errors.join("；")}`);
   }
@@ -536,12 +589,17 @@ export default function AgentTaskWorkbench() {
     setError(null);
     try {
       const fetchActivities: AgentEffect[] = [];
+      const acceptedSeq = state.accepted_seq ?? 0;
       setBusyStage("正在读取市场宽度和全部资讯频道…");
       const [marketOverview, marketContext, globalContext, marketNews] = await Promise.all([
-        requestNative<unknown>("engine", "market.overview", {}, { deadlineMs: 120_000 }),
-        requestNative<unknown>("engine", "research.market_context", {}, { deadlineMs: 180_000 }),
-        requestNative<unknown>("engine", "research.global_context", {}, { deadlineMs: 180_000 }),
-        fetchResearchNews({}, depth === "exhaustive" ? 60 : 45),
+        requestDurableTool<unknown>(state.task_id, acceptedSeq, "market-overview", "market.overview", {}, 120_000),
+        requestDurableTool<unknown>(state.task_id, acceptedSeq, "market-context", "research.market_context", {}, 180_000),
+        requestDurableTool<unknown>(state.task_id, acceptedSeq, "global-context", "research.global_context", {}, 180_000),
+        fetchResearchNews({}, depth === "exhaustive" ? 60 : 45, 10, {
+          taskId: state.task_id,
+          causedBySeq: acceptedSeq,
+          callId: "market-news",
+        }),
       ]);
       fetchActivities.push(
         { kind: "execute_tool", tool: "市场宽度", detail: "读取涨跌家数、数据时点与行情源", evidence_count: 1 },
@@ -560,11 +618,13 @@ export default function AgentTaskWorkbench() {
       let researchPlan: ResearchPlan | null = null;
       if (!symbols.length) {
         setBusyStage("正在建立满足资金与一手约束的候选池…");
-        const candidatePool = await requestNative<{ items: ResearchCandidate[]; source: string; fetched_at: string }>(
-          "engine",
+        const candidatePool = await requestDurableTool<{ items: ResearchCandidate[]; source: string; fetched_at: string }>(
+          state.task_id,
+          acceptedSeq,
+          "market-candidates",
           "research.market_candidates",
           { limit: depth === "exhaustive" ? 80 : 50, ...(capital ? { max_lot_cost: capital * 0.8 } : {}) },
-          { deadlineMs: 120_000 },
+          120_000,
         );
         fetchActivities.push({
           kind: "execute_tool",
@@ -588,17 +648,21 @@ export default function AgentTaskWorkbench() {
       setBusyStage(`正在并行核验 ${symbols.length} 只证券的行情、资金、财务、估值、公告与新闻…`);
       const rawSecurities = await Promise.all(symbols.map(async (symbol) => {
         const [market, fundamentals, events, news, reconciliation, joinquant] = await Promise.all([
-          requestNative<unknown>("engine", "market.security_snapshot", { symbol, period: "day", adjust: "qfq", count: depth === "exhaustive" ? 500 : 250 }, { deadlineMs: 180_000 }),
-          requestNative<unknown>("engine", "research.fundamentals", { symbol }, { deadlineMs: 240_000 }),
-          requestNative<unknown>("engine", "research.security_events", { symbol }, { deadlineMs: 180_000 }),
-          fetchResearchNews({ symbol, keyword: symbol }, depth === "exhaustive" ? 30 : 20, 0),
-          requestNative<unknown>("engine", "research.data_reconcile", { symbol }, { deadlineMs: 180_000 }),
-          requestNative<unknown>("engine", "research.joinquant_context", {
+          requestDurableTool<unknown>(state.task_id!, acceptedSeq, `${symbol}-market`, "market.security_snapshot", { symbol, period: "day", adjust: "qfq", count: depth === "exhaustive" ? 500 : 250 }, 180_000),
+          requestDurableTool<unknown>(state.task_id!, acceptedSeq, `${symbol}-fundamentals`, "research.fundamentals", { symbol }, 240_000),
+          requestDurableTool<unknown>(state.task_id!, acceptedSeq, `${symbol}-events`, "research.security_events", { symbol }, 180_000),
+          fetchResearchNews({ symbol, keyword: symbol }, depth === "exhaustive" ? 30 : 20, 0, {
+            taskId: state.task_id!,
+            causedBySeq: acceptedSeq,
+            callId: `${symbol}-news`,
+          }),
+          requestDurableTool<unknown>(state.task_id!, acceptedSeq, `${symbol}-reconcile`, "research.data_reconcile", { symbol }, 180_000),
+          requestDurableTool<unknown>(state.task_id!, acceptedSeq, `${symbol}-joinquant`, "research.joinquant_context", {
             symbol,
             benchmark: state.spec?.comparison_benchmark ?? "000300",
             start: state.spec?.research_start ?? new Date(Date.now() - 365 * 86_400_000).toISOString().slice(0, 10),
             end: state.spec?.research_end ?? new Date().toISOString().slice(0, 10),
-          }, { deadlineMs: 180_000 }),
+          }, 180_000),
         ]);
         return { symbol, market, fundamentals, events, news, reconciliation, joinquant };
       }));

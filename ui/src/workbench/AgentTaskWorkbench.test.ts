@@ -7,7 +7,7 @@ vi.mock("../bridge", () => ({
   requestNative,
 }));
 
-import { requestDurableAgent } from "./AgentTaskWorkbench";
+import { requestDurableAgent, requestDurableTool } from "./AgentTaskWorkbench";
 
 const spec = {
   objective: "分析两万元最新投资计划",
@@ -86,5 +86,48 @@ describe("durable Agent operation journal", () => {
       900_000,
     )).rejects.toThrow("pending");
     expect(requestNative.mock.calls.some((call) => call[0] === "agent")).toBe(false);
+  });
+
+  it("journals Engine tool intent and reuses its verified result", async () => {
+    const quote = { quote: { symbol: "603927", price: 18.6 }, source: "TDX" };
+    requestNative.mockImplementation(async (_target: string, kind: string) => {
+      if (kind === "agent.effect.list") return { items: [] };
+      if (kind === "market.quote") return quote;
+      return { inserted: true };
+    });
+    await expect(requestDurableTool(
+      "task-3",
+      2,
+      "603927-quote",
+      "market.quote",
+      { symbol: "603927" },
+      60_000,
+    )).resolves.toEqual(quote);
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "agent.effect.list",
+      "agent.effect.begin",
+      "market.quote",
+      "agent.effect.complete",
+    ]);
+
+    requestNative.mockReset();
+    requestNative.mockResolvedValue({
+      items: [{
+        effect_id: "tool-existing",
+        effect_kind: "engine.market.quote",
+        status: "succeeded",
+        result: quote,
+        idempotency_key: "task-3:tool:603927-quote",
+      }],
+    });
+    await expect(requestDurableTool(
+      "task-3",
+      2,
+      "603927-quote",
+      "market.quote",
+      { symbol: "603927" },
+      60_000,
+    )).resolves.toEqual(quote);
+    expect(requestNative).toHaveBeenCalledTimes(1);
   });
 });
