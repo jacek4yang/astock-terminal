@@ -3,7 +3,8 @@ name = "astock-quant"
 description = "Quant Lab: returns, volatility, correlations, lead-lag, cointegration, GARCH, Kalman, HMM, change-point, PCA, Monte Carlo"
 version.workspace = true
 edition.workspace = true
-
+license.workspace = true
+publish.workspace = true
 [dependencies]
 astock-core = { path = "../core" }
 serde.workspace = true

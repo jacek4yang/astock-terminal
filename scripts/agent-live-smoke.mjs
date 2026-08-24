@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 
 const executable = process.argv[2];
 if (!executable) throw new Error("usage: node scripts/agent-live-smoke.mjs <agent-worker.exe>");

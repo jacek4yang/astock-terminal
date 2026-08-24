@@ -3,7 +3,8 @@ name = "astock-global-intelligence"
 description = "Auditable overseas primary-source ingestion and Global-to-A-share transmission mapping"
 version.workspace = true
 edition.workspace = true
-
+license.workspace = true
+publish.workspace = true
 [dependencies]
 astock-storage = { path = "../storage" }
 astock-trading-rules = { path = "../trading-rules" }

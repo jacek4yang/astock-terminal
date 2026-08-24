@@ -3,7 +3,8 @@ name = "astock-security"
 description = "Security boundary for untrusted research documents, safe URL fetching, redaction and tool authorization"
 version.workspace = true
 edition.workspace = true
-
+license.workspace = true
+publish.workspace = true
 [dependencies]
 tokio.workspace = true
 reqwest.workspace = true

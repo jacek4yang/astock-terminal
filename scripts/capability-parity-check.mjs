@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const root = path.resolve(import.meta.dirname, "..");
+const releaseMode = process.argv.includes("--release");
 const tauriRegistryPath = path.join(root, "src-tauri", "src", "lib.rs");
 const providerDir = path.join(root, "crates", "market-data", "src", "providers");
 const globalCatalogPath = path.join(root, "crates", "global-intelligence", "src", "lib.rs");
@@ -152,8 +153,19 @@ const marketProviderBlockers = Object.entries(marketProviderStatus)
   .filter(([, status]) => status === "INTERNAL_ONLY" || status === "GAP")
   .map(([name]) => name);
 
+if (releaseMode && blockers.length) {
+  fail(`${blockers.length} legacy handlers are not READY/ENRICHED for the Proton architecture`);
+}
+if (releaseMode && marketProviderBlockers.length) {
+  fail(`market providers are not renderer/Agent reachable: ${marketProviderBlockers.join(", ")}`);
+}
+if (releaseMode && globalBlockers.length) {
+  fail(`${globalBlockers.length} official global sources are not exposed through the Engine contract`);
+}
+
 console.log(JSON.stringify({
   ok: process.exitCode !== 1,
+  mode: releaseMode ? "release" : "diagnostic",
   legacy_handlers: legacyHandlers.length,
   migrated_handlers: migratedHandlers.size,
   legacy_handler_blockers: blockers.length,

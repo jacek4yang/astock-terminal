@@ -3,7 +3,8 @@ name = "astock-relation-extraction"
 description = "Evidence-bound supply-chain relation extraction, review and publication"
 version.workspace = true
 edition.workspace = true
-
+license.workspace = true
+publish.workspace = true
 [dependencies]
 astock-storage = { path = "../storage" }
 astock-source-verification = { path = "../source-verification" }

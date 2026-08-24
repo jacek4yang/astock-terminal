@@ -3,7 +3,8 @@ name = "astock-graph"
 description = "Supply-chain knowledge graph + event propagation engine (multi-hop transmission, provenance-tracked edges)"
 version.workspace = true
 edition.workspace = true
-
+license.workspace = true
+publish.workspace = true
 [dependencies]
 astock-core = { path = "../core" }
 astock-market-data = { path = "../market-data" }

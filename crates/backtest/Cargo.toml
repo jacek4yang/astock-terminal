@@ -3,7 +3,8 @@ name = "astock-backtest"
 description = "A-share backtesting engine: event-driven + vectorized, trading rules aware, anti-overfitting harness"
 version.workspace = true
 edition.workspace = true
-
+license.workspace = true
+publish.workspace = true
 [dependencies]
 astock-core = { path = "../core" }
 astock-trading-rules = { path = "../trading-rules" }

@@ -3,7 +3,8 @@ name = "astock-market-data"
 description = "Market data provider abstraction + EastMoney/Tencent/Sina adapters, adaptive rate limiting, failover"
 version.workspace = true
 edition.workspace = true
-
+license.workspace = true
+publish.workspace = true
 [dependencies]
 astock-core = { path = "../core" }
 astock-tdx = { path = "../tdx" }

@@ -3,7 +3,8 @@ name = "astock-tdx"
 description = "TDX (通达信) quote TCP protocol client: pure-Rust tokio implementation with server probing, pooling and heartbeat"
 version.workspace = true
 edition.workspace = true
-
+license.workspace = true
+publish.workspace = true
 [dependencies]
 tokio.workspace = true
 thiserror.workspace = true

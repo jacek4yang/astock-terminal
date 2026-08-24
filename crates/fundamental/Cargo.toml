@@ -3,7 +3,8 @@ name = "astock-fundamental"
 description = "Fundamental analysis: financial statements (EastMoney F10), ratios, DuPont, F/Z/M-scores, anomaly flags, valuation"
 version.workspace = true
 edition.workspace = true
-
+license.workspace = true
+publish.workspace = true
 [dependencies]
 astock-core = { path = "../core" }
 astock-market-data = { path = "../market-data" }

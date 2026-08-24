@@ -3,7 +3,8 @@ name = "astock-storage"
 description = "Tiered local persistence: SQLite metadata/state + Parquet time-series cache + LRU memory cache"
 version.workspace = true
 edition.workspace = true
-
+license.workspace = true
+publish.workspace = true
 [dependencies]
 astock-core = { path = "../core" }
 tokio = { version = "1", features = ["sync", "rt", "macros"] }

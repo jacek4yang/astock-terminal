@@ -3,7 +3,8 @@ name = "astock-engine"
 description = "GUI-independent deterministic financial and persistence worker"
 version.workspace = true
 edition.workspace = true
-
+license.workspace = true
+publish.workspace = true
 [dependencies]
 astock-core = { path = "../core" }
 astock-chanlun = { path = "../chanlun" }

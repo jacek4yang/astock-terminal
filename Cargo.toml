@@ -34,7 +34,8 @@ members = [
 [workspace.package]
 version = "6.0.0"
 edition = "2021"
-license = "Proprietary"
+license = "LicenseRef-Proprietary"
+publish = false
 rust-version = "1.88"
 
 [workspace.dependencies]
