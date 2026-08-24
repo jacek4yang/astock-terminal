@@ -241,7 +241,14 @@ function validateExternalServices(evidence) {
   invariant(HEX_SHA256.test(plan.report_sha256 ?? ""), "minimax-20000-manual-plan: report SHA-256 is missing");
   invariant(plan.verifier_version === "engine-report-verifier-v1", "minimax-20000-manual-plan: independent verifier is missing");
   invariant(Number.isInteger(plan.numeric_claims_checked) && plan.numeric_claims_checked > 0, "minimax-20000-manual-plan: numeric claims were not checked");
-  invariant(Number.isInteger(plan.distinct_citations) && plan.distinct_citations >= 4, "minimax-20000-manual-plan: citations are insufficient");
+  invariant(Number.isInteger(plan.distinct_citations) && plan.distinct_citations >= 8, "minimax-20000-manual-plan: primary-source citations are insufficient");
+  invariant(plan.durable_phase === "completed" && Number.isInteger(plan.durable_accepted_seq) && plan.durable_accepted_seq > 0 &&
+    plan.durable_accepted_seq === plan.worker_accepted_seq,
+  "minimax-20000-manual-plan: durable task does not match the completed Worker state");
+  invariant(plan.pending_effects === 0 && Number.isInteger(plan.succeeded_effects) && plan.succeeded_effects >= 2,
+    "minimax-20000-manual-plan: durable Effect ledger is incomplete");
+  invariant(plan.verifier_effect_status === "succeeded" && plan.verifier_effect_version === "engine-report-verifier-v1",
+    "minimax-20000-manual-plan: durable verifier Effect is missing");
 
   const stream = details("minimax-stream-resume");
   invariant(stream.implementation === "moonbit-agent-worker", "minimax-stream-resume: wrong implementation boundary");
@@ -252,6 +259,10 @@ function validateExternalServices(evidence) {
   const quota = details("minimax-quota");
   invariant(Number.isInteger(quota.model_count) && quota.model_count > 0, "minimax-quota: no model quota was returned");
   invariant(Number.isFinite(quota.fetched_at_ms) && quota.fetched_at_ms > 0, "minimax-quota: fetch timestamp is missing");
+  const evidenceStartedAt = Date.parse(evidence.started_at_utc);
+  const evidenceCompletedAt = Date.parse(evidence.completed_at_utc);
+  invariant(quota.fetched_at_ms >= evidenceStartedAt - 60_000 && quota.fetched_at_ms <= evidenceCompletedAt + 60_000,
+    "minimax-quota: snapshot is not bound to this live run");
 
   const auth = details("joinquant-auth");
   invariant(auth.configured === true, "joinquant-auth: Credential Manager authentication was not confirmed");
@@ -261,6 +272,8 @@ function validateExternalServices(evidence) {
   invariant(Number.isInteger(data.total_rows) && data.total_rows >= data.row_count, "joinquant-minimal-data: total_rows is invalid");
   invariant(data.source === "JoinQuant", "joinquant-minimal-data: source identity is invalid");
   invariant(typeof data.fetched_at === "string" && Number.isFinite(Date.parse(data.fetched_at)), "joinquant-minimal-data: fetched_at is invalid");
+  invariant(Date.parse(data.fetched_at) >= evidenceStartedAt - 60_000 && Date.parse(data.fetched_at) <= evidenceCompletedAt + 60_000,
+    "joinquant-minimal-data: fetch timestamp is not bound to this live run");
   invariant(data.symbol === "000725", "joinquant-minimal-data: audited security identity is invalid");
   for (const field of ["requested_start", "requested_end", "first_date", "latest_date"]) {
     invariant(typeof data[field] === "string" && /^\d{4}-\d{2}-\d{2}$/.test(data[field]) &&

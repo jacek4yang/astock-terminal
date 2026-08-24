@@ -151,6 +151,13 @@ function completeExternalServices() {
     verifier_version: "engine-report-verifier-v1",
     numeric_claims_checked: 8,
     distinct_citations: 8,
+    durable_phase: "completed",
+    durable_accepted_seq: 42,
+    worker_accepted_seq: 42,
+    pending_effects: 0,
+    succeeded_effects: 12,
+    verifier_effect_status: "succeeded",
+    verifier_effect_version: "engine-report-verifier-v1",
   };
   byId.get("minimax-stream-resume").details = {
     implementation: "moonbit-agent-worker",
@@ -160,7 +167,7 @@ function completeExternalServices() {
     partial_output_discarded: true,
     complete_response_retry_tested: true,
   };
-  byId.get("minimax-quota").details = { model_count: 2, fetched_at_ms: 1_800_000_000_000 };
+  byId.get("minimax-quota").details = { model_count: 2, fetched_at_ms: Date.parse("2026-08-24T00:00:30Z") };
   byId.get("joinquant-auth").details = { configured: true };
   byId.get("joinquant-minimal-data").details = {
     dataset: "qfq_daily", row_count: 20, total_rows: 20, source: "JoinQuant", fetched_at: "2026-08-24T00:00:30Z",
@@ -402,6 +409,27 @@ test("rejects live evidence that does not preserve the exact 20,000 CNY constrai
   const evidence = completeExternalServices();
   evidence.cases.find((item) => item.id === "minimax-20000-manual-plan").details.capital_cny = 10_000;
   assert.throws(() => validateEvidence(evidence, "minimax-plus-joinquant-live", commit), /capital constraint/);
+});
+
+test("rejects insufficient primary-source citations or stale live snapshots", () => {
+  const evidence = completeExternalServices();
+  const plan = evidence.cases.find((item) => item.id === "minimax-20000-manual-plan").details;
+  plan.distinct_citations = 7;
+  assert.throws(() => validateEvidence(evidence, "minimax-plus-joinquant-live", commit), /primary-source citations are insufficient/);
+  plan.distinct_citations = 8;
+  const quota = evidence.cases.find((item) => item.id === "minimax-quota").details;
+  quota.fetched_at_ms = Date.parse("2025-01-01T00:00:00Z");
+  assert.throws(() => validateEvidence(evidence, "minimax-plus-joinquant-live", commit), /snapshot is not bound to this live run/);
+});
+
+test("rejects a completed MiniMax response without a reconciled durable Effect ledger", () => {
+  const evidence = completeExternalServices();
+  const details = evidence.cases.find((item) => item.id === "minimax-20000-manual-plan").details;
+  details.pending_effects = 1;
+  assert.throws(() => validateEvidence(evidence, "minimax-plus-joinquant-live", commit), /durable Effect ledger is incomplete/);
+  details.pending_effects = 0;
+  details.durable_accepted_seq += 1;
+  assert.throws(() => validateEvidence(evidence, "minimax-plus-joinquant-live", commit), /durable task does not match/);
 });
 
 test("rejects stale or structurally unaudited JoinQuant live data", () => {

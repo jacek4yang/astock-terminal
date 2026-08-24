@@ -248,6 +248,23 @@ try {
   }
   if (researched.report.includes("<think>")) throw new Error("private reasoning leaked into final report");
   if (!/(2万元|20000|20,000)/.test(researched.report)) throw new Error("final report lost the 20,000 CNY capital constraint");
+  const [durableTask, durableEffects] = await Promise.all([
+    engine.request("agent.task.load", { task_id: taskId }, 30_000),
+    engine.request("agent.effect.list", { task_id: taskId }, 30_000),
+  ]);
+  const effectItems = durableEffects.items ?? [];
+  const pendingEffects = effectItems.filter((item) => item.status === "pending");
+  const succeededEffects = effectItems.filter((item) => item.status === "succeeded");
+  const verifierEffect = succeededEffects.find((item) =>
+    item.effect_kind === "engine.research.agent_report_verify" &&
+    item.result?.passed === true && item.result?.verification_version === "engine-report-verifier-v1");
+  const parentEffect = succeededEffects.find((item) => item.effect_kind === "agent.research.workflow");
+  if (durableTask.task?.phase !== "completed" ||
+      durableTask.task?.accepted_seq !== researched.state.accepted_seq ||
+      durableTask.task?.checkpoint?.phase !== "completed" ||
+      pendingEffects.length !== 0 || !verifierEffect || !parentEffect) {
+    throw new Error("completed Agent response does not reconcile with the durable task/effect ledger");
+  }
   console.log(JSON.stringify({
     ok: true,
     elapsed_ms: Date.now() - startedAt,
@@ -285,6 +302,13 @@ try {
       verifier_version: researched.verification.version,
       numeric_claims_checked: researched.verification.numeric_claims_checked,
       distinct_citations: researched.verification.distinct_citations,
+      durable_phase: durableTask.task.phase,
+      durable_accepted_seq: durableTask.task.accepted_seq,
+      worker_accepted_seq: researched.state.accepted_seq,
+      pending_effects: pendingEffects.length,
+      succeeded_effects: succeededEffects.length,
+      verifier_effect_status: verifierEffect.status,
+      verifier_effect_version: verifierEffect.result.verification_version,
     },
     stream: {
       transport: "sse",

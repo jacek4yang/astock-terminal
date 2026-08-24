@@ -72,12 +72,18 @@ live MiniMax Plus and JoinQuant smoke test. It must contain a real model-catalog
 lookup, Token Plan quota snapshot, a complete 20,000 CNY manual-plan run over
 MoonBit SSE, the independent Engine verifier summary, a deterministic partial
 stream rejection/retry check, and an authenticated JoinQuant `qfq_daily`
-result. Every returned qfq row is checked for the requested security/date
+result. The `primary_sources` plan must resolve at least eight distinct
+citations, and both the quota snapshot and JoinQuant fetch timestamp must bind
+to the current evidence run. Every returned qfq row is checked for the requested security/date
 window, strict date order, OHLC bounds, lot units and non-negative
 volume/turnover; the latest bar may lag the requested end by at most 14 calendar
 days. Evidence retains the requested window, first/latest dates, checked-row
 count and row-set SHA-256. The report itself is not retained; evidence keeps
-only counts, timestamps and SHA-256. Pass-only case labels are rejected.
+only counts, timestamps and SHA-256. After completion the runner independently
+reloads the Rust Engine task/checkpoint and Effect ledger: durable/Worker
+sequence and phase must agree, the report-verifier and parent workflow Effects
+must be succeeded, and no pending Effect may remain. Pass-only case labels are
+rejected.
 
 Credential evidence records only explicit release-operator rotation/revocation
 attestation and Credential Manager readback booleans, never a key, account,

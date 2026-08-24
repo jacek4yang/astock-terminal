@@ -85,6 +85,13 @@ $cases = @(
             verifier_version = [string]$live.manual_plan.verifier_version
             numeric_claims_checked = [int]$live.manual_plan.numeric_claims_checked
             distinct_citations = [int]$live.manual_plan.distinct_citations
+            durable_phase = [string]$live.manual_plan.durable_phase
+            durable_accepted_seq = [int]$live.manual_plan.durable_accepted_seq
+            worker_accepted_seq = [int]$live.manual_plan.worker_accepted_seq
+            pending_effects = [int]$live.manual_plan.pending_effects
+            succeeded_effects = [int]$live.manual_plan.succeeded_effects
+            verifier_effect_status = [string]$live.manual_plan.verifier_effect_status
+            verifier_effect_version = [string]$live.manual_plan.verifier_effect_version
         }
     },
     [pscustomobject][ordered]@{
