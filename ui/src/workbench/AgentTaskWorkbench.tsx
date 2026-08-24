@@ -109,6 +109,19 @@ type ConversationSummary = {
 
 type StoredConversation = ConversationSummary & { session: AgentSession };
 
+type DurableEffect = {
+  effect_id: string;
+  effect_kind: string;
+  status: "pending" | "succeeded" | "failed" | "cancelled";
+  result?: unknown;
+  idempotency_key: string;
+};
+
+type DurableTask = {
+  task: { accepted_seq: number; checkpoint?: unknown };
+  events: Array<{ seq: number }>;
+};
+
 const MAX_HISTORY_ITEMS = 80;
 
 const AGENT_BEST = "__agent_best__";
@@ -298,6 +311,107 @@ async function fetchResearchNews(
   };
 }
 
+/**
+ * All stateful Agent Worker operations pass through the Engine journal. The
+ * effect intent is committed before the Worker can contact a provider; the
+ * provider result, reducer outcome events and full checkpoint are committed
+ * before the renderer receives the reply.
+ */
+export async function requestDurableAgent<T>(
+  kind: "agent.start" | "agent.event" | "agent.plan" | "agent.research",
+  payload: Record<string, unknown>,
+  taskId: string,
+  acceptedSeq: number,
+  deadlineMs: number,
+  taskSpec?: TaskSpec,
+): Promise<T> {
+  if (taskSpec) {
+    await requestNative("engine", "agent.task.create", {
+      task_id: taskId,
+      reducer_version: "moonbit-agent-kernel-v1",
+      task_spec: taskSpec,
+      phase: "idle",
+    });
+  }
+
+  const inputSeq = typeof payload.seq === "number" ? payload.seq : null;
+  if (inputSeq != null) {
+    await requestNative("engine", "agent.event.append", {
+      task_id: taskId,
+      seq: inputSeq,
+      event_id: `input:${taskId}:${inputSeq}`,
+      event_kind: kind === "agent.start" ? "start" : String(payload.event_kind ?? "agent_event"),
+      event: { worker_request_kind: kind, payload },
+    });
+  }
+
+  const baseKey = `${taskId}:${kind}:${inputSeq ?? acceptedSeq}`;
+  const effects = await requestNative<{ items: DurableEffect[] }>(
+    "engine",
+    "agent.effect.list",
+    { task_id: taskId },
+  );
+  const prior = effects.items.filter((item) => item.idempotency_key === baseKey || item.idempotency_key.startsWith(`${baseKey}:retry:`));
+  const completed = prior.find((item) => item.status === "succeeded" && item.result != null);
+  if (completed) return completed.result as T;
+  if (prior.some((item) => item.status === "pending")) {
+    throw new Error("检测到同一 Agent 操作仍为 pending；任务已保留，请先恢复或等待本地 Worker 完成，避免重复调用模型。 ");
+  }
+  const retry = prior.length;
+  const idempotencyKey = retry === 0 ? baseKey : `${baseKey}:retry:${retry}`;
+  const effectId = `fx:${taskId}:${kind.replaceAll(".", "-")}:${inputSeq ?? acceptedSeq}:${retry}`;
+  await requestNative("engine", "agent.effect.begin", {
+    effect_id: effectId,
+    task_id: taskId,
+    caused_by_seq: inputSeq ?? acceptedSeq,
+    effect_kind: kind,
+    effect: { worker_request_kind: kind, payload },
+    idempotency_key: idempotencyKey,
+  });
+
+  let reply: T;
+  try {
+    reply = await requestNative<T>("agent", kind, payload, { deadlineMs });
+  } catch (cause) {
+    await requestNative("engine", "agent.effect.complete", {
+      effect_id: effectId,
+      status: "failed",
+      result: { error: cause instanceof Error ? cause.message : String(cause) },
+    }).catch(() => undefined);
+    throw cause;
+  }
+
+  await requestNative("engine", "agent.effect.complete", {
+    effect_id: effectId,
+    status: "succeeded",
+    result: reply,
+  });
+
+  const transition = reply as T & { state?: TaskView; checkpoint?: unknown };
+  const finalSeq = transition.state?.accepted_seq;
+  if (typeof finalSeq === "number" && transition.checkpoint !== undefined) {
+    const durable = await requestNative<DurableTask>("engine", "agent.task.load", { task_id: taskId });
+    let durableMax = durable.events.reduce((maximum, event) => Math.max(maximum, event.seq), 0);
+    while (durableMax < finalSeq) {
+      durableMax += 1;
+      await requestNative("engine", "agent.event.append", {
+        task_id: taskId,
+        seq: durableMax,
+        event_id: `result:${taskId}:${durableMax}`,
+        event_kind: durableMax === finalSeq ? `${kind}.result` : `${kind}.transition`,
+        event: durableMax === finalSeq ? { effect_id: effectId, state: transition.state } : { effect_id: effectId },
+      });
+    }
+    await requestNative("engine", "agent.checkpoint.put", {
+      task_id: taskId,
+      accepted_seq: finalSeq,
+      phase: transition.state?.phase ?? "idle",
+      checkpoint: transition.checkpoint,
+    });
+  }
+  return reply;
+}
+
 export default function AgentTaskWorkbench() {
   const [sessionId, setSessionId] = useState<string>(() => crypto.randomUUID());
   const [title, setTitle] = useState("");
@@ -460,11 +574,11 @@ export default function AgentTaskWorkbench() {
         });
         setEffects([...fetchActivities]);
         setBusyStage("MiniMax Plus 正在规划深度取证对象；此时尚不形成投资结论…");
-        const planned = await requestNative<{ plan: ResearchPlan; activities?: AgentEffect[] }>("agent", "agent.plan", {
+        const planned = await requestDurableAgent<{ plan: ResearchPlan; activities?: AgentEffect[] }>("agent.plan", {
           task_id: state.task_id,
           candidates: candidatePool.items,
           market_context: marketOverview,
-        }, { deadlineMs: 180_000 });
+        }, state.task_id, state.accepted_seq ?? 0, 180_000);
         researchPlan = planned.plan;
         symbols = validResearchSymbols(researchPlan.symbols).slice(0, maximumResearchSymbols);
         if (!symbols.length) throw new Error("Agent 研究计划没有返回候选池内的有效证券代码");
@@ -499,7 +613,7 @@ export default function AgentTaskWorkbench() {
       }
       setEffects([...fetchActivities]);
       setBusyStage("MiniMax Plus 正在进行证据评估、独立反证和最终综合（共三轮）…");
-      const reply = await requestNative<TaskTransition>("agent", "agent.research", {
+      const reply = await requestDurableAgent<TaskTransition>("agent.research", {
         task_id: state.task_id,
         context: {
           source: "desktop_engine",
@@ -517,7 +631,7 @@ export default function AgentTaskWorkbench() {
             review_rounds: 3,
           },
         },
-      }, { deadlineMs: 900_000 });
+      }, state.task_id, state.accepted_seq ?? 0, 900_000);
       const next = applyTransition(reply);
       setEffects([...fetchActivities, ...(reply.activities ?? reply.effects ?? [])]);
       if (reply.report?.trim()) append("agent", reply.report.trim());
@@ -563,12 +677,12 @@ export default function AgentTaskWorkbench() {
     setDraft(emptyClarificationDraft());
     append("user", objective);
     try {
-      const reply = await requestNative<TaskTransition>("agent", "agent.start", {
+      const reply = await requestDurableAgent<TaskTransition>("agent.start", {
         task_id: taskId,
         seq: 1,
         spec: initialSpec,
         run_options: { depth, tool_policy: toolPolicy },
-      }, { deadlineMs: 120_000 });
+      }, taskId, 0, 120_000, initialSpec);
       const next = applyTransition(reply);
       if (next.phase === "waiting_for_user") append("agent", "我正在结合你的研究目标生成必要的澄清问题。问题和候选项由模型动态产生，前端不会套用预设问卷。");
       else {
@@ -622,13 +736,13 @@ export default function AgentTaskWorkbench() {
     setBusyStage("正在让模型解析你的选择并补全研究边界…");
     setError(null);
     try {
-      const reply = await requestNative<TaskTransition>("agent", "agent.event", {
+      const reply = await requestDurableAgent<TaskTransition>("agent.event", {
         task_id: task.task_id,
         seq: (task.accepted_seq ?? 1) + 1,
         event_kind: "clarification_answered",
         clarification_response: { title: clarification.title, answers },
         run_options: { depth, tool_policy: toolPolicy },
-      }, { deadlineMs: 120_000 });
+      }, task.task_id, task.accepted_seq ?? 1, 120_000);
       const autoCount = answers.filter((answer) => answer.decision_mode === "agent_best_with_evidence").length;
       append("user", autoCount ? `已提交研究边界；其中 ${autoCount} 项明确授权 Agent 在取得证据后选择，并要求记录依据。` : "已提交模型提出的研究边界，继续执行。" );
       setClarification(null);
