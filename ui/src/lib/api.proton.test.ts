@@ -27,6 +27,12 @@ import {
   getGlobalGoldenChains,
   getGlobalProviderHealth,
   getGlobalTransmissionPaths,
+  graphAsOf,
+  graphEdgeTimeline,
+  graphHistoryBounds,
+  graphSnapshotDiff,
+  graphSnapshotGet,
+  graphSubgraph,
   getNewsArchiveRecent,
   getNewsArchiveRevisions,
   getNewsEventClusterDetail,
@@ -45,6 +51,7 @@ import {
   queryDisclosures,
   queryRelationReviews,
   queryNewsCenter,
+  relationshipGraph,
   refreshNewsCenter,
   mergeNewsEventClusters,
   resolveNewsEvidenceReview,
@@ -56,6 +63,7 @@ import {
   splitNewsEventRevision,
   startEventAnalysis,
   startRelationExtraction,
+  supplyChainShock,
 } from "./api";
 
 describe("Proton global research bridge", () => {
@@ -327,6 +335,42 @@ describe("Proton global research bridge", () => {
     expect(requestNative.mock.calls[5][2]).toEqual({
       candidate_id: "candidate:one",
       reason: "来源后续公告已否定该关系",
+    });
+  });
+
+  it("routes bitemporal graph, shock and market relationships without the Rust Agent", async () => {
+    await graphSubgraph("300308", 3);
+    await graphAsOf(1_787_500_000, 1_787_500_100, "300308", 2);
+    await graphHistoryBounds();
+    await graphEdgeTimeline("edge-identity:one");
+    await graphSnapshotGet("graph-snapshot:one");
+    await graphSnapshotDiff(1_787_500_000, 1_787_500_100, 1_787_600_000, 1_787_600_100);
+    await supplyChainShock("铜", "up", 10);
+    await relationshipGraph(["300308", "000300"], 250);
+
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "research.graph.subgraph",
+      "research.graph.as_of",
+      "research.graph.history_bounds",
+      "research.graph.edge_timeline",
+      "research.graph.snapshot.get",
+      "research.graph.snapshot.diff",
+      "research.graph.shock",
+      "research.market.relationship",
+    ]);
+    expect(requestNative.mock.calls[1][2]).toEqual({
+      business_time: 1_787_500_000,
+      knowledge_time: 1_787_500_100,
+      symbol_or_node: "300308",
+      hops: 2,
+    });
+    expect(requestNative.mock.calls[5][2]).toMatchObject({
+      left_business_time: 1_787_500_000,
+      right_knowledge_time: 1_787_600_100,
+    });
+    expect(requestNative.mock.calls[7][2]).toEqual({
+      symbols: ["300308", "000300"],
+      window_days: 250,
     });
   });
 });

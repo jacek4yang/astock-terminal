@@ -6,6 +6,7 @@ mod disclosure_sync;
 mod event_analysis;
 mod event_store;
 mod global_sync;
+mod graph_services;
 mod news_center;
 mod relation_extraction;
 mod scan;
@@ -37,6 +38,7 @@ pub struct Engine {
     storage: Storage,
     market: Arc<MarketData>,
     fundamental: Arc<FundamentalClient>,
+    graph: astock_graph::GraphStore,
     rules: RuleSet,
     scan: scan::ScanService,
     disclosure_sync: disclosure_sync::DisclosureSyncService,
@@ -65,6 +67,10 @@ impl Engine {
             market.http.clone(),
             market.cache.clone(),
         ))));
+        let graph = astock_graph::GraphStore::new(storage.clone());
+        if let Err(error) = astock_graph::seed_if_empty(&graph).await {
+            tracing::warn!(%error, "graph seed failed; graph services will expose partial coverage");
+        }
         if let (Ok(Some(username)), Ok(Some(password))) = (
             joinquant_username_store().load_key(),
             joinquant_password_store().load_key(),
@@ -82,6 +88,7 @@ impl Engine {
             storage,
             market,
             fundamental,
+            graph,
             rules,
             scan: scan::ScanService::default(),
             disclosure_sync: disclosure_sync::DisclosureSyncService::default(),
@@ -957,6 +964,107 @@ impl Engine {
                         .await
                         .map_err(relation_extraction_error)?;
                 serde_json::to_value(result).map_err(serialize_error)
+            }
+            "research.graph.subgraph" => {
+                let payload: GraphSubgraphPayload = decode_payload(&request.payload)?;
+                graph_services::subgraph(
+                    &self.graph,
+                    &self.market,
+                    &self.fundamental,
+                    &self.storage,
+                    &payload.symbol_or_node,
+                    payload.hops,
+                )
+                .await
+                .map_err(graph_service_error)
+            }
+            "research.graph.as_of" => {
+                let payload: GraphAsOfPayload = decode_payload(&request.payload)?;
+                graph_services::as_of(
+                    &self.graph,
+                    &self.market,
+                    &self.fundamental,
+                    &self.storage,
+                    payload.business_time,
+                    payload.knowledge_time,
+                    payload.symbol_or_node.as_deref(),
+                    payload.hops,
+                )
+                .await
+                .map_err(graph_service_error)
+            }
+            "research.graph.history_bounds" => {
+                let value = self
+                    .graph
+                    .graph_history_bounds()
+                    .await
+                    .map_err(graph_error)?;
+                serde_json::to_value(value).map_err(serialize_error)
+            }
+            "research.graph.edge_timeline" => {
+                let payload: GraphIdentityPayload = decode_payload(&request.payload)?;
+                let identity_id = validate_news_identifier(&payload.identity_id, "identity_id")?;
+                let value = self
+                    .graph
+                    .edge_timeline(identity_id)
+                    .await
+                    .map_err(graph_error)?;
+                serde_json::to_value(value).map_err(serialize_error)
+            }
+            "research.graph.snapshot.get" => {
+                let payload: GraphSnapshotPayload = decode_payload(&request.payload)?;
+                let snapshot_id = validate_news_identifier(&payload.snapshot_id, "snapshot_id")?;
+                let value = self
+                    .graph
+                    .graph_snapshot(snapshot_id)
+                    .await
+                    .map_err(graph_error)?;
+                serde_json::to_value(value).map_err(serialize_error)
+            }
+            "research.graph.snapshot.diff" => {
+                let payload: GraphSnapshotDiffPayload = decode_payload(&request.payload)?;
+                for (field, value) in [
+                    ("left_business_time", payload.left_business_time),
+                    ("left_knowledge_time", payload.left_knowledge_time),
+                    ("right_business_time", payload.right_business_time),
+                    ("right_knowledge_time", payload.right_knowledge_time),
+                ] {
+                    if value <= 0 {
+                        return Err(ServiceError::new(
+                            "invalid_payload",
+                            format!("{field} 必须是正的 Unix 秒时间戳"),
+                            false,
+                        ));
+                    }
+                }
+                let value = self
+                    .graph
+                    .compare_graph_snapshots(
+                        payload.left_business_time,
+                        payload.left_knowledge_time,
+                        payload.right_business_time,
+                        payload.right_knowledge_time,
+                    )
+                    .await
+                    .map_err(graph_error)?;
+                serde_json::to_value(value).map_err(serialize_error)
+            }
+            "research.graph.shock" => {
+                let payload: GraphShockPayload = decode_payload(&request.payload)?;
+                graph_services::shock(
+                    &self.graph,
+                    &payload.subject,
+                    &payload.direction,
+                    payload.magnitude_pct,
+                )
+                .await
+                .map_err(graph_service_error)
+            }
+            "research.market.relationship" => {
+                let payload: MarketRelationshipPayload = decode_payload(&request.payload)?;
+                graph_services::relationship(&self.market, &payload.symbols, payload.window_days)
+                    .await
+                    .map_err(graph_service_error)
             }
             "research.data_reconcile" => {
                 let payload: SymbolPayload = decode_payload(&request.payload)?;
@@ -2370,6 +2478,63 @@ struct RelationRetractPayload {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct GraphSubgraphPayload {
+    symbol_or_node: String,
+    #[serde(default)]
+    hops: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphAsOfPayload {
+    business_time: i64,
+    knowledge_time: i64,
+    #[serde(default)]
+    symbol_or_node: Option<String>,
+    #[serde(default)]
+    hops: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphIdentityPayload {
+    identity_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphSnapshotPayload {
+    snapshot_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphSnapshotDiffPayload {
+    left_business_time: i64,
+    left_knowledge_time: i64,
+    right_business_time: i64,
+    right_knowledge_time: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphShockPayload {
+    subject: String,
+    direction: String,
+    #[serde(default)]
+    magnitude_pct: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MarketRelationshipPayload {
+    symbols: Vec<String>,
+    #[serde(default)]
+    window_days: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TaskIdPayload {
     task_id: String,
 }
@@ -2499,6 +2664,14 @@ fn entity_linking_error(error: astock_entity_linking::Error) -> ServiceError {
 
 fn relation_extraction_error(error: astock_relation_extraction::Error) -> ServiceError {
     ServiceError::new("relation_extraction", error.to_string(), false)
+}
+
+fn graph_error(error: astock_graph::Error) -> ServiceError {
+    ServiceError::new("graph", error.to_string(), false)
+}
+
+fn graph_service_error(error: String) -> ServiceError {
+    ServiceError::new("graph", error, false)
 }
 
 async fn persist_driver_tree(

@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=9c046bb2a437662057acccfb98e7c1b34f05adfa65151a7ae424ea887d71d076
+// GENERATED from protocol/schema; schema-sha256=6a485fb31e4bb01cb105f50c825fe7daf6eabbb440098454c5ec937420fad23d
 // Run: node protocol/codegen.mjs
 
 use serde::{Deserialize, Serialize};
@@ -71,6 +71,14 @@ pub const ENGINE_REQUEST_KINDS: &[&str] = &[
     "research.relations.reviews",
     "research.relations.review",
     "research.relations.retract",
+    "research.graph.subgraph",
+    "research.graph.as_of",
+    "research.graph.history_bounds",
+    "research.graph.edge_timeline",
+    "research.graph.snapshot.get",
+    "research.graph.snapshot.diff",
+    "research.graph.shock",
+    "research.market.relationship",
     "research.fundamentals",
     "research.earnings_driver.tree",
     "research.earnings_driver.shock",

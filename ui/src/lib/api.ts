@@ -193,6 +193,24 @@ async function protonCommand<T>(name: string, args: Record<string, unknown> = {}
       );
     case "retract_relation_candidate":
       return requestNative<T>("engine", "research.relations.retract", args);
+    case "graph_subgraph":
+      return requestNative<T>("engine", "research.graph.subgraph", args);
+    case "graph_as_of":
+      return requestNative<T>("engine", "research.graph.as_of", args);
+    case "graph_history_bounds":
+      return requestNative<T>("engine", "research.graph.history_bounds", {});
+    case "graph_edge_timeline":
+      return requestNative<T>("engine", "research.graph.edge_timeline", args);
+    case "graph_snapshot_get":
+      return requestNative<T>("engine", "research.graph.snapshot.get", args);
+    case "graph_snapshot_diff":
+      return requestNative<T>("engine", "research.graph.snapshot.diff", args);
+    case "supply_chain_shock":
+      return requestNative<T>("engine", "research.graph.shock", args);
+    case "relationship_graph":
+      return requestNative<T>("engine", "research.market.relationship", args, {
+        deadlineMs: 120_000,
+      });
     case "get_market_breadth": {
       const result = await requestNative<{ breadth: unknown }>("engine", "market.overview", {});
       return result.breadth as T;
@@ -2650,7 +2668,8 @@ export interface RelationshipGraph {
   period: { start: string | null; end: string | null };
   nodes: { symbol: string }[];
   edges: RelationshipEdge[];
-  matrix: { labels: string[]; pearson: number[][] };
+  matrix: { labels: string[]; pearson: (number | null)[][] };
+  sources: { symbol: string; source: string }[];
   method: string;
   note: string;
   errors: string[];
