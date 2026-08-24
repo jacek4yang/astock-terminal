@@ -4,6 +4,7 @@ import { isProton, requestNative, subscribeNativeEvent } from "../bridge";
 import type { ClarificationDraft, ClarificationQuestion, ClarificationRequest } from "../lib/agentClarification";
 import { emptyClarificationDraft } from "../lib/agentClarification";
 import { createEventBatcher } from "../lib/eventBatcher";
+import { agentTaskService, type DurableTaskView, type StoredAgentConversation } from "../services/agentTaskService";
 import { consumeAgentDraft, subscribeAgentDraft } from "./agentDraft";
 import { sanitizeAgentVisibleText } from "./agentVisibleText";
 import { useResearchContext } from "./store";
@@ -81,12 +82,8 @@ type AgentSession = {
   verification?: DeterministicVerification | null;
 };
 
-type StoredConversation = ConversationSummary & { session: AgentSession };
-
-type DurableTask = {
-  task: { accepted_seq: number; checkpoint?: unknown };
-  events: Array<{ seq: number }>;
-};
+type StoredConversation = StoredAgentConversation<AgentSession>;
+type DurableTask = DurableTaskView;
 
 type WorkerProgress = {
   request_id?: string;
@@ -220,7 +217,7 @@ export async function requestDurableAgent<T>(
   payload: Record<string, unknown>,
   deadlineMs: number,
 ): Promise<T> {
-  return requestNative<T>("agent", kind, payload, { deadlineMs });
+  return agentTaskService.transition<T>(kind, payload, deadlineMs);
 }
 
 export function deterministicVerificationSummary(verification: DeterministicVerification): string {
@@ -292,13 +289,13 @@ export default function AgentTaskWorkbench() {
     let cancelled = false;
     void (async () => {
       try {
-        const result = await requestNative<{ items: ConversationSummary[] }>("engine", "agent.conversation.list", { limit: MAX_HISTORY_ITEMS });
+        const result = await agentTaskService.list(MAX_HISTORY_ITEMS);
         if (cancelled) return;
         const items = result.items ?? [];
         setHistory(items);
         const latest = items[0];
         if (latest) {
-          const stored = await requestNative<StoredConversation>("engine", "agent.conversation.load", { conversation_id: latest.conversation_id });
+          const stored = await agentTaskService.getConversation<AgentSession>(latest.conversation_id);
           if (cancelled) return;
           restoreSession(stored.session, stored.title);
         }
@@ -415,10 +412,7 @@ export default function AgentTaskWorkbench() {
     setHistorySearchResults(null);
     setHistorySearching(true);
     const timer = window.setTimeout(() => {
-      void requestNative<{ items: ConversationSummary[] }>("engine", "agent.conversation.list", {
-        limit: MAX_HISTORY_ITEMS,
-        query,
-      }).then((result) => {
+      void agentTaskService.list(MAX_HISTORY_ITEMS, query).then((result) => {
         if (!cancelled) setHistorySearchResults(result.items ?? []);
       }).catch((cause) => {
         if (!cancelled) setError(`搜索 Agent 历史失败：${cause instanceof Error ? cause.message : String(cause)}`);
@@ -434,7 +428,7 @@ export default function AgentTaskWorkbench() {
 
   const recoverLatestCheckpoint = async (taskId: string) => {
     setDurableTaskReady(false);
-    const durable = await requestNative<DurableTask>("engine", "agent.task.load", { task_id: taskId });
+    const durable = await agentTaskService.get(taskId);
     const recovered = durableCheckpointState(durable, taskId);
     setCheckpoint(durable.task.checkpoint);
     setTask(recovered);
@@ -490,7 +484,7 @@ export default function AgentTaskWorkbench() {
     setError(null);
     try {
       setBusyStage("MoonBit Agent 正在规划工具、核验多源资料并执行三轮审查…");
-      const reply = await requestDurableAgent<TaskTransition>("agent.research.workflow", {
+      const reply = await agentTaskService.resume<TaskTransition>({
         task_id: state.task_id,
         depth,
         tool_policy: toolPolicy,
@@ -534,11 +528,7 @@ export default function AgentTaskWorkbench() {
     setBusyStage("正在安全停止研究并保存最后一个已提交检查点…");
     setError(null);
     try {
-      const reply = await requestDurableAgent<TaskTransition>("agent.event", {
-        task_id: active.task_id,
-        seq: Math.max(1, active.accepted_seq ?? 0) + 1,
-        event_kind: "cancel",
-      }, 120_000);
+      const reply = await agentTaskService.cancel<TaskTransition>(active.task_id, active.accepted_seq ?? 0);
       const next = applyTransition(reply);
       if (next.phase !== "cancelled") throw new Error(`停止请求返回了意外状态：${phaseLabel[next.phase ?? "idle"]}`);
       append("system", "研究已按你的要求停止。已完成的工具结果和证据仍保存在任务日志中，不会发布未校验结论。");
@@ -591,7 +581,7 @@ export default function AgentTaskWorkbench() {
     setDraft(emptyClarificationDraft());
     append("user", objective);
     try {
-      const reply = await requestDurableAgent<TaskTransition>("agent.start", {
+      const reply = await agentTaskService.create<TaskTransition>({
         task_id: taskId,
         seq: 1,
         spec: initialSpec,
@@ -650,10 +640,9 @@ export default function AgentTaskWorkbench() {
     setBusyStage("正在让模型解析你的选择并补全研究边界…");
     setError(null);
     try {
-      const reply = await requestDurableAgent<TaskTransition>("agent.event", {
+      const reply = await agentTaskService.answer<TaskTransition>({
         task_id: task.task_id,
         seq: (task.accepted_seq ?? 1) + 1,
-        event_kind: "clarification_answered",
         clarification_response: { title: clarification.title, answers },
         run_options: { depth, tool_policy: toolPolicy },
       }, 120_000);
@@ -722,7 +711,7 @@ export default function AgentTaskWorkbench() {
     setHistoryLoading(true);
     setError(null);
     try {
-      const stored = await requestNative<StoredConversation>("engine", "agent.conversation.load", { conversation_id: saved.conversation_id });
+      const stored = await agentTaskService.getConversation<AgentSession>(saved.conversation_id);
       restoreSession(stored.session, stored.title);
     } catch (cause) {
       setError(`打开历史研究失败：${cause instanceof Error ? cause.message : String(cause)}`);
@@ -737,7 +726,7 @@ export default function AgentTaskWorkbench() {
     setHistoryLoading(true);
     setError(null);
     try {
-      const stored = await requestNative<StoredConversation>("engine", "agent.conversation.branch", {
+      const stored = await agentTaskService.branch<AgentSession>({
         source_conversation_id: sourceConversationId,
         new_conversation_id: newConversationId,
         message_id: messageId,
@@ -768,7 +757,7 @@ export default function AgentTaskWorkbench() {
     if (busy || historyLoading) return;
     setHistoryLoading(true);
     try {
-      const stored = await requestNative<StoredConversation>("engine", "agent.conversation.load", { conversation_id: saved.conversation_id });
+      const stored = await agentTaskService.getConversation<AgentSession>(saved.conversation_id);
       const last = stored.session.messages?.at(-1);
       if (!last) throw new Error("该历史研究没有可分支的消息");
       restoreSession(stored.session, stored.title);

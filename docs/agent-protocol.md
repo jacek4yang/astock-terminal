@@ -10,6 +10,8 @@ React Renderer 只通过声明过的 Proton typed bridge 调用桌面 Host。Moo
 
 `protocol/schema/agent.schema.json` 同时定义并生成跨语言稳定模型：`TaskSpec`、`AgentQuestion`（与单个动态澄清问题同构）、`ConversationSummary`、`TaskCheckpoint`、`ToolActivity`、`EvidenceRef`、`VerificationFinding` 和 `ProviderQuota`。Rust、MoonBit 与 TypeScript 生成物必须由 `protocol-codegen --check` 保持一致；Renderer 不再为这些公开模型维护另一套手写形状。
 
+Renderer 使用稳定的 Agent 服务外观 `task.create/list/get/branch/resume/cancel/answer`。这七个方法也由 schema 生成白名单，但为保持协议 v1 兼容，它们不会扩张底层 Worker wire：状态变更映射到 Host 持久化的 `agent.start/event/research.workflow`，历史列表、任务读取和消息分支映射到 Engine 的有界只读/分支服务。外观不能调用任务创建日志、事件追加、Effect 或 checkpoint 写原语。
+
 ## 持久化真相与 Effect
 
 任务状态由 `reduce(state, event) -> (state, effects)` 推进。网络、时间、工具、存储和日志都在 reducer 外执行。桌面 Host 在执行工具前，先把用户输入、任务事件、检查点和 Effect 意图写入 Engine；工具结果带幂等键持久化后，才作为新事件继续 reducer。恢复时根据持久化事件和检查点重放，重复、过期、跳号或乱序事件会被拒绝。

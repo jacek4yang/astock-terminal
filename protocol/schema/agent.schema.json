@@ -42,6 +42,18 @@
         { "const": "agent.event" },
         { "const": "agent.research.workflow" }
       ]
+    },
+    "service_methods": {
+      "type": "array",
+      "prefixItems": [
+        { "const": "task.create" },
+        { "const": "task.list" },
+        { "const": "task.get" },
+        { "const": "task.branch" },
+        { "const": "task.resume" },
+        { "const": "task.cancel" },
+        { "const": "task.answer" }
+      ]
     }
   },
   "$defs": {

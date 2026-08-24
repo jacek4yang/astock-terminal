@@ -62,6 +62,11 @@ durable state instead of depending on React to notice and repair the process.
 `agent.restore` and the in-memory task snapshot are internal Worker operations,
 not Renderer permissions; the workbench can read only the Engine's durable task
 projection.
+The renderer-facing task service is fixed to
+`task.create/list/get/branch/resume/cancel/answer`. It is a typed compatibility
+facade rather than a second wire protocol: mutating transitions remain
+Host-journaled Agent calls, while bounded history/task reads and message
+branching remain deterministic Engine calls.
 Stateful Agent operations are single-flight at the Host boundary. A concurrent
 duplicate waits for the first operation, then reuses its committed result;
 only an orphaned journal intent after a process loss can enter the bounded

@@ -147,6 +147,7 @@ mod tests {
             ENGINE_RENDERER_REQUEST_KINDS,
             AGENT_REQUEST_KINDS,
             AGENT_RENDERER_REQUEST_KINDS,
+            AGENT_SERVICE_METHODS,
             HOST_RENDERER_REQUEST_KINDS,
         ] {
             assert!(kinds.iter().all(|kind| kind.contains('.')));
@@ -168,6 +169,18 @@ mod tests {
             .iter()
             .all(|kind| AGENT_REQUEST_KINDS.contains(kind)));
         assert!(!AGENT_RENDERER_REQUEST_KINDS.contains(&"agent.research.workflow.continue"));
+        assert_eq!(
+            AGENT_SERVICE_METHODS,
+            [
+                "task.create",
+                "task.list",
+                "task.get",
+                "task.branch",
+                "task.resume",
+                "task.cancel",
+                "task.answer",
+            ]
+        );
         assert!(HOST_RENDERER_REQUEST_KINDS.contains(&"window.toggle_maximize"));
     }
 

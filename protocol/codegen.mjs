@@ -23,6 +23,7 @@ const kinds = schemas["engine.schema.json"].properties.request_kinds.prefixItems
 const engineRendererKinds = schemas["engine.schema.json"].properties.renderer_request_kinds.prefixItems.map((item) => item.const);
 const agentKinds = schemas["agent.schema.json"].properties.request_kinds.prefixItems.map((item) => item.const);
 const agentRendererKinds = schemas["agent.schema.json"].properties.renderer_request_kinds.prefixItems.map((item) => item.const);
+const agentServiceMethods = schemas["agent.schema.json"].properties.service_methods.prefixItems.map((item) => item.const);
 const hostRendererKinds = schemas["host.schema.json"].properties.renderer_request_kinds.prefixItems.map((item) => item.const);
 const header = (comment) => `${comment} GENERATED from protocol/schema; schema-sha256=${hash}\n${comment} Run: node protocol/codegen.mjs\n`;
 
@@ -40,6 +41,7 @@ pub const ENGINE_REQUEST_KINDS: &[&str] = &[${kinds.map((kind) => `\n    "${kind
 pub const ENGINE_RENDERER_REQUEST_KINDS: &[&str] = &[${engineRendererKinds.map((kind) => `\n    "${kind}",`).join("")}\n];
 pub const AGENT_REQUEST_KINDS: &[&str] = &[${agentKinds.map((kind) => `\n    "${kind}",`).join("")}\n];
 pub const AGENT_RENDERER_REQUEST_KINDS: &[&str] = &[${agentRendererKinds.map((kind) => `\n    "${kind}",`).join("")}\n];
+pub const AGENT_SERVICE_METHODS: &[&str] = &[${agentServiceMethods.map((method) => `\n    "${method}",`).join("")}\n];
 pub const HOST_RENDERER_REQUEST_KINDS: &[&str] = &[${hostRendererKinds.map((kind) => `\n    "${kind}",`).join("")}\n];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -262,6 +264,8 @@ export const AGENT_REQUEST_KINDS = ${JSON.stringify(agentKinds)} as const;
 export type AgentRequestKind = (typeof AGENT_REQUEST_KINDS)[number];
 export const AGENT_RENDERER_REQUEST_KINDS = ${JSON.stringify(agentRendererKinds)} as const;
 export type AgentRendererRequestKind = (typeof AGENT_RENDERER_REQUEST_KINDS)[number];
+export const AGENT_SERVICE_METHODS = ${JSON.stringify(agentServiceMethods)} as const;
+export type AgentServiceMethod = (typeof AGENT_SERVICE_METHODS)[number];
 export const HOST_RENDERER_REQUEST_KINDS = ${JSON.stringify(hostRendererKinds)} as const;
 export type HostRendererRequestKind = (typeof HOST_RENDERER_REQUEST_KINDS)[number];
 export type AgentPhase = ${phases.map((phase) => `"${phase}"`).join(" | ")};
@@ -459,6 +463,9 @@ pub let agent_request_kinds : Array[String] = ${JSON.stringify(agentKinds)}
 
 ///|
 pub let agent_renderer_request_kinds : Array[String] = ${JSON.stringify(agentRendererKinds)}
+
+///|
+pub let agent_service_methods : Array[String] = ${JSON.stringify(agentServiceMethods)}
 
 ///|
 pub let host_renderer_request_kinds : Array[String] = ${JSON.stringify(hostRendererKinds)}

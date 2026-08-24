@@ -28,6 +28,8 @@ function requiredCapture(label, source, pattern) {
 const cargo = fs.readFileSync(path.join(root, "Cargo.toml"), "utf8");
 const ui = JSON.parse(fs.readFileSync(path.join(root, "ui", "package.json"), "utf8"));
 const agentWorkbench = fs.readFileSync(path.join(root, "ui", "src", "workbench", "AgentTaskWorkbench.tsx"), "utf8");
+const agentTaskService = fs.readFileSync(path.join(root, "ui", "src", "services", "agentTaskService.ts"), "utf8");
+const agentClientSources = `${agentWorkbench}\n${agentTaskService}`;
 const workspaceStore = fs.readFileSync(path.join(root, "ui", "src", "workbench", "store.ts"), "utf8");
 const agentVisibleText = fs.readFileSync(path.join(root, "ui", "src", "workbench", "agentVisibleText.ts"), "utf8");
 const moonAgent = fs.readFileSync(path.join(root, "app-moon", "agent_worker", "main.mbt"), "utf8");
@@ -112,6 +114,11 @@ for (const stableAgentModel of [
   "provider_quota",
 ]) {
   if (!agentSchema.$defs?.[stableAgentModel]) failures.push(`Agent protocol schema is missing stable model: ${stableAgentModel}`);
+}
+const requiredAgentServiceMethods = ["task.create", "task.list", "task.get", "task.branch", "task.resume", "task.cancel", "task.answer"];
+const declaredAgentServiceMethods = new Set((agentSchema.properties?.service_methods?.prefixItems ?? []).map((item) => item.const));
+for (const method of requiredAgentServiceMethods) {
+  if (!declaredAgentServiceMethods.has(method)) failures.push(`Agent service contract is missing method: ${method}`);
 }
 if (ui.dependencies?.["dockview-react"] || ui.devDependencies?.["dockview-react"]) {
   failures.push("v6 three-page renderer still depends on the retired Dockview IDE shell");
@@ -229,7 +236,7 @@ if (!agentWorkbench.includes("sanitizeAgentVisibleText(message.text)")) {
   failures.push("persisted Agent history bypasses the v6 visible-text publication boundary");
 }
 for (const durableRecoveryMarker of ["durableCheckpointState", "agent.task.load", "持久化检查点与任务不匹配", "setDurableTaskReady(false)"]) {
-  if (!agentWorkbench.includes(durableRecoveryMarker)) failures.push(`React Agent recovery is missing Engine-truth guard: ${durableRecoveryMarker}`);
+  if (!agentClientSources.includes(durableRecoveryMarker)) failures.push(`React Agent recovery is missing Engine-truth guard: ${durableRecoveryMarker}`);
 }
 if (agentWorkbench.includes("locally saved checkpoint") || /recoverLatestCheckpoint\([^)]*fallback/.test(agentWorkbench)) {
   failures.push("React Agent can still use a presentation-session checkpoint as executable task truth");
@@ -242,7 +249,7 @@ for (const obsoleteCredentialWrapper of ["settings_set_provider_credentials", "j
 for (const leakedTool of ["market.overview", "research.market_context", "research.market_candidates", "research.data_reconcile"]) {
   if (agentWorkbench.includes(`\"${leakedTool}\"`)) failures.push(`React Agent workbench still selects ${leakedTool}`);
 }
-if (!agentWorkbench.includes("agent.research.workflow")) failures.push("React does not submit the single Agent research workflow request");
+if (!agentClientSources.includes("agent.research.workflow")) failures.push("React does not submit the single Agent research workflow request");
 if (!moonAgent.includes('"agent.research.workflow"') || !moonAgent.includes('"host_effects"')) {
   failures.push("MoonBit Agent does not own the effect-driven research workflow");
 }
@@ -265,7 +272,7 @@ for (const capability of ["advanced_tool_planning", "closed_engine_effects"]) {
 if (!engineRuntime.includes('"agent_advanced_analysis_v1"')) {
   failures.push("Rust Engine handshake is missing agent_advanced_analysis_v1");
 }
-if (!agentWorkbench.includes('agent.task.load') || !agentWorkbench.includes('recoverLatestCheckpoint')) {
+if (!agentClientSources.includes('agent.task.load') || !agentWorkbench.includes('recoverLatestCheckpoint')) {
   failures.push("React does not restore the newest durable Agent checkpoint before resuming");
 }
 if (!engineEventStore.includes('format!("sha256:{:x}", Sha256::digest(value.as_bytes()))') ||
@@ -282,7 +289,7 @@ for (const internalJournalKind of [
   "agent.effect.complete",
   "agent.effect.list",
 ]) {
-  if (agentWorkbench.includes(`"${internalJournalKind}"`)) {
+  if (agentClientSources.includes(`"${internalJournalKind}"`)) {
     failures.push(`React Agent workbench can write internal journal kind ${internalJournalKind}`);
   }
 }

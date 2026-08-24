@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=6946a569e672aadbc444c9a1907eaa65ae50b79711731ad84adf5742c1d1b0ff
+// GENERATED from protocol/schema; schema-sha256=30951f97fd73e190476ec8161f3728d1ea65fcec41d5f4d4d0975f94f1765b6d
 // Run: node protocol/codegen.mjs
 
 export const PROTOCOL_VERSION = 1 as const;
@@ -15,6 +15,8 @@ export const AGENT_REQUEST_KINDS = ["system.handshake","diagnostics.status","age
 export type AgentRequestKind = (typeof AGENT_REQUEST_KINDS)[number];
 export const AGENT_RENDERER_REQUEST_KINDS = ["diagnostics.status","agent.provider.test","agent.provider.configure","agent.start","agent.event","agent.research.workflow"] as const;
 export type AgentRendererRequestKind = (typeof AGENT_RENDERER_REQUEST_KINDS)[number];
+export const AGENT_SERVICE_METHODS = ["task.create","task.list","task.get","task.branch","task.resume","task.cancel","task.answer"] as const;
+export type AgentServiceMethod = (typeof AGENT_SERVICE_METHODS)[number];
 export const HOST_RENDERER_REQUEST_KINDS = ["diagnostics.status","window.state","window.minimize","window.toggle_maximize","window.begin_drag","window.system_menu"] as const;
 export type HostRendererRequestKind = (typeof HOST_RENDERER_REQUEST_KINDS)[number];
 export type AgentPhase = "idle" | "preparing" | "waiting_for_user" | "reasoning" | "awaiting_tools" | "reviewing" | "synthesizing" | "verifying" | "suspended" | "completed" | "verification_failed" | "cancelled" | "hard_failed";
