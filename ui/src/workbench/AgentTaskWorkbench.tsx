@@ -190,6 +190,35 @@ function capitalFromObjective(objective = ""): number | null {
   return yuan ? Number(yuan[1]) : null;
 }
 
+async function persistDurableTransition(
+  taskId: string,
+  kind: "agent.start" | "agent.event" | "agent.research.workflow",
+  effectId: string,
+  reply: unknown,
+) {
+  const transition = reply as { state?: TaskView; checkpoint?: unknown };
+  const finalSeq = transition.state?.accepted_seq;
+  if (typeof finalSeq !== "number" || transition.checkpoint === undefined) return;
+  const durable = await requestNative<DurableTask>("engine", "agent.task.load", { task_id: taskId });
+  let durableMax = durable.events.reduce((maximum, event) => Math.max(maximum, event.seq), 0);
+  while (durableMax < finalSeq) {
+    durableMax += 1;
+    await requestNative("engine", "agent.event.append", {
+      task_id: taskId,
+      seq: durableMax,
+      event_id: `result:${taskId}:${durableMax}`,
+      event_kind: durableMax === finalSeq ? `${kind}.result` : `${kind}.transition`,
+      event: durableMax === finalSeq ? { effect_id: effectId, state: transition.state } : { effect_id: effectId },
+    });
+  }
+  await requestNative("engine", "agent.checkpoint.put", {
+    task_id: taskId,
+    accepted_seq: finalSeq,
+    phase: transition.state?.phase ?? "idle",
+    checkpoint: transition.checkpoint,
+  });
+}
+
 /**
  * All stateful Agent Worker operations pass through the Engine journal. The
  * effect intent is committed before the Worker can contact a provider; the
@@ -232,7 +261,10 @@ export async function requestDurableAgent<T>(
   );
   const prior = effects.items.filter((item) => item.idempotency_key === baseKey || item.idempotency_key.startsWith(`${baseKey}:retry:`));
   const completed = prior.find((item) => item.status === "succeeded" && item.result != null);
-  if (completed) return completed.result as T;
+  if (completed) {
+    await persistDurableTransition(taskId, kind, completed.effect_id, completed.result);
+    return completed.result as T;
+  }
   if (prior.some((item) => item.status === "pending") && kind !== "agent.research.workflow") {
     throw new Error("检测到同一 Agent 操作仍为 pending；任务已保留，请先恢复或等待本地 Worker 完成，避免重复调用模型。 ");
   }
@@ -266,28 +298,7 @@ export async function requestDurableAgent<T>(
     result: reply,
   });
 
-  const transition = reply as T & { state?: TaskView; checkpoint?: unknown };
-  const finalSeq = transition.state?.accepted_seq;
-  if (typeof finalSeq === "number" && transition.checkpoint !== undefined) {
-    const durable = await requestNative<DurableTask>("engine", "agent.task.load", { task_id: taskId });
-    let durableMax = durable.events.reduce((maximum, event) => Math.max(maximum, event.seq), 0);
-    while (durableMax < finalSeq) {
-      durableMax += 1;
-      await requestNative("engine", "agent.event.append", {
-        task_id: taskId,
-        seq: durableMax,
-        event_id: `result:${taskId}:${durableMax}`,
-        event_kind: durableMax === finalSeq ? `${kind}.result` : `${kind}.transition`,
-        event: durableMax === finalSeq ? { effect_id: effectId, state: transition.state } : { effect_id: effectId },
-      });
-    }
-    await requestNative("engine", "agent.checkpoint.put", {
-      task_id: taskId,
-      accepted_seq: finalSeq,
-      phase: transition.state?.phase ?? "idle",
-      checkpoint: transition.checkpoint,
-    });
-  }
+  await persistDurableTransition(taskId, kind, effectId, reply);
   return reply;
 }
 

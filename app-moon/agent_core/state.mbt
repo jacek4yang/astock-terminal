@@ -156,6 +156,23 @@ pub fn AgentState::has_pending(self : AgentState, call_id : String) -> Bool {
 }
 
 ///|
+/// Match both the durable call identity and its allowlisted tool. Report
+/// verification is deliberately kept separate from ordinary evidence tools so
+/// a forged success event cannot unlock publication through the generic path.
+fn AgentState::has_pending_tool(
+  self : AgentState,
+  call_id : String,
+  tool : String,
+) -> Bool {
+  for item in self.pending_tools {
+    if item.call_id == call_id && item.tool == tool {
+      return true
+    }
+  }
+  false
+}
+
+///|
 /// Copy with controlled replacement. New arrays passed to this function are
 /// never mutated after the state is returned.
 fn evolve(
@@ -384,7 +401,9 @@ pub fn reduce(state : AgentState, seq : Int, event : AgentEvent) -> Transition {
         rejected(state, "tool_request_not_unique_or_wrong_phase")
       }
     ToolSucceeded(call_id~, evidence_ids~) =>
-      if state.has_pending(call_id) {
+      if evidence_ids.contains("engine-report-verifier-v1") {
+        rejected(state, "report_verification_evidence_requires_verifier_event")
+      } else if state.has_pending(call_id) {
         let pending = remove_pending(state.pending_tools, call_id)
         let completed = [..state.completed_call_ids, call_id]
         let evidence = [..state.evidence_ids, ..evidence_ids]
@@ -415,6 +434,7 @@ pub fn reduce(state : AgentState, seq : Int, event : AgentEvent) -> Transition {
       }
     VerificationToolRequested(call_id~, tool~) =>
       if state.phase == Verifying &&
+        tool == "research.agent_report_verify" &&
         !contains(state.completed_call_ids, call_id) &&
         !state.has_pending(call_id) {
         accepted(
@@ -432,7 +452,8 @@ pub fn reduce(state : AgentState, seq : Int, event : AgentEvent) -> Transition {
         rejected(state, "verification_tool_request_not_unique_or_wrong_phase")
       }
     VerificationToolSucceeded(call_id~, evidence_ids~) =>
-      if state.phase == Verifying && state.has_pending(call_id) {
+      if state.phase == Verifying &&
+        state.has_pending_tool(call_id, "research.agent_report_verify") {
         accepted(
           evolve(
             state,
@@ -557,6 +578,8 @@ pub fn reduce(state : AgentState, seq : Int, event : AgentEvent) -> Transition {
       }
     VerificationPassed =>
       if state.phase == Verifying &&
+        state.pending_tools.is_empty() &&
+        contains(state.evidence_ids, "engine-report-verifier-v1") &&
         state.blocking_verification_errors.is_empty() {
         accepted(evolve(state, phase=Completed, accepted_seq=seq), [
           PersistCheckpoint,

@@ -93,6 +93,44 @@ describe("durable Agent operation journal", () => {
     ]);
   });
 
+  it("backfills a missing checkpoint from an already completed durable result", async () => {
+    const completedReply = {
+      state: { task_id: "task-replay", accepted_seq: 3, phase: "preparing" },
+      checkpoint: { task_id: "task-replay", accepted_seq: 3, phase: "preparing" },
+    };
+    requestNative.mockImplementation(async (target: string, kind: string) => {
+      if (kind === "agent.effect.list") {
+        return {
+          items: [{
+            effect_id: "fx-completed",
+            effect_kind: "agent.event",
+            status: "succeeded",
+            idempotency_key: "task-replay:agent.event:2",
+            result: completedReply,
+          }],
+        };
+      }
+      if (kind === "agent.task.load") return { task: { accepted_seq: 1 }, events: [{ seq: 1 }, { seq: 2 }] };
+      if (target === "agent") throw new Error("completed operations must not call the Worker again");
+      return { inserted: true };
+    });
+
+    await expect(requestDurableAgent(
+      "agent.event",
+      { task_id: "task-replay", seq: 2, event_kind: "resume" },
+      "task-replay",
+      1,
+      120_000,
+    )).resolves.toEqual(completedReply);
+    expect(requestNative.mock.calls.map((call) => `${call[0]}:${call[1]}`)).toEqual([
+      "engine:agent.event.append",
+      "engine:agent.effect.list",
+      "engine:agent.task.load",
+      "engine:agent.event.append",
+      "engine:agent.checkpoint.put",
+    ]);
+  });
+
   it("formats deterministic report verification without inventing totals", () => {
     expect(deterministicVerificationSummary({
       version: "engine-report-verifier-v1",

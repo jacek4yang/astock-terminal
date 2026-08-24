@@ -280,44 +280,6 @@ async function protonCommand<T>(name: string, args: Record<string, unknown> = {}
       return requestNative<T>("engine", "quant.scan.status", {});
     case "scan_cancel":
       return requestNative<T>("engine", "quant.scan.cancel", {});
-    case "settings_get_provider_status": {
-      const status = await requestNative<{
-        providers: {
-          joinquant: boolean;
-          optional: Record<string, { configured: boolean }>;
-        };
-      }>("engine", "credentials.status", {});
-      return {
-        tushare_token: Boolean(status.providers.optional.tushare?.configured),
-        iwencai_key: Boolean(status.providers.optional.iwencai?.configured),
-        jq_user: status.providers.joinquant,
-        jq_pwd: status.providers.joinquant,
-        sec_user_agent: Boolean(status.providers.optional.sec_edgar?.configured),
-        socks5: Boolean(status.providers.optional.socks5?.configured),
-      } as T;
-    }
-    case "settings_set_provider_credentials": {
-      for (const [field, provider] of [
-        ["tushare_token", "tushare"],
-        ["iwencai_key", "iwencai"],
-        ["sec_user_agent", "sec_edgar"],
-        ["socks5", "socks5"],
-      ] as const) {
-        if (!(field in args)) continue;
-        const value = String(args[field] ?? "").trim();
-        await requestNative("engine", value ? "credentials.provider.set" : "credentials.provider.delete", value ? { provider, value } : { provider });
-      }
-      if ("jq_user" in args || "jq_pwd" in args) {
-        const username = String(args.jq_user ?? "").trim();
-        const password = String(args.jq_pwd ?? "");
-        await requestNative(
-          "engine",
-          username && password ? "credentials.joinquant.set" : "credentials.joinquant.delete",
-          username && password ? { username, password } : {},
-        );
-      }
-      return { status: await protonCommand<ProviderStatus>("settings_get_provider_status"), message: "凭据已写入 Windows Credential Manager；需重启的数据源已明确标记。" } as T;
-    }
     case "settings_get_agent_model_routing":
       return requestNative<T>("engine", "settings.agent_models.get", {});
     case "settings_set_agent_model_routing": {
@@ -2239,37 +2201,6 @@ export const cacheCleanup = (targetMb: number) =>
   cmd<CacheCleanupResult>("cache_cleanup", { target_mb: targetMb });
 export const getDataDir = () => cmd<string>("get_data_dir");
 export const setDataDir = (path: string) => cmd<unknown>("set_data_dir", { path });
-
-// ---- 数据源凭证与代理(可选 provider;状态只回布尔,凭证本体绝不回显) ----
-
-/** settings_get_provider_status 返回:各项是否已配置 */
-export interface ProviderStatus {
-  tushare_token: boolean;
-  iwencai_key: boolean;
-  jq_user: boolean;
-  jq_pwd: boolean;
-  sec_user_agent: boolean;
-  socks5: boolean;
-}
-
-/** settings_set_provider_credentials 入参;空串/不传 = 清除该项 */
-export interface ProviderCredentials {
-  tushare_token?: string;
-  iwencai_key?: string;
-  jq_user?: string;
-  jq_pwd?: string;
-  socks5?: string;
-}
-
-export interface SetProviderCredentialsResult {
-  status: ProviderStatus;
-  message: string;
-}
-
-export const settingsGetProviderStatus = () =>
-  cmd<ProviderStatus>("settings_get_provider_status");
-export const settingsSetProviderCredentials = (creds: ProviderCredentials) =>
-  cmd<SetProviderCredentialsResult>("settings_set_provider_credentials", { ...creds });
 
 // ==================== AI Agent ====================
 

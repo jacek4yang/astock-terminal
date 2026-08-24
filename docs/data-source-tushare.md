@@ -188,7 +188,7 @@
 2. **验证逻辑**：用所填 token 调一次最便宜的有把握接口——推荐 `daily(trade_date=<最近交易日>, fields='ts_code,close')`（120 档必可用）而非 `stock_basic`（门槛 2000，免费 token 会误报无效）。`code == 0` → 保存；`code == 2002` → 提示"token 有效但积分不足 120"？（实际 2002 即权限不足）；其他 `code != 0` → 展示 `msg`。
 3. **积分档探测**：保存后依次试调 `adj_factor` / `daily_basic`（各一次，trade_date 取最近交易日），根据 2002 与否推断档位（120 / 2000+），在设置页显示"当前档位：免费 120（仅日线）/ 2000+（全功能）"，并据此开关下游功能（金标对拍、daily_basic 同步等）。**这是用户体验关键点**：不要让 120 档用户看到一堆 2002 报错。
 4. **无 token 时**：provider 整体禁用，不影响东财/腾讯/雪球现有链路（与 joinquant provider 的禁用语义一致）。
-5. **存储**：复用 storage `kv` 表存 token（key 如 `tushare.token`），与聚宽凭证并列；不写入日志。
+5. **生产安全修订**：本段调研早期提出的 SQLite/`kv` token 方案已废弃。v6 只把 Tushare token 写入 Windows Credential Manager；Engine 在请求期间读入私有内存对象，不进入 SQLite、环境变量、命令行、React 状态或日志。无 Credential Manager 凭据时 provider 必须显式禁用。
 
 ---
 

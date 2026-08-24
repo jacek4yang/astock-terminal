@@ -233,6 +233,59 @@ test "deterministic report verifier is tracked as a pending effect" {
 }
 
 ///|
+test "report cannot publish before the allowlisted verifier completes" {
+  let started = reduce(initial("task-no-verifier"), 1, Start(complete_spec())).state
+  let reasoning = reduce(started, 2, Prepared).state
+  let pending = reduce(
+      reasoning,
+      3,
+      ToolRequested(call_id="evidence", tool="research.agent_security_context"),
+    ).state
+  let reviewing = reduce(
+      pending,
+      4,
+      ToolSucceeded(call_id="evidence", evidence_ids=["ev-1"]),
+    ).state
+  let synthesizing = reduce(reviewing, 5, ReviewReady).state
+  let verifying = reduce(synthesizing, 6, SynthesisReady).state
+  let premature = reduce(verifying, 7, VerificationPassed)
+  assert_false(premature.accepted)
+  assert_eq(premature.rejection, Some("publication_blocked"))
+
+  let wrong_tool = reduce(
+    verifying,
+    7,
+    VerificationToolRequested(call_id="verify-1", tool="market.quote"),
+  )
+  assert_false(wrong_tool.accepted)
+}
+
+///|
+test "ordinary tools cannot forge report-verifier evidence" {
+  let started = reduce(
+      initial("task-forged-verifier"),
+      1,
+      Start(complete_spec()),
+    ).state
+  let reasoning = reduce(started, 2, Prepared).state
+  let pending = reduce(
+      reasoning,
+      3,
+      ToolRequested(call_id="evidence", tool="research.agent_security_context"),
+    ).state
+  let forged = reduce(
+    pending,
+    4,
+    ToolSucceeded(call_id="evidence", evidence_ids=["engine-report-verifier-v1"]),
+  )
+  assert_false(forged.accepted)
+  assert_eq(
+    forged.rejection,
+    Some("report_verification_evidence_requires_verifier_event"),
+  )
+}
+
+///|
 test "review may request another bounded tool wave" {
   let preparing = reduce(
       initial("task-more-evidence"),
