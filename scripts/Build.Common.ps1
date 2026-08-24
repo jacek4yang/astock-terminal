@@ -135,6 +135,22 @@ function Get-ProtonCliPath {
     return $candidate
 }
 
+function Enable-AStockCefRuntimePath {
+    param([Parameter(Mandatory)]$Environment)
+
+    $libcef = Get-ChildItem -LiteralPath $Environment.Paths.ProtonRuntime -Recurse -Filter 'libcef.dll' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -like '*\runtime\bin\libcef.dll' } |
+        Select-Object -First 1
+    if (-not $libcef) {
+        throw "Pinned CEF runtime is unavailable under $($Environment.Paths.ProtonRuntime). Run scripts/bootstrap.ps1."
+    }
+    $runtimeBin = $libcef.DirectoryName
+    if (($env:PATH -split ';') -notcontains $runtimeBin) {
+        $env:PATH = "$runtimeBin;$env:PATH"
+    }
+    return $runtimeBin
+}
+
 function Invoke-Checked {
     param(
         [Parameter(Mandatory)][string]$FilePath,
@@ -189,7 +205,7 @@ function Set-AStockWorkerEnvironment {
     }
     $env:ASTOCK_ENGINE_EXE = $engine
     $env:ASTOCK_AGENT_EXE = $agent
-    $env:ASTOCK_ICON_PATH = Join-Path $Environment.RepositoryRoot 'src-tauri\icons\icon.ico'
+    $env:ASTOCK_ICON_PATH = Join-Path $Environment.RepositoryRoot 'assets\icons\icon.ico'
 }
 
 function New-AStockProtonConfig {

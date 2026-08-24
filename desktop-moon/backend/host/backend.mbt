@@ -3,6 +3,7 @@ pub struct Backend {
   engine : WorkerClient
   agent : WorkerClient
   mut window : @proton.WindowHandle?
+  mut closed : Bool
 }
 
 ///|
@@ -45,6 +46,10 @@ fn worker_path(env_name : String, packaged_name : String) -> String {
 
 ///|
 pub async fn Backend::start() -> Backend {
+  guard create_worker_job() else {
+    fail("failed to create the Windows Worker Job Object")
+  }
+  errdefer ignore(shutdown_worker_job(0))
   let engine = @async.with_timeout(15000, () => {
     WorkerClient::start(
       "engine",
@@ -59,9 +64,28 @@ pub async fn Backend::start() -> Backend {
     )
   })
   errdefer agent.close()
-  let backend = Backend::{ engine, agent, window: None }
+  let backend = Backend::{ engine, agent, window: None, closed: false }
   backend.handshake()
   backend
+}
+
+///|
+/// Supervise both Worker protocol channels every two seconds. Three missed
+/// health checks trigger a bounded 1/2/5 second restart; an active long-running
+/// request is treated as busy while native process liveness remains checked.
+pub async fn Backend::supervise(self : Backend) -> Unit {
+  while !self.closed {
+    @async.sleep(2000)
+    if self.closed {
+      return
+    }
+    self.engine.heartbeat() catch {
+      _ => ()
+    }
+    self.agent.heartbeat() catch {
+      _ => ()
+    }
+  }
 }
 
 ///|
@@ -190,12 +214,19 @@ pub async fn Backend::route(
             "engine": self.engine.diagnostics(),
             "agent": self.agent.diagnostics(),
             "queue_limit": 256,
-            "heartbeat_interval_ms": 2000,
-            "heartbeat_miss_limit": 3,
-            "restart_budget": {
-              "window_ms": 600000,
-              "max": 3,
-              "backoff_ms": [1000, 2000, 5000],
+            "worker_supervision": {
+              "job_object_managed": true,
+              "kill_on_host_close": true,
+              "active_processes": worker_job_active_processes(),
+              "graceful_shutdown_ms": 5000,
+              "heartbeat_interval_ms": 2000,
+              "heartbeat_miss_limit": 3,
+              "busy_request_policy": "process_liveness",
+              "restart_budget": {
+                "window_ms": 600000,
+                "max": 3,
+                "backoff_ms": [1000, 2000, 5000],
+              },
             },
           })
       }
@@ -206,6 +237,11 @@ pub async fn Backend::route(
 
 ///|
 pub fn Backend::close(self : Backend) -> Unit {
+  if self.closed {
+    return
+  }
+  self.closed = true
   self.engine.close()
   self.agent.close()
+  ignore(shutdown_worker_job(5000))
 }

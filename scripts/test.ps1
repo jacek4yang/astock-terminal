@@ -26,6 +26,14 @@ try {
     Invoke-Checked -FilePath 'moon' -WorkingDirectory (Join-Path $build.RepositoryRoot 'app-moon') -Arguments @(
         'build', '--target', 'native', '--release', '--target-dir', $build.Paths.MoonAgent, 'agent_worker'
     )
+    $env:ASTOCK_SUPERVISION_TEST_WORKER = Join-Path $build.Paths.MoonAgent 'native\release\build\agent_worker\agent_worker.exe'
+    if (-not (Test-Path -LiteralPath $env:ASTOCK_SUPERVISION_TEST_WORKER -PathType Leaf)) {
+        throw "Agent supervision test Worker is missing: $env:ASTOCK_SUPERVISION_TEST_WORKER"
+    }
+    Enable-AStockCefRuntimePath -Environment $build | Out-Null
+    Invoke-Checked -FilePath 'moon' -WorkingDirectory (Join-Path $build.RepositoryRoot 'desktop-moon') -Arguments @(
+        'test', '--target', 'native', '--no-parallelize', '--target-dir', $build.Paths.MoonDesktop, 'backend/host'
+    )
     Set-AStockWorkerEnvironment -Environment $build -Release
     Invoke-Checked -FilePath 'node' -Arguments @(
         'scripts/ipc-smoke.mjs', $env:ASTOCK_ENGINE_EXE, $env:ASTOCK_AGENT_EXE

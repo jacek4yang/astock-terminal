@@ -6,6 +6,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+static HANDLE astock_worker_job = NULL;
+
 typedef struct astock_window_lookup {
   DWORD process_id;
   HWND window;
@@ -134,6 +136,115 @@ MOONBIT_FFI_EXPORT int32_t astock_show_window_system_menu(void) {
   return 1;
 }
 
+MOONBIT_FFI_EXPORT int32_t astock_create_worker_job(void) {
+  if (astock_worker_job != NULL) {
+    return 1;
+  }
+  HANDLE job = CreateJobObjectW(NULL, NULL);
+  if (job == NULL) {
+    return 0;
+  }
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
+  ZeroMemory(&limits, sizeof(limits));
+  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation,
+                               &limits, sizeof(limits))) {
+    CloseHandle(job);
+    return 0;
+  }
+  astock_worker_job = job;
+  return 1;
+}
+
+MOONBIT_FFI_EXPORT int32_t astock_assign_worker_to_job(int32_t pid) {
+  if (astock_worker_job == NULL || pid <= 0) {
+    return 0;
+  }
+  HANDLE process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE |
+                                   PROCESS_QUERY_LIMITED_INFORMATION,
+                               FALSE, (DWORD)pid);
+  if (process == NULL) {
+    return 0;
+  }
+  BOOL assigned = AssignProcessToJobObject(astock_worker_job, process);
+  if (!assigned) {
+    TerminateProcess(process, ERROR_PROCESS_ABORTED);
+  }
+  CloseHandle(process);
+  return assigned ? 1 : 0;
+}
+
+MOONBIT_FFI_EXPORT int32_t astock_worker_job_active_processes(void) {
+  if (astock_worker_job == NULL) {
+    return -1;
+  }
+  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
+  ZeroMemory(&accounting, sizeof(accounting));
+  if (!QueryInformationJobObject(astock_worker_job,
+                                 JobObjectBasicAccountingInformation,
+                                 &accounting, sizeof(accounting), NULL)) {
+    return -1;
+  }
+  return (int32_t)accounting.ActiveProcesses;
+}
+
+MOONBIT_FFI_EXPORT int32_t astock_shutdown_worker_job(int32_t grace_ms) {
+  HANDLE job = astock_worker_job;
+  if (job == NULL) {
+    return 1;
+  }
+  if (grace_ms < 0) {
+    grace_ms = 0;
+  }
+  DWORD started = GetTickCount();
+  while (grace_ms > 0) {
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
+    ZeroMemory(&accounting, sizeof(accounting));
+    if (!QueryInformationJobObject(job, JobObjectBasicAccountingInformation,
+                                   &accounting, sizeof(accounting), NULL) ||
+        accounting.ActiveProcesses == 0) {
+      break;
+    }
+    DWORD elapsed = GetTickCount() - started;
+    if (elapsed >= (DWORD)grace_ms) {
+      break;
+    }
+    Sleep(50);
+  }
+  astock_worker_job = NULL;
+  return CloseHandle(job) ? 1 : 0;
+}
+
+MOONBIT_FFI_EXPORT int32_t astock_worker_process_running(int32_t pid) {
+  if (pid <= 0) {
+    return 0;
+  }
+  HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
+  if (process == NULL) {
+    return 0;
+  }
+  DWORD wait = WaitForSingleObject(process, 0);
+  CloseHandle(process);
+  return wait == WAIT_TIMEOUT ? 1 : 0;
+}
+
+MOONBIT_FFI_EXPORT int32_t astock_terminate_worker_process(int32_t pid) {
+  if (pid <= 0) {
+    return 0;
+  }
+  HANDLE process = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE,
+                               (DWORD)pid);
+  if (process == NULL) {
+    return 0;
+  }
+  BOOL terminated = TerminateProcess(process, ERROR_PROCESS_ABORTED);
+  if (terminated) {
+    WaitForSingleObject(process, 2000);
+  }
+  CloseHandle(process);
+  return terminated ? 1 : 0;
+}
+
 #else
 
 MOONBIT_FFI_EXPORT int32_t astock_apply_window_icon(moonbit_bytes_t path,
@@ -146,5 +257,31 @@ MOONBIT_FFI_EXPORT int32_t astock_apply_window_icon(moonbit_bytes_t path,
 MOONBIT_FFI_EXPORT int32_t astock_begin_window_drag(void) { return 0; }
 
 MOONBIT_FFI_EXPORT int32_t astock_show_window_system_menu(void) { return 0; }
+
+MOONBIT_FFI_EXPORT int32_t astock_create_worker_job(void) { return 0; }
+
+MOONBIT_FFI_EXPORT int32_t astock_assign_worker_to_job(int32_t pid) {
+  (void)pid;
+  return 0;
+}
+
+MOONBIT_FFI_EXPORT int32_t astock_worker_job_active_processes(void) {
+  return -1;
+}
+
+MOONBIT_FFI_EXPORT int32_t astock_shutdown_worker_job(int32_t grace_ms) {
+  (void)grace_ms;
+  return 1;
+}
+
+MOONBIT_FFI_EXPORT int32_t astock_worker_process_running(int32_t pid) {
+  (void)pid;
+  return 0;
+}
+
+MOONBIT_FFI_EXPORT int32_t astock_terminate_worker_process(int32_t pid) {
+  (void)pid;
+  return 0;
+}
 
 #endif

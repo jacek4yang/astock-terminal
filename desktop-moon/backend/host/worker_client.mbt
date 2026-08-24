@@ -7,19 +7,27 @@ const MAX_FRAME_BYTES : Int = 8 * 1024 * 1024
 /// the Host boundary where the hard limit is 256.
 pub struct WorkerClient {
   name : String
-  pid : Int
-  input : @process.WriteToProcess
-  output : @process.ReadFromProcess
+  executable : String
+  mut pid : Int
+  mut input : @process.WriteToProcess
+  mut output : @process.ReadFromProcess
   lock : @async.Mutex
   mut request_count : Int
   mut failure_count : Int
+  mut heartbeat_misses : Int
+  mut restart_count : Int
+  restart_times : Array[Int64]
+  mut in_flight : Int
+  mut status : String
+  mut last_heartbeat_ms : Int64
+  mut closed : Bool
 }
 
 ///|
-pub async fn WorkerClient::start(
+async fn spawn_worker(
   name : String,
   executable : String,
-) -> WorkerClient {
+) -> (Int, @process.WriteToProcess, @process.ReadFromProcess) {
   let (child_stdin, host_input) = @process.write_to_process()
   let (host_output, child_stdout) = @process.read_from_process()
   let pid = @process.spawn_orphan(
@@ -29,14 +37,37 @@ pub async fn WorkerClient::start(
     stdout=child_stdout,
     no_console_window=true,
   )
+  if !assign_worker_to_job(pid) {
+    host_input.close()
+    host_output.close()
+    ignore(terminate_worker_process(pid))
+    fail("failed to assign " + name + " Worker to the Host Job Object")
+  }
+  (pid, host_input, host_output)
+}
+
+///|
+pub async fn WorkerClient::start(
+  name : String,
+  executable : String,
+) -> WorkerClient {
+  let (pid, input, output) = spawn_worker(name, executable)
   WorkerClient::{
     name,
+    executable,
     pid,
-    input: host_input,
-    output: host_output,
+    input,
+    output,
     lock: @async.Mutex::Mutex(),
     request_count: 0,
     failure_count: 0,
+    heartbeat_misses: 0,
+    restart_count: 0,
+    restart_times: [],
+    in_flight: 0,
+    status: "starting",
+    last_heartbeat_ms: @async.now(),
+    closed: false,
   }
 }
 
@@ -69,16 +100,156 @@ pub async fn WorkerClient::request(
   request : Json,
   timeout_ms? : Int = 30000,
 ) -> Json {
+  if self.closed {
+    fail(self.name + " Worker channel is closed")
+  }
+  self.in_flight += 1
+  defer {
+    self.in_flight -= 1
+  }
   self.lock.acquire()
   defer self.lock.release()
   self.request_count += 1
   errdefer {
     self.failure_count += 1
+    self.status = "degraded"
   }
-  @async.with_timeout(timeout_ms, () => {
+  let reply = @async.with_timeout(timeout_ms, () => {
     self.write_frame(request)
     self.read_frame()
   })
+  self.status = "ready"
+  reply
+}
+
+///|
+fn WorkerClient::restart_budget_available(self : WorkerClient) -> Bool {
+  let now = @async.now()
+  let mut recent = 0
+  for timestamp in self.restart_times {
+    if now - timestamp <= 600000L {
+      recent += 1
+    }
+  }
+  recent < 3
+}
+
+///|
+async fn WorkerClient::restart(self : WorkerClient) -> Unit {
+  self.lock.acquire()
+  defer self.lock.release()
+  if self.closed {
+    return
+  }
+  if !self.restart_budget_available() {
+    self.status = "hard_failed"
+    fail(self.name + " Worker exhausted its 10-minute restart budget")
+  }
+  let backoff = match self.restart_count % 3 {
+    0 => 1000
+    1 => 2000
+    _ => 5000
+  }
+  self.status = "restarting"
+  self.input.close()
+  self.output.close()
+  if worker_process_running(self.pid) {
+    ignore(terminate_worker_process(self.pid))
+  }
+  @async.sleep(backoff)
+  let (pid, input, output) = spawn_worker(self.name, self.executable)
+  self.pid = pid
+  self.input = input
+  self.output = output
+  self.restart_count += 1
+  self.restart_times.push(@async.now())
+  let handshake : Json = {
+    "protocol_version": 1,
+    "request_id": "host-" +
+    self.name +
+    "-restart-handshake-" +
+    self.restart_count.to_string(),
+    "kind": "system.handshake",
+    "payload": {
+      "app_version": "6.0.0",
+      "host_version": "moonbit-proton-0.2.1",
+      "protocol_version": 1,
+    },
+    "deadline_ms": 15000,
+  }
+  errdefer {
+    self.input.close()
+    self.output.close()
+    ignore(terminate_worker_process(self.pid))
+    self.status = "degraded"
+  }
+  let reply = @async.with_timeout(15000, () => {
+    self.write_frame(handshake)
+    self.read_frame()
+  })
+  guard reply is { "ok": true, .. } else {
+    fail(self.name + " Worker restart handshake failed")
+  }
+  self.heartbeat_misses = 0
+  self.status = "ready"
+}
+
+///|
+async fn WorkerClient::record_heartbeat_miss(
+  self : WorkerClient,
+  count_failure? : Bool = true,
+) -> Unit {
+  self.heartbeat_misses += 1
+  if count_failure {
+    self.failure_count += 1
+  }
+  self.status = "degraded"
+  if self.heartbeat_misses >= 3 {
+    self.restart()
+  }
+}
+
+///|
+pub async fn WorkerClient::heartbeat(self : WorkerClient) -> Unit {
+  if self.closed {
+    return
+  }
+  if !worker_process_running(self.pid) {
+    self.record_heartbeat_miss()
+    return
+  }
+  // A request already in flight proves the channel is actively supervised.
+  // Do not inject a health frame behind a long provider request on the single
+  // ordered Agent channel; process liveness is still checked above.
+  if self.in_flight > 0 {
+    self.status = "busy"
+    self.heartbeat_misses = 0
+    self.last_heartbeat_ms = @async.now()
+    return
+  }
+  let heartbeat : Json = {
+    "protocol_version": 1,
+    "request_id": "host-heartbeat-" +
+    self.name +
+    "-" +
+    self.request_count.to_string(),
+    "kind": "diagnostics.status",
+    "payload": {},
+    "deadline_ms": 2000,
+  }
+  let reply = self.request(heartbeat, timeout_ms=2000) catch {
+    _ => {
+      self.record_heartbeat_miss(count_failure=false)
+      return
+    }
+  }
+  if reply is { "ok": true, .. } {
+    self.heartbeat_misses = 0
+    self.last_heartbeat_ms = @async.now()
+    self.status = "ready"
+  } else {
+    self.record_heartbeat_miss()
+  }
 }
 
 ///|
@@ -88,16 +259,22 @@ pub fn WorkerClient::diagnostics(self : WorkerClient) -> Json {
     "pid": self.pid,
     "request_count": self.request_count,
     "failure_count": self.failure_count,
-    "status": if self.failure_count == 0 {
-      "ready"
-    } else {
-      "degraded"
-    },
+    "status": self.status,
+    "process_running": worker_process_running(self.pid),
+    "in_flight": self.in_flight,
+    "heartbeat_misses": self.heartbeat_misses,
+    "last_heartbeat_ms": self.last_heartbeat_ms,
+    "restart_count": self.restart_count,
   }
 }
 
 ///|
 pub fn WorkerClient::close(self : WorkerClient) -> Unit {
+  if self.closed {
+    return
+  }
+  self.closed = true
+  self.status = "stopping"
   self.input.close()
   self.output.close()
 }

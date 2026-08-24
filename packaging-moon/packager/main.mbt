@@ -16,7 +16,7 @@ async fn main {
   let worker_resources = required_env("ASTOCK_PACKAGE_STAGE") + "\\workers"
   let artifacts = required_env("ASTOCK_ARTIFACTS_DIR")
   let moon_target = required_env("ASTOCK_MOON_DESKTOP_TARGET")
-  let app_icon = desktop_root + "\\..\\src-tauri\\icons\\icon.ico"
+  let app_icon = desktop_root + "\\..\\assets\\icons\\icon.ico"
 
   let proton_source = @build.resolve_proton_source(desktop_root, "backend/app")
   let requirements = @build.resolve_proton_runtime_requirements(proton_source)
