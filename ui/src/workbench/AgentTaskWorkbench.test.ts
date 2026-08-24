@@ -7,7 +7,7 @@ vi.mock("../bridge", () => ({
   requestNative,
 }));
 
-import { requestDurableAgent } from "./AgentTaskWorkbench";
+import { deterministicVerificationSummary, requestDurableAgent } from "./AgentTaskWorkbench";
 
 const spec = {
   objective: "分析两万元最新投资计划",
@@ -91,5 +91,15 @@ describe("durable Agent operation journal", () => {
       "agent.effect.begin",
       expect.objectContaining({ idempotency_key: "task-2:agent.research.workflow:3:retry:1" }),
     ]);
+  });
+
+  it("formats deterministic report verification without inventing totals", () => {
+    expect(deterministicVerificationSummary({
+      version: "engine-report-verifier-v1",
+      distinct_citations: 12,
+      numeric_claims_checked: 37,
+      registry_facts: 6_000,
+    })).toBe("复现 37 个数字 · 12 个不同证据引用 · 6000 条字段事实");
+    expect(deterministicVerificationSummary({})).toBe("复现 0 个数字 · 0 个不同证据引用 · 0 条字段事实");
   });
 });

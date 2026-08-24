@@ -33,6 +33,12 @@ type AgentEffect = {
   cache_hit?: boolean;
   evidence_count?: number;
 };
+export type DeterministicVerification = {
+  version?: string;
+  distinct_citations?: number;
+  numeric_claims_checked?: number;
+  registry_facts?: number;
+};
 type TaskTransition = {
   accepted?: boolean;
   rejection?: string | null;
@@ -41,8 +47,9 @@ type TaskTransition = {
   activities?: AgentEffect[];
   clarification?: ClarificationRequest | null;
   checkpoint?: unknown;
-  report?: string;
+  report?: string | null;
   verification_findings?: string[];
+  verification?: DeterministicVerification;
 };
 
 type AgentSession = {
@@ -59,6 +66,7 @@ type AgentSession = {
   clarification?: ClarificationRequest | null;
   draft?: ClarificationDraft;
   checkpoint?: unknown;
+  verification?: DeterministicVerification | null;
 };
 
 type ConversationSummary = {
@@ -106,7 +114,7 @@ const effectCopy: Record<string, [string, string]> = {
   request_model: ["分析证据与下一步", "模型只接收可公开的任务上下文，不展示私有推理链"],
   review_evidence: ["核验证据", "检查来源、时点、冲突和结论覆盖情况"],
   synthesize_report: ["形成研究结论", "将工具结果整理为可审阅的研究报告"],
-  verify_report: ["发布前校验", "检查证据完整性、计算引用和研究边界"],
+  verify_report: ["发布前校验", "逐行复现数字，并检查证据编号、来源时点、版本、质量状态和研究边界"],
   publish_report: ["发布报告", "报告已通过校验并保存"],
 };
 
@@ -266,6 +274,13 @@ export async function requestDurableAgent<T>(
   return reply;
 }
 
+export function deterministicVerificationSummary(verification: DeterministicVerification): string {
+  const claims = Math.max(0, verification.numeric_claims_checked ?? 0);
+  const citations = Math.max(0, verification.distinct_citations ?? 0);
+  const facts = Math.max(0, verification.registry_facts ?? 0);
+  return `复现 ${claims} 个数字 · ${citations} 个不同证据引用 · ${facts} 条字段事实`;
+}
+
 export default function AgentTaskWorkbench() {
   const [sessionId, setSessionId] = useState<string>(() => crypto.randomUUID());
   const [title, setTitle] = useState("");
@@ -287,6 +302,7 @@ export default function AgentTaskWorkbench() {
   const [clarification, setClarification] = useState<ClarificationRequest | null>(null);
   const [draft, setDraft] = useState<ClarificationDraft>(emptyClarificationDraft);
   const [checkpoint, setCheckpoint] = useState<unknown>();
+  const [verification, setVerification] = useState<DeterministicVerification | null>(null);
   const [busy, setBusy] = useState(false);
   const [busyStage, setBusyStage] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -326,7 +342,7 @@ export default function AgentTaskWorkbench() {
     if (!hydrated || !isProton() || !messages.length) return;
     const updatedAt = Date.now();
     const resolvedTitle = title || sessionTitle(messages);
-    const session: AgentSession = { sessionId, title: resolvedTitle, createdAt, updatedAt, input, depth, toolPolicy, messages, task, effects, clarification, draft, checkpoint };
+    const session: AgentSession = { sessionId, title: resolvedTitle, createdAt, updatedAt, input, depth, toolPolicy, messages, task, effects, clarification, draft, checkpoint, verification };
     const timer = window.setTimeout(() => {
       void requestNative<StoredConversation>("engine", "agent.conversation.save", {
         conversation_id: sessionId,
@@ -347,7 +363,7 @@ export default function AgentTaskWorkbench() {
       }).catch((cause) => setError(`保存 Agent 会话失败：${cause instanceof Error ? cause.message : String(cause)}`));
     }, 450);
     return () => window.clearTimeout(timer);
-  }, [checkpoint, clarification, createdAt, depth, draft, effects, hydrated, input, messages, sessionId, task, title, toolPolicy]);
+  }, [checkpoint, clarification, createdAt, depth, draft, effects, hydrated, input, messages, sessionId, task, title, toolPolicy, verification]);
 
   useEffect(() => {
     if (!historyOpen) return;
@@ -429,6 +445,7 @@ export default function AgentTaskWorkbench() {
     const next = reply.state ?? {};
     setTask(next);
     setEffects(reply.activities ?? reply.effects ?? []);
+    if (reply.verification) setVerification(reply.verification);
     if (reply.checkpoint !== undefined) setCheckpoint(reply.checkpoint);
     const generated = reply.clarification ?? next.clarification ?? null;
     if (generated) {
@@ -502,6 +519,7 @@ export default function AgentTaskWorkbench() {
     setInput("");
     setTask(null);
     setEffects([]);
+    setVerification(null);
     setCheckpoint(undefined);
     restoredTaskRef.current = null;
     setClarification(null);
@@ -595,6 +613,7 @@ export default function AgentTaskWorkbench() {
     setMessages([]);
     setTask(null);
     setEffects([]);
+    setVerification(null);
     setClarification(null);
     setDraft(emptyClarificationDraft());
     setCheckpoint(undefined);
@@ -617,6 +636,7 @@ export default function AgentTaskWorkbench() {
     setMessages(saved.messages ?? []);
     setTask(saved.task ?? null);
     setEffects(saved.effects ?? []);
+    setVerification(saved.verification ?? null);
     setClarification(saved.clarification ? normalizeClarification(saved.clarification) : null);
     setDraft(saved.draft ?? emptyClarificationDraft());
     setCheckpoint(saved.checkpoint);
@@ -716,6 +736,7 @@ export default function AgentTaskWorkbench() {
 
   const status = task?.phase ?? "idle";
   const activity = effects.filter((effect) => effect.kind !== "persist_checkpoint");
+  const finalVerificationActivity = activity.reduce((last, effect, index) => effect.kind === "verify_report" ? index : last, -1);
   const displayedHistory = historyQuery.trim() ? historySearchResults ?? [] : history;
 
   return <div className="agent-console agent-golden-layout">
@@ -775,7 +796,8 @@ export default function AgentTaskWorkbench() {
       <div className="activity-feed">
         {activity.length ? activity.map((effect, index) => {
           const [title, detail] = effectCopy[effect.kind ?? ""] ?? [effect.title ?? effect.tool ?? "任务活动", effect.detail ?? "Worker 已记录此项活动"];
-          return <article key={`${effect.call_id ?? effect.kind}-${index}`}><i className={effect.cache_hit ? "cache" : "running"} /><div><b>{title}</b><p>{detail}</p><small>{effect.call_id && `调用 ${effect.call_id}`}{effect.cache_hit && " · 命中缓存"}{effect.evidence_count ? ` · ${effect.evidence_count} 条证据` : ""}</small></div></article>;
+          const showVerification = effect.kind === "verify_report" && index === finalVerificationActivity && verification;
+          return <article key={`${effect.call_id ?? effect.kind}-${index}`}><i className={effect.cache_hit || showVerification && status === "completed" ? "cache" : "running"} /><div><b>{title}</b><p>{detail}</p><small>{effect.call_id && `调用 ${effect.call_id}`}{effect.cache_hit && " · 命中缓存"}{effect.evidence_count ? ` · ${effect.evidence_count} 条证据` : ""}{showVerification && ` · ${deterministicVerificationSummary(verification)}`}</small>{showVerification && <small className="block break-all">校验器 {verification.version ?? "版本未知"}</small>}</div></article>;
         }) : <div className="activity-empty"><b>等待任务</b><p>开始研究后，这里会按顺序展示计划、工具调用、缓存、证据与报告校验，不显示模型私有推理链。</p></div>}
       </div>
       <footer><span>已取得证据</span><b>{task?.evidence_ids?.length ?? 0}</b><span>完成工具</span><b>{task?.completed_tool_count ?? 0}</b></footer>
