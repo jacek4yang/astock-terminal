@@ -52,7 +52,13 @@
         { "const": "agent.event.append" },
         { "const": "agent.checkpoint.put" },
         { "const": "agent.task.load" },
-        { "const": "agent.task.list" }
+        { "const": "agent.task.list" },
+        { "const": "agent.conversation.save" },
+        { "const": "agent.conversation.load" },
+        { "const": "agent.conversation.list" },
+        { "const": "agent.conversation.rename" },
+        { "const": "agent.conversation.branch" },
+        { "const": "agent.conversation.delete" }
       ]
     }
   }

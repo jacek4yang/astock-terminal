@@ -1147,6 +1147,53 @@ impl Engine {
                 .map_err(event_store_error)?;
                 Ok(json!({"items": tasks}))
             }
+            "agent.conversation.save" => {
+                let payload: event_store::SaveConversation = decode_payload(&request.payload)?;
+                let conversation = event_store::save_conversation(&self.storage, payload)
+                    .await
+                    .map_err(event_store_error)?;
+                serde_json::to_value(conversation).map_err(invalid)
+            }
+            "agent.conversation.load" => {
+                let payload: event_store::ConversationId = decode_payload(&request.payload)?;
+                let conversation =
+                    event_store::load_conversation(&self.storage, payload.conversation_id)
+                        .await
+                        .map_err(event_store_error)?;
+                serde_json::to_value(conversation).map_err(invalid)
+            }
+            "agent.conversation.list" => {
+                let payload: TaskListPayload = decode_payload(&request.payload)?;
+                let conversations = event_store::list_conversations(
+                    &self.storage,
+                    payload.limit.unwrap_or(astock_protocol::MAX_PAGE_SIZE),
+                )
+                .await
+                .map_err(event_store_error)?;
+                Ok(json!({"items": conversations}))
+            }
+            "agent.conversation.rename" => {
+                let payload: event_store::RenameConversation = decode_payload(&request.payload)?;
+                let conversation = event_store::rename_conversation(&self.storage, payload)
+                    .await
+                    .map_err(event_store_error)?;
+                serde_json::to_value(conversation).map_err(invalid)
+            }
+            "agent.conversation.branch" => {
+                let payload: event_store::BranchConversation = decode_payload(&request.payload)?;
+                let conversation = event_store::branch_conversation(&self.storage, payload)
+                    .await
+                    .map_err(event_store_error)?;
+                serde_json::to_value(conversation).map_err(invalid)
+            }
+            "agent.conversation.delete" => {
+                let payload: event_store::ConversationId = decode_payload(&request.payload)?;
+                let deleted =
+                    event_store::delete_conversation(&self.storage, payload.conversation_id)
+                        .await
+                        .map_err(event_store_error)?;
+                Ok(json!({"deleted": deleted}))
+            }
             _ => Err(ServiceError::new(
                 "unknown_request_kind",
                 format!("unsupported Engine request kind: {}", request.kind),

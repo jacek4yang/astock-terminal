@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=5eb1d40803020296e5aa38f62a5645ac5c045af44690f8d8cdff481482c0b6b4
+// GENERATED from protocol/schema; schema-sha256=9cd148d9b61673d3d95bfd2d3941d55e34c37fdb1f114ad222326b2ec1762db2
 // Run: node protocol/codegen.mjs
 
 pub let protocol_version : Int = 1

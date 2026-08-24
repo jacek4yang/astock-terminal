@@ -95,8 +95,20 @@ type AgentSession = {
   checkpoint?: unknown;
 };
 
-const SESSION_KEY = "astock.agent.session.v1";
-const HISTORY_KEY = "astock.agent.history.v1";
+type ConversationSummary = {
+  conversation_id: string;
+  title: string;
+  phase: AgentPhase;
+  message_count: number;
+  evidence_count: number;
+  parent_conversation_id?: string | null;
+  branch_from_message_id?: string | null;
+  created_at: number;
+  updated_at: number;
+};
+
+type StoredConversation = ConversationSummary & { session: AgentSession };
+
 const MAX_HISTORY_ITEMS = 80;
 
 const AGENT_BEST = "__agent_best__";
@@ -152,27 +164,6 @@ function normalizeClarification(value: ClarificationRequest): ClarificationReque
   };
 }
 
-function loadSession(): AgentSession {
-  try {
-    return JSON.parse(localStorage.getItem(SESSION_KEY) ?? "{}") as AgentSession;
-  } catch {
-    return {};
-  }
-}
-
-function loadHistory(): AgentSession[] {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(HISTORY_KEY) ?? "[]") as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((item): item is AgentSession => Boolean(item && typeof item === "object" && typeof (item as AgentSession).sessionId === "string"))
-      .sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0))
-      .slice(0, MAX_HISTORY_ITEMS);
-  } catch {
-    return [];
-  }
-}
-
 function sessionTitle(messages: AgentMessage[], fallback = "新的投资研究"): string {
   const objective = messages.find((message) => message.role === "user")?.text.trim() ?? "";
   if (!objective) return fallback;
@@ -181,9 +172,10 @@ function sessionTitle(messages: AgentMessage[], fallback = "新的投资研究")
 
 function historyTime(value?: number): string {
   if (!value) return "时间未知";
+  const milliseconds = value < 10_000_000_000 ? value * 1000 : value;
   return new Intl.DateTimeFormat("zh-CN", {
     month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
-  }).format(new Date(value));
+  }).format(new Date(milliseconds));
 }
 
 function capitalFromObjective(objective = ""): number | null {
@@ -307,21 +299,23 @@ async function fetchResearchNews(
 }
 
 export default function AgentTaskWorkbench() {
-  const [savedSession] = useState(loadSession);
-  const [sessionId, setSessionId] = useState(savedSession.sessionId ?? crypto.randomUUID());
-  const [createdAt, setCreatedAt] = useState(savedSession.createdAt ?? Date.now());
-  const [history, setHistory] = useState<AgentSession[]>(loadHistory);
+  const [sessionId, setSessionId] = useState<string>(() => crypto.randomUUID());
+  const [title, setTitle] = useState("");
+  const [createdAt, setCreatedAt] = useState(Date.now);
+  const [history, setHistory] = useState<ConversationSummary[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
   const contextSymbol = useResearchContext((state) => state.symbol);
-  const [input, setInput] = useState(savedSession.input ?? "");
-  const [depth, setDepth] = useState<Depth>(savedSession.depth ?? "deep");
-  const [toolPolicy, setToolPolicy] = useState<ToolPolicy>(savedSession.toolPolicy ?? "auto");
-  const [messages, setMessages] = useState<AgentMessage[]>(savedSession.messages ?? []);
-  const [task, setTask] = useState<TaskView | null>(savedSession.task ?? null);
-  const [effects, setEffects] = useState<AgentEffect[]>(savedSession.effects ?? []);
-  const [clarification, setClarification] = useState<ClarificationRequest | null>(savedSession.clarification ? normalizeClarification(savedSession.clarification) : null);
-  const [draft, setDraft] = useState<ClarificationDraft>(savedSession.draft ?? emptyClarificationDraft());
-  const [checkpoint, setCheckpoint] = useState<unknown>(savedSession.checkpoint);
+  const [input, setInput] = useState("");
+  const [depth, setDepth] = useState<Depth>("deep");
+  const [toolPolicy, setToolPolicy] = useState<ToolPolicy>("auto");
+  const [messages, setMessages] = useState<AgentMessage[]>([]);
+  const [task, setTask] = useState<TaskView | null>(null);
+  const [effects, setEffects] = useState<AgentEffect[]>([]);
+  const [clarification, setClarification] = useState<ClarificationRequest | null>(null);
+  const [draft, setDraft] = useState<ClarificationDraft>(emptyClarificationDraft);
+  const [checkpoint, setCheckpoint] = useState<unknown>();
   const [busy, setBusy] = useState(false);
   const [busyStage, setBusyStage] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -329,18 +323,60 @@ export default function AgentTaskWorkbench() {
   const restoredTaskRef = useRef<string | null>(null);
 
   useEffect(() => {
-    const session: AgentSession = { sessionId, title: sessionTitle(messages), createdAt, updatedAt: Date.now(), input, depth, toolPolicy, messages, task, effects, clarification, draft, checkpoint };
-    localStorage.setItem(SESSION_KEY, JSON.stringify(session));
-    if (messages.length) {
-      setHistory((current) => {
-        const next = [session, ...current.filter((item) => item.sessionId !== sessionId)]
-          .sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0))
-          .slice(0, MAX_HISTORY_ITEMS);
-        localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
-        return next;
-      });
+    if (!isProton()) {
+      setHydrated(true);
+      return;
     }
-  }, [checkpoint, clarification, createdAt, depth, draft, effects, input, messages, sessionId, task, toolPolicy]);
+    let cancelled = false;
+    void (async () => {
+      try {
+        const result = await requestNative<{ items: ConversationSummary[] }>("engine", "agent.conversation.list", { limit: MAX_HISTORY_ITEMS });
+        if (cancelled) return;
+        const items = result.items ?? [];
+        setHistory(items);
+        const latest = items[0];
+        if (latest) {
+          const stored = await requestNative<StoredConversation>("engine", "agent.conversation.load", { conversation_id: latest.conversation_id });
+          if (cancelled) return;
+          restoreSession(stored.session, stored.title);
+        }
+      } catch (cause) {
+        if (!cancelled) setError(`读取 Agent 历史失败：${cause instanceof Error ? cause.message : String(cause)}`);
+      } finally {
+        if (!cancelled) setHydrated(true);
+      }
+    })();
+    return () => { cancelled = true; };
+    // 首次挂载只从 Engine 恢复一次；restoreSession 使用当前组件的稳定 setter。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated || !isProton() || !messages.length) return;
+    const updatedAt = Date.now();
+    const resolvedTitle = title || sessionTitle(messages);
+    const session: AgentSession = { sessionId, title: resolvedTitle, createdAt, updatedAt, input, depth, toolPolicy, messages, task, effects, clarification, draft, checkpoint };
+    const timer = window.setTimeout(() => {
+      void requestNative<StoredConversation>("engine", "agent.conversation.save", {
+        conversation_id: sessionId,
+        title: resolvedTitle,
+        session,
+      }).then((stored) => {
+        setHistory((current) => [{
+          conversation_id: stored.conversation_id,
+          title: stored.title,
+          phase: stored.session.task?.phase ?? "idle",
+          message_count: stored.session.messages?.length ?? 0,
+          evidence_count: stored.session.task?.evidence_ids?.length ?? 0,
+          parent_conversation_id: stored.parent_conversation_id,
+          branch_from_message_id: stored.branch_from_message_id,
+          created_at: stored.created_at,
+          updated_at: stored.updated_at,
+        }, ...current.filter((item) => item.conversation_id !== stored.conversation_id)].slice(0, MAX_HISTORY_ITEMS));
+      }).catch((cause) => setError(`保存 Agent 会话失败：${cause instanceof Error ? cause.message : String(cause)}`));
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [checkpoint, clarification, createdAt, depth, draft, effects, hydrated, input, messages, sessionId, task, title, toolPolicy]);
 
   useEffect(() => {
     if (!historyOpen) return;
@@ -518,7 +554,6 @@ export default function AgentTaskWorkbench() {
     setBusy(true);
     setBusyStage("正在理解目标并检查缺失的研究边界…");
     setError(null);
-    setMessages([]);
     setInput("");
     setTask(null);
     setEffects([]);
@@ -611,6 +646,7 @@ export default function AgentTaskWorkbench() {
   const newResearch = () => {
     if (busy) return;
     setInput("");
+    setTitle("");
     setMessages([]);
     setTask(null);
     setEffects([]);
@@ -622,13 +658,13 @@ export default function AgentTaskWorkbench() {
     setSessionId(crypto.randomUUID());
     setCreatedAt(Date.now());
     restoredTaskRef.current = null;
-    localStorage.removeItem(SESSION_KEY);
     composerRef.current?.focus();
   };
 
-  const openHistory = (saved: AgentSession) => {
-    if (busy || !saved.sessionId) return;
+  const restoreSession = (saved: AgentSession, storedTitle = "") => {
+    if (!saved.sessionId) return;
     setSessionId(saved.sessionId);
+    setTitle(storedTitle || saved.title || "");
     setCreatedAt(saved.createdAt ?? Date.now());
     setInput(saved.input ?? "");
     setDepth(saved.depth ?? "deep");
@@ -644,21 +680,89 @@ export default function AgentTaskWorkbench() {
     setHistoryOpen(false);
   };
 
-  const continueHistory = (saved: AgentSession) => {
+  const openHistory = async (saved: ConversationSummary) => {
     if (busy) return;
-    const objective = saved.messages?.find((message) => message.role === "user")?.text.trim() || saved.title || "此前投资研究";
-    const conclusion = [...(saved.messages ?? [])].reverse().find((message) => message.role === "agent")?.text.trim();
-    newResearch();
-    setInput(`基于此前研究重新获取最新数据并更新结论：${objective}${conclusion ? `\n此前结论摘要（必须重新核验，不能直接沿用）：${conclusion.slice(0, 1200)}` : ""}`);
-    setHistoryOpen(false);
-    requestAnimationFrame(() => composerRef.current?.focus());
+    setHistoryLoading(true);
+    setError(null);
+    try {
+      const stored = await requestNative<StoredConversation>("engine", "agent.conversation.load", { conversation_id: saved.conversation_id });
+      restoreSession(stored.session, stored.title);
+    } catch (cause) {
+      setError(`打开历史研究失败：${cause instanceof Error ? cause.message : String(cause)}`);
+    } finally {
+      setHistoryLoading(false);
+    }
   };
 
-  const deleteHistory = (saved: AgentSession) => {
-    const next = history.filter((item) => item.sessionId !== saved.sessionId);
-    setHistory(next);
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
-    if (saved.sessionId === sessionId) newResearch();
+  const branchFromMessage = async (messageId: string, sourceConversationId = sessionId) => {
+    if (busy || historyLoading) return;
+    const newConversationId = crypto.randomUUID();
+    setHistoryLoading(true);
+    setError(null);
+    try {
+      const stored = await requestNative<StoredConversation>("engine", "agent.conversation.branch", {
+        source_conversation_id: sourceConversationId,
+        new_conversation_id: newConversationId,
+        message_id: messageId,
+        title: `${title || sessionTitle(messages)} · 分支`,
+      });
+      restoreSession(stored.session, stored.title);
+      setInput("基于以上节点重新取得最新数据并继续研究；旧结论只能作为待核验线索，不得直接沿用。 ");
+      setHistory((current) => [{
+        conversation_id: stored.conversation_id,
+        title: stored.title,
+        phase: "idle" as AgentPhase,
+        message_count: stored.session.messages?.length ?? 0,
+        evidence_count: 0,
+        parent_conversation_id: stored.parent_conversation_id,
+        branch_from_message_id: stored.branch_from_message_id,
+        created_at: stored.created_at,
+        updated_at: stored.updated_at,
+      }, ...current].slice(0, MAX_HISTORY_ITEMS));
+      requestAnimationFrame(() => composerRef.current?.focus());
+    } catch (cause) {
+      setError(`创建研究分支失败：${cause instanceof Error ? cause.message : String(cause)}`);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const continueHistory = async (saved: ConversationSummary) => {
+    if (busy || historyLoading) return;
+    setHistoryLoading(true);
+    try {
+      const stored = await requestNative<StoredConversation>("engine", "agent.conversation.load", { conversation_id: saved.conversation_id });
+      const last = stored.session.messages?.at(-1);
+      if (!last) throw new Error("该历史研究没有可分支的消息");
+      restoreSession(stored.session, stored.title);
+      setHistoryLoading(false);
+      await branchFromMessage(last.id, saved.conversation_id);
+    } catch (cause) {
+      setHistoryLoading(false);
+      setError(`继续历史研究失败：${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  };
+
+  const renameHistory = async (saved: ConversationSummary) => {
+    const nextTitle = window.prompt("重命名研究会话", saved.title)?.trim();
+    if (!nextTitle || nextTitle === saved.title) return;
+    try {
+      await requestNative("engine", "agent.conversation.rename", { conversation_id: saved.conversation_id, title: nextTitle });
+      setHistory((current) => current.map((item) => item.conversation_id === saved.conversation_id ? { ...item, title: nextTitle } : item));
+      if (saved.conversation_id === sessionId) setTitle(nextTitle);
+    } catch (cause) {
+      setError(`重命名失败：${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  };
+
+  const deleteHistory = async (saved: ConversationSummary) => {
+    try {
+      await requestNative("engine", "agent.conversation.delete", { conversation_id: saved.conversation_id });
+      setHistory((current) => current.filter((item) => item.conversation_id !== saved.conversation_id));
+      if (saved.conversation_id === sessionId) newResearch();
+    } catch (cause) {
+      setError(`删除历史研究失败：${cause instanceof Error ? cause.message : String(cause)}`);
+    }
   };
 
   const status = task?.phase ?? "idle";
@@ -673,9 +777,9 @@ export default function AgentTaskWorkbench() {
     {historyOpen && <div className="agent-history-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setHistoryOpen(false); }}>
       <section className="agent-history-panel" role="dialog" aria-modal="true" aria-label="Agent 历史记录">
         <header><div><span className="eyebrow">RESEARCH HISTORY</span><h2>历史研究</h2><p>打开可查看完整记录；“基于此继续”会新建任务并重新取得最新数据。</p></div><button aria-label="关闭历史记录" onClick={() => setHistoryOpen(false)}>×</button></header>
-        <div className="agent-history-list">{history.length ? history.map((saved) => <article className={saved.sessionId === sessionId ? "current" : ""} key={saved.sessionId}>
-          <button className="history-main" onClick={() => openHistory(saved)}><b>{saved.title || sessionTitle(saved.messages ?? [])}</b><span>{historyTime(saved.updatedAt)} · {phaseLabel[saved.task?.phase ?? "idle"]}</span><small>{saved.messages?.length ?? 0} 条记录 · {saved.task?.evidence_ids?.length ?? 0} 条证据</small></button>
-          <div><button onClick={() => continueHistory(saved)}>基于此继续</button><button className="danger" aria-label={`删除 ${saved.title ?? "历史研究"}`} onClick={() => deleteHistory(saved)}>删除</button></div>
+        <div className="agent-history-list">{history.length ? history.map((saved) => <article className={saved.conversation_id === sessionId ? "current" : ""} key={saved.conversation_id}>
+          <button className="history-main" disabled={historyLoading} onClick={() => void openHistory(saved)}><b>{saved.title}</b><span>{historyTime(saved.updated_at)} · {phaseLabel[saved.phase ?? "idle"]}</span><small>{saved.message_count} 条记录 · {saved.evidence_count} 条证据{saved.parent_conversation_id ? " · 研究分支" : ""}</small></button>
+          <div><button disabled={historyLoading} onClick={() => void continueHistory(saved)}>基于此继续</button><button onClick={() => void renameHistory(saved)}>重命名</button><button className="danger" aria-label={`删除 ${saved.title || "历史研究"}`} onClick={() => void deleteHistory(saved)}>删除</button></div>
         </article>) : <div className="agent-history-empty"><b>还没有历史研究</b><p>发送第一条研究任务后会自动保存在本机，切换页面或重启桌面应用也不会丢失。</p></div>}</div>
         <footer><span>最多保留最近 {MAX_HISTORY_ITEMS} 项 · 不保存 API Key</span><button onClick={newResearch}>开始新对话</button></footer>
       </section>
@@ -693,7 +797,7 @@ export default function AgentTaskWorkbench() {
         </div>
       </section> : <div className="message-column">
         {messages.map((message) => <article className={`agent-message role-${message.role}`} key={message.id}>
-          <div className="message-meta"><b>{message.role === "user" ? "你" : message.role === "agent" ? "AStock Agent" : message.role === "tool" ? "工具" : "系统"}</b><time>{message.timestamp}</time></div>
+          <div className="message-meta"><b>{message.role === "user" ? "你" : message.role === "agent" ? "AStock Agent" : message.role === "tool" ? "工具" : "系统"}</b><span><button title="从这条消息创建新研究分支" disabled={busy || historyLoading} onClick={() => void branchFromMessage(message.id)}>从此分支</button><time>{message.timestamp}</time></span></div>
           <p>{message.text}</p>
         </article>)}
 

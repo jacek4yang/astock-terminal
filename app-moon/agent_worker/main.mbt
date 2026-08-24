@@ -250,7 +250,7 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json raise 
   match request.kind {
     "system.handshake" => response(request, true, {
       "protocol_version": @protocol.protocol_version,
-      "agent_version": "5.2.0",
+      "agent_version": "6.0.0",
       "reducer_version": "moonbit-agent-kernel-v1",
       "capabilities": ["pure_reducer", "replay", "evidence_gate", "provider_discovery", "candidate_planning", "multi_pass_review"],
       "max_frame_bytes": @protocol.max_frame_bytes,
