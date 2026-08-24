@@ -132,6 +132,44 @@ async function protonCommand<T>(name: string, args: Record<string, unknown> = {}
       return requestNative<T>("engine", "quant.scan.status", {});
     case "scan_cancel":
       return requestNative<T>("engine", "quant.scan.cancel", {});
+    case "settings_get_provider_status": {
+      const status = await requestNative<{
+        providers: {
+          joinquant: boolean;
+          optional: Record<string, { configured: boolean }>;
+        };
+      }>("engine", "credentials.status", {});
+      return {
+        tushare_token: Boolean(status.providers.optional.tushare?.configured),
+        iwencai_key: Boolean(status.providers.optional.iwencai?.configured),
+        jq_user: status.providers.joinquant,
+        jq_pwd: status.providers.joinquant,
+        sec_user_agent: Boolean(status.providers.optional.sec_edgar?.configured),
+        socks5: Boolean(status.providers.optional.socks5?.configured),
+      } as T;
+    }
+    case "settings_set_provider_credentials": {
+      for (const [field, provider] of [
+        ["tushare_token", "tushare"],
+        ["iwencai_key", "iwencai"],
+        ["sec_user_agent", "sec_edgar"],
+        ["socks5", "socks5"],
+      ] as const) {
+        if (!(field in args)) continue;
+        const value = String(args[field] ?? "").trim();
+        await requestNative("engine", value ? "credentials.provider.set" : "credentials.provider.delete", value ? { provider, value } : { provider });
+      }
+      if ("jq_user" in args || "jq_pwd" in args) {
+        const username = String(args.jq_user ?? "").trim();
+        const password = String(args.jq_pwd ?? "");
+        await requestNative(
+          "engine",
+          username && password ? "credentials.joinquant.set" : "credentials.joinquant.delete",
+          username && password ? { username, password } : {},
+        );
+      }
+      return { status: await protonCommand<ProviderStatus>("settings_get_provider_status"), message: "凭据已写入 Windows Credential Manager；需重启的数据源已明确标记。" } as T;
+    }
     case "get_all_a_shares":
       return readAllSharePages<T>();
     case "get_stock_bundle": {
@@ -2009,6 +2047,7 @@ export interface ProviderStatus {
   iwencai_key: boolean;
   jq_user: boolean;
   jq_pwd: boolean;
+  sec_user_agent: boolean;
   socks5: boolean;
 }
 

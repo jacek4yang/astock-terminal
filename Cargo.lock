@@ -448,6 +448,7 @@ dependencies = [
  "astock-storage",
  "astock-technical",
  "astock-trading-rules",
+ "base64 0.22.1",
  "chrono",
  "futures",
  "rusqlite",
@@ -459,6 +460,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

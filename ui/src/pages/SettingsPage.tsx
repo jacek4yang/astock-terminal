@@ -44,6 +44,7 @@ const CRED_FIELDS: {
 }[] = [
   { key: "tushare_token", label: "Tushare 访问凭证", secret: true, hint: "输入 Tushare 专业版访问凭证" },
   { key: "iwencai_key", label: "问财访问密钥", secret: true, hint: "输入同花顺问财开放接口访问密钥" },
+  { key: "sec_user_agent", label: "SEC 访问身份", secret: false, hint: "应用名称 contact@example.com" },
   { key: "jq_user", label: "聚宽账号", secret: false, hint: "输入聚宽(JoinQuant)账号" },
   { key: "jq_pwd", label: "聚宽密码", secret: true, hint: "输入聚宽密码" },
   { key: "socks5", label: "SOCKS5 代理", secret: false, hint: "如 socks5://127.0.0.1:10808" },
@@ -56,6 +57,7 @@ const EMPTY_CREDS: CredValues = {
   iwencai_key: "",
   jq_user: "",
   jq_pwd: "",
+  sec_user_agent: "",
   socks5: "",
 };
 

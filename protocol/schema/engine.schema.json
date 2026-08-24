@@ -47,6 +47,8 @@
         { "const": "workspace.watchlist.remove" },
         { "const": "workspace.watchlist.pin" },
         { "const": "credentials.status" },
+        { "const": "credentials.provider.set" },
+        { "const": "credentials.provider.delete" },
         { "const": "credentials.minimax.set" },
         { "const": "credentials.minimax.delete" },
         { "const": "credentials.minimax.quota" },

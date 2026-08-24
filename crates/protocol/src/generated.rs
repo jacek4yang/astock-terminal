@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=ff8d24dbc141c4182f74298b05f229a665815d729264e9cf29abf975390a4dfd
+// GENERATED from protocol/schema; schema-sha256=32f67c82cd37a569555467a4a7a27d104c38f689ffbbe0e87e0ce9828c60cdf9
 // Run: node protocol/codegen.mjs
 
 use serde::{Deserialize, Serialize};
@@ -47,6 +47,8 @@ pub const ENGINE_REQUEST_KINDS: &[&str] = &[
     "workspace.watchlist.remove",
     "workspace.watchlist.pin",
     "credentials.status",
+    "credentials.provider.set",
+    "credentials.provider.delete",
     "credentials.minimax.set",
     "credentials.minimax.delete",
     "credentials.minimax.quota",

@@ -1,4 +1,5 @@
 mod analysis;
+mod credentials;
 mod data_quality;
 mod data_root;
 mod event_store;
@@ -32,12 +33,20 @@ pub struct Engine {
     fundamental: Arc<FundamentalClient>,
     rules: RuleSet,
     scan: scan::ScanService,
+    provider_boot: credentials::BootStatus,
+    credential_migration_error: Option<String>,
     data_root: DataRootDecision,
 }
 
 impl Engine {
     pub async fn initialize() -> Result<Self, String> {
         let (storage, data_root) = data_root::resolve_and_open().await?;
+        let credential_migration_error = credentials::migrate_legacy(&storage)
+            .await
+            .err()
+            .map(|error| error.message);
+        let provider_boot = credentials::load_into_environment()
+            .map_err(|error| format!("load provider credentials: {}", error.message))?;
         event_store::migrate(&storage)
             .await
             .map_err(|error| format!("migrate Agent event store: {error}"))?;
@@ -65,6 +74,8 @@ impl Engine {
             fundamental,
             rules,
             scan: scan::ScanService::default(),
+            provider_boot,
+            credential_migration_error,
             data_root,
         })
     }
@@ -105,7 +116,8 @@ impl Engine {
                 "protocol_version": PROTOCOL_VERSION,
                 "uptime_ms": now_ms().saturating_sub(self.started_at_ms),
                 "data_root": self.data_root,
-                "provider_health": self.market.provider_health()
+                "provider_health": self.market.provider_health(),
+                "credential_migration_error": self.credential_migration_error,
             })),
             "diagnostics.data_quality" => {
                 let payload: data_quality::DataQualityQuery = decode_payload(&request.payload)?;
@@ -1041,10 +1053,21 @@ impl Engine {
                     .load_key()
                     .map_err(credential_store)?
                     .is_some();
+                let optional = credentials::status(self)?;
                 Ok(json!({"providers": {
                     "minimax": minimax,
-                    "joinquant": joinquant_user && joinquant_password && self.market.joinquant.available()
+                    "joinquant": joinquant_user && joinquant_password && self.market.joinquant.available(),
+                    "optional": optional
                 }}))
+            }
+            "credentials.provider.set" => {
+                let payload: credentials::ProviderCredentialPayload =
+                    decode_payload(&request.payload)?;
+                credentials::set(payload)
+            }
+            "credentials.provider.delete" => {
+                let payload: credentials::ProviderIdPayload = decode_payload(&request.payload)?;
+                credentials::delete(payload)
             }
             "credentials.minimax.set" => {
                 let payload: MinimaxCredentialPayload = decode_payload(&request.payload)?;
@@ -1061,6 +1084,18 @@ impl Engine {
                     .map_err(|error| {
                         ServiceError::new("credential_store", error.to_string(), false)
                     })?;
+                let verified = astock_minimax::KeyStore::new()
+                    .load_key()
+                    .map_err(credential_store)?
+                    .is_some_and(|stored| stored.expose() == key);
+                if !verified {
+                    let _ = astock_minimax::KeyStore::new().delete_key();
+                    return Err(ServiceError::new(
+                        "credential_verification_failed",
+                        "MiniMax Credential Manager read-back failed; the key was not retained",
+                        false,
+                    ));
+                }
                 Ok(json!({"stored": true}))
             }
             "credentials.minimax.delete" => {
@@ -1105,23 +1140,53 @@ impl Engine {
             "credentials.joinquant.set" => {
                 let payload: JoinQuantCredentialPayload = decode_payload(&request.payload)?;
                 let username = payload.username.trim();
-                if username.is_empty() || payload.password.len() < 6 {
+                if username.is_empty()
+                    || payload.password.len() < 6
+                    || username.chars().any(char::is_control)
+                    || payload.password.chars().any(char::is_control)
+                {
                     return Err(ServiceError::new(
                         "invalid_credential",
                         "聚宽用户名或密码格式无效",
                         false,
                     ));
                 }
-                self.market
-                    .joinquant
-                    .configure(username.to_string(), payload.password.clone())
-                    .map_err(upstream)?;
                 joinquant_username_store()
                     .store_key(&astock_minimax::SecretKey::new(username))
                     .map_err(credential_store)?;
-                joinquant_password_store()
-                    .store_key(&astock_minimax::SecretKey::new(payload.password))
-                    .map_err(credential_store)?;
+                if let Err(error) = joinquant_password_store()
+                    .store_key(&astock_minimax::SecretKey::new(&payload.password))
+                {
+                    let _ = joinquant_username_store().delete_key();
+                    return Err(credential_store(error));
+                }
+                let verified = joinquant_username_store()
+                    .load_key()
+                    .map_err(credential_store)?
+                    .is_some_and(|stored| stored.expose() == username)
+                    && joinquant_password_store()
+                        .load_key()
+                        .map_err(credential_store)?
+                        .is_some_and(|stored| stored.expose() == payload.password);
+                if !verified {
+                    let _ = joinquant_username_store().delete_key();
+                    let _ = joinquant_password_store().delete_key();
+                    return Err(ServiceError::new(
+                        "credential_verification_failed",
+                        "JoinQuant Credential Manager read-back failed; credentials were not retained",
+                        false,
+                    ));
+                }
+                if let Err(error) = self
+                    .market
+                    .joinquant
+                    .configure(username.to_string(), payload.password)
+                {
+                    let _ = joinquant_username_store().delete_key();
+                    let _ = joinquant_password_store().delete_key();
+                    self.market.joinquant.clear_credentials();
+                    return Err(upstream(error));
+                }
                 Ok(json!({"stored": true, "active": true}))
             }
             "credentials.joinquant.delete" => {

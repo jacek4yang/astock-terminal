@@ -16,6 +16,7 @@ astock-source-verification = { path = "../source-verification" }
 astock-storage = { path = "../storage" }
 astock-technical = { path = "../technical" }
 astock-trading-rules = { path = "../trading-rules" }
+base64 = "0.22"
 chrono.workspace = true
 futures.workspace = true
 serde.workspace = true
@@ -26,6 +27,7 @@ tokio.workspace = true
 tokio-util = "0.7"
 tracing.workspace = true
 tracing-subscriber.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

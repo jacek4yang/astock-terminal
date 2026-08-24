@@ -79,6 +79,8 @@ const migratedHandlers = new Set([
   "scan.scan_start",
   "scan.scan_status",
   "scan.scan_cancel",
+  "settings.settings_get_provider_status",
+  "settings.settings_set_provider_credentials",
 ]);
 
 const marketProviderStatus = {

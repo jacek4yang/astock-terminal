@@ -545,6 +545,11 @@
 .settings-grid section > p { margin: 11px 0 0; color: #647991; font-size: 8px; line-height: 1.6; }
 .credential-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-left: 136px; }
 .settings-grid .credential-message { margin-left: 136px; color: #75c9a8; }
+.provider-credential-row { display: grid; gap: 7px; margin-top: 9px; padding-top: 9px; border-top: 1px solid #1d3048; }
+.provider-credential-row:first-of-type { margin-top: 0; padding-top: 0; border-top: 0; }
+.provider-credential-row > div:first-child { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; color: #c7d6e7; font-size: 9px; }
+.settings-grid .provider-credential-row label { grid-template-columns: 1fr; margin: 0; }
+.provider-credential-row .credential-actions { margin-left: 0; }
 .settings-success { max-width: 1180px; margin: 0 auto 12px; padding: 8px 10px; border: 1px solid #27644f; border-radius: 4px; color: #81d2b1; background: #0d2a21; font-size: 9px; }
 .quota-list { display: grid; gap: 5px; margin: 10px 0 0 136px; }
 .quota-list article { display: grid; grid-template-columns: minmax(100px, .7fr) minmax(0, 1fr); gap: 3px 8px; padding: 7px 8px; border: 1px solid #263b56; border-radius: 3px; background: #091725; }
