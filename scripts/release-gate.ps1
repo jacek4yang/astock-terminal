@@ -393,10 +393,11 @@ $html = @"
 [System.IO.File]::WriteAllText($htmlPath, $html, [System.Text.UTF8Encoding]::new($false))
 
 $hashManifest = Join-Path $reportDirectory 'SHA256SUMS'
-$hashLines = foreach ($file in Get-ChildItem -File $reportDirectory) {
-    if ($file.Name -eq 'SHA256SUMS') { continue }
+$hashLines = foreach ($file in Get-ChildItem -LiteralPath $reportDirectory -Recurse -File | Sort-Object FullName) {
+    if ($file.FullName -eq $hashManifest) { continue }
     $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
-    "$hash  $($file.Name)"
+    $relative = [System.IO.Path]::GetRelativePath($reportDirectory, $file.FullName).Replace('\', '/')
+    "$hash  $relative"
 }
 [System.IO.File]::WriteAllLines($hashManifest, $hashLines, [System.Text.UTF8Encoding]::new($false))
 Get-ChildItem -Recurse -File $reportDirectory | ForEach-Object { $_.IsReadOnly = $true }

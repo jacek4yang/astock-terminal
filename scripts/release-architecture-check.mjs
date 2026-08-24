@@ -215,8 +215,15 @@ for (const publicationMarker of [
   "Local and remote immutable tag objects differ",
   "$signedEvidence.pe_inventory",
   "Get-ChildItem -LiteralPath $appDirectory -Recurse -File",
+  "AStock-Terminal-v6.0.0-verification-bundle.zip",
 ]) {
   if (!releasePublisher.includes(publicationMarker)) failures.push(`v6 publication guard is missing ${publicationMarker}`);
+}
+for (const reportIntegrityMarker of [
+  "Get-ChildItem -LiteralPath $reportDirectory -Recurse -File",
+  "GetRelativePath($reportDirectory, $file.FullName)",
+]) {
+  if (!releaseGate.includes(reportIntegrityMarker)) failures.push(`release report manifest is missing ${reportIntegrityMarker}`);
 }
 for (const evidenceMarker of [
   "packaged-app-pe-plus-installer",

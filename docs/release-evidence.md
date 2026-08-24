@@ -72,7 +72,8 @@ re-enumerates the application `.exe`/`.dll` set plus the installer and rejects
 any added, removed or changed PE.
 
 `scripts/release-gate.ps1` validates the complete contract and then hashes each
-evidence file into the immutable release report. Failed prerequisites mark
+report, HTML page and per-gate log recursively into the immutable release
+manifest. Failed prerequisites mark
 dependent gates as `SKIPPED` without executing them, and skipped gates still
 fail the overall report. Production signing depends on every critical gate. A
 minimal JSON containing only `gate`, `status` and `commit` is deliberately
@@ -85,4 +86,5 @@ private-repository visibility, the exact Actions disclosure, signed tag target
 and release assets. Publication requires the explicit
 `-ConfirmProductionRelease` switch plus PowerShell confirmation. A transient
 GitHub upload failure may resume from the same already-verified immutable tag;
-the script never moves or deletes that tag.
+the script never moves or deletes that tag. The uploaded verification bundle
+contains the JSON, HTML, all gate logs and their relative-path hash manifest.

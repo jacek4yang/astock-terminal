@@ -211,6 +211,12 @@ try {
         if (-not (Test-Path -LiteralPath $entry.Value -PathType Leaf)) { throw "Release asset is missing: $($entry.Value)" }
         Copy-Item -LiteralPath $entry.Value -Destination (Join-Path $publishStage $entry.Key) -Force
     }
+    $verificationBundle = Join-Path $publishStage 'AStock-Terminal-v6.0.0-verification-bundle.zip'
+    if (Test-Path -LiteralPath $verificationBundle) { Remove-Item -LiteralPath $verificationBundle -Force }
+    Compress-Archive -Path (Join-Path $reportDirectory '*') -DestinationPath $verificationBundle -CompressionLevel Optimal
+    if (-not (Test-Path -LiteralPath $verificationBundle -PathType Leaf)) {
+        throw 'Verification report bundle was not generated.'
+    }
     $assetManifest = Join-Path $publishStage 'AStock-Terminal-v6.0.0-SHA256SUMS.txt'
     $manifestLines = foreach ($file in Get-ChildItem -LiteralPath $publishStage -File | Sort-Object Name) {
         if ($file.FullName -eq $assetManifest) { continue }
