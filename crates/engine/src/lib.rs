@@ -5,6 +5,7 @@ mod data_root;
 mod disclosure_sync;
 mod event_store;
 mod global_sync;
+mod news_center;
 mod scan;
 mod settings;
 
@@ -636,6 +637,13 @@ impl Engine {
                 let providers = self.market.finance_news.provider_health().await;
                 serde_json::to_value(providers).map_err(serialize_error)
             }
+            "research.news.center" => {
+                let query: news_center::NewsCenterQuery = decode_payload(&request.payload)?;
+                let page = news_center::query(self.storage.clone(), &self.rules, query)
+                    .await
+                    .map_err(|error| ServiceError::new("news_center", error, false))?;
+                serde_json::to_value(page).map_err(serialize_error)
+            }
             "research.news.provider.set" => {
                 let payload: NewsProviderTogglePayload = decode_payload(&request.payload)?;
                 let provider_id = payload.provider_id.trim();
@@ -709,6 +717,99 @@ impl Engine {
                     .await
                     .map_err(storage)?;
                 serde_json::to_value(rows).map_err(serialize_error)
+            }
+            "research.news.user_state" => {
+                let payload: NewsUserStatePayload = decode_payload(&request.payload)?;
+                let document_id = validate_news_identifier(&payload.document_id, "document_id")?;
+                let action = match payload.action.as_str() {
+                    "read" => astock_storage::NewsUserAction::Read,
+                    "pinned" => astock_storage::NewsUserAction::Pinned,
+                    "favorite" => astock_storage::NewsUserAction::Favorite,
+                    "ignored" => astock_storage::NewsUserAction::Ignored,
+                    _ => {
+                        return Err(ServiceError::new(
+                            "invalid_payload",
+                            "action 只能是 read/pinned/favorite/ignored",
+                            false,
+                        ))
+                    }
+                };
+                let state = self
+                    .storage
+                    .news_user_state_set(document_id, action, payload.value)
+                    .await
+                    .map_err(storage)?;
+                serde_json::to_value(state).map_err(serialize_error)
+            }
+            "research.news.clusters.list" => {
+                let payload: LimitPayload = decode_payload(&request.payload)?;
+                let rows = astock_news_intelligence::NewsEventClusterer::new(self.storage.clone())
+                    .clusters_recent(payload.limit.unwrap_or(100).clamp(1, 500))
+                    .await
+                    .map_err(news_intelligence_error)?;
+                serde_json::to_value(rows).map_err(serialize_error)
+            }
+            "research.news.clusters.detail" => {
+                let payload: NewsClusterPayload = decode_payload(&request.payload)?;
+                let cluster_id = validate_news_identifier(&payload.cluster_id, "cluster_id")?;
+                let detail =
+                    astock_news_intelligence::NewsEventClusterer::new(self.storage.clone())
+                        .cluster_detail(cluster_id)
+                        .await
+                        .map_err(news_intelligence_error)?;
+                serde_json::to_value(detail).map_err(serialize_error)
+            }
+            "research.news.clusters.merge" => {
+                let payload: NewsClusterMergePayload = decode_payload(&request.payload)?;
+                let from = validate_news_identifier(&payload.from_cluster_id, "from_cluster_id")?;
+                let to = validate_news_identifier(&payload.to_cluster_id, "to_cluster_id")?;
+                let reason = validate_review_reason(&payload.reason)?;
+                if from == to {
+                    return Err(ServiceError::new(
+                        "invalid_payload",
+                        "不能把事件簇合并到自身",
+                        false,
+                    ));
+                }
+                let detail =
+                    astock_news_intelligence::NewsEventClusterer::new(self.storage.clone())
+                        .manual_merge(from, to, reason)
+                        .await
+                        .map_err(news_intelligence_error)?;
+                serde_json::to_value(detail).map_err(serialize_error)
+            }
+            "research.news.clusters.split" => {
+                let payload: NewsClusterSplitPayload = decode_payload(&request.payload)?;
+                let revision_id = validate_news_identifier(&payload.revision_id, "revision_id")?;
+                let reason = validate_review_reason(&payload.reason)?;
+                let detail =
+                    astock_news_intelligence::NewsEventClusterer::new(self.storage.clone())
+                        .manual_split(revision_id, reason)
+                        .await
+                        .map_err(news_intelligence_error)?;
+                serde_json::to_value(detail).map_err(serialize_error)
+            }
+            "research.news.reviews.list" => {
+                let payload: LimitPayload = decode_payload(&request.payload)?;
+                let rows = astock_news_intelligence::NewsEventClusterer::new(self.storage.clone())
+                    .pending_reviews(payload.limit.unwrap_or(100).clamp(1, 500))
+                    .await
+                    .map_err(news_intelligence_error)?;
+                serde_json::to_value(rows).map_err(serialize_error)
+            }
+            "research.news.reviews.resolve" => {
+                let payload: NewsReviewResolvePayload = decode_payload(&request.payload)?;
+                let task_id = validate_news_identifier(&payload.task_id, "task_id")?;
+                let conclusion_key =
+                    validate_news_identifier(&payload.conclusion_key, "conclusion_key")?;
+                let triggering_revision =
+                    validate_news_identifier(&payload.triggering_revision, "triggering_revision")?;
+                let resolved =
+                    astock_news_intelligence::NewsEventClusterer::new(self.storage.clone())
+                        .resolve_review(task_id, conclusion_key, triggering_revision)
+                        .await
+                        .map_err(news_intelligence_error)?;
+                Ok(Value::Bool(resolved))
             }
             "research.data_reconcile" => {
                 let payload: SymbolPayload = decode_payload(&request.payload)?;
@@ -2037,6 +2138,43 @@ struct NewsObservationPayload {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct NewsUserStatePayload {
+    document_id: String,
+    action: String,
+    value: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewsClusterPayload {
+    cluster_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewsClusterMergePayload {
+    from_cluster_id: String,
+    to_cluster_id: String,
+    reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewsClusterSplitPayload {
+    revision_id: String,
+    reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewsReviewResolvePayload {
+    task_id: String,
+    conclusion_key: String,
+    triggering_revision: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TaskIdPayload {
     task_id: String,
 }
@@ -2154,6 +2292,10 @@ fn disclosure_error(error: astock_disclosure::Error) -> ServiceError {
 
 fn serialize_error(error: serde_json::Error) -> ServiceError {
     ServiceError::new("serialization", error.to_string(), false)
+}
+
+fn news_intelligence_error(error: astock_news_intelligence::Error) -> ServiceError {
+    ServiceError::new("news_clustering", error.to_string(), false)
 }
 
 async fn persist_driver_tree(
@@ -2329,6 +2471,19 @@ fn validate_news_identifier<'a>(raw: &'a str, field: &str) -> Result<&'a str, Se
         Err(ServiceError::new(
             "invalid_payload",
             format!("{field} 必须是 1 至 256 个无控制字符的文本"),
+            false,
+        ))
+    } else {
+        Ok(value)
+    }
+}
+
+fn validate_review_reason(raw: &str) -> Result<&str, ServiceError> {
+    let value = raw.trim();
+    if value.is_empty() || value.chars().count() > 2_000 || value.chars().any(char::is_control) {
+        Err(ServiceError::new(
+            "invalid_payload",
+            "人工复核理由必须是 1 至 2000 个无控制字符的文本",
             false,
         ))
     } else {
@@ -2923,6 +3078,8 @@ mod tests {
         );
         assert!(validate_news_identifier("\n", "document_id").is_err());
         assert!(validate_news_identifier(&"x".repeat(257), "provider_id").is_err());
+        assert_eq!(validate_review_reason(" 独立事件 ").unwrap(), "独立事件");
+        assert!(validate_review_reason(" ").is_err());
     }
 
     #[tokio::test]

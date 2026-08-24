@@ -26,7 +26,10 @@ import {
   getGlobalTransmissionPaths,
   getNewsArchiveRecent,
   getNewsArchiveRevisions,
+  getNewsEventClusterDetail,
+  getNewsEventClusters,
   getNewsIngestObservations,
+  getPendingNewsEvidenceReviews,
   getNewsProviderHealth,
   getPool,
   globalSyncCancel,
@@ -34,7 +37,13 @@ import {
   globalSyncStatus,
   queryGlobalDocuments,
   queryDisclosures,
+  queryNewsCenter,
+  refreshNewsCenter,
+  mergeNewsEventClusters,
+  resolveNewsEvidenceReview,
+  setNewsItemState,
   setNewsProviderEnabled,
+  splitNewsEventRevision,
 } from "./api";
 
 describe("Proton global research bridge", () => {
@@ -148,6 +157,69 @@ describe("Proton global research bridge", () => {
     expect(requestNative.mock.calls[5][2]).toEqual({
       provider_id: "cninfo-announcements",
       limit: 25,
+    });
+  });
+
+  it("routes news clustering, review and user state through durable Engine services", async () => {
+    await queryNewsCenter({
+      keyword: "业绩",
+      category: "important",
+      source_id: "",
+      importance: "important",
+      entity_keywords: ["300308"],
+      event_type: "earnings",
+      language: "zh-CN",
+      verification: "primary",
+      user_state: "",
+      from_utc: null,
+      to_utc: null,
+      page: 1,
+      page_size: 50,
+    });
+    await refreshNewsCenter(["cninfo-announcements"], "业绩", "300308", 100);
+    await setNewsItemState("document:abc", "favorite", true);
+    await getNewsEventClusters(80);
+    await getNewsEventClusterDetail("cluster:one");
+    await mergeNewsEventClusters("cluster:one", "cluster:two", "同一公司同一事项");
+    await splitNewsEventRevision("revision:three", "发布日期与主体均不同");
+    await getPendingNewsEvidenceReviews(40);
+    await resolveNewsEvidenceReview("task:1", "growth", "revision:three");
+
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "research.news.center",
+      "research.news",
+      "research.news.user_state",
+      "research.news.clusters.list",
+      "research.news.clusters.detail",
+      "research.news.clusters.merge",
+      "research.news.clusters.split",
+      "research.news.reviews.list",
+      "research.news.reviews.resolve",
+    ]);
+    expect(requestNative.mock.calls[0][2]).toMatchObject({
+      keyword: "业绩",
+      category: "important",
+      page_size: 50,
+    });
+    expect(requestNative.mock.calls[1][2]).toEqual({
+      sources: ["cninfo-announcements"],
+      keyword: "业绩",
+      symbol: "300308",
+      limit: 100,
+    });
+    expect(requestNative.mock.calls[2][2]).toEqual({
+      document_id: "document:abc",
+      action: "favorite",
+      value: true,
+    });
+    expect(requestNative.mock.calls[5][2]).toMatchObject({
+      from_cluster_id: "cluster:one",
+      to_cluster_id: "cluster:two",
+    });
+    expect(requestNative.mock.calls[8][2]).toEqual({
+      task_id: "task:1",
+      conclusion_key: "growth",
+      triggering_revision: "revision:three",
     });
   });
 });

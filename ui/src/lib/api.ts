@@ -117,6 +117,14 @@ async function protonCommand<T>(name: string, args: Record<string, unknown> = {}
       return requestNative<T>("engine", "research.disclosures.sync.cancel", {});
     case "get_news_provider_health":
       return requestNative<T>("engine", "research.news.providers", {});
+    case "query_news_center":
+      return requestNative<T>(
+        "engine",
+        "research.news.center",
+        (args.query ?? {}) as Record<string, unknown>,
+      );
+    case "refresh_news_center":
+      return requestNative<T>("engine", "research.news", args, { deadlineMs: 90_000 });
     case "set_news_provider_enabled":
       return requestNative<T>("engine", "research.news.provider.set", args);
     case "get_news_archive_recent":
@@ -127,6 +135,20 @@ async function protonCommand<T>(name: string, args: Record<string, unknown> = {}
       return requestNative<T>("engine", "research.news.archive.integrity", {});
     case "get_news_ingest_observations":
       return requestNative<T>("engine", "research.news.archive.observations", args);
+    case "set_news_item_state":
+      return requestNative<T>("engine", "research.news.user_state", args);
+    case "get_news_event_clusters":
+      return requestNative<T>("engine", "research.news.clusters.list", args);
+    case "get_news_event_cluster_detail":
+      return requestNative<T>("engine", "research.news.clusters.detail", args);
+    case "merge_news_event_clusters":
+      return requestNative<T>("engine", "research.news.clusters.merge", args);
+    case "split_news_event_revision":
+      return requestNative<T>("engine", "research.news.clusters.split", args);
+    case "get_pending_news_evidence_reviews":
+      return requestNative<T>("engine", "research.news.reviews.list", args);
+    case "resolve_news_evidence_review":
+      return requestNative<T>("engine", "research.news.reviews.resolve", args);
     case "get_market_breadth": {
       const result = await requestNative<{ breadth: unknown }>("engine", "market.overview", {});
       return result.breadth as T;
