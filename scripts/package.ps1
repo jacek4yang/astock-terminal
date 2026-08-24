@@ -7,7 +7,7 @@ $build = Initialize-AStockBuildEnvironment -SkipSpaceCheck:$SkipSpaceCheck
 & (Join-Path $PSScriptRoot 'build.ps1') -Component all -Release -SkipSpaceCheck:$SkipSpaceCheck
 Set-AStockWorkerEnvironment -Environment $build -Release
 
-$workerStage = Join-Path $build.Paths.PackageStage 'workers'
+$workerStage = Join-Path $build.Paths.RendererDist 'workers'
 New-Item -ItemType Directory -Path $workerStage -Force | Out-Null
 Copy-Item -LiteralPath $env:ASTOCK_ENGINE_EXE -Destination (Join-Path $workerStage 'astock-engine.exe') -Force
 Copy-Item -LiteralPath $env:ASTOCK_AGENT_EXE -Destination (Join-Path $workerStage 'astock-agent.exe') -Force

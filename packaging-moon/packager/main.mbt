@@ -13,7 +13,7 @@ async fn main {
   let host_executable = required_env("ASTOCK_HOST_EXE")
   let desktop_root = required_env("ASTOCK_DESKTOP_ROOT")
   let frontend_dist = required_env("ASTOCK_RENDERER_DIST")
-  let worker_resources = required_env("ASTOCK_PACKAGE_STAGE") + "\\workers"
+  let worker_resources = frontend_dist + "\\workers"
   let artifacts = required_env("ASTOCK_ARTIFACTS_DIR")
   let moon_target = required_env("ASTOCK_MOON_DESKTOP_TARGET")
   let app_icon = desktop_root + "\\..\\assets\\icons\\icon.ico"
@@ -38,7 +38,10 @@ async fn main {
     spec,
     helper,
     requirements,
-    desktop_root,
+    // Payload destinations are relative to the renderer root: the renderer
+    // itself lands at Resources/. and Workers at Resources/workers. This also
+    // keeps every source/destination on the D-drive package staging volume.
+    frontend_dist,
     "6.0.0",
     "60000",
     Some(frontend_dist),

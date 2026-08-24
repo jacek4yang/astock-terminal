@@ -47,6 +47,27 @@ function Enable-AStockProtonLiveResize {
     if ($LASTEXITCODE -ne 0) { throw 'Failed to apply the Proton Windows live-resize patch.' }
 }
 
+function Enable-AStockProtonBundleWindowsPaths {
+    param([Parameter(Mandatory)][string]$RepositoryRoot)
+
+    # MoonBit Path::relative currently returns the absolute candidate for
+    # same-drive Windows paths. Proton Bundle then rejects an otherwise valid
+    # D-drive renderer payload. Keep this containment-checked fix pinned to the
+    # audited Proton Bundle 0.2.1 source.
+    $bundleRoot = Join-Path $RepositoryRoot 'packaging-moon\.mooncakes\moonbit-community\proton_bundle'
+    $source = Join-Path $bundleRoot 'support.mbt'
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { return }
+    $text = Get-Content -LiteralPath $source -Raw
+    if ($text.Contains('let comparable_root = if @path.sep')) { return }
+    $patch = Join-Path $RepositoryRoot 'patches\proton-bundle-0.2.1-windows-relative-path.patch'
+    & git -C $RepositoryRoot apply --check --unsafe-paths --directory='packaging-moon/.mooncakes/moonbit-community/proton_bundle' $patch
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Pinned Proton Bundle source does not match the audited Windows path patch.'
+    }
+    & git -C $RepositoryRoot apply --unsafe-paths --directory='packaging-moon/.mooncakes/moonbit-community/proton_bundle' $patch
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to apply the Proton Bundle Windows path patch.' }
+}
+
 function Initialize-AStockBuildEnvironment {
     param(
         [switch]$SkipSpaceCheck
@@ -55,6 +76,7 @@ function Initialize-AStockBuildEnvironment {
     $repoRoot = Get-AStockRepositoryRoot
     Enable-AStockProtonAlloyRuntime -RepositoryRoot $repoRoot
     Enable-AStockProtonLiveResize -RepositoryRoot $repoRoot
+    Enable-AStockProtonBundleWindowsPaths -RepositoryRoot $repoRoot
     $buildRoot = if ([string]::IsNullOrWhiteSpace($env:ASTOCK_BUILD_ROOT)) {
         'D:\astock-build\astock-terminal'
     } else {

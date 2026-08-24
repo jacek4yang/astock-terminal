@@ -1,0 +1,33 @@
+diff --git a/support.mbt b/support.mbt
+--- a/support.mbt
++++ b/support.mbt
+@@ -53,15 +53,27 @@ async fn path_is_dir(value : String) -> Bool {
+ ///|
+ fn relative_to_base(base : String, value : String) -> String? {
+-  let root = resolve_path(base, ".")
+-  let candidate = resolve_path(base, value)
+-  let relative = relative_path(root, candidate).replace_all(old="\\", new="/")
+-  if relative == "" {
++  let root = resolve_path(base, ".").replace_all(old="\\", new="/")
++  let candidate = resolve_path(base, value).replace_all(old="\\", new="/")
++  let comparable_root = if @path.sep == '\\' { root.to_lower() } else { root }
++  let comparable_candidate = if @path.sep == '\\' {
++    candidate.to_lower()
++  } else {
++    candidate
++  }
++  if comparable_candidate == comparable_root {
+     Some(".")
+-  } else if relative == ".." || relative.has_prefix("../") {
+-    None
+   } else {
+-    Some(relative)
++    let prefix = comparable_root + "/"
++    guard comparable_candidate.has_prefix(prefix) else { return None }
++    Some(
++      candidate
++      .unsafe_substring(start=root.length() + 1, end=candidate.length())
++      .to_string(),
++    )
+   }
+ }
