@@ -1164,6 +1164,27 @@ impl Engine {
                     .map_err(event_store_error)?;
                 Ok(json!({"ok": true}))
             }
+            "agent.effect.begin" => {
+                let payload: event_store::BeginEffect = decode_payload(&request.payload)?;
+                let inserted = event_store::begin_effect(&self.storage, payload)
+                    .await
+                    .map_err(event_store_error)?;
+                Ok(json!({"inserted": inserted}))
+            }
+            "agent.effect.complete" => {
+                let payload: event_store::CompleteEffect = decode_payload(&request.payload)?;
+                event_store::complete_effect(&self.storage, payload)
+                    .await
+                    .map_err(event_store_error)?;
+                Ok(json!({"ok": true}))
+            }
+            "agent.effect.list" => {
+                let payload: TaskIdPayload = decode_payload(&request.payload)?;
+                let effects = event_store::list_effects(&self.storage, payload.task_id)
+                    .await
+                    .map_err(event_store_error)?;
+                Ok(json!({"items": effects}))
+            }
             "agent.task.load" => {
                 let payload: TaskIdPayload = decode_payload(&request.payload)?;
                 let loaded = event_store::load_task(&self.storage, payload.task_id)

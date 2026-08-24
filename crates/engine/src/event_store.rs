@@ -29,6 +29,26 @@ pub struct PutCheckpoint {
     pub task_id: String,
     pub accepted_seq: i64,
     pub phase: String,
+    pub checkpoint: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BeginEffect {
+    pub effect_id: String,
+    pub task_id: String,
+    pub caused_by_seq: i64,
+    pub effect_kind: String,
+    pub effect: Value,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompleteEffect {
+    pub effect_id: String,
+    pub status: String,
+    pub result: Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -38,6 +58,21 @@ pub struct DurableTask {
     pub task_spec: Value,
     pub phase: String,
     pub accepted_seq: i64,
+    pub checkpoint: Option<Value>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DurableEffect {
+    pub effect_id: String,
+    pub task_id: String,
+    pub caused_by_seq: i64,
+    pub effect_kind: String,
+    pub effect: Value,
+    pub status: String,
+    pub result: Option<Value>,
+    pub idempotency_key: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -124,6 +159,7 @@ pub async fn migrate(storage: &Storage) -> Result<(), astock_storage::Error> {
                    task_spec_json TEXT NOT NULL,
                    phase TEXT NOT NULL,
                    accepted_seq INTEGER NOT NULL DEFAULT 0,
+                   checkpoint_json TEXT,
                    created_at INTEGER NOT NULL,
                    updated_at INTEGER NOT NULL
                  );
@@ -169,6 +205,19 @@ pub async fn migrate(storage: &Storage) -> Result<(), astock_storage::Error> {
                    ON agent_conversations_v2(deleted_at, updated_at DESC);
                  COMMIT;",
             )?;
+            let has_checkpoint = {
+                let mut statement = connection.prepare("PRAGMA table_info(agent_tasks_v2)")?;
+                let columns = statement
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                columns.iter().any(|column| column == "checkpoint_json")
+            };
+            if !has_checkpoint {
+                connection.execute(
+                    "ALTER TABLE agent_tasks_v2 ADD COLUMN checkpoint_json TEXT",
+                    [],
+                )?;
+            }
             Ok(())
         })
         .await
@@ -260,6 +309,11 @@ pub async fn append_event(storage: &Storage, input: AppendEvent) -> Result<bool,
 }
 
 pub async fn put_checkpoint(storage: &Storage, input: PutCheckpoint) -> Result<(), String> {
+    let checkpoint_json = serde_json::to_string(&input.checkpoint)
+        .map_err(|error| format!("checkpoint_encode_failed:{error}"))?;
+    if checkpoint_json.len() > astock_protocol::MAX_FRAME_BYTES {
+        return Err("checkpoint_too_large".into());
+    }
     let now = now_secs();
     storage
         .run(move |connection| {
@@ -283,11 +337,163 @@ pub async fn put_checkpoint(storage: &Storage, input: PutCheckpoint) -> Result<(
                 )));
             }
             transaction.execute(
-                "UPDATE agent_tasks_v2 SET phase=?2,accepted_seq=?3,updated_at=?4 WHERE task_id=?1",
-                params![input.task_id, input.phase, input.accepted_seq, now],
+                "UPDATE agent_tasks_v2
+                 SET phase=?2,accepted_seq=?3,checkpoint_json=?4,updated_at=?5
+                 WHERE task_id=?1",
+                params![
+                    input.task_id,
+                    input.phase,
+                    input.accepted_seq,
+                    checkpoint_json,
+                    now
+                ],
             )?;
             transaction.commit()?;
             Ok(())
+        })
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn begin_effect(storage: &Storage, input: BeginEffect) -> Result<bool, String> {
+    validate_identity(&input.effect_id, "effect_id")?;
+    validate_identity(&input.task_id, "task_id")?;
+    validate_identity(&input.effect_kind, "effect_kind")?;
+    validate_identity(&input.idempotency_key, "idempotency_key")?;
+    if input.caused_by_seq < 0 {
+        return Err("caused_by_seq must not be negative".into());
+    }
+    let effect_json = serde_json::to_string(&input.effect).map_err(|error| error.to_string())?;
+    if effect_json.len() > astock_protocol::MAX_FRAME_BYTES {
+        return Err("effect_too_large".into());
+    }
+    let now = now_secs();
+    storage
+        .run(move |connection| {
+            let transaction = connection.transaction()?;
+            let existing: Option<(String, String, String, String)> = transaction
+                .query_row(
+                    "SELECT effect_id,task_id,effect_kind,effect_json
+                     FROM agent_effects_v2
+                     WHERE effect_id=?1 OR idempotency_key=?2",
+                    params![input.effect_id, input.idempotency_key],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
+            if let Some((effect_id, task_id, effect_kind, stored_json)) = existing {
+                if effect_id == input.effect_id
+                    && task_id == input.task_id
+                    && effect_kind == input.effect_kind
+                    && stored_json == effect_json
+                {
+                    transaction.commit()?;
+                    return Ok(false);
+                }
+                return Err(astock_storage::Error::Invalid(
+                    "effect_identity_conflict".into(),
+                ));
+            }
+            transaction.execute(
+                "INSERT INTO agent_effects_v2
+                 (effect_id,task_id,caused_by_seq,effect_kind,effect_json,status,
+                  result_json,idempotency_key,created_at,updated_at)
+                 VALUES (?1,?2,?3,?4,?5,'pending',NULL,?6,?7,?7)",
+                params![
+                    input.effect_id,
+                    input.task_id,
+                    input.caused_by_seq,
+                    input.effect_kind,
+                    effect_json,
+                    input.idempotency_key,
+                    now
+                ],
+            )?;
+            transaction.commit()?;
+            Ok(true)
+        })
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn complete_effect(storage: &Storage, input: CompleteEffect) -> Result<(), String> {
+    validate_identity(&input.effect_id, "effect_id")?;
+    if !matches!(input.status.as_str(), "succeeded" | "failed" | "cancelled") {
+        return Err("invalid_effect_terminal_status".into());
+    }
+    let result_json = serde_json::to_string(&input.result).map_err(|error| error.to_string())?;
+    if result_json.len() > astock_protocol::MAX_FRAME_BYTES {
+        return Err("effect_result_too_large".into());
+    }
+    let now = now_secs();
+    storage
+        .run(move |connection| {
+            let transaction = connection.transaction()?;
+            let existing: Option<(String, Option<String>)> = transaction
+                .query_row(
+                    "SELECT status,result_json FROM agent_effects_v2 WHERE effect_id=?1",
+                    params![input.effect_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((status, stored_result)) = existing else {
+                return Err(astock_storage::Error::Invalid("effect_not_found".into()));
+            };
+            if status != "pending" {
+                if status == input.status && stored_result.as_deref() == Some(&result_json) {
+                    transaction.commit()?;
+                    return Ok(());
+                }
+                return Err(astock_storage::Error::Invalid(
+                    "effect_terminal_conflict".into(),
+                ));
+            }
+            transaction.execute(
+                "UPDATE agent_effects_v2 SET status=?2,result_json=?3,updated_at=?4
+                 WHERE effect_id=?1",
+                params![input.effect_id, input.status, result_json, now],
+            )?;
+            transaction.commit()?;
+            Ok(())
+        })
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn list_effects(
+    storage: &Storage,
+    task_id: String,
+) -> Result<Vec<DurableEffect>, String> {
+    validate_identity(&task_id, "task_id")?;
+    storage
+        .run(move |connection| {
+            let mut statement = connection.prepare(
+                "SELECT effect_id,task_id,caused_by_seq,effect_kind,effect_json,status,
+                        result_json,idempotency_key,created_at,updated_at
+                 FROM agent_effects_v2 WHERE task_id=?1 ORDER BY created_at ASC,effect_id ASC",
+            )?;
+            let rows = statement
+                .query_map(params![task_id], |row| {
+                    let effect_json: String = row.get(4)?;
+                    let result_json: Option<String> = row.get(6)?;
+                    Ok(DurableEffect {
+                        effect_id: row.get(0)?,
+                        task_id: row.get(1)?,
+                        caused_by_seq: row.get(2)?,
+                        effect_kind: row.get(3)?,
+                        effect: serde_json::from_str(&effect_json).unwrap_or(Value::Null),
+                        status: row.get(5)?,
+                        result: result_json
+                            .as_deref()
+                            .map(serde_json::from_str)
+                            .transpose()
+                            .unwrap_or(None),
+                        idempotency_key: row.get(7)?,
+                        created_at: row.get(8)?,
+                        updated_at: row.get(9)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
         })
         .await
         .map_err(|error| error.to_string())
@@ -298,7 +504,8 @@ pub async fn load_task(storage: &Storage, task_id: String) -> Result<LoadedTask,
         .run(move |connection| {
             let task = connection
                 .query_row(
-                    "SELECT task_id,reducer_version,task_spec_json,phase,accepted_seq,created_at,updated_at
+                    "SELECT task_id,reducer_version,task_spec_json,phase,accepted_seq,
+                            checkpoint_json,created_at,updated_at
                      FROM agent_tasks_v2 WHERE task_id=?1",
                     params![task_id],
                     |row| {
@@ -309,8 +516,11 @@ pub async fn load_task(storage: &Storage, task_id: String) -> Result<LoadedTask,
                             task_spec: serde_json::from_str(&spec).unwrap_or(Value::Null),
                             phase: row.get(3)?,
                             accepted_seq: row.get(4)?,
-                            created_at: row.get(5)?,
-                            updated_at: row.get(6)?,
+                            checkpoint: row
+                                .get::<_, Option<String>>(5)?
+                                .and_then(|value| serde_json::from_str(&value).ok()),
+                            created_at: row.get(6)?,
+                            updated_at: row.get(7)?,
                         })
                     },
                 )
@@ -345,7 +555,8 @@ pub async fn list_tasks(storage: &Storage, limit: usize) -> Result<Vec<DurableTa
     storage
         .run(move |connection| {
             let mut statement = connection.prepare(
-                "SELECT task_id,reducer_version,task_spec_json,phase,accepted_seq,created_at,updated_at
+                "SELECT task_id,reducer_version,task_spec_json,phase,accepted_seq,
+                        checkpoint_json,created_at,updated_at
                  FROM agent_tasks_v2 ORDER BY updated_at DESC LIMIT ?1",
             )?;
             let tasks = statement
@@ -357,8 +568,11 @@ pub async fn list_tasks(storage: &Storage, limit: usize) -> Result<Vec<DurableTa
                         task_spec: serde_json::from_str(&spec).unwrap_or(Value::Null),
                         phase: row.get(3)?,
                         accepted_seq: row.get(4)?,
-                        created_at: row.get(5)?,
-                        updated_at: row.get(6)?,
+                        checkpoint: row
+                            .get::<_, Option<String>>(5)?
+                            .and_then(|value| serde_json::from_str(&value).ok()),
+                        created_at: row.get(6)?,
+                        updated_at: row.get(7)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -730,14 +944,61 @@ mod tests {
                 task_id: "task-1".into(),
                 accepted_seq: 1,
                 phase: "reasoning".into(),
+                checkpoint: serde_json::json!({"task_id":"task-1","accepted_seq":1}),
             },
         )
         .await
         .unwrap();
         let loaded = load_task(&storage, "task-1".into()).await.unwrap();
         assert_eq!(loaded.task.accepted_seq, 1);
+        assert_eq!(loaded.task.checkpoint.unwrap()["accepted_seq"], 1);
         assert_eq!(loaded.events.len(), 1);
         assert_eq!(loaded.events[0].event_id, "event-1");
+    }
+
+    #[tokio::test]
+    async fn effects_are_persisted_before_results_and_finish_idempotently() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(StorageConfig::with_base_dir(dir.path())).unwrap();
+        migrate(&storage).await.unwrap();
+        create_task(
+            &storage,
+            CreateTask {
+                task_id: "task-effect".into(),
+                reducer_version: "kernel-v1".into(),
+                task_spec: serde_json::json!({"objective":"audit"}),
+                phase: "preparing".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let intent = BeginEffect {
+            effect_id: "effect-1".into(),
+            task_id: "task-effect".into(),
+            caused_by_seq: 1,
+            effect_kind: "provider.request".into(),
+            effect: serde_json::json!({"model":"minimax-plus","operation":"plan"}),
+            idempotency_key: "task-effect:plan:1".into(),
+        };
+        assert!(begin_effect(&storage, intent.clone()).await.unwrap());
+        assert!(!begin_effect(&storage, intent).await.unwrap());
+        let pending = list_effects(&storage, "task-effect".into()).await.unwrap();
+        assert_eq!(pending[0].status, "pending");
+        assert!(pending[0].result.is_none());
+
+        let completion = CompleteEffect {
+            effect_id: "effect-1".into(),
+            status: "succeeded".into(),
+            result: serde_json::json!({"evidence_ids":["evidence-1"]}),
+        };
+        complete_effect(&storage, completion.clone()).await.unwrap();
+        complete_effect(&storage, completion).await.unwrap();
+        let completed = list_effects(&storage, "task-effect".into()).await.unwrap();
+        assert_eq!(completed[0].status, "succeeded");
+        assert_eq!(
+            completed[0].result.as_ref().unwrap()["evidence_ids"][0],
+            "evidence-1"
+        );
     }
 
     #[tokio::test]

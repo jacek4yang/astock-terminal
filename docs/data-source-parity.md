@@ -4,7 +4,7 @@ Updated: 2026-08-24 (Asia/Shanghai)
 
 This document treats the last Tauri application as a migration oracle, not as
 the target architecture. The old application registers 127 UI commands. The
-versioned Engine v1 contract currently exposes 54 coarse request kinds. A lower
+versioned Engine v1 contract currently exposes 57 coarse request kinds. A lower
 command count is intentional, but a feature is not considered migrated merely
 because its Rust crate still compiles.
 

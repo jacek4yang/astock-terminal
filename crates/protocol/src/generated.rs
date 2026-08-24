@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=81c4e1483f2963faef9ee6be198d9a6cc56b09f64141c323ce4d8a9f17e4755e
+// GENERATED from protocol/schema; schema-sha256=a252a7a6c8434c06a48ff5932bb24713c0568b9500a4716625d9669d74160749
 // Run: node protocol/codegen.mjs
 
 use serde::{Deserialize, Serialize};
@@ -54,6 +54,9 @@ pub const ENGINE_REQUEST_KINDS: &[&str] = &[
     "agent.task.create",
     "agent.event.append",
     "agent.checkpoint.put",
+    "agent.effect.begin",
+    "agent.effect.complete",
+    "agent.effect.list",
     "agent.task.load",
     "agent.task.list",
     "agent.conversation.save",
