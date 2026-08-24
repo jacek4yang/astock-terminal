@@ -535,8 +535,10 @@ mod tests {
 
     #[test]
     fn query_limits_reject_control_text_and_inverted_ranges() {
-        let mut query = NewsCenterQuery::default();
-        query.keyword = "x\n".into();
+        let mut query = NewsCenterQuery {
+            keyword: "x\n".into(),
+            ..Default::default()
+        };
         assert!(validate_query(&query).is_err());
         query.keyword.clear();
         query.from_utc = Some(20);

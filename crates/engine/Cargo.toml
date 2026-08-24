@@ -10,6 +10,7 @@ astock-core = { path = "../core" }
 astock-chanlun = { path = "../chanlun" }
 astock-disclosure = { path = "../disclosure" }
 astock-entity-linking = { path = "../entity-linking" }
+astock-event-intelligence = { path = "../event-intelligence" }
 astock-fundamental = { path = "../fundamental" }
 astock-global-intelligence = { path = "../global-intelligence" }
 astock-market-data = { path = "../market-data" }

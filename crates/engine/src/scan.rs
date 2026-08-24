@@ -248,9 +248,11 @@ async fn scan_one(
     );
     let hit = hit_from_signal(
         &code,
-        (!quote.data.name.is_empty())
-            .then(|| quote.data.name.clone())
-            .unwrap_or(stock.name),
+        if !quote.data.name.is_empty() {
+            quote.data.name.clone()
+        } else {
+            stock.name
+        },
         &signal,
     );
     (code, hit)

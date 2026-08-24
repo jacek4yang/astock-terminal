@@ -275,7 +275,7 @@ pub(super) fn set(payload: ProviderCredentialPayload) -> Result<Value, ServiceEr
     let key = SecretKey::new(value.clone());
     store(slot).store_key(&key).map_err(credential_store)?;
     let read_back = load(slot)?;
-    if !read_back.is_some_and(|stored| stored.expose() == value) {
+    if read_back.is_none_or(|stored| stored.expose() != value) {
         let _ = store(slot).delete_key();
         return Err(ServiceError::new(
             "credential_verification_failed",

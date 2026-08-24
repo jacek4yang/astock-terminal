@@ -88,6 +88,7 @@ pub async fn signal(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn signal_with_context(
     rules: &RuleSet,
     symbol: &Symbol,

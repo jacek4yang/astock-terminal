@@ -365,6 +365,7 @@ fn cninfo_columns(code: Option<&str>) -> Vec<&'static str> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn sync_cninfo(
     market: &Arc<MarketData>,
     storage: &Storage,

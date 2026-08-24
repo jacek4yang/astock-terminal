@@ -414,7 +414,7 @@ pub(super) async fn reconcile_quote(engine: &Engine, symbol: &str) -> Result<Val
         "failures": failures,
         "blocking": blocking,
         "comparable_sources": successful,
-        "limitation": (successful < 2).then(|| "当前不足两个成功来源，已保留失败详情；不会用缓存或推算值伪装双源校验"),
+        "limitation": (successful < 2).then_some("当前不足两个成功来源，已保留失败详情；不会用缓存或推算值伪装双源校验"),
     }))
 }
 
@@ -701,7 +701,7 @@ pub(super) async fn reconcile_valuation(
         "failures": failures,
         "blocking": blocking,
         "comparable_sources": sources.len(),
-        "limitation": (sources.len() < 2).then(|| "已配置且成功返回的估值来源不足两个；估值仍可展示，但不得标为高置信"),
+        "limitation": (sources.len() < 2).then_some("已配置且成功返回的估值来源不足两个；估值仍可展示，但不得标为高置信"),
     }))
 }
 

@@ -454,7 +454,7 @@ fn verify_manifest(root: &Path, manifest: &MigrationManifest) -> Result<(), Stri
 }
 
 fn write_active_redirect(root: &Path, destination: &Path) -> Result<(), String> {
-    fs::create_dir_all(&root)
+    fs::create_dir_all(root)
         .map_err(|error| format!("create Proton bootstrap directory: {error}"))?;
     let final_path = root.join(REDIRECT_FILE);
     let temporary = root.join(format!("{REDIRECT_FILE}.tmp-{}", std::process::id()));

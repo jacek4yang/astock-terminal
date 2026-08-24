@@ -18,6 +18,7 @@ import {
   disclosureSyncStart,
   disclosureSyncStatus,
   checkNewsArchiveIntegrity,
+  cancelEventAnalysis,
   getBoardConstituents,
   getDisclosureDetail,
   getDisclosureProviderHealth,
@@ -33,6 +34,7 @@ import {
   getNewsEntityLinks,
   getPendingNewsEvidenceReviews,
   getNewsProviderHealth,
+  getEventAnalysisStatus,
   getPool,
   globalSyncCancel,
   globalSyncStart,
@@ -47,6 +49,7 @@ import {
   setNewsItemState,
   setNewsProviderEnabled,
   splitNewsEventRevision,
+  startEventAnalysis,
 } from "./api";
 
 describe("Proton global research bridge", () => {
@@ -245,5 +248,25 @@ describe("Proton global research bridge", () => {
       accept: true,
       reason: "证券代码与法定名称一致",
     });
+  });
+
+  it("routes background event price-in analysis with resumable job ids", async () => {
+    await startEventAnalysis("revision:event", "300308", 800, 500);
+    await getEventAnalysisStatus("event-job");
+    await cancelEventAnalysis("event-job");
+
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "research.events.analysis.start",
+      "research.events.analysis.status",
+      "research.events.analysis.cancel",
+    ]);
+    expect(requestNative.mock.calls[0][2]).toEqual({
+      revision_id: "revision:event",
+      security_code: "300308",
+      structured_impact_bps: 800,
+      consensus_impact_bps: 500,
+    });
+    expect(requestNative.mock.calls[1][2]).toEqual({ job_id: "event-job" });
+    expect(requestNative.mock.calls[2][2]).toEqual({ job_id: "event-job" });
   });
 });

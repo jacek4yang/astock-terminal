@@ -442,6 +442,7 @@ dependencies = [
  "astock-core",
  "astock-disclosure",
  "astock-entity-linking",
+ "astock-event-intelligence",
  "astock-fundamental",
  "astock-global-intelligence",
  "astock-market-data",

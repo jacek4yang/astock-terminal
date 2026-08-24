@@ -3,6 +3,7 @@ mod credentials;
 mod data_quality;
 mod data_root;
 mod disclosure_sync;
+mod event_analysis;
 mod event_store;
 mod global_sync;
 mod news_center;
@@ -38,6 +39,7 @@ pub struct Engine {
     rules: RuleSet,
     scan: scan::ScanService,
     disclosure_sync: disclosure_sync::DisclosureSyncService,
+    event_analysis: event_analysis::EventAnalysisService,
     global_sync: global_sync::GlobalSyncService,
     provider_boot: credentials::BootStatus,
     credential_migration_error: Option<String>,
@@ -81,6 +83,7 @@ impl Engine {
             rules,
             scan: scan::ScanService::default(),
             disclosure_sync: disclosure_sync::DisclosureSyncService::default(),
+            event_analysis: event_analysis::EventAnalysisService::default(),
             global_sync: global_sync::GlobalSyncService::default(),
             provider_boot,
             credential_migration_error,
@@ -394,7 +397,7 @@ impl Engine {
                             && amount > 0.0
                             && !name.contains("ST")
                             && !name.contains('退')
-                            && max_lot_cost.map_or(true, |budget| price * 100.0 <= budget)
+                            && max_lot_cost.is_none_or(|budget| price * 100.0 <= budget)
                     })
                     .collect::<Vec<_>>();
                 rows.sort_by(|left, right| {
@@ -859,6 +862,38 @@ impl Engine {
                     .await
                     .map_err(entity_linking_error)?;
                 Ok(Value::Bool(resolved))
+            }
+            "research.events.analysis.start" => {
+                let payload: event_analysis::EventAnalysisRequest =
+                    decode_payload(&request.payload)?;
+                let started = self
+                    .event_analysis
+                    .start(
+                        self.storage.clone(),
+                        self.market.clone(),
+                        self.fundamental.clone(),
+                        self.rules.clone(),
+                        payload,
+                    )
+                    .await
+                    .map_err(|error| ServiceError::new("event_analysis", error, false))?;
+                serde_json::to_value(started).map_err(serialize_error)
+            }
+            "research.events.analysis.status" => {
+                let payload: EventJobPayload = decode_payload(&request.payload)?;
+                let snapshot = self
+                    .event_analysis
+                    .status(&payload.job_id)
+                    .map_err(|error| ServiceError::new("event_job_not_found", error, false))?;
+                serde_json::to_value(snapshot).map_err(serialize_error)
+            }
+            "research.events.analysis.cancel" => {
+                let payload: EventJobPayload = decode_payload(&request.payload)?;
+                let cancelled = self
+                    .event_analysis
+                    .cancel(&payload.job_id)
+                    .map_err(|error| ServiceError::new("event_analysis", error, false))?;
+                Ok(json!({ "cancelled": cancelled }))
             }
             "research.data_reconcile" => {
                 let payload: SymbolPayload = decode_payload(&request.payload)?;
@@ -2236,6 +2271,12 @@ struct EntityReviewResolvePayload {
     entity_id: Option<String>,
     accept: bool,
     reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EventJobPayload {
+    job_id: String,
 }
 
 #[derive(Deserialize)]
