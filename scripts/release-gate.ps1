@@ -2,7 +2,9 @@
 param(
     [string]$CertificateThumbprint = $env:ASTOCK_SIGNING_CERT_THUMBPRINT,
     [string]$EvidenceDirectory = $env:ASTOCK_RELEASE_EVIDENCE_DIR,
-    [string]$TimestampUrl = $env:ASTOCK_RFC3161_TIMESTAMP_URL
+    [string]$TimestampUrl = $env:ASTOCK_RFC3161_TIMESTAMP_URL,
+    [string]$BrowserAcceptanceSession = $env:ASTOCK_BROWSER_ACCEPTANCE_SESSION,
+    [string]$DesktopAcceptanceSession = $env:ASTOCK_DESKTOP_ACCEPTANCE_SESSION
 )
 
 Set-StrictMode -Version Latest
@@ -105,6 +107,34 @@ function Assert-ReleaseEvidence {
     }
     Invoke-Checked -FilePath 'node' -Arguments @('scripts/release-evidence-check.mjs', $path, $Gate, $commit)
     Get-FileHash -Algorithm SHA256 -LiteralPath $path | Format-List
+}
+
+function Complete-InteractiveEvidence {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$SessionDirectory,
+        [Parameter(Mandatory)][string]$FileName
+    )
+    $output = Join-Path $EvidenceDirectory $FileName
+    if (Test-Path -LiteralPath $output -PathType Leaf) { return }
+    if ([string]::IsNullOrWhiteSpace($SessionDirectory)) {
+        throw "Required interactive evidence is missing: $output. Supply its audited D-drive acceptance session."
+    }
+    $session = [System.IO.Path]::GetFullPath($SessionDirectory)
+    if (-not (Test-Path -LiteralPath $session -PathType Container)) {
+        throw "Interactive acceptance session does not exist: $session"
+    }
+    $buildRoot = [System.IO.Path]::GetFullPath($build.Paths.Root).TrimEnd('\') + '\'
+    if (-not ($session + '\').StartsWith($buildRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Interactive acceptance session escapes ASTOCK_BUILD_ROOT: $session"
+    }
+    Invoke-Checked -FilePath 'node' -Arguments @(
+        'scripts/acceptance-evidence.mjs',
+        'finalize',
+        $session,
+        $output,
+        $commit,
+        $build.Paths.Root
+    )
 }
 
 function Assert-SigningCertificate {
@@ -268,6 +298,7 @@ shortcut = "4"
     # The user requires the non-invasive Codex in-app browser acceptance to
     # pass before any packaged desktop process is started.
     Invoke-ReleaseGateStep 'browser-cdp-evidence' 'renderer' 'INTEGRATION TESTED' {
+        Complete-InteractiveEvidence -SessionDirectory $BrowserAcceptanceSession -FileName 'browser-cdp.json'
         Assert-ReleaseEvidence -FileName 'browser-cdp.json' -Gate 'browser-cdp'
     }
 
@@ -292,6 +323,7 @@ shortcut = "4"
         Assert-ReleaseEvidence -FileName 'desktop-window-native.json' -Gate 'desktop-window-native'
     }
     Invoke-ReleaseGateStep 'desktop-e2e-evidence' 'desktop' 'INTEGRATION TESTED' -Requires @('browser-cdp-evidence','package-proton-cef','desktop-window-native-evidence') -Action {
+        Complete-InteractiveEvidence -SessionDirectory $DesktopAcceptanceSession -FileName 'desktop-e2e.json'
         Assert-ReleaseEvidence -FileName 'desktop-e2e.json' -Gate 'desktop-e2e-40'
     }
     Invoke-ReleaseGateStep 'migration-evidence' 'storage' 'INTEGRATION TESTED' -Requires @('browser-cdp-evidence','package-proton-cef') -Action {

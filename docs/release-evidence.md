@@ -28,7 +28,11 @@ assertions, a clean console, the exact responsive viewport, real Engine/Agent
 Bridge use for the Codex in-app browser, an isolated packaged data root for CEF,
 and rejects credentials or Bridge-token material. Its output is create-once and
 cannot overwrite prior evidence. `init` emits a deliberately `NOT_RUN`
-observation template; it never pre-populates a passing case. Packaged CEF inspection is
+observation template; it never pre-populates a passing case. Set
+`ASTOCK_BROWSER_ACCEPTANCE_SESSION` or `ASTOCK_DESKTOP_ACCEPTANCE_SESSION` to
+the completed session directory before running `release-gate.ps1`; the gate
+finalizes a missing canonical evidence file and refuses sessions outside
+`ASTOCK_BUILD_ROOT`. It never overwrites an existing result. Packaged CEF inspection is
 deny-by-default: the application must explicitly receive
 `ASTOCK_RELEASE_TEST_CDP=1`, while the isolated runner chooses a random loopback
 port. Supplying only `PROTON_REMOTE_DEBUGGING_PORT` must not enable CDP. The

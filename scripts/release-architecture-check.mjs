@@ -321,6 +321,10 @@ for (const dependencyMarker of [
   "'credential-rotation-evidence'",
   "'external-services-evidence'",
   "status = 'SKIPPED'",
+  "ASTOCK_BROWSER_ACCEPTANCE_SESSION",
+  "ASTOCK_DESKTOP_ACCEPTANCE_SESSION",
+  "Complete-InteractiveEvidence -SessionDirectory $BrowserAcceptanceSession",
+  "Complete-InteractiveEvidence -SessionDirectory $DesktopAcceptanceSession",
 ]) {
   if (!releaseGate.includes(dependencyMarker)) failures.push(`release gate dependency control is missing ${dependencyMarker}`);
 }
