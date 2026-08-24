@@ -91,6 +91,41 @@ async function protonCommand<T>(name: string, args: Record<string, unknown> = {}
       const result = await requestNative<{ provider_health: unknown }>("engine", "market.overview", {});
       return result.provider_health as T;
     }
+    case "get_data_quality_slo":
+      return requestNative<T>("engine", "diagnostics.data_quality", {
+        action: "slo",
+        window_secs: args.window_secs,
+      });
+    case "get_data_quality_observations":
+      return requestNative<T>("engine", "diagnostics.data_quality", {
+        action: "observations",
+        dataset: args.dataset,
+        provider: args.provider,
+        limit: args.limit,
+      });
+    case "get_field_lineage":
+      return requestNative<T>("engine", "diagnostics.data_quality", {
+        action: "lineage",
+        dataset: args.dataset,
+        entity_key: args.entity_key,
+        limit: args.limit,
+      });
+    case "get_data_reconciliations":
+      return requestNative<T>("engine", "diagnostics.data_quality", {
+        action: "reconciliations",
+        dataset: args.dataset,
+        entity_key: args.entity_key,
+        limit: args.limit,
+      });
+    case "get_data_health_report":
+      return requestNative<T>("engine", "diagnostics.data_quality", {
+        action: "health",
+        window_secs: args.window_secs,
+      });
+    case "reconcile_quote_sources":
+      return requestNative<T>("engine", "research.quote_reconcile", args, { deadlineMs: 90_000 });
+    case "reconcile_valuation_sources":
+      return requestNative<T>("engine", "research.valuation_reconcile", args, { deadlineMs: 90_000 });
     case "get_all_a_shares":
       return readAllSharePages<T>();
     case "get_stock_bundle": {

@@ -1,4 +1,5 @@
 mod analysis;
+mod data_quality;
 mod data_root;
 mod event_store;
 
@@ -90,7 +91,7 @@ impl Engine {
             "system.handshake" => Ok(json!({
                 "protocol_version": PROTOCOL_VERSION,
                 "engine_version": ENGINE_VERSION,
-                "capabilities": ["market", "research", "fundamentals", "valuation", "multi_source_news", "security_events", "global_context", "storage", "credentials", "agent_event_store_v2"],
+                "capabilities": ["market", "research", "fundamentals", "valuation", "multi_source_news", "security_events", "global_context", "data_quality", "storage", "credentials", "agent_event_store_v2"],
                 "max_frame_bytes": astock_protocol::MAX_FRAME_BYTES,
                 "max_page_size": astock_protocol::MAX_PAGE_SIZE
             })),
@@ -103,6 +104,10 @@ impl Engine {
                 "data_root": self.data_root,
                 "provider_health": self.market.provider_health()
             })),
+            "diagnostics.data_quality" => {
+                let payload: data_quality::DataQualityQuery = decode_payload(&request.payload)?;
+                data_quality::query(self, payload).await
+            }
             "market.session" => Ok(market_session_payload(
                 &self.rules,
                 astock_core::time::now_china(),
@@ -633,6 +638,14 @@ impl Engine {
                     tencent_bars,
                     sina_bars,
                 ))
+            }
+            "research.quote_reconcile" => {
+                let payload: SymbolPayload = decode_payload(&request.payload)?;
+                data_quality::reconcile_quote(self, payload.symbol.trim()).await
+            }
+            "research.valuation_reconcile" => {
+                let payload: SymbolPayload = decode_payload(&request.payload)?;
+                data_quality::reconcile_valuation(self, payload.symbol.trim()).await
             }
             "research.joinquant_context" => {
                 let payload: JoinQuantResearchPayload = decode_payload(&request.payload)?;

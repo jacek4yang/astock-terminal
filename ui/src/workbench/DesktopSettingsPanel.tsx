@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { requestNative } from "../bridge";
+import DataQualityWorkbench from "../components/DataQualityWorkbench";
 import { getProviderHealth, type ProviderHealthItem } from "../lib/api";
 import { useAppStore } from "../store";
 import { useRuntimeStatus } from "./runtime";
@@ -204,5 +205,6 @@ export default function DesktopSettingsPanel() {
       <section><h3>空间与缓存</h3><dl><dt>缓存合计</dt><dd>{bytes(cache?.total_bytes)}</dd><dt>行情 Parquet</dt><dd>{bytes(cache?.kline_parquet_bytes)} · {cache?.kline_parquet_files ?? "—"} 个文件</dd><dt>工具缓存</dt><dd>{bytes(cache?.tool_cache_bytes)} · {cache?.tool_cache_rows ?? "—"} 条</dd><dt>SQLite</dt><dd>{bytes(cache?.sqlite_bytes)}（始终保留）</dd><dt>Agent/聊天</dt><dd>{bytes(cache?.chat_bytes)}（始终保留）</dd><dt>数据盘可用</dt><dd>{bytes(cache?.disk_free_bytes)}</dd></dl><label><span>清理后上限</span><select value={cleanupTarget} onChange={(event) => setCleanupTarget(Number(event.target.value))}><option value={2048}>2 GiB</option><option value={1024}>1 GiB</option><option value={512}>512 MiB</option><option value={128}>128 MiB</option><option value={0}>仅保留不可删除数据</option></select></label><div className="credential-actions"><button className="btn" disabled={credentialBusy} onClick={() => void cleanupCache()}>预警确认后清理</button><button className="btn" disabled={credentialBusy} onClick={() => void load()}>重新统计</button></div><p>只淘汰过期工具缓存和最久未使用、可重新获取的行情 Parquet；不会删除数据库、Agent 历史、聊天、报告或用户配置。</p></section>
       <section><h3>本地服务</h3><dl><dt>Engine</dt><dd>{engine ? `${engine.status} · v${engine.engine_version}` : "—"}</dd><dt>协议</dt><dd>{engine ? `v${engine.protocol_version}` : "—"}</dd><dt>Host</dt><dd>{runtime.status?.host_version ?? "—"}</dd></dl><div className="provider-mini-list">{providers.map((provider) => <span key={provider.name} className={provider.available && provider.state === "closed" ? "ready" : "degraded"}>{provider.name}</span>)}</div></section>
     </div>
+    <DataQualityWorkbench />
   </div>;
 }
