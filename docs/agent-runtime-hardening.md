@@ -19,11 +19,14 @@ MiniMax Provider 位于 MoonBit Agent Worker。结构化规划与审查使用非
 
 MoonBit Agent 的纯 reducer 只处理事件并产生 Effect；Rust Engine 保存任务事件、检查点、Effect 意图和结果；Proton Host 监督两个 Worker 并编排最多四轮 `host_effects + continuation`：
 
-1. Host 先持久化 Agent 检查点，再读取 Effect 历史。
-2. 只接受 `target=engine`，且 kind 必须属于 `research.agent_prepare_context`、`research.agent_security_context`、`research.agent_report_verify` 三项闭集。
-3. Host 持久化 Effect 意图后才调用 Engine，Engine 结果持久化成功后才传回 Agent。
-4. 已成功的幂等键直接复用；崩溃留下的 pending 记录只允许上述三个可重放研究聚合以 `:retry:N` 重新执行。
-5. Agent/Engine 连续丢失三次 2 秒心跳后由 Job Object 监督器重启并重新握手；首次启动与重启都必须匹配 schema 固定的协议 v1、6.0.0 版本、8 MiB 帧限制、Agent reducer 版本和最低能力子集，只有 `ok=true` 不会被接纳；Provider 暂停保留检查点，不发布未完成报告。
+1. Renderer 只能提交公开 Agent 请求，不能调用任务创建、事件追加、检查点写入或 Effect 写入/列表等内部日志原语。
+2. Host 对 `agent.start`、`agent.event`、`agent.research.workflow` 先持久化输入事件和整体操作意图，再调用 Agent；相同已完成操作直接复用持久化响应。
+3. Host 先持久化 Agent 检查点，再读取工具 Effect 历史。
+4. 只接受 `target=engine`，且 kind 必须属于 `research.agent_prepare_context`、`research.agent_security_context`、`research.agent_report_verify` 三项闭集。
+5. Host 持久化工具 Effect 意图后才调用 Engine，Engine 结果持久化成功后才传回 Agent。
+6. 已成功的幂等键直接复用；崩溃留下的 pending 记录只允许上述三个可重放研究聚合以 `:retry:N` 重新执行。
+7. 每个非 start 的用户事件或研究工作流调用前，Host 都把 Engine 中最新检查点恢复到 Agent；Worker 重启后的正确性不依赖 React 恰好观察到故障。
+8. Agent/Engine 连续丢失三次 2 秒心跳后由 Job Object 监督器重启并重新握手；首次启动与重启都必须匹配 schema 固定的协议 v1、6.0.0 版本、8 MiB 帧限制、Agent reducer 版本和最低能力子集，只有 `ok=true` 不会被接纳；Provider 暂停保留检查点，不发布未完成报告。
 
 ### 自动恢复分类
 
@@ -33,7 +36,7 @@ MoonBit Agent 的纯 reducer 只处理事件并产生 Effect；Rust Engine 保�
 
 Renderer 只提交一个 `agent.research.workflow`。模型不能产生任意 Engine kind，只能在以下高级模块闭集中选择子集：`earnings_driver`、`industry_graph`、`relationship`、`market_regime`、`historical_backtest`。`market/evidence/full` 策略在模型规划后由程序强制覆盖，`auto` 也必须通过闭集校验；交易、凭据和存储修改永远不在集合中。
 
-Effect 幂等键由任务、工具 kind 和完整 JSON payload 构成，因而证券、研究区间、数据截止时间、工具策略与高级模块都会参与身份。Host 串行化同一 Worker 通道、读取持久化 Effect 历史并复用成功结果；Rust 数据层继续按来源版本和参数管理读缓存。缓存命中只复用不可变成功结果，失败、跳过、过期和冲突状态仍显式返回。
+Effect 幂等身份由任务、工具 kind 和完整结构化 JSON payload 构成，因而证券、研究区间、数据截止时间、工具策略与高级模块都会参与身份；参数比较使用结构化相等而不依赖对象字段顺序。Engine 在写 SQLite 唯一键前统一转换为 SHA-256 摘要，长参数不会超出键长度或以明文泄露。Host 串行化同一 Worker 通道、读取持久化 Effect 历史并复用成功结果；Rust 数据层继续按来源版本和参数管理读缓存。缓存命中只复用不可变成功结果，失败、跳过、过期和冲突状态仍显式返回。
 
 ## 4. 工具防死锁预算
 
@@ -52,6 +55,7 @@ Effect 幂等键由任务、工具 kind 和完整 JSON payload 构成，因而�
 ## 5. 运行时不变量
 
 - 每个 reducer 调用和 Effect 结果保持唯一、单调、可重放。
+- Renderer 对内部事件、检查点和 Effect 日志始终只有 Host 代写、无直接写权限。
 - 不完整模型流不得写入 SQLite；完整流恢复不得拼接前一次草稿。
 - 任何 TaskStream 必须产生终态，或由监督器转换为恢复/挂起状态。
 - 高级模块失败与跳过必须显示在 `tool_activities`，失败不得伪装为成功证据。

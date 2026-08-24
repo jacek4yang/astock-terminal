@@ -39,10 +39,8 @@
         { "const": "agent.provider.test" },
         { "const": "agent.provider.configure" },
         { "const": "agent.start" },
-        { "const": "agent.restore" },
         { "const": "agent.event" },
-        { "const": "agent.research.workflow" },
-        { "const": "agent.task.snapshot" }
+        { "const": "agent.research.workflow" }
       ]
     }
   },

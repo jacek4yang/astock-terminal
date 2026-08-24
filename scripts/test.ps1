@@ -30,11 +30,28 @@ try {
     if (-not (Test-Path -LiteralPath $env:ASTOCK_SUPERVISION_TEST_WORKER -PathType Leaf)) {
         throw "Agent supervision test Worker is missing: $env:ASTOCK_SUPERVISION_TEST_WORKER"
     }
-    Enable-AStockCefRuntimePath -Environment $build | Out-Null
-    Invoke-Checked -FilePath 'moon' -WorkingDirectory (Join-Path $build.RepositoryRoot 'desktop-moon') -Arguments @(
-        'test', '--target', 'native', '--no-parallelize', '--target-dir', $build.Paths.MoonDesktop, 'backend/host'
-    )
     Set-AStockWorkerEnvironment -Environment $build -Release
+    $previousDataDir = $env:ASTOCK_DATA_DIR
+    try {
+        $env:ASTOCK_DATA_DIR = Join-Path $build.Paths.Temp "host-durability-$PID-$([Guid]::NewGuid().ToString('N'))"
+        New-Item -ItemType Directory -Path $env:ASTOCK_DATA_DIR -Force | Out-Null
+        Enable-AStockCefRuntimePath -Environment $build | Out-Null
+        Invoke-Checked -FilePath 'moon' -WorkingDirectory (Join-Path $build.RepositoryRoot 'desktop-moon') -Arguments @(
+            'test', '--target', 'native', '--no-parallelize', '--target-dir', $build.Paths.MoonDesktop, 'backend/host'
+        )
+        $env:ASTOCK_HOST_DURABILITY_TEST = '1'
+        try {
+            Invoke-Checked -FilePath 'moon' -WorkingDirectory (Join-Path $build.RepositoryRoot 'desktop-moon') -Arguments @(
+                'test', '--target', 'native', '--no-parallelize', '--filter', '*Host owns Agent durability*',
+                '--target-dir', $build.Paths.MoonDesktop, 'backend/host/worker_supervision_wbtest.mbt'
+            )
+        } finally {
+            Remove-Item Env:ASTOCK_HOST_DURABILITY_TEST -ErrorAction SilentlyContinue
+        }
+    } finally {
+        if ($null -eq $previousDataDir) { Remove-Item Env:ASTOCK_DATA_DIR -ErrorAction SilentlyContinue }
+        else { $env:ASTOCK_DATA_DIR = $previousDataDir }
+    }
     Invoke-Checked -FilePath 'node' -Arguments @(
         'scripts/ipc-smoke.mjs', $env:ASTOCK_ENGINE_EXE, $env:ASTOCK_AGENT_EXE
     )

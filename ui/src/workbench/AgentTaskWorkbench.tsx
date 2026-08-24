@@ -93,14 +93,6 @@ type ConversationSummary = {
 
 type StoredConversation = ConversationSummary & { session: AgentSession };
 
-type DurableEffect = {
-  effect_id: string;
-  effect_kind: string;
-  status: "pending" | "succeeded" | "failed" | "cancelled";
-  result?: unknown;
-  idempotency_key: string;
-};
-
 type DurableTask = {
   task: { accepted_seq: number; checkpoint?: unknown };
   events: Array<{ seq: number }>;
@@ -228,116 +220,17 @@ function capitalFromObjective(objective = ""): number | null {
   return yuan ? Number(yuan[1]) : null;
 }
 
-async function persistDurableTransition(
-  taskId: string,
-  kind: "agent.start" | "agent.event" | "agent.research.workflow",
-  effectId: string,
-  reply: unknown,
-) {
-  const transition = reply as { state?: TaskView; checkpoint?: unknown };
-  const finalSeq = transition.state?.accepted_seq;
-  if (typeof finalSeq !== "number" || transition.checkpoint === undefined) return;
-  const durable = await requestNative<DurableTask>("engine", "agent.task.load", { task_id: taskId });
-  let durableMax = durable.events.reduce((maximum, event) => Math.max(maximum, event.seq), 0);
-  while (durableMax < finalSeq) {
-    durableMax += 1;
-    await requestNative("engine", "agent.event.append", {
-      task_id: taskId,
-      seq: durableMax,
-      event_id: `result:${taskId}:${durableMax}`,
-      event_kind: durableMax === finalSeq ? `${kind}.result` : `${kind}.transition`,
-      event: durableMax === finalSeq ? { effect_id: effectId, state: transition.state } : { effect_id: effectId },
-    });
-  }
-  await requestNative("engine", "agent.checkpoint.put", {
-    task_id: taskId,
-    accepted_seq: finalSeq,
-    phase: transition.state?.phase ?? "idle",
-    checkpoint: transition.checkpoint,
-  });
-}
-
 /**
- * All stateful Agent Worker operations pass through the Engine journal. The
- * effect intent is committed before the Worker can contact a provider; the
- * provider result, reducer outcome events and full checkpoint are committed
- * before the renderer receives the reply.
+ * Stateful Agent operations are one public bridge call. The Proton Host (and
+ * browser acceptance Bridge) owns event/effect/checkpoint durability; the
+ * renderer cannot write those internal Engine records or claim a result.
  */
 export async function requestDurableAgent<T>(
   kind: "agent.start" | "agent.event" | "agent.research.workflow",
   payload: Record<string, unknown>,
-  taskId: string,
-  acceptedSeq: number,
   deadlineMs: number,
-  taskSpec?: TaskSpec,
 ): Promise<T> {
-  if (taskSpec) {
-    await requestNative("engine", "agent.task.create", {
-      task_id: taskId,
-      reducer_version: "moonbit-agent-kernel-v1",
-      task_spec: taskSpec,
-      phase: "idle",
-    });
-  }
-
-  const inputSeq = typeof payload.seq === "number" ? payload.seq : null;
-  if (inputSeq != null) {
-    await requestNative("engine", "agent.event.append", {
-      task_id: taskId,
-      seq: inputSeq,
-      event_id: `input:${taskId}:${inputSeq}`,
-      event_kind: kind === "agent.start" ? "start" : String(payload.event_kind ?? "agent_event"),
-      event: { worker_request_kind: kind, payload },
-    });
-  }
-
-  const baseKey = `${taskId}:${kind}:${inputSeq ?? acceptedSeq}`;
-  const effects = await requestNative<{ items: DurableEffect[] }>(
-    "engine",
-    "agent.effect.list",
-    { task_id: taskId },
-  );
-  const prior = effects.items.filter((item) => item.idempotency_key === baseKey || item.idempotency_key.startsWith(`${baseKey}:retry:`));
-  const completed = prior.find((item) => item.status === "succeeded" && item.result != null);
-  if (completed) {
-    await persistDurableTransition(taskId, kind, completed.effect_id, completed.result);
-    return completed.result as T;
-  }
-  if (prior.some((item) => item.status === "pending") && kind !== "agent.research.workflow") {
-    throw new Error("检测到同一 Agent 操作仍为 pending；任务已保留，请先恢复或等待本地 Worker 完成，避免重复调用模型。 ");
-  }
-  const retry = prior.length;
-  const idempotencyKey = retry === 0 ? baseKey : `${baseKey}:retry:${retry}`;
-  const effectId = `fx:${taskId}:${kind.replaceAll(".", "-")}:${inputSeq ?? acceptedSeq}:${retry}`;
-  await requestNative("engine", "agent.effect.begin", {
-    effect_id: effectId,
-    task_id: taskId,
-    caused_by_seq: inputSeq ?? acceptedSeq,
-    effect_kind: kind,
-    effect: { worker_request_kind: kind, payload },
-    idempotency_key: idempotencyKey,
-  });
-
-  let reply: T;
-  try {
-    reply = await requestNative<T>("agent", kind, payload, { deadlineMs });
-  } catch (cause) {
-    await requestNative("engine", "agent.effect.complete", {
-      effect_id: effectId,
-      status: "failed",
-      result: { error: cause instanceof Error ? cause.message : String(cause) },
-    }).catch(() => undefined);
-    throw cause;
-  }
-
-  await requestNative("engine", "agent.effect.complete", {
-    effect_id: effectId,
-    status: "succeeded",
-    result: reply,
-  });
-
-  await persistDurableTransition(taskId, kind, effectId, reply);
-  return reply;
+  return requestNative<T>("agent", kind, payload, { deadlineMs });
 }
 
 export function deterministicVerificationSummary(verification: DeterministicVerification): string {
@@ -534,10 +427,10 @@ export default function AgentTaskWorkbench() {
       }
     } catch {
       // A locally saved checkpoint is still useful when the task journal is
-      // temporarily unavailable; Agent restore remains fail-closed below.
+      // temporarily unavailable. The next stateful request asks Host to
+      // restore durable Engine truth before it reaches Agent.
     }
     if (!recovered) throw new Error("没有可恢复的 Agent 检查点");
-    await requestNative("agent", "agent.restore", { state: recovered }, { deadlineMs: 20_000 });
     if (typeof recovered === "object" && recovered !== null && recoveredSeq >= localSeq) {
       setCheckpoint(recovered);
       setTask(recovered as TaskView);
@@ -589,7 +482,7 @@ export default function AgentTaskWorkbench() {
         tool_policy: toolPolicy,
         preferred_symbols: contextSymbol ? [contextSymbol] : [],
         capital: capitalFromObjective(state.spec?.objective),
-      }, state.task_id, state.accepted_seq ?? 0, 900_000);
+      }, 900_000);
       const next = applyTransition(reply);
       if (reply.report?.trim()) append("agent", reply.report.trim());
       else if (next.phase === "suspended") {
@@ -653,7 +546,7 @@ export default function AgentTaskWorkbench() {
         seq: 1,
         spec: initialSpec,
         run_options: { depth, tool_policy: toolPolicy },
-      }, taskId, 0, 120_000, initialSpec);
+      }, 120_000);
       const next = applyTransition(reply);
       if (next.phase === "waiting_for_user") append("agent", "我正在结合你的研究目标生成必要的澄清问题。问题和候选项由模型动态产生，前端不会套用预设问卷。");
       else {
@@ -713,7 +606,7 @@ export default function AgentTaskWorkbench() {
         event_kind: "clarification_answered",
         clarification_response: { title: clarification.title, answers },
         run_options: { depth, tool_policy: toolPolicy },
-      }, task.task_id, task.accepted_seq ?? 1, 120_000);
+      }, 120_000);
       const autoCount = answers.filter((answer) => answer.decision_mode === "agent_best_with_evidence").length;
       append("user", autoCount ? `已提交研究边界；其中 ${autoCount} 项明确授权 Agent 在取得证据后选择，并要求记录依据。` : "已提交模型提出的研究边界，继续执行。" );
       setClarification(null);

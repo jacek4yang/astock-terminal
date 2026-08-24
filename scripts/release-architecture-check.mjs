@@ -67,6 +67,7 @@ const qualityWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", 
 const engineCredentials = fs.readFileSync(path.join(root, "crates", "engine", "src", "credentials.rs"), "utf8");
 const engineRuntime = fs.readFileSync(path.join(root, "crates", "engine", "src", "lib.rs"), "utf8");
 const engineAgentContext = fs.readFileSync(path.join(root, "crates", "engine", "src", "agent_context.rs"), "utf8");
+const engineEventStore = fs.readFileSync(path.join(root, "crates", "engine", "src", "event_store.rs"), "utf8");
 const marketHub = fs.readFileSync(path.join(root, "crates", "market-data", "src", "hub.rs"), "utf8");
 const marketHttp = fs.readFileSync(path.join(root, "crates", "market-data", "src", "http.rs"), "utf8");
 const credentialRuntimeSources = [
@@ -219,8 +220,23 @@ if (!engineRuntime.includes('"agent_advanced_analysis_v1"')) {
 if (!agentWorkbench.includes('agent.task.load') || !agentWorkbench.includes('recoverLatestCheckpoint')) {
   failures.push("React does not restore the newest durable Agent checkpoint before resuming");
 }
-if (!agentWorkbench.includes("persistDurableTransition") || !agentWorkbench.includes("completed.result")) {
-  failures.push("React cannot backfill a missing checkpoint from an already completed durable Agent effect");
+if (!engineEventStore.includes('format!("sha256:{:x}", Sha256::digest(value.as_bytes()))') ||
+    !moonHost.includes("durable_operation_effect_matches") ||
+    !moonHost.includes("identity.payload == Some(payload)") ||
+    !browserBridge.includes("isDeepStrictEqual(item.effect?.payload")) {
+  failures.push("Agent Effect identities are not parameter-complete SHA-256-backed structured matches");
+}
+for (const internalJournalKind of [
+  "agent.task.create",
+  "agent.event.append",
+  "agent.checkpoint.put",
+  "agent.effect.begin",
+  "agent.effect.complete",
+  "agent.effect.list",
+]) {
+  if (agentWorkbench.includes(`"${internalJournalKind}"`)) {
+    failures.push(`React Agent workbench can write internal journal kind ${internalJournalKind}`);
+  }
 }
 if (moonAgent.includes('"agent.research" =>') || moonAgent.includes('"agent.plan" =>')) {
   failures.push("MoonBit Agent still exposes renderer-supplied legacy research orchestration endpoints");
@@ -248,9 +264,9 @@ const agentRendererKinds = agentSchema.properties.renderer_request_kinds.prefixI
 const hostRendererKinds = hostSchema.properties.renderer_request_kinds.prefixItems.map((item) => item.const);
 const engineRendererKinds = engineSchemaObject.properties.renderer_request_kinds.prefixItems.map((item) => item.const);
 const engineWorkerKinds = engineSchemaObject.properties.request_kinds.prefixItems.map((item) => item.const);
-if (engineRendererKinds.length !== 119 ||
+if (engineRendererKinds.length !== 113 ||
     !engineRendererKinds.every((kind) => engineWorkerKinds.includes(kind))) {
-  failures.push("Engine renderer request allowlist is not the audited 119-kind subset of the Worker contract");
+  failures.push("Engine renderer request allowlist is not the audited 113-kind subset of the Worker contract");
 }
 for (const internalEngineKind of [
   "system.handshake",
@@ -263,27 +279,33 @@ for (const internalEngineKind of [
   "research.market_candidates",
   "research.joinquant_context",
   "research.optional_sources",
+  "agent.task.create",
+  "agent.event.append",
+  "agent.checkpoint.put",
+  "agent.effect.begin",
+  "agent.effect.complete",
+  "agent.effect.list",
 ]) {
   if (engineRendererKinds.includes(internalEngineKind)) {
     failures.push(`internal Engine kind is exposed to the renderer: ${internalEngineKind}`);
   }
 }
-for (const requiredAgentKind of [
-  "diagnostics.status",
-  "agent.provider.test",
-  "agent.provider.configure",
-  "agent.start",
-  "agent.restore",
-  "agent.event",
-  "agent.research.workflow",
-  "agent.task.snapshot",
-]) {
-  if (!agentRendererKinds.includes(requiredAgentKind)) {
-    failures.push(`Agent renderer protocol is missing ${requiredAgentKind}`);
+exactStringSet(
+  "Agent renderer request contract",
+  agentRendererKinds,
+  [
+    "diagnostics.status",
+    "agent.provider.test",
+    "agent.provider.configure",
+    "agent.start",
+    "agent.event",
+    "agent.research.workflow",
+  ],
+);
+for (const internalAgentKind of ["agent.restore", "agent.task.snapshot", "agent.research.workflow.continue"]) {
+  if (agentRendererKinds.includes(internalAgentKind)) {
+    failures.push(`internal Agent kind is exposed to the renderer: ${internalAgentKind}`);
   }
-}
-if (agentRendererKinds.includes("agent.research.workflow.continue")) {
-  failures.push("internal Agent workflow continuation is exposed to the renderer");
 }
 exactStringSet(
   "Host renderer request contract",
@@ -364,6 +386,24 @@ if (!browserBridge.includes("validateHandshakeResponse(engineHandshake") ||
     !browserBridge.includes("validateHandshakeResponse(agentHandshake") ||
     !handshakeContract.includes("startup_required_capabilities")) {
   failures.push("browser test Bridge does not fail closed on incompatible Worker startup handshakes");
+}
+for (const marker of [
+  "route_durable_agent",
+  "durable_agent_request_kind(envelope.kind)",
+  "agent_durability_lock.acquire()",
+  '"agent.restore"',
+  "loaded.task.checkpoint",
+  '"agent.effect.begin"',
+  '"agent.effect.complete"',
+]) {
+  if (!moonHost.includes(marker)) failures.push(`Proton Host durable Agent boundary is missing ${marker}`);
+}
+if (!browserBridge.includes("routeDurableAgent") ||
+    !browserBridge.includes("DURABLE_AGENT_KINDS") ||
+    !browserBridge.includes("durableAgentTail") ||
+    !browserBridge.includes('"agent.effect.begin"') ||
+    !browserBridge.includes('"agent.effect.complete"')) {
+  failures.push("browser test Bridge does not preserve Host-owned Agent durability");
 }
 const expectedAgentEffectKinds = [
   "research.agent_prepare_context",

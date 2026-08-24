@@ -21,20 +21,13 @@ const spec = {
   evidence_requirement: "strict" as const,
 };
 
-describe("durable Agent operation journal", () => {
+describe("Host-owned durable Agent bridge", () => {
   beforeEach(() => requestNative.mockReset());
 
-  it("commits intent before Worker and result plus checkpoint before returning", async () => {
-    requestNative.mockImplementation(async (target: string, kind: string) => {
-      if (kind === "agent.effect.list") return { items: [] };
-      if (target === "agent" && kind === "agent.start") {
-        return {
-          state: { task_id: "task-1", accepted_seq: 2, phase: "waiting_for_user" },
-          checkpoint: { task_id: "task-1", accepted_seq: 2 },
-        };
-      }
-      if (kind === "agent.task.load") return { task: { accepted_seq: 0 }, events: [{ seq: 1 }] };
-      return { inserted: true };
+  it("submits one public Agent call and cannot write Engine journal primitives", async () => {
+    requestNative.mockResolvedValue({
+      state: { task_id: "task-1", accepted_seq: 2, phase: "waiting_for_user" },
+      checkpoint: { task_id: "task-1", accepted_seq: 2 },
     });
 
     const reply = await requestDurableAgent<{
@@ -43,92 +36,17 @@ describe("durable Agent operation journal", () => {
     }>(
       "agent.start",
       { task_id: "task-1", seq: 1, spec },
-      "task-1",
-      0,
       120_000,
-      spec,
     );
 
     expect(reply.state?.accepted_seq).toBe(2);
-    expect(requestNative.mock.calls.map((call) => `${call[0]}:${call[1]}`)).toEqual([
-      "engine:agent.task.create",
-      "engine:agent.event.append",
-      "engine:agent.effect.list",
-      "engine:agent.effect.begin",
-      "agent:agent.start",
-      "engine:agent.effect.complete",
-      "engine:agent.task.load",
-      "engine:agent.event.append",
-      "engine:agent.checkpoint.put",
-    ]);
-  });
-
-  it("reconciles a pending research workflow through a journaled retry", async () => {
-    requestNative.mockImplementation(async (_target: string, kind: string) => {
-      if (kind === "agent.effect.list") {
-        return {
-          items: [{
-            effect_id: "fx-existing",
-            effect_kind: "agent.research.workflow",
-            status: "pending",
-            idempotency_key: "task-2:agent.research.workflow:3",
-          }],
-        };
-      }
-      return { inserted: true };
-    });
-
-    await expect(requestDurableAgent(
-      "agent.research.workflow",
-      { task_id: "task-2", context: {} },
-      "task-2",
-      3,
-      900_000,
-    )).resolves.toEqual({ inserted: true });
-    expect(requestNative.mock.calls.some((call) => call[0] === "agent")).toBe(true);
-    expect(requestNative.mock.calls).toContainEqual([
-      "engine",
-      "agent.effect.begin",
-      expect.objectContaining({ idempotency_key: "task-2:agent.research.workflow:3:retry:1" }),
-    ]);
-  });
-
-  it("backfills a missing checkpoint from an already completed durable result", async () => {
-    const completedReply = {
-      state: { task_id: "task-replay", accepted_seq: 3, phase: "preparing" },
-      checkpoint: { task_id: "task-replay", accepted_seq: 3, phase: "preparing" },
-    };
-    requestNative.mockImplementation(async (target: string, kind: string) => {
-      if (kind === "agent.effect.list") {
-        return {
-          items: [{
-            effect_id: "fx-completed",
-            effect_kind: "agent.event",
-            status: "succeeded",
-            idempotency_key: "task-replay:agent.event:2",
-            result: completedReply,
-          }],
-        };
-      }
-      if (kind === "agent.task.load") return { task: { accepted_seq: 1 }, events: [{ seq: 1 }, { seq: 2 }] };
-      if (target === "agent") throw new Error("completed operations must not call the Worker again");
-      return { inserted: true };
-    });
-
-    await expect(requestDurableAgent(
-      "agent.event",
-      { task_id: "task-replay", seq: 2, event_kind: "resume" },
-      "task-replay",
-      1,
-      120_000,
-    )).resolves.toEqual(completedReply);
-    expect(requestNative.mock.calls.map((call) => `${call[0]}:${call[1]}`)).toEqual([
-      "engine:agent.event.append",
-      "engine:agent.effect.list",
-      "engine:agent.task.load",
-      "engine:agent.event.append",
-      "engine:agent.checkpoint.put",
-    ]);
+    expect(requestNative).toHaveBeenCalledTimes(1);
+    expect(requestNative).toHaveBeenCalledWith(
+      "agent",
+      "agent.start",
+      { task_id: "task-1", seq: 1, spec },
+      { deadlineMs: 120_000 },
+    );
   });
 
   it("formats deterministic report verification without inventing totals", () => {

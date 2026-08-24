@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=65b293549628946d86d197ff5440c8f4d71eca233e6c55d503e203eca4c58b43
+// GENERATED from protocol/schema; schema-sha256=21885987a7488bb0e51eaacce89681d72c6f04bb50b5936e7cf67353094a256e
 // Run: node protocol/codegen.mjs
 
 use serde::{Deserialize, Serialize};
@@ -269,12 +269,6 @@ pub const ENGINE_RENDERER_REQUEST_KINDS: &[&str] = &[
     "quant.scan.cancel",
     "settings.agent_models.get",
     "settings.agent_models.set",
-    "agent.task.create",
-    "agent.event.append",
-    "agent.checkpoint.put",
-    "agent.effect.begin",
-    "agent.effect.complete",
-    "agent.effect.list",
     "agent.task.load",
     "agent.conversation.save",
     "agent.conversation.load",
@@ -300,10 +294,8 @@ pub const AGENT_RENDERER_REQUEST_KINDS: &[&str] = &[
     "agent.provider.test",
     "agent.provider.configure",
     "agent.start",
-    "agent.restore",
     "agent.event",
     "agent.research.workflow",
-    "agent.task.snapshot",
 ];
 pub const HOST_RENDERER_REQUEST_KINDS: &[&str] = &[
     "diagnostics.status",

@@ -599,9 +599,6 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
         .get(payload.task_id)
         .unwrap_or(@agent.initial(payload.task_id))
       let transition = @agent.reduce(current, payload.seq, Start(payload.spec))
-      if transition.accepted {
-        self.tasks[payload.task_id] = transition.state
-      }
       if transition.accepted && transition.state.phase == WaitingForUser {
         let key = read_minimax_key()
         if key.trim().is_empty() {
@@ -632,6 +629,9 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
         }
         response(request, true, transition_json(generated))
       } else {
+        if transition.accepted {
+          self.tasks[payload.task_id] = transition.state
+        }
         response(request, true, transition_json(transition))
       }
     }

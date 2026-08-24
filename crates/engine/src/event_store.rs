@@ -2,6 +2,7 @@ use astock_storage::Storage;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -368,7 +369,7 @@ pub async fn begin_effect(storage: &Storage, input: BeginEffect) -> Result<bool,
     validate_identity(&input.effect_id, "effect_id")?;
     validate_identity(&input.task_id, "task_id")?;
     validate_identity(&input.effect_kind, "effect_kind")?;
-    validate_identity(&input.idempotency_key, "idempotency_key")?;
+    let idempotency_key = normalize_idempotency_key(&input.idempotency_key)?;
     if input.caused_by_seq < 0 {
         return Err("caused_by_seq must not be negative".into());
     }
@@ -385,7 +386,7 @@ pub async fn begin_effect(storage: &Storage, input: BeginEffect) -> Result<bool,
                     "SELECT effect_id,task_id,effect_kind,effect_json
                      FROM agent_effects_v2
                      WHERE effect_id=?1 OR idempotency_key=?2",
-                    params![input.effect_id, input.idempotency_key],
+                    params![input.effect_id, idempotency_key],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
                 .optional()?;
@@ -413,7 +414,7 @@ pub async fn begin_effect(storage: &Storage, input: BeginEffect) -> Result<bool,
                     input.caused_by_seq,
                     input.effect_kind,
                     effect_json,
-                    input.idempotency_key,
+                    idempotency_key,
                     now
                 ],
             )?;
@@ -911,6 +912,13 @@ fn validate_identity(value: &str, name: &str) -> Result<(), String> {
     }
 }
 
+fn normalize_idempotency_key(value: &str) -> Result<String, String> {
+    if value.is_empty() || value.len() > astock_protocol::MAX_FRAME_BYTES {
+        return Err("idempotency_key must contain 1..8 MiB bytes".into());
+    }
+    Ok(format!("sha256:{:x}", Sha256::digest(value.as_bytes())))
+}
+
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1029,6 +1037,8 @@ mod tests {
         let pending = list_effects(&storage, "task-effect".into()).await.unwrap();
         assert_eq!(pending[0].status, "pending");
         assert!(pending[0].result.is_none());
+        assert_eq!(pending[0].idempotency_key.len(), 71);
+        assert!(pending[0].idempotency_key.starts_with("sha256:"));
 
         let completion = CompleteEffect {
             effect_id: "effect-1".into(),

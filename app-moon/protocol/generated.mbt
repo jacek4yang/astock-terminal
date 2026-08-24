@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=65b293549628946d86d197ff5440c8f4d71eca233e6c55d503e203eca4c58b43
+// GENERATED from protocol/schema; schema-sha256=21885987a7488bb0e51eaacce89681d72c6f04bb50b5936e7cf67353094a256e
 // Run: node protocol/codegen.mjs
 
 ///|
@@ -23,7 +23,7 @@ pub let agent_startup_required_capabilities : Array[String] = ["pure_reducer","r
 pub let agent_request_kinds : Array[String] = ["system.handshake","diagnostics.status","agent.provider.test","agent.provider.configure","agent.start","agent.restore","agent.event","agent.research.workflow","agent.research.workflow.continue","agent.task.snapshot"]
 
 ///|
-pub let agent_renderer_request_kinds : Array[String] = ["diagnostics.status","agent.provider.test","agent.provider.configure","agent.start","agent.restore","agent.event","agent.research.workflow","agent.task.snapshot"]
+pub let agent_renderer_request_kinds : Array[String] = ["diagnostics.status","agent.provider.test","agent.provider.configure","agent.start","agent.event","agent.research.workflow"]
 
 ///|
 pub let host_renderer_request_kinds : Array[String] = ["diagnostics.status","window.state","window.minimize","window.toggle_maximize","window.begin_drag","window.system_menu"]

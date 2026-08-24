@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 const [engineExecutable, agentExecutable] = process.argv.slice(2);
 if (!engineExecutable || !agentExecutable) throw new Error("usage: node scripts/research-live-smoke.mjs <engine.exe> <agent-worker.exe>");
@@ -115,7 +116,11 @@ async function persistCheckpoint(taskId, payload) {
 async function executeEffect(effect) {
   if (effect.target !== "engine") throw new Error(`effect target denied: ${effect.target}`);
   const history = await engine.request("agent.effect.list", { task_id: effect.task_id }, 30_000);
-  const prior = (history.items ?? []).filter((item) => item.idempotency_key === effect.idempotency_key || item.idempotency_key?.startsWith(`${effect.idempotency_key}:retry:`));
+  const prior = (history.items ?? []).filter((item) =>
+    item.effect_kind === `engine.${effect.kind}` &&
+    item.effect?.target === "engine" &&
+    item.effect?.kind === effect.kind &&
+    isDeepStrictEqual(item.effect?.payload, effect.payload));
   const cached = prior.find((item) => item.status === "succeeded" && item.result != null);
   if (cached) return { call_id: effect.call_id, ok: true, payload: cached.result, error: null, cache_hit: true };
   const replayableRead = effect.kind === "research.agent_prepare_context" ||
@@ -151,7 +156,7 @@ async function runWorkflow(taskId, acceptedSeq, payload) {
     caused_by_seq: acceptedSeq,
     effect_kind: "agent.research.workflow",
     effect: { worker_request_kind: "agent.research.workflow", payload },
-    idempotency_key: `${taskId}:agent.research.workflow:${acceptedSeq}`,
+    idempotency_key: `${taskId}:agent.research.workflow:${acceptedSeq}:${JSON.stringify(payload)}`,
   }, 30_000);
   let response = await agent.request("agent.research.workflow", payload, 900_000);
   for (let round = 1; round <= 4; round += 1) {

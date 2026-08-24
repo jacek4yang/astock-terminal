@@ -4,6 +4,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { validateHandshakeResponse } from "./lib/handshake-contract.mjs";
 
 const [engineExecutable, agentExecutable] = process.argv.slice(2);
@@ -208,7 +209,11 @@ async function executeAgentEffect(parent, effect) {
     return { call_id: effect.call_id, ok: false, payload: null, error: "Agent requested an Engine kind outside the bounded research Effect allowlist", cache_hit: false };
   }
   const history = await enginePayload(parent, `effect-list:${effect.call_id}`, "agent.effect.list", { task_id: effect.task_id });
-  const prior = (history.items ?? []).filter((item) => item.idempotency_key === effect.idempotency_key || item.idempotency_key?.startsWith(`${effect.idempotency_key}:retry:`));
+  const prior = (history.items ?? []).filter((item) =>
+    item.effect_kind === `engine.${effect.kind}` &&
+    item.effect?.target === "engine" &&
+    item.effect?.kind === effect.kind &&
+    isDeepStrictEqual(item.effect?.payload, effect.payload));
   const completed = prior.find((item) => item.status === "succeeded" && item.result != null);
   if (completed) return { call_id: effect.call_id, ok: true, payload: completed.result, error: null, cache_hit: true };
   const replayableRead = effect.kind === "research.agent_prepare_context" ||
@@ -266,6 +271,104 @@ async function routeAgent(request) {
   throw new Error("Agent exceeded the bounded browser-test effect continuation limit");
 }
 
+const DURABLE_AGENT_KINDS = new Set([
+  "agent.start",
+  "agent.event",
+  "agent.research.workflow",
+]);
+
+let durableAgentTail = Promise.resolve();
+
+async function routeDurableAgent(request) {
+  let release;
+  const previous = durableAgentTail;
+  durableAgentTail = new Promise((resolve) => { release = resolve; });
+  await previous;
+  try {
+    return await routeDurableAgentExclusive(request);
+  } finally {
+    release();
+  }
+}
+
+async function routeDurableAgentExclusive(request) {
+  const payload = request?.payload;
+  if (!payload?.task_id || typeof payload.task_id !== "string") throw new Error("durable Agent request requires task_id");
+  if (request.kind === "agent.start") {
+    if (!payload.spec || typeof payload.spec !== "object") throw new Error("Agent start request is missing its TaskSpec");
+    await enginePayload(request, "task-create", "agent.task.create", {
+      task_id: payload.task_id,
+      reducer_version: "moonbit-agent-kernel-v1",
+      task_spec: payload.spec,
+      phase: "idle",
+    });
+  }
+  const inputSeq = Number.isInteger(payload.seq) ? payload.seq : null;
+  if (inputSeq != null) {
+    await enginePayload(request, `input:${inputSeq}`, "agent.event.append", {
+      task_id: payload.task_id,
+      seq: inputSeq,
+      event_id: `input:${payload.task_id}:${inputSeq}`,
+      event_kind: request.kind === "agent.start" ? "start" : String(payload.event_kind ?? "agent_event"),
+      event: { worker_request_kind: request.kind, payload },
+    });
+  }
+  const loaded = await enginePayload(request, "task-load", "agent.task.load", { task_id: payload.task_id });
+  const causedBySeq = inputSeq ?? loaded.task?.accepted_seq;
+  if (!Number.isInteger(causedBySeq)) throw new Error("durable Agent task has no accepted sequence");
+  const baseKey = `${payload.task_id}:${request.kind}:${causedBySeq}:${JSON.stringify(payload)}`;
+  const history = await enginePayload(request, "operation-effects", "agent.effect.list", { task_id: payload.task_id });
+  const prior = (history.items ?? []).filter((item) =>
+    item.effect_kind === request.kind &&
+    item.effect?.worker_request_kind === request.kind &&
+    isDeepStrictEqual(item.effect?.payload, payload));
+  const completed = prior.find((item) => item.status === "succeeded" && item.result != null);
+  if (completed) {
+    return { ...completed.result, protocol_version: 1, request_id: request.request_id, kind: request.kind };
+  }
+  if (request.kind !== "agent.research.workflow" && prior.some((item) => item.status === "pending")) {
+    throw new Error("The same Agent operation is still pending; restore the durable task before retrying");
+  }
+  if (request.kind !== "agent.start") {
+    if (loaded.task?.checkpoint == null) throw new Error("The durable Agent task has no checkpoint to restore");
+    requireSuccess(await agent.request(workerRequest(
+      request,
+      "restore",
+      "agent.restore",
+      { state: loaded.task.checkpoint },
+      30_000,
+    )), "agent.restore");
+  }
+  const retry = prior.length;
+  const idempotencyKey = retry === 0 ? baseKey : `${baseKey}:retry:${retry}`;
+  const effectId = `browser-agent:${payload.task_id}:${request.kind}:${causedBySeq}:${retry}`;
+  await enginePayload(request, "operation-begin", "agent.effect.begin", {
+    effect_id: effectId,
+    task_id: payload.task_id,
+    caused_by_seq: causedBySeq,
+    effect_kind: request.kind,
+    effect: { worker_request_kind: request.kind, payload },
+    idempotency_key: idempotencyKey,
+  });
+  let reply;
+  try {
+    reply = await routeAgent(request);
+  } catch (error) {
+    await enginePayload(request, "operation-failed", "agent.effect.complete", {
+      effect_id: effectId,
+      status: "failed",
+      result: { error: error instanceof Error ? error.message : String(error) },
+    });
+    throw error;
+  }
+  await enginePayload(request, "operation-complete", "agent.effect.complete", {
+    effect_id: effectId,
+    status: reply.ok ? "succeeded" : "failed",
+    result: reply,
+  });
+  return reply;
+}
+
 const [engineHandshake, agentHandshake] = await Promise.all([
   engine.request({ protocol_version: 1, request_id: "browser-engine-handshake", kind: "system.handshake", payload: { app_version: "browser-test", protocol_version: 1 }, deadline_ms: 15_000 }),
   agent.request({ protocol_version: 1, request_id: "browser-agent-handshake", kind: "system.handshake", payload: { app_version: "browser-test", protocol_version: 1 }, deadline_ms: 15_000 }),
@@ -305,7 +408,9 @@ const server = createServer(async (request, response) => {
     const result = body.target === "host"
       ? hostResponse(body.request)
       : body.target === "agent"
-        ? await routeAgent(body.request)
+        ? DURABLE_AGENT_KINDS.has(body.request.kind)
+          ? await routeDurableAgent(body.request)
+          : await routeAgent(body.request)
         : await channels[body.target].request(body.request);
     json(response, 200, result, allowedOrigin);
   } catch (error) {

@@ -17,9 +17,7 @@ async test "dead worker restarts after three misses and re-handshakes" {
     return
   }
   assert_true(create_worker_job())
-  defer ignore(shutdown_worker_job(0))
   let worker = WorkerClient::start("agent-test", executable)
-  defer worker.close()
   let handshake : Json = {
     "protocol_version": 1,
     "request_id": "supervision-test-handshake",
@@ -57,6 +55,9 @@ async test "dead worker restarts after three misses and re-handshakes" {
   assert_true(worker.pid != original_pid)
   assert_true(worker_process_running(worker.pid))
   assert_eq(worker.status, "ready")
+  worker.close()
+  assert_true(shutdown_worker_job(0))
+  @async.sleep(100)
 }
 
 ///|
@@ -73,10 +74,188 @@ test "Agent Effect permissions allow only bounded research aggregates" {
 test "Renderer request contracts are target-specific and deny internal continuation" {
   assert_true(renderer_engine_request_kind("market.quote"))
   assert_false(renderer_engine_request_kind("market.unknown"))
+  assert_false(renderer_engine_request_kind("agent.task.create"))
+  assert_false(renderer_engine_request_kind("agent.event.append"))
+  assert_false(renderer_engine_request_kind("agent.checkpoint.put"))
+  assert_false(renderer_engine_request_kind("agent.effect.begin"))
+  assert_false(renderer_engine_request_kind("agent.effect.complete"))
+  assert_false(renderer_engine_request_kind("agent.effect.list"))
   assert_true(renderer_agent_request_kind("agent.research.workflow"))
   assert_false(renderer_agent_request_kind("agent.research.workflow.continue"))
+  assert_false(renderer_agent_request_kind("agent.restore"))
+  assert_false(renderer_agent_request_kind("agent.task.snapshot"))
+  assert_true(durable_agent_request_kind("agent.start"))
+  assert_true(durable_agent_request_kind("agent.event"))
+  assert_true(durable_agent_request_kind("agent.research.workflow"))
+  assert_false(durable_agent_request_kind("agent.provider.configure"))
+  assert_false(durable_agent_request_kind("agent.restore"))
   assert_true(renderer_host_request_kind("window.toggle_maximize"))
   assert_false(renderer_host_request_kind("window.unknown"))
+}
+
+///|
+test "durable operation identity includes the full structured payload" {
+  let stored = DurableEffectView::{
+    status: "succeeded",
+    result: Some({ "ok": true }),
+    effect_kind: "agent.research.workflow",
+    effect: {
+      "worker_request_kind": "agent.research.workflow",
+      "payload": { "task_id": "task-1", "depth": "deep", "tool_policy": "full" },
+    },
+  }
+  assert_true(
+    durable_operation_effect_matches(stored, "agent.research.workflow", {
+      "tool_policy": "full",
+      "depth": "deep",
+      "task_id": "task-1",
+    }),
+  )
+  assert_false(
+    durable_operation_effect_matches(stored, "agent.research.workflow", {
+      "tool_policy": "market",
+      "depth": "deep",
+      "task_id": "task-1",
+    }),
+  )
+}
+
+///|
+#cfg(platform="windows")
+async test "Host owns Agent durability and reuses a completed operation" {
+  guard @env.get_env_var("ASTOCK_HOST_DURABILITY_TEST") is Some("1") &&
+    @env.get_env_var("ASTOCK_ENGINE_EXE") is Some(_) &&
+    @env.get_env_var("ASTOCK_AGENT_EXE") is Some(_) &&
+    @env.get_env_var("ASTOCK_DATA_DIR") is Some(_) else {
+    return
+  }
+  let backend = Backend::start()
+  defer backend.close()
+  let payload : Json = {
+    "task_id": "host-durability-test",
+    "seq": 1,
+    "spec": {
+      "objective": "验证 Host 持久化边界",
+      "security_universe": ["600519"],
+      "as_of": "2026-08-25T13:00:00+08:00",
+      "research_start": "2025-08-25",
+      "research_end": "2026-08-25",
+      "investment_horizon": "3个月",
+      "comparison_benchmark": "000300",
+      "output_type": "manual_plan",
+      "evidence_requirement": "strict",
+    },
+  }
+  let first = backend.route(@shared.AppRequest::{
+    target: "agent",
+    request: worker_request(
+      "host-durability-first", "agent.start", payload, 30000,
+    ),
+  })
+  assert_true(
+    first
+    is {
+      "request_id": "host-durability-first",
+      "kind": "agent.start",
+      "ok": true,
+      ..
+    },
+  )
+  let first_reply : WorkerResponseEnvelope = @json.from_json(first)
+  let projection : AgentWorkflowPayload = @json.from_json(first_reply.payload)
+  guard projection.state is Some(first_state) else {
+    fail("Agent start response did not contain durable state")
+  }
+  assert_eq(first_state.accepted_seq, 1)
+  assert_eq(first_state.phase, "preparing")
+  let durable_json = backend.require_engine(
+    "host-durability-load",
+    "agent.task.load",
+    { "task_id": "host-durability-test" },
+    30000,
+  )
+  let durable : DurableTaskView = @json.from_json(durable_json)
+  assert_eq(durable.task.accepted_seq, 1)
+  assert_eq(durable.events.length(), 1)
+  let effects_json = backend.require_engine(
+    "host-durability-effects",
+    "agent.effect.list",
+    { "task_id": "host-durability-test" },
+    30000,
+  )
+  let effects : DurableEffectList = @json.from_json(effects_json)
+  assert_eq(effects.items.length(), 1)
+  assert_eq(effects.items[0].status, "succeeded")
+  let repeated = backend.route(@shared.AppRequest::{
+    target: "agent",
+    request: worker_request(
+      "host-durability-repeated", "agent.start", payload, 30000,
+    ),
+  })
+  assert_true(
+    repeated
+    is {
+      "request_id": "host-durability-repeated",
+      "kind": "agent.start",
+      "ok": true,
+      ..
+    },
+  )
+  let repeated_effects_json = backend.require_engine(
+    "host-durability-effects-repeated",
+    "agent.effect.list",
+    { "task_id": "host-durability-test" },
+    30000,
+  )
+  let repeated_effects : DurableEffectList = @json.from_json(
+    repeated_effects_json,
+  )
+  assert_eq(repeated_effects.items.length(), 1)
+  let old_agent_pid = backend.agent.pid
+  assert_true(terminate_worker_process(old_agent_pid))
+  backend.agent.restart()
+  assert_true(backend.agent.pid != old_agent_pid)
+  let cancelled = backend.route(@shared.AppRequest::{
+    target: "agent",
+    request: worker_request(
+      "host-durability-after-restart",
+      "agent.event",
+      { "task_id": "host-durability-test", "seq": 2, "event_kind": "cancel" },
+      30000,
+    ),
+  })
+  let cancelled_reply : WorkerResponseEnvelope = @json.from_json(cancelled)
+  let cancelled_projection : AgentWorkflowPayload = @json.from_json(
+    cancelled_reply.payload,
+  )
+  guard cancelled_projection.state is Some(cancelled_state) else {
+    fail("Agent restart response did not contain restored state")
+  }
+  assert_eq(cancelled_state.accepted_seq, 2)
+  assert_eq(cancelled_state.phase, "cancelled")
+  let after_restart_json = backend.require_engine(
+    "host-durability-after-restart-load",
+    "agent.task.load",
+    { "task_id": "host-durability-test" },
+    30000,
+  )
+  let after_restart : DurableTaskView = @json.from_json(after_restart_json)
+  assert_eq(after_restart.task.accepted_seq, 2)
+  assert_eq(after_restart.events.length(), 2)
+  let renderer_write : Json? = Some(
+    backend.route(@shared.AppRequest::{
+      target: "engine",
+      request: worker_request(
+        "host-durability-forbidden-write",
+        "agent.effect.complete",
+        { "effect_id": "forged-effect", "status": "succeeded", "result": null },
+        30000,
+      ),
+    }),
+  ) catch {
+    _ => None
+  }
+  assert_true(renderer_write is None)
 }
 
 ///|

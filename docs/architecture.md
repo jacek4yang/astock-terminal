@@ -46,7 +46,26 @@ the Rust, MoonBit and TypeScript contracts. Engine, public Agent and Host kinds
 are checked independently in React, Proton Host and the browser acceptance
 Bridge. The internal `agent.research.workflow.continue` kind is Worker-to-Host
 only and cannot be submitted by Renderer code; unknown Host kinds fail instead
-of falling through to diagnostics.
+of falling through to diagnostics. Renderer code can read a durable task for
+recovery, but cannot create a task or append events, checkpoints and Effects.
+For `agent.start`, `agent.event` and `agent.research.workflow`, Host (and only
+the development acceptance Bridge outside production) journals the user input
+and operation intent before calling Agent, persists intermediate checkpoints,
+then stores the correlated terminal response. A repeated completed operation
+is served from that immutable journal result instead of invoking Agent twice.
+Operation and tool identities compare the full structured payload; Engine
+stores only a `sha256:` digest as the unique SQLite key, so large parameters
+neither overflow the identity column nor leak their contents through indexes.
+Before a post-start event or workflow is sent, Host restores the newest Engine
+checkpoint into Agent. A supervised Worker restart therefore resumes from
+durable state instead of depending on React to notice and repair the process.
+`agent.restore` and the in-memory task snapshot are internal Worker operations,
+not Renderer permissions; the workbench can read only the Engine's durable task
+projection.
+Stateful Agent operations are single-flight at the Host boundary. A concurrent
+duplicate waits for the first operation, then reuses its committed result;
+only an orphaned journal intent after a process loss can enter the bounded
+read-only retry path.
 
 Every reducer call id remains unique, while an Engine snapshot cache key is
 derived from the task, tool kind and full JSON payload. If Host/Agent/renderer
@@ -84,11 +103,12 @@ capabilities are allowed. The browser development Bridge and IPC smoke use the
 same schema-derived contract. A Worker that merely replies `ok` but is missing
 one of these fields is terminated as incompatible instead of entering service.
 
-Agent state changes and effect intent are committed to the Engine SQLite event
-store before Provider or Engine side effects run. An effect result is committed
-before it is reduced. Conversation history, branches, checkpoints, evidence
-and verification findings are durable; React local storage is never the task
-truth source. Secrets live only in Windows Credential Manager.
+Agent state changes and effect intent are committed by Host to the Engine
+SQLite event store before Provider or Engine side effects run. An effect result
+is committed before it is reduced. Conversation history, branches,
+checkpoints, evidence and verification findings are durable; React local
+storage is never the task truth source and has no journal write capability.
+Secrets live only in Windows Credential Manager.
 
 ## Data correctness
 

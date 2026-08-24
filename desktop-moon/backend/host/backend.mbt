@@ -2,6 +2,7 @@
 pub struct Backend {
   engine : WorkerClient
   agent : WorkerClient
+  agent_durability_lock : @async.Mutex
   mut window : @proton.WindowHandle?
   mut window_events : @proton.WindowEventEmitter?
   mut closed : Bool
@@ -12,6 +13,7 @@ pub struct Backend {
 struct HostRequestEnvelope {
   request_id : String
   kind : String
+  payload : Json
 } derive(FromJson)
 
 ///|
@@ -73,7 +75,8 @@ struct AgentWorkflowPayload {
 struct DurableEffectView {
   status : String
   result : Json?
-  idempotency_key : String
+  effect_kind : String
+  effect : Json
 } derive(FromJson)
 
 ///|
@@ -88,8 +91,59 @@ struct DurableEventView {
 
 ///|
 struct DurableTaskView {
+  task : DurableTaskRecord
   events : Array[DurableEventView]
 } derive(FromJson)
+
+///|
+struct DurableTaskRecord {
+  accepted_seq : Int
+  checkpoint : Json?
+} derive(FromJson)
+
+///|
+struct DurableAgentInput {
+  task_id : String
+  seq : Int?
+  spec : Json?
+  event_kind : String?
+} derive(FromJson)
+
+///|
+struct DurableEffectIdentity {
+  worker_request_kind : String?
+  target : String?
+  kind : String?
+  payload : Json?
+} derive(FromJson)
+
+///|
+fn durable_tool_effect_matches(
+  item : DurableEffectView,
+  effect : AgentHostEffect,
+) -> Bool {
+  guard item.effect_kind == "engine." + effect.kind else { return false }
+  let identity : DurableEffectIdentity = @json.from_json(item.effect) catch {
+    _ => return false
+  }
+  identity.target == Some("engine") &&
+  identity.kind == Some(effect.kind) &&
+  identity.payload == Some(effect.payload)
+}
+
+///|
+fn durable_operation_effect_matches(
+  item : DurableEffectView,
+  kind : String,
+  payload : Json,
+) -> Bool {
+  guard item.effect_kind == kind else { return false }
+  let identity : DurableEffectIdentity = @json.from_json(item.effect) catch {
+    _ => return false
+  }
+  identity.worker_request_kind == Some(kind) &&
+  identity.payload == Some(payload)
+}
 
 ///|
 struct HostToolProgress {
@@ -147,6 +201,7 @@ pub async fn Backend::start() -> Backend {
   let backend = Backend::{
     engine,
     agent,
+    agent_durability_lock: @async.Mutex::Mutex(),
     window: None,
     window_events: None,
     closed: false,
@@ -431,8 +486,7 @@ async fn Backend::execute_agent_effect(
   let history : DurableEffectList = @json.from_json(listed)
   let prior : Array[DurableEffectView] = []
   for item in history.items {
-    if item.idempotency_key == effect.idempotency_key ||
-      item.idempotency_key.has_prefix(effect.idempotency_key + ":retry:") {
+    if durable_tool_effect_matches(item, effect) {
       prior.push(item)
     }
   }
@@ -602,6 +656,198 @@ async fn Backend::route_agent(self : Backend, request : Json) -> Json {
 }
 
 ///|
+fn durable_agent_request_kind(kind : String) -> Bool {
+  kind == "agent.start" ||
+  kind == "agent.event" ||
+  kind == "agent.research.workflow"
+}
+
+///|
+/// Renderer code never receives direct access to the event/effect/checkpoint
+/// write primitives. The Host journals the input and Effect intent before the
+/// Agent call, then stores the correlated response after all checkpoints and
+/// Engine tool results have been committed.
+async fn Backend::route_durable_agent(self : Backend, request : Json) -> Json {
+  let maximum = worker_timeout(request, 900000)
+  @async.with_timeout(maximum, () => self.agent_durability_lock.acquire())
+  defer self.agent_durability_lock.release()
+  let envelope : HostRequestEnvelope = @json.from_json(request)
+  let input : DurableAgentInput = @json.from_json(envelope.payload)
+  if envelope.kind == "agent.start" {
+    guard input.spec is Some(spec) else {
+      fail("Agent start request is missing its TaskSpec")
+    }
+    ignore(
+      self.require_engine(
+        envelope.request_id + ":task-create",
+        "agent.task.create",
+        {
+          "task_id": input.task_id,
+          "reducer_version": "moonbit-agent-kernel-v1",
+          "task_spec": spec,
+          "phase": "idle",
+        },
+        30000,
+      ),
+    )
+  }
+  if input.seq is Some(seq) {
+    ignore(
+      self.require_engine(
+        envelope.request_id + ":input:" + seq.to_string(),
+        "agent.event.append",
+        {
+          "task_id": input.task_id,
+          "seq": seq,
+          "event_id": "input:" + input.task_id + ":" + seq.to_string(),
+          "event_kind": if envelope.kind == "agent.start" {
+            "start"
+          } else {
+            input.event_kind.unwrap_or("agent_event")
+          },
+          "event": {
+            "worker_request_kind": envelope.kind,
+            "payload": envelope.payload,
+          },
+        },
+        30000,
+      ),
+    )
+  }
+  let loaded_json = self.require_engine(
+    envelope.request_id + ":task-load",
+    "agent.task.load",
+    { "task_id": input.task_id },
+    30000,
+  )
+  let loaded : DurableTaskView = @json.from_json(loaded_json)
+  let caused_by_seq = input.seq.unwrap_or(loaded.task.accepted_seq)
+  let base_key = input.task_id +
+    ":" +
+    envelope.kind +
+    ":" +
+    caused_by_seq.to_string() +
+    ":" +
+    envelope.payload.stringify()
+  let listed = self.require_engine(
+    envelope.request_id + ":operation-effects",
+    "agent.effect.list",
+    { "task_id": input.task_id },
+    30000,
+  )
+  let history : DurableEffectList = @json.from_json(listed)
+  let prior : Array[DurableEffectView] = []
+  for item in history.items {
+    if durable_operation_effect_matches(item, envelope.kind, envelope.payload) {
+      prior.push(item)
+    }
+  }
+  for item in prior {
+    if item.status == "succeeded" && item.result is Some(result) {
+      let stored : WorkerResponseEnvelope = @json.from_json(result)
+      return correlate_worker_reply(envelope, stored)
+    }
+  }
+  if envelope.kind != "agent.research.workflow" {
+    for item in prior {
+      if item.status == "pending" {
+        fail(
+          "The same Agent operation is still pending; restore the durable task before retrying",
+        )
+      }
+    }
+  }
+  if envelope.kind != "agent.start" {
+    guard loaded.task.checkpoint is Some(checkpoint) else {
+      fail("The durable Agent task has no checkpoint to restore")
+    }
+    let restore = self.agent.request(
+      worker_request(
+        envelope.request_id + ":restore",
+        "agent.restore",
+        { "state": checkpoint },
+        30000,
+      ),
+      timeout_ms=30000,
+    )
+    let restored : WorkerResponseEnvelope = @json.from_json(restore)
+    if !restored.ok {
+      fail(
+        "Agent rejected the durable checkpoint restore: " +
+        response_error(restored),
+      )
+    }
+  }
+  let retry = prior.length()
+  let idempotency_key = if retry == 0 {
+    base_key
+  } else {
+    base_key + ":retry:" + retry.to_string()
+  }
+  let effect_id = "host-agent:" +
+    input.task_id +
+    ":" +
+    envelope.kind +
+    ":" +
+    caused_by_seq.to_string() +
+    ":" +
+    retry.to_string()
+  ignore(
+    self.require_engine(
+      envelope.request_id + ":operation-begin",
+      "agent.effect.begin",
+      {
+        "effect_id": effect_id,
+        "task_id": input.task_id,
+        "caused_by_seq": caused_by_seq,
+        "effect_kind": envelope.kind,
+        "effect": {
+          "worker_request_kind": envelope.kind,
+          "payload": envelope.payload,
+        },
+        "idempotency_key": idempotency_key,
+      },
+      30000,
+    ),
+  )
+  let reply = self.route_agent(request) catch {
+    error => {
+      ignore(
+        self.require_engine(
+          envelope.request_id + ":operation-failed",
+          "agent.effect.complete",
+          {
+            "effect_id": effect_id,
+            "status": "failed",
+            "result": { "error": error.to_string() },
+          },
+          30000,
+        ),
+      )
+      fail(error.to_string())
+    }
+  }
+  let projected : WorkerResponseEnvelope = @json.from_json(reply)
+  ignore(
+    self.require_engine(
+      envelope.request_id + ":operation-complete",
+      "agent.effect.complete",
+      {
+        "effect_id": effect_id,
+        "status": if projected.ok {
+          "succeeded"
+        } else {
+          "failed"
+        },
+        "result": reply,
+      },
+      30000,
+    ),
+  )
+  reply
+}
+
+///|
 fn handshake_request(request_id : String) -> Json {
   {
     "protocol_version": 1,
@@ -655,7 +901,11 @@ pub async fn Backend::route(
           "Renderer requested an Agent kind outside the public protocol contract",
         )
       }
-      self.route_agent(request.request)
+      if durable_agent_request_kind(envelope.kind) {
+        self.route_durable_agent(request.request)
+      } else {
+        self.route_agent(request.request)
+      }
     }
     "host" => {
       let envelope : HostRequestEnvelope = @json.from_json(request.request)

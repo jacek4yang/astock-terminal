@@ -1,4 +1,4 @@
-/// GENERATED from protocol/schema; schema-sha256=65b293549628946d86d197ff5440c8f4d71eca233e6c55d503e203eca4c58b43
+/// GENERATED from protocol/schema; schema-sha256=21885987a7488bb0e51eaacce89681d72c6f04bb50b5936e7cf67353094a256e
 /// Run: node protocol/codegen.mjs
 
 let protocol_release_version : String = "6.0.0"
@@ -118,12 +118,6 @@ fn renderer_engine_request_kind(kind : String) -> Bool {
   kind == "quant.scan.cancel" ||
   kind == "settings.agent_models.get" ||
   kind == "settings.agent_models.set" ||
-  kind == "agent.task.create" ||
-  kind == "agent.event.append" ||
-  kind == "agent.checkpoint.put" ||
-  kind == "agent.effect.begin" ||
-  kind == "agent.effect.complete" ||
-  kind == "agent.effect.list" ||
   kind == "agent.task.load" ||
   kind == "agent.conversation.save" ||
   kind == "agent.conversation.load" ||
@@ -139,10 +133,8 @@ fn renderer_agent_request_kind(kind : String) -> Bool {
   kind == "agent.provider.test" ||
   kind == "agent.provider.configure" ||
   kind == "agent.start" ||
-  kind == "agent.restore" ||
   kind == "agent.event" ||
-  kind == "agent.research.workflow" ||
-  kind == "agent.task.snapshot"
+  kind == "agent.research.workflow"
 }
 
 ///|
