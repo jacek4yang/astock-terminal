@@ -83,6 +83,17 @@ async function protonCommand<T>(name: string, args: Record<string, unknown> = {}
       return requestNative<T>("engine", "market.fund_flow.daily", args);
     case "get_realtime_flow":
       return requestNative<T>("engine", "market.fund_flow.realtime", args);
+    case "chanlun_minute":
+      return requestNative<T>("engine", "analysis.chanlun.minute", args, { deadlineMs: 60_000 });
+    case "get_pool":
+      return requestNative<T>("engine", "research.market_pool", args, { deadlineMs: 60_000 });
+    case "get_board_cons":
+      return requestNative<T>(
+        "engine",
+        "research.board.constituents",
+        { board_code: args.bk_code },
+        { deadlineMs: 60_000 },
+      );
     case "get_market_breadth": {
       const result = await requestNative<{ breadth: unknown }>("engine", "market.overview", {});
       return result.breadth as T;
@@ -2875,6 +2886,17 @@ export type PoolKind = "zt" | "prev" | "strong" | "sub_new" | "broken" | "dt";
 export type PoolRow = Record<string, unknown>;
 export const getPool = (pool: PoolKind, date?: string) =>
   cmd<DcResult<PoolRow>>("get_pool", date ? { pool, date } : { pool });
+export interface BoardConsRow {
+  code: string;
+  name: string;
+  price: number | null;
+  pct: number | null;
+  pe: number | null;
+  total_market_cap: number | null;
+  float_market_cap: number | null;
+}
+export const getBoardConstituents = (boardCode: string) =>
+  cmd<DcResult<BoardConsRow>>("get_board_cons", { bk_code: boardCode });
 export const getBillboard = (days?: number) =>
   cmd<DcResult<BillboardRow>>("get_billboard", days != null ? { days } : {});
 export const getMarginDaily = () => cmd<DcResult<MarginDailyRow>>("get_margin_daily");

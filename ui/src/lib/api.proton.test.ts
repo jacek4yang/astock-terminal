@@ -13,9 +13,12 @@ vi.mock("../bridge", () => ({
 }));
 
 import {
+  chanlunMinute,
+  getBoardConstituents,
   getGlobalGoldenChains,
   getGlobalProviderHealth,
   getGlobalTransmissionPaths,
+  getPool,
   globalSyncCancel,
   globalSyncStart,
   globalSyncStatus,
@@ -54,5 +57,20 @@ describe("Proton global research bridge", () => {
       as_of: 1234,
       max_depth: 4,
     });
+  });
+
+  it("routes intraday analysis and datacenter views without legacy Tauri", async () => {
+    await chanlunMinute("300308");
+    await getPool("strong", "2026-08-24");
+    await getBoardConstituents("bk0447");
+
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "analysis.chanlun.minute",
+      "research.market_pool",
+      "research.board.constituents",
+    ]);
+    expect(requestNative.mock.calls[0][2]).toEqual({ symbol: "300308" });
+    expect(requestNative.mock.calls[1][2]).toEqual({ pool: "strong", date: "2026-08-24" });
+    expect(requestNative.mock.calls[2][2]).toEqual({ board_code: "bk0447" });
   });
 });

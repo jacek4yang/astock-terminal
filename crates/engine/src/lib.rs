@@ -942,6 +942,39 @@ impl Engine {
                 });
                 Ok(json!({"points": points, "summary": summary}))
             }
+            "analysis.chanlun.minute" => {
+                let payload: SymbolPayload = decode_payload(&request.payload)?;
+                let symbol = parse_live_symbol(&payload.symbol)?;
+                let fetched = self.market.minute(&symbol).await.map_err(upstream)?;
+                if fetched.data.points.is_empty() {
+                    return Err(ServiceError::new(
+                        "empty",
+                        format!("{symbol} 当前没有可用分时数据（可能尚未开盘或已休市）"),
+                        true,
+                    ));
+                }
+                let times = fetched
+                    .data
+                    .points
+                    .iter()
+                    .map(|point| point.time.format("%H:%M").to_string())
+                    .collect::<Vec<_>>();
+                let prices = fetched
+                    .data
+                    .points
+                    .iter()
+                    .map(|point| point.price)
+                    .collect::<Vec<_>>();
+                let volumes = fetched
+                    .data
+                    .points
+                    .iter()
+                    .map(|point| point.volume)
+                    .collect::<Vec<_>>();
+                let result =
+                    astock_chanlun::minute::analyze_chanlun_minute(&times, &prices, &volumes);
+                Ok(astock_chanlun::minute::signals_to_dict(&result))
+            }
             "research.market_context" => {
                 let today = astock_core::time::now_china().date_naive();
                 let trade_date = latest_trading_day_on_or_before(&self.rules, today);
@@ -992,6 +1025,75 @@ impl Engine {
                     },
                     "evidence_note": "东方财富数据中心市场环境包；各子集独立保留失败状态，池为空不等于接口失败"
                 }))
+            }
+            "research.market_pool" => {
+                let payload: MarketPoolPayload = decode_payload(&request.payload)?;
+                let date = payload
+                    .date
+                    .as_deref()
+                    .map(|value| parse_research_date(value, "date"))
+                    .transpose()?
+                    .unwrap_or_else(|| {
+                        latest_trading_day_on_or_before(
+                            &self.rules,
+                            astock_core::time::now_china().date_naive(),
+                        )
+                    });
+                match parse_market_pool_kind(&payload.pool)? {
+                    MarketPoolKind::LimitUp => research_rows_payload(
+                        self.market
+                            .em_datacenter
+                            .zt_pool(date)
+                            .await
+                            .map_err(upstream)?,
+                    ),
+                    MarketPoolKind::PreviousLimitUp => research_rows_payload(
+                        self.market
+                            .em_datacenter
+                            .prev_zt_pool(date)
+                            .await
+                            .map_err(upstream)?,
+                    ),
+                    MarketPoolKind::Strong => research_rows_payload(
+                        self.market
+                            .em_datacenter
+                            .strong_pool(date)
+                            .await
+                            .map_err(upstream)?,
+                    ),
+                    MarketPoolKind::SubNew => research_rows_payload(
+                        self.market
+                            .em_datacenter
+                            .sub_new_pool(date)
+                            .await
+                            .map_err(upstream)?,
+                    ),
+                    MarketPoolKind::BrokenLimit => research_rows_payload(
+                        self.market
+                            .em_datacenter
+                            .broken_pool(date)
+                            .await
+                            .map_err(upstream)?,
+                    ),
+                    MarketPoolKind::LimitDown => research_rows_payload(
+                        self.market
+                            .em_datacenter
+                            .dt_pool(date)
+                            .await
+                            .map_err(upstream)?,
+                    ),
+                }
+            }
+            "research.board.constituents" => {
+                let payload: BoardConstituentsPayload = decode_payload(&request.payload)?;
+                let board_code = parse_board_code(&payload.board_code)?;
+                research_rows_payload(
+                    self.market
+                        .em_datacenter
+                        .board_cons(&board_code, 5)
+                        .await
+                        .map_err(upstream)?,
+                )
             }
             "research.global_context" => {
                 let world_bank =
@@ -1751,6 +1853,20 @@ struct GlobalTransmissionPayload {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct MarketPoolPayload {
+    pool: String,
+    #[serde(default)]
+    date: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoardConstituentsPayload {
+    board_code: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TaskIdPayload {
     task_id: String,
 }
@@ -1984,6 +2100,63 @@ fn latest_trading_day_on_or_before(rules: &RuleSet, mut date: NaiveDate) -> Naiv
         date -= chrono::Duration::days(1);
     }
     date
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarketPoolKind {
+    LimitUp,
+    PreviousLimitUp,
+    Strong,
+    SubNew,
+    BrokenLimit,
+    LimitDown,
+}
+
+fn parse_market_pool_kind(raw: &str) -> Result<MarketPoolKind, ServiceError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "zt" => Ok(MarketPoolKind::LimitUp),
+        "prev" => Ok(MarketPoolKind::PreviousLimitUp),
+        "strong" => Ok(MarketPoolKind::Strong),
+        "sub_new" => Ok(MarketPoolKind::SubNew),
+        "broken" => Ok(MarketPoolKind::BrokenLimit),
+        "dt" => Ok(MarketPoolKind::LimitDown),
+        other => Err(ServiceError::new(
+            "invalid_payload",
+            format!("pool 只能是 zt/prev/strong/sub_new/broken/dt，收到 `{other}`"),
+            false,
+        )),
+    }
+}
+
+fn parse_board_code(raw: &str) -> Result<String, ServiceError> {
+    let code = raw.trim().to_ascii_uppercase();
+    let valid = code.len() == 6
+        && code.starts_with("BK")
+        && code[2..].bytes().all(|byte| byte.is_ascii_digit());
+    if valid {
+        Ok(code)
+    } else {
+        Err(ServiceError::new(
+            "invalid_payload",
+            format!("board_code 必须是 BK + 4 位数字（如 BK0447），收到 `{raw}`"),
+            false,
+        ))
+    }
+}
+
+/// Preserve the legacy datacenter row contract while routing through the
+/// coarse research service. Provenance belongs to every response so an empty
+/// row set can never be confused with a provider failure.
+fn research_rows_payload<T: serde::Serialize>(
+    fetched: astock_core::Fetched<Vec<T>>,
+) -> Result<Value, ServiceError> {
+    let count = fetched.data.len();
+    Ok(json!({
+        "rows": fetched.data,
+        "count": count,
+        "source": fetched.source.to_string(),
+        "fetched_at": fetched.fetched_at.to_rfc3339(),
+    }))
 }
 
 fn tushare_pro_unavailable(
@@ -2530,6 +2703,24 @@ mod tests {
             .to_string()
             .contains("权限探测失败")
         );
+    }
+
+    #[test]
+    fn market_pool_and_board_inputs_are_closed_enums() {
+        assert_eq!(
+            parse_market_pool_kind("zt").unwrap(),
+            MarketPoolKind::LimitUp
+        );
+        assert_eq!(
+            parse_market_pool_kind(" SUB_NEW ").unwrap(),
+            MarketPoolKind::SubNew
+        );
+        assert_eq!(parse_board_code(" bk0447 ").unwrap(), "BK0447");
+
+        let pool_error = parse_market_pool_kind("anything").unwrap_err();
+        assert_eq!(pool_error.code, "invalid_payload");
+        let board_error = parse_board_code("000001").unwrap_err();
+        assert_eq!(board_error.code, "invalid_payload");
     }
 
     #[tokio::test]
