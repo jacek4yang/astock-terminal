@@ -3,6 +3,7 @@ mod credentials;
 mod data_quality;
 mod data_root;
 mod event_store;
+mod global_sync;
 mod scan;
 mod settings;
 
@@ -34,6 +35,7 @@ pub struct Engine {
     fundamental: Arc<FundamentalClient>,
     rules: RuleSet,
     scan: scan::ScanService,
+    global_sync: global_sync::GlobalSyncService,
     provider_boot: credentials::BootStatus,
     credential_migration_error: Option<String>,
     data_root: DataRootDecision,
@@ -75,6 +77,7 @@ impl Engine {
             fundamental,
             rules,
             scan: scan::ScanService::default(),
+            global_sync: global_sync::GlobalSyncService::default(),
             provider_boot,
             credential_migration_error,
             data_root,
@@ -1012,6 +1015,55 @@ impl Engine {
                     "evidence_note": "全球上下文只提供跨市场背景，不把年度宏观数据伪装成实时信号；每个数据集独立保留来源、失败和观测期"
                 }))
             }
+            "research.global.sync.start" => {
+                let payload: global_sync::GlobalSyncRequest = decode_payload(&request.payload)?;
+                self.global_sync
+                    .start(self.market.clone(), self.storage.clone(), payload)
+                    .await
+                    .map(|started| json!(started))
+                    .map_err(|message| ServiceError::new("global_sync", message, false))
+            }
+            "research.global.sync.status" => Ok(json!(self.global_sync.status())),
+            "research.global.sync.cancel" => Ok(json!({ "cancelled": self.global_sync.cancel() })),
+            "research.global.providers" => global_sync::provider_health(self.storage.clone())
+                .await
+                .map(|providers| json!(providers))
+                .map_err(|message| ServiceError::new("global_intelligence", message, false)),
+            "research.global.documents" => {
+                let payload: astock_global_intelligence::GlobalDocumentQuery =
+                    decode_payload(&request.payload)?;
+                astock_global_intelligence::GlobalStore::new(self.storage.clone())
+                    .query_documents(payload)
+                    .await
+                    .map(|page| json!(page))
+                    .map_err(|error| {
+                        ServiceError::new("global_intelligence", error.to_string(), false)
+                    })
+            }
+            "research.global.chains" => Ok(json!(
+                astock_global_intelligence::global_a_share_golden_chains()
+            )),
+            "research.global.transmission" => {
+                let payload: GlobalTransmissionPayload = decode_payload(&request.payload)?;
+                if payload.root_entity_id.trim().is_empty() {
+                    return Err(ServiceError::new(
+                        "invalid_entity",
+                        "root_entity_id must not be empty",
+                        false,
+                    ));
+                }
+                astock_global_intelligence::GlobalStore::new(self.storage.clone())
+                    .transmission_paths(
+                        payload.root_entity_id.trim(),
+                        payload.as_of.unwrap_or_else(now_secs),
+                        payload.max_depth.unwrap_or(6),
+                    )
+                    .await
+                    .map(|paths| json!(paths))
+                    .map_err(|error| {
+                        ServiceError::new("global_intelligence", error.to_string(), false)
+                    })
+            }
             "research.security_events" => {
                 let payload: SymbolPayload = decode_payload(&request.payload)?;
                 let symbol = parse_live_symbol(&payload.symbol)?;
@@ -1685,6 +1737,16 @@ struct CacheCleanupPayload {
 #[serde(deny_unknown_fields)]
 struct DataRootMigrationPayload {
     destination: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GlobalTransmissionPayload {
+    root_entity_id: String,
+    #[serde(default)]
+    as_of: Option<i64>,
+    #[serde(default)]
+    max_depth: Option<usize>,
 }
 
 #[derive(Deserialize)]

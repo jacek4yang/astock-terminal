@@ -201,6 +201,20 @@ async function protonCommand<T>(name: string, args: Record<string, unknown> = {}
       return requestNative<T>("engine", "research.sources.fetch", args, { deadlineMs: 60_000 });
     case "compare_source_evidence":
       return requestNative<T>("engine", "research.sources.compare", args);
+    case "global_sync_start":
+      return requestNative<T>("engine", "research.global.sync.start", (args.request ?? {}) as Record<string, unknown>, { deadlineMs: 60_000 });
+    case "global_sync_status":
+      return requestNative<T>("engine", "research.global.sync.status", {});
+    case "global_sync_cancel":
+      return requestNative<T>("engine", "research.global.sync.cancel", {});
+    case "get_global_provider_health":
+      return requestNative<T>("engine", "research.global.providers", {});
+    case "query_global_documents":
+      return requestNative<T>("engine", "research.global.documents", (args.query ?? {}) as Record<string, unknown>);
+    case "get_global_golden_chains":
+      return requestNative<T>("engine", "research.global.chains", {});
+    case "get_global_transmission_paths":
+      return requestNative<T>("engine", "research.global.transmission", args);
     case "watchlist_list":
       return requestNative<T>("engine", "workspace.watchlist.list", { group: args.group ?? "默认" });
     case "watchlist_add":

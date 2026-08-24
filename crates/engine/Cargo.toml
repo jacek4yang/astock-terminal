@@ -9,6 +9,7 @@ publish.workspace = true
 astock-core = { path = "../core" }
 astock-chanlun = { path = "../chanlun" }
 astock-fundamental = { path = "../fundamental" }
+astock-global-intelligence = { path = "../global-intelligence" }
 astock-market-data = { path = "../market-data" }
 astock-minimax = { path = "../minimax" }
 astock-protocol = { path = "../protocol" }

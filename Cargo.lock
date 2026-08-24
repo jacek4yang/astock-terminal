@@ -441,6 +441,7 @@ dependencies = [
  "astock-chanlun",
  "astock-core",
  "astock-fundamental",
+ "astock-global-intelligence",
  "astock-market-data",
  "astock-minimax",
  "astock-protocol",

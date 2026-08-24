@@ -70,6 +70,13 @@ const migratedHandlers = new Set([
   "settings.cache_cleanup",
   "settings.get_data_dir",
   "settings.set_data_dir",
+  "global.global_sync_start",
+  "global.global_sync_status",
+  "global.global_sync_cancel",
+  "global.get_global_provider_health",
+  "global.query_global_documents",
+  "global.get_global_golden_chains",
+  "global.get_global_transmission_paths",
   "agent.agent_ask",
   "agent.agent_conversation_delete",
   "agent.agent_conversation_load",
@@ -95,7 +102,7 @@ const marketProviderStatus = {
   global_assets: "ENRICHED",
   iwencai_openapi: "ENRICHED",
   joinquant: "READY",
-  sec_edgar: "INTERNAL_ONLY",
+  sec_edgar: "READY",
   sina: "READY",
   tdx_adapter: "ENRICHED",
   tencent: "READY",
@@ -104,6 +111,7 @@ const marketProviderStatus = {
 };
 
 const exposedGlobalSources = new Set([
+  "sec_edgar",
   "world_bank",
   "sge_gold",
   "world_gold_council",
