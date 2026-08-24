@@ -146,7 +146,11 @@ try {
     Invoke-ReleaseGateStep 'version-contract' 'source' 'INTEGRATION TESTED' {
         Invoke-Checked -FilePath 'node' -Arguments @('scripts/release-version-check.mjs', '6.0.0')
         Invoke-Checked -FilePath 'node' -Arguments @('protocol/codegen.mjs', '--check')
-        Invoke-Checked -FilePath 'node' -Arguments @('--test', 'scripts/release-evidence-check.test.mjs')
+        Invoke-Checked -FilePath 'node' -Arguments @(
+            '--test',
+            'scripts/release-evidence-check.test.mjs',
+            'scripts/acceptance-evidence.test.mjs'
+        )
     }
 
     Invoke-ReleaseGateStep 'architecture-cutover' 'architecture' 'INTEGRATION TESTED' {

@@ -25,7 +25,7 @@ jobs:
       - name: Check Proton, MoonBit Agent and Rust Engine boundaries
         run: node scripts/release-architecture-check.mjs
       - name: Test immutable release-evidence validation
-        run: node --test scripts/release-evidence-check.test.mjs
+        run: node --test scripts/release-evidence-check.test.mjs scripts/acceptance-evidence.test.mjs
 
   security-audit:
     runs-on: ubuntu-latest

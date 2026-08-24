@@ -49,6 +49,32 @@ function evidencedCases(caseIds) {
   }));
 }
 
+function interactiveCases(caseIds, surface) {
+  return caseIds.map((id) => ({
+    id,
+    status: "PASSED",
+    duration_ms: 1,
+    assertion_count: 2,
+    artifacts: [
+      { kind: "interaction-trace", path: artifactPath, sha256: artifactHash, captured_at_utc: "2026-08-24T00:00:30.000Z" },
+      { kind: "screenshot", path: artifactPath, sha256: artifactHash, captured_at_utc: "2026-08-24T00:00:30.000Z" },
+    ],
+    details: {
+      recording_schema: 1,
+      surface,
+      viewport: { width: id === "responsive-1200" ? 1199 : id === "responsive-900" ? 899 : 1440, height: 900 },
+      console: { error_count: 0, warning_count: 0 },
+      assertions: [
+        { id: "visible", passed: true, expected: "visible", observed: "visible" },
+        { id: "interactive", passed: true, expected: true, observed: true },
+      ],
+      ...(surface === "codex-in-app-browser"
+        ? { bridge: { real_engine: true, real_agent: true } }
+        : { package: { application_version: "6.0.0", commit, isolated_data_root: true } }),
+    },
+  }));
+}
+
 function completePerformance() {
   const metric = (id, value, comparison, budget, aggregation, unit, count) => ({
     id, value, comparison, budget, aggregation, unit, status: "PASSED", samples: Array(count).fill(value),
@@ -214,8 +240,22 @@ test("recomputes artifact hashes instead of trusting the evidence JSON", () => {
 
 test("accepts the complete desktop catalog only with auditable artifacts", () => {
   const evidence = base("desktop-e2e-40", DESKTOP_E2E_SCENARIOS);
-  evidence.cases = evidencedCases(DESKTOP_E2E_SCENARIOS);
+  evidence.secrets_in_evidence = false;
+  evidence.production_data_touched = false;
+  evidence.runner.surface = "packaged-proton-cef";
+  evidence.runner.session_id = "desktop-session";
+  evidence.cases = interactiveCases(DESKTOP_E2E_SCENARIOS, "packaged-proton-cef");
   assert.doesNotThrow(() => validateEvidence(evidence, "desktop-e2e-40", commit));
+});
+
+test("rejects pass-only browser evidence without real Worker and visual provenance", () => {
+  const evidence = base("browser-cdp", BROWSER_CDP_SCENARIOS);
+  evidence.cases = evidencedCases(BROWSER_CDP_SCENARIOS);
+  evidence.secrets_in_evidence = false;
+  evidence.production_data_touched = false;
+  evidence.runner.surface = "codex-in-app-browser";
+  evidence.runner.session_id = "browser-session";
+  assert.throws(() => validateEvidence(evidence, "browser-cdp", commit), /detailed interactive recording/);
 });
 
 test("accepts complete core fault evidence without pretending renderer coverage", () => {

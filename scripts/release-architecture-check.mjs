@@ -13,6 +13,7 @@ const moonHost = fs.readFileSync(path.join(root, "desktop-moon", "backend", "hos
 const moonEntry = fs.readFileSync(path.join(root, "desktop-moon", "backend", "app", "main.mbt"), "utf8");
 const engineSchema = fs.readFileSync(path.join(root, "protocol", "schema", "engine.schema.json"), "utf8");
 const browserBridge = fs.readFileSync(path.join(root, "scripts", "browser-dev-bridge.mjs"), "utf8");
+const acceptanceEvidence = fs.readFileSync(path.join(root, "scripts", "acceptance-evidence.mjs"), "utf8");
 const releaseGate = fs.readFileSync(path.join(root, "scripts", "release-gate.ps1"), "utf8");
 const releaseSigner = fs.readFileSync(path.join(root, "scripts", "sign-release.ps1"), "utf8");
 const releaseEvidenceValidator = fs.readFileSync(path.join(root, "scripts", "release-evidence-check.mjs"), "utf8");
@@ -113,6 +114,7 @@ for (const requiredWorkflowMarker of [
   "protocol/codegen.mjs --check",
   "capability-parity-check.mjs --release",
   "release-architecture-check.mjs",
+  "acceptance-evidence.test.mjs",
   "https://cli.moonbitlang.com/binaries/0.1.20260819/moonbit-linux-x86_64.tar.gz",
   "moon version | grep -F 'moon 0.1.20260819'",
   "moon test --target native",
@@ -180,6 +182,16 @@ if (!moonHost.includes('effect.kind != "research.agent_prepare_context"') ||
 }
 if (!browserBridge.includes("executeAgentEffect") || !browserBridge.includes('effect?.target !== "engine"')) {
   failures.push("browser test Bridge does not preserve the production Agent effect contract");
+}
+for (const acceptanceMarker of [
+  "codex-in-app-browser",
+  "packaged-proton-cef",
+  "interaction-trace",
+  "screenshot",
+  "observation contains credential or Bridge-token material",
+  "flag: \"wx\"",
+]) {
+  if (!acceptanceEvidence.includes(acceptanceMarker)) failures.push(`interactive acceptance evidence recorder is missing ${acceptanceMarker}`);
 }
 for (const kind of ["research.agent_prepare_context", "research.agent_security_context", "research.agent_report_verify"]) {
   if (!engineSchema.includes(`\"${kind}\"`)) failures.push(`Engine protocol is missing ${kind}`);

@@ -19,7 +19,16 @@ cannot run until Codex in-app browser evidence and packaging both pass.
 The desktop gate requires the exact 40 named v6 scenarios in
 `scripts/release-scenarios.mjs`; unrelated placeholder cases cannot satisfy the
 count. Every browser and desktop case must record a positive assertion count
-and at least one absolute, timestamped artifact with its SHA-256. Packaged CEF inspection is
+and an absolute interaction trace plus PNG screenshot with recomputed SHA-256.
+Interactive acceptance is never represented by a hand-written `PASSED` list.
+Create a commit-bound D-drive session with `scripts/acceptance-evidence.mjs
+init`, record `observation.json` plus `screenshot.png` for every catalog case,
+then run `finalize`. Finalization requires concrete expected/observed
+assertions, a clean console, the exact responsive viewport, real Engine/Agent
+Bridge use for the Codex in-app browser, an isolated packaged data root for CEF,
+and rejects credentials or Bridge-token material. Its output is create-once and
+cannot overwrite prior evidence. `init` emits a deliberately `NOT_RUN`
+observation template; it never pre-populates a passing case. Packaged CEF inspection is
 deny-by-default: the application must explicitly receive
 `ASTOCK_RELEASE_TEST_CDP=1`, while the isolated runner chooses a random loopback
 port. Supplying only `PROTON_REMOTE_DEBUGGING_PORT` must not enable CDP. The

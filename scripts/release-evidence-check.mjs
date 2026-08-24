@@ -307,6 +307,41 @@ function validateSignedArtifacts(evidence) {
   }
 }
 
+function validateInteractiveAcceptance(evidence, gate) {
+  const browser = gate === "browser-cdp";
+  const expectedSurface = browser ? "codex-in-app-browser" : "packaged-proton-cef";
+  invariant(evidence.secrets_in_evidence === false, `${gate}: evidence may not retain credentials or Bridge tokens`);
+  invariant(evidence.production_data_touched === false, `${gate}: acceptance may not touch production data`);
+  invariant(evidence.runner.surface === expectedSurface && typeof evidence.runner.session_id === "string" && evidence.runner.session_id.trim(),
+    `${gate}: acceptance runner surface/session is invalid`);
+  for (const item of evidence.cases) {
+    const details = item.details;
+    invariant(isRecord(details) && details.recording_schema === 1 && details.surface === expectedSurface,
+      `${gate}: case ${item.id} has no detailed interactive recording`);
+    invariant(Array.isArray(details.assertions) && details.assertions.length >= 2 &&
+      details.assertions.every((assertion) => isRecord(assertion) && assertion.passed === true &&
+        typeof assertion.id === "string" && assertion.id.trim() &&
+        Object.hasOwn(assertion, "expected") && Object.hasOwn(assertion, "observed")),
+    `${gate}: case ${item.id} contains only a pass label or incomplete assertions`);
+    invariant(isRecord(details.viewport) && Number.isInteger(details.viewport.width) && Number.isInteger(details.viewport.height),
+      `${gate}: case ${item.id} has no viewport recording`);
+    invariant(details.console?.error_count === 0 && details.console?.warning_count === 0,
+      `${gate}: case ${item.id} contains console errors or warnings`);
+    const artifactKinds = new Set(item.artifacts.map((artifact) => artifact.kind));
+    invariant(artifactKinds.has("interaction-trace") && artifactKinds.has("screenshot"),
+      `${gate}: case ${item.id} requires an interaction trace and screenshot`);
+    if (browser) {
+      invariant(details.bridge?.real_engine === true && details.bridge?.real_agent === true,
+        `${gate}: case ${item.id} did not use the real Engine and Agent Workers`);
+      if (item.id === "responsive-1200") invariant(details.viewport.width === 1199, `${gate}: responsive-1200 must exercise 1199px`);
+      if (item.id === "responsive-900") invariant(details.viewport.width === 899, `${gate}: responsive-900 must exercise 899px`);
+    } else {
+      invariant(details.package?.application_version === "6.0.0" && details.package?.commit === evidence.commit &&
+        details.package?.isolated_data_root === true, `${gate}: case ${item.id} is not bound to the isolated packaged application`);
+    }
+  }
+}
+
 export function validateEvidence(evidence, expectedGate, expectedCommit) {
   invariant(isRecord(evidence), "release evidence root must be an object");
   invariant(evidence.schema_version === 1, `${expectedGate}: schema_version must be 1`);
@@ -326,6 +361,7 @@ export function validateEvidence(evidence, expectedGate, expectedCommit) {
   if (expectedGate === "minimax-plus-joinquant-live") validateExternalServices(evidence);
   if (expectedGate === "credential-rotation") validateCredentialRotation(evidence);
   if (expectedGate === "authenticode-valid-all-pe") validateSignedArtifacts(evidence);
+  if (expectedGate === "browser-cdp" || expectedGate === "desktop-e2e-40") validateInteractiveAcceptance(evidence, expectedGate);
   return { gate: expectedGate, cases: evidence.cases.length, completed_at_utc: evidence.completed_at_utc };
 }
 
