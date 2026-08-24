@@ -56,3 +56,53 @@ async fn worker_stdout_is_protocol_only_and_handshake_is_versioned() {
     assert!(shutdown.ok);
     assert_eq!(child.wait().await.unwrap().code(), Some(0));
 }
+
+#[tokio::test]
+async fn worker_rejects_a_duplicate_request_id_on_the_same_channel() {
+    let data = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_astock-engine"))
+        .env("ASTOCK_DATA_DIR", data.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let duplicate = request(
+        "duplicate-id",
+        "system.handshake",
+        json!({"app_version":"test","protocol_version":1}),
+    );
+    write_frame(&mut stdin, &duplicate).await.unwrap();
+    assert!(
+        read_frame::<_, ResponseEnvelope>(&mut stdout)
+            .await
+            .unwrap()
+            .unwrap()
+            .ok
+    );
+    write_frame(&mut stdin, &duplicate).await.unwrap();
+    let rejected: ResponseEnvelope = read_frame(&mut stdout).await.unwrap().unwrap();
+    assert!(!rejected.ok);
+    assert_eq!(
+        rejected.error.as_ref().map(|error| error.code.as_str()),
+        Some("duplicate_request_id")
+    );
+
+    write_frame(
+        &mut stdin,
+        &request("shutdown-after-duplicate", "system.shutdown", json!({})),
+    )
+    .await
+    .unwrap();
+    assert!(
+        read_frame::<_, ResponseEnvelope>(&mut stdout)
+            .await
+            .unwrap()
+            .unwrap()
+            .ok
+    );
+    assert_eq!(child.wait().await.unwrap().code(), Some(0));
+}

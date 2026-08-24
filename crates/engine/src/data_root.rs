@@ -35,6 +35,8 @@ pub struct DataRootDecision {
 struct ActiveDataRoot {
     version: u32,
     data_root: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    migration_destination: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,6 +68,16 @@ pub struct MigrationOutcome {
     pub source_retained: bool,
     pub restart_required: bool,
     pub compatibility_warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RollbackOutcome {
+    pub data_dir: PathBuf,
+    pub migrated_copy: PathBuf,
+    pub source_sqlite_integrity: String,
+    pub source_retained: bool,
+    pub migrated_copy_retained: bool,
+    pub restart_required: bool,
 }
 
 pub async fn resolve_and_open() -> Result<(Storage, DataRootDecision), String> {
@@ -142,6 +154,99 @@ pub async fn migrate(storage: &Storage, requested: &str) -> Result<MigrationOutc
         })?
         .join("com.astock.terminal");
     migrate_with_bootstrap(storage, requested, &bootstrap_root).await
+}
+
+pub async fn rollback(storage: &Storage) -> Result<RollbackOutcome, String> {
+    let bootstrap_root = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            "LOCALAPPDATA is unavailable; cannot restore the prior data root".to_string()
+        })?
+        .join("com.astock.terminal");
+    rollback_with_bootstrap(storage, &bootstrap_root).await
+}
+
+async fn rollback_with_bootstrap(
+    storage: &Storage,
+    bootstrap_root: &Path,
+) -> Result<RollbackOutcome, String> {
+    let redirect_path = bootstrap_root.join(REDIRECT_FILE);
+    if !redirect_path.is_file() {
+        return Err("no migrated data-root activation is available to roll back".into());
+    }
+    let redirect = read_active_redirect_record(&redirect_path)?;
+    let active_root = friendly_canonicalize(&redirect.data_root)
+        .map_err(|error| format!("resolve active data root: {error}"))?;
+    let migrated_copy = friendly_canonicalize(
+        redirect
+            .migration_destination
+            .as_deref()
+            .unwrap_or(&active_root),
+    )
+    .map_err(|error| format!("resolve migrated data root: {error}"))?;
+    let manifest_path = migrated_copy.join(MANIFEST_FILE);
+    let manifest_bytes = fs::read(&manifest_path).map_err(|error| {
+        format!(
+            "read migration manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest: MigrationManifest = serde_json::from_slice(&manifest_bytes).map_err(|error| {
+        format!(
+            "parse migration manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest_destination = friendly_canonicalize(&manifest.destination)
+        .map_err(|error| format!("resolve manifest destination: {error}"))?;
+    if manifest.schema_version != 1 || manifest_destination != migrated_copy {
+        return Err("migration manifest does not match the active migrated data root".into());
+    }
+    let source = friendly_canonicalize(&manifest.source)
+        .map_err(|error| format!("resolve retained source data root: {error}"))?;
+    let current = friendly_canonicalize(storage.base_dir())
+        .map_err(|error| format!("resolve current Engine data root: {error}"))?;
+    if current != source && current != migrated_copy {
+        return Err("current Engine data root is unrelated to the active migration".into());
+    }
+    if source == migrated_copy || !has_store(&source) {
+        return Err(
+            "retained source data root is missing or invalid; rollback was not activated".into(),
+        );
+    }
+
+    let source_database = source.join("meta.db");
+    let source_for_check = source_database.clone();
+    let integrity = tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let connection = Connection::open_with_flags(
+            &source_for_check,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(|error| format!("open retained source database read-only: {error}"))?;
+        let integrity: String = connection
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .map_err(|error| format!("verify retained source database: {error}"))?;
+        if integrity != "ok" {
+            return Err(format!(
+                "retained source database integrity_check returned {integrity}"
+            ));
+        }
+        Ok(integrity)
+    })
+    .await
+    .map_err(|error| format!("rollback verification worker failed: {error}"))??;
+
+    // The pointer is the only switched state. Neither the original nor the
+    // migrated copy is deleted, so an interrupted rollback remains recoverable.
+    write_active_redirect(bootstrap_root, &source, Some(&migrated_copy))?;
+    Ok(RollbackOutcome {
+        data_dir: source,
+        migrated_copy,
+        source_sqlite_integrity: integrity,
+        source_retained: true,
+        migrated_copy_retained: true,
+        restart_required: true,
+    })
 }
 
 async fn migrate_with_bootstrap(
@@ -225,7 +330,7 @@ async fn migrate_with_bootstrap(
         .map_err(|error| format!("atomically finalize migrated data directory: {error}"))?;
     stage_guard.disarm();
 
-    write_active_redirect(bootstrap_root, &destination)?;
+    write_active_redirect(bootstrap_root, &destination, Some(&destination))?;
     let compatibility_warning = storage
         .settings_set("data_dir", &destination.to_string_lossy())
         .await
@@ -453,7 +558,11 @@ fn verify_manifest(root: &Path, manifest: &MigrationManifest) -> Result<(), Stri
     Ok(())
 }
 
-fn write_active_redirect(root: &Path, destination: &Path) -> Result<(), String> {
+fn write_active_redirect(
+    root: &Path,
+    data_root: &Path,
+    migration_destination: Option<&Path>,
+) -> Result<(), String> {
     fs::create_dir_all(root)
         .map_err(|error| format!("create Proton bootstrap directory: {error}"))?;
     let final_path = root.join(REDIRECT_FILE);
@@ -462,7 +571,8 @@ fn write_active_redirect(root: &Path, destination: &Path) -> Result<(), String> 
         &temporary,
         &ActiveDataRoot {
             version: REDIRECT_VERSION,
-            data_root: destination.to_path_buf(),
+            data_root: data_root.to_path_buf(),
+            migration_destination: migration_destination.map(Path::to_path_buf),
         },
     )?;
     fs::rename(&temporary, &final_path)
@@ -471,6 +581,10 @@ fn write_active_redirect(root: &Path, destination: &Path) -> Result<(), String> 
 }
 
 fn read_active_redirect(path: &Path) -> Result<PathBuf, String> {
+    Ok(read_active_redirect_record(path)?.data_root)
+}
+
+fn read_active_redirect_record(path: &Path) -> Result<ActiveDataRoot, String> {
     let bytes = fs::read(path).map_err(|error| {
         format!(
             "read migrated data root pointer {}: {error}",
@@ -483,13 +597,19 @@ fn read_active_redirect(path: &Path) -> Result<PathBuf, String> {
             path.display()
         )
     })?;
-    if redirect.version != REDIRECT_VERSION || !redirect.data_root.is_absolute() {
+    if redirect.version != REDIRECT_VERSION
+        || !redirect.data_root.is_absolute()
+        || redirect
+            .migration_destination
+            .as_ref()
+            .is_some_and(|destination| !destination.is_absolute())
+    {
         return Err(format!(
             "migrated data root pointer is invalid: {}",
             path.display()
         ));
     }
-    Ok(redirect.data_root)
+    Ok(redirect)
 }
 
 fn write_json_synced(path: &Path, value: &impl Serialize) -> Result<(), String> {
@@ -629,8 +749,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let first = root.path().join("first");
         let second = root.path().join("second");
-        write_active_redirect(root.path(), &first).unwrap();
-        write_active_redirect(root.path(), &second).unwrap();
+        write_active_redirect(root.path(), &first, None).unwrap();
+        write_active_redirect(root.path(), &second, None).unwrap();
         assert_eq!(
             read_active_redirect(&root.path().join(REDIRECT_FILE)).unwrap(),
             second
@@ -672,5 +792,43 @@ mod tests {
             storage.settings_get("data_dir").await.unwrap().as_deref(),
             destination.to_str()
         );
+    }
+
+    #[tokio::test]
+    async fn rollback_atomically_reactivates_verified_source_and_keeps_both_copies() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let destination = root.path().join("destination");
+        let bootstrap = root.path().join("bootstrap");
+        let storage = Storage::open(StorageConfig::with_base_dir(&source)).unwrap();
+        storage
+            .settings_set("rollback-proof", "source")
+            .await
+            .unwrap();
+        migrate_with_bootstrap(&storage, destination.to_str().unwrap(), &bootstrap)
+            .await
+            .unwrap();
+
+        let outcome = rollback_with_bootstrap(&storage, &bootstrap).await.unwrap();
+        assert_eq!(outcome.source_sqlite_integrity, "ok");
+        assert!(outcome.source_retained);
+        assert!(outcome.migrated_copy_retained);
+        assert!(outcome.restart_required);
+        assert_eq!(
+            read_active_redirect(&bootstrap.join(REDIRECT_FILE)).unwrap(),
+            friendly_canonicalize(&source).unwrap()
+        );
+        assert!(source.join("meta.db").is_file());
+        assert!(destination.join("meta.db").is_file());
+        assert!(destination.join(MANIFEST_FILE).is_file());
+
+        let repeated = rollback_with_bootstrap(&storage, &bootstrap).await.unwrap();
+        assert_eq!(repeated.data_dir, friendly_canonicalize(&source).unwrap());
+        assert_eq!(
+            repeated.migrated_copy,
+            friendly_canonicalize(&destination).unwrap()
+        );
+        assert!(source.join("meta.db").is_file());
+        assert!(destination.join("meta.db").is_file());
     }
 }

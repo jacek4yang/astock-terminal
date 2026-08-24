@@ -13,6 +13,9 @@ const engineSchema = fs.readFileSync(path.join(root, "protocol", "schema", "engi
 const browserBridge = fs.readFileSync(path.join(root, "scripts", "browser-dev-bridge.mjs"), "utf8");
 const releaseGate = fs.readFileSync(path.join(root, "scripts", "release-gate.ps1"), "utf8");
 const releaseSigner = fs.readFileSync(path.join(root, "scripts", "sign-release.ps1"), "utf8");
+const packageHardener = fs.readFileSync(path.join(root, "scripts", "harden-package.ps1"), "utf8");
+const migrationEvidence = fs.readFileSync(path.join(root, "scripts", "migration-e2e.ps1"), "utf8");
+const faultEvidence = fs.readFileSync(path.join(root, "scripts", "fault-injection-e2e.ps1"), "utf8");
 
 if (fs.existsSync(path.join(root, "src-tauri"))) failures.push("src-tauri differential oracle has not been removed");
 if (/"src-tauri"/.test(cargo)) failures.push("Cargo workspace still contains src-tauri");
@@ -54,12 +57,26 @@ if (!browserBridge.includes("executeAgentEffect") || !browserBridge.includes('ef
 for (const kind of ["research.agent_prepare_context", "research.agent_security_context"]) {
   if (!engineSchema.includes(`\"${kind}\"`)) failures.push(`Engine protocol is missing ${kind}`);
 }
+for (const kind of ["storage.data_root.migrate", "storage.data_root.rollback"]) {
+  if (!engineSchema.includes(`\"${kind}\"`)) failures.push(`Engine protocol is missing ${kind}`);
+}
 if (!releaseGate.includes("sign-release.ps1") || !releaseGate.includes("ASTOCK_RFC3161_TIMESTAMP_URL")) {
   failures.push("release gate does not execute the RFC3161 signing pipeline");
 }
 for (const signingMarker of ["!uninstfinalize", "/fd SHA256", "/tr $TimestampUrl", "/td SHA256", "SHA256SUMS", "signed-artifacts.json"]) {
   if (!releaseSigner.includes(signingMarker)) failures.push(`release signing pipeline is missing ${signingMarker}`);
 }
+for (const packageMarker of ["RequestExecutionLevel user", "$LOCALAPPDATA\\Programs\\AStock Terminal", "/RELEASETEST=", "HKCU", "makensis"]) {
+  if (!packageHardener.includes(packageMarker)) failures.push(`package hardening is missing ${packageMarker}`);
+}
+for (const migrationMarker of ["migration-engine-e2e.mjs", "uninstall-preserves-data", "release-evidence-check.mjs"]) {
+  if (!migrationEvidence.includes(migrationMarker)) failures.push(`migration release harness is missing ${migrationMarker}`);
+}
+if (!releaseGate.includes("migration-e2e.ps1")) failures.push("release gate does not execute isolated migration E2E");
+for (const faultMarker of ["fault-injection-core.mjs", "provider-stream-break", "sqlite-lock"]) {
+  if (!faultEvidence.includes(faultMarker)) failures.push(`core fault harness is missing ${faultMarker}`);
+}
+if (!releaseGate.includes("fault-injection-e2e.ps1")) failures.push("release gate does not execute core fault injection");
 
 const moon = fs.readFileSync(path.join(root, "desktop-moon", "backend", "moon.mod"), "utf8");
 for (const dependency of [

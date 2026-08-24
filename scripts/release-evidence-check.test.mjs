@@ -30,6 +30,42 @@ test("requires all named browser scenarios", () => {
   assert.throws(() => validateEvidence(evidence, "browser-cdp", commit), /stock-detail/);
 });
 
+test("accepts complete core fault evidence without pretending renderer coverage", () => {
+  const ids = [
+    "engine-kill",
+    "agent-kill",
+    "checkpoint-before-crash",
+    "checkpoint-after-crash",
+    "provider-stream-break",
+    "quota-suspension-resume",
+    "oversized-ipc",
+    "corrupt-ipc",
+    "duplicate-ipc",
+    "out-of-order-ipc",
+    "cancel-safety",
+    "sqlite-lock",
+  ];
+  assert.equal(validateEvidence(base("fault-injection-core", ids), "fault-injection-core", commit).cases, 12);
+});
+
+test("full fault evidence still requires desktop renderer and GPU failures", () => {
+  const evidence = base("fault-injection", [
+    "engine-kill",
+    "agent-kill",
+    "checkpoint-before-crash",
+    "checkpoint-after-crash",
+    "provider-stream-break",
+    "quota-suspension-resume",
+    "oversized-ipc",
+    "corrupt-ipc",
+    "duplicate-ipc",
+    "out-of-order-ipc",
+    "cancel-safety",
+    "sqlite-lock",
+  ]);
+  assert.throws(() => validateEvidence(evidence, "fault-injection", commit), /renderer-kill/);
+});
+
 test("rejects a performance metric outside its budget", () => {
   const evidence = base("performance-budgets", ["measurement-environment"]);
   evidence.metrics = [

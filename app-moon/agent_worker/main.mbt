@@ -253,6 +253,8 @@ fn parse_event(payload : EventPayload) -> @agent.AgentEvent raise {
 /// effects and must be committed by the Host/Engine before later effects run.
 struct Worker {
   tasks : Map[String, @agent.AgentState]
+  seen_request_ids : Map[String, Bool]
+  request_order : Array[String]
   mut provider : ProviderConfig?
   mut model_routing : ModelRouting
 }
@@ -261,6 +263,8 @@ struct Worker {
 fn Worker::new() -> Worker {
   {
     tasks: Map([], capacity=32),
+    seen_request_ids: Map([], capacity=4096),
+    request_order: [],
     provider: None,
     model_routing: default_model_routing(),
   }
@@ -442,6 +446,33 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
   // request reaches this synchronous pure-kernel dispatch.
   ignore(request.deadline_ms)
   ignore(request.cancellation_id)
+  if request.request_id.trim().is_empty() {
+    return response(
+      request,
+      false,
+      null,
+      error=error_payload(
+        "invalid_request_id", "request_id must not be empty", false,
+      ),
+    )
+  }
+  if self.seen_request_ids.contains(request.request_id) {
+    return response(
+      request,
+      false,
+      null,
+      error=error_payload(
+        "duplicate_request_id", "request_id was already observed on this Worker channel",
+        false,
+      ),
+    )
+  }
+  self.seen_request_ids[request.request_id] = true
+  self.request_order.push(request.request_id)
+  if self.request_order.length() > 4096 {
+    let expired = self.request_order.remove(0)
+    self.seen_request_ids.remove(expired)
+  }
   if request.protocol_version != @protocol.protocol_version {
     return response(
       request,

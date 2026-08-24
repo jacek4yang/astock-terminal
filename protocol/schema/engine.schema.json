@@ -121,6 +121,7 @@
         { "const": "storage.cache.stats" },
         { "const": "storage.cache.cleanup" },
         { "const": "storage.data_root.migrate" },
+        { "const": "storage.data_root.rollback" },
         { "const": "quant.scan.start" },
         { "const": "quant.scan.status" },
         { "const": "quant.scan.cancel" },

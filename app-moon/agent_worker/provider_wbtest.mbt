@@ -77,3 +77,23 @@ test "publication verifier rejects thin drafts and accepts complete manual plans
   })
   assert_true(accepted.is_empty())
 }
+
+///|
+async test "worker rejects duplicate request identifiers on one channel" {
+  let worker = Worker::new()
+  let request = RequestEnvelope::{
+    protocol_version: 1,
+    request_id: "duplicate-request",
+    kind: "system.handshake",
+    payload: { "app_version": "test", "protocol_version": 1 },
+    deadline_ms: Some(1000),
+    cancellation_id: None,
+  }
+  let first = worker.handle(request)
+  assert_true(first is { "ok": true, .. })
+  let duplicate = worker.handle(request)
+  assert_true(
+    duplicate
+    is { "ok": false, "error": { "code": "duplicate_request_id", .. }, .. },
+  )
+}

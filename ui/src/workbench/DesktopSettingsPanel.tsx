@@ -49,6 +49,15 @@ type DataRootMigration = {
   compatibility_warning?: string | null;
 };
 
+type DataRootRollback = {
+  data_dir: string;
+  migrated_copy: string;
+  source_sqlite_integrity: string;
+  source_retained: boolean;
+  migrated_copy_retained: boolean;
+  restart_required: boolean;
+};
+
 type OptionalProviderState = {
   configured: boolean;
   active: boolean;
@@ -247,6 +256,21 @@ export default function DesktopSettingsPanel() {
     }
   };
 
+  const rollbackDataRoot = async () => {
+    if (credentialBusy) return;
+    if (!window.confirm("将把下次启动的数据目录恢复到迁移前的旧副本。迁移后的副本也会完整保留，但迁移后新增的数据不会自动合并回旧副本。继续吗？")) return;
+    setCredentialBusy(true); setCredentialMessage(null); setError(null);
+    try {
+      const result = await requestNative<DataRootRollback>("engine", "storage.data_root.rollback", {}, { deadlineMs: 120_000 });
+      setCredentialMessage(`回滚指针已安全切换到 ${result.data_dir}；SQLite ${result.source_sqlite_integrity}。旧副本和迁移副本均未删除，请重启桌面应用完成切换。`);
+      setMigration(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setCredentialBusy(false);
+    }
+  };
+
   const saveOptionalProvider = async (
     provider: "tushare" | "iwencai" | "sec_edgar" | "socks5",
     input: RefObject<HTMLInputElement | null>,
@@ -311,7 +335,7 @@ export default function DesktopSettingsPanel() {
     <div className="settings-grid">
       <section><h3>界面与布局</h3><label><span>主题</span><select value={theme} onChange={(event) => setTheme(event.target.value as "dark" | "light")}><option value="dark">深色看盘</option><option value="light">浅色界面</option></select></label><label><span>信息密度</span><select value={mode} onChange={(event) => setMode(event.target.value as "pro" | "simple")}><option value="simple">普通股民模式</option><option value="pro">专业完整模式</option></select></label><button className="btn" onClick={resetLayout}>恢复默认比例</button><p>大盘主图与全市场列表之间的分隔线可拖动，比例会自动保存并随窗口响应。</p></section>
       <section><h3>研究数据</h3><dl><dt>数据目录</dt><dd>{engine?.data_root?.path ?? "读取中…"}</dd><dt>接管方式</dt><dd>{engine?.data_root?.origin ?? "—"}</dd><dt>旧目录</dt><dd>{engine?.data_root?.legacy_path ?? "无"}</dd></dl><p>历史数据库原地接管，不自动复制或删除大型 SQLite/Parquet 数据。</p></section>
-      <section className="credential-settings"><h3>迁移研究数据到 D 盘</h3><label><span>全新目标目录</span><input value={dataTarget} onChange={(event) => setDataTarget(event.target.value)} spellCheck={false} /></label><div className="credential-actions"><button className="btn-primary" disabled={credentialBusy || !dataTarget.trim()} onClick={() => void migrateDataRoot()}>{credentialBusy ? "正在备份与校验…" : "备份、校验并准备切换"}</button></div>{migration && <dl><dt>新目录</dt><dd>{migration.data_dir}</dd><dt>校验清单</dt><dd>{migration.manifest_path}</dd><dt>旧副本</dt><dd>{migration.source_retained ? "完整保留" : "异常"}</dd></dl>}<p>目标必须是尚不存在的绝对路径。程序使用 SQLite 在线备份、完整性检查和逐文件 SHA-256 清单，同卷原子完成新目录；运行中的 Engine 不切换，重启后生效。程序绝不自动删除旧副本。</p></section>
+      <section className="credential-settings"><h3>迁移研究数据到 D 盘</h3><label><span>全新目标目录</span><input value={dataTarget} onChange={(event) => setDataTarget(event.target.value)} spellCheck={false} /></label><div className="credential-actions"><button className="btn-primary" disabled={credentialBusy || !dataTarget.trim()} onClick={() => void migrateDataRoot()}>{credentialBusy ? "正在备份与校验…" : "备份、校验并准备切换"}</button>{(migration || engine?.data_root?.origin === "migrated_redirect") && <button className="btn" disabled={credentialBusy} onClick={() => void rollbackDataRoot()}>恢复迁移前目录</button>}</div>{migration && <dl><dt>新目录</dt><dd>{migration.data_dir}</dd><dt>校验清单</dt><dd>{migration.manifest_path}</dd><dt>旧副本</dt><dd>{migration.source_retained ? "完整保留" : "异常"}</dd></dl>}<p>目标必须是尚不存在的绝对路径。程序使用 SQLite 在线备份、完整性检查和逐文件 SHA-256 清单，同卷原子完成新目录；运行中的 Engine 不切换，重启后生效。回滚也只切换经过校验的指针，两个副本都不会自动删除。</p></section>
       <section className="credential-settings"><h3>Agent 与 MiniMax Plus</h3><dl><dt>MiniMax Plus</dt><dd className={minimax ? "text-down" : "text-up"}>{minimax ? "Credential Manager 已配置" : "尚未配置"}</dd><dt>Agent Worker</dt><dd>{runtime.status?.agent ? `${runtime.status.agent.status} · PID ${runtime.status.agent.pid}` : "—"}</dd>{providerTest && <><dt>已验证模型</dt><dd>{providerTest.model}</dd><dt>服务区域</dt><dd>{providerTest.api_host.includes("minimaxi.com") ? "中国大陆" : "国际"}</dd></>}</dl><label><span>MiniMax Plus Key</span><input ref={minimaxInput} type="password" autoComplete="off" spellCheck={false} placeholder={minimax ? "输入新密钥以替换" : "输入密钥"} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void saveMinimax(); } }} /></label><div className="credential-actions"><button className="btn-primary" disabled={credentialBusy} onClick={() => void saveMinimax()}>{credentialBusy ? "处理中…" : minimax ? "替换并验证" : "安全保存并验证"}</button>{minimax && <button className="btn" disabled={credentialBusy} onClick={() => void deleteMinimax()}>删除密钥</button>}<button className="btn" disabled={!minimax || credentialBusy} onClick={() => void testMinimax()}>测试连接</button><button className="btn" disabled={!minimax || credentialBusy} onClick={() => void loadQuota()}>刷新额度</button></div>{quota && <div className="quota-list">{quota.models.map((model) => <article key={model.model_name}><b>{model.model_name || "未命名模型"}</b><span>当前窗口 {model.interval_remaining_percent == null ? "未知" : `${model.interval_remaining_percent.toFixed(1)}%`} · {model.interval_used ?? "?"}/{model.interval_total ?? "?"}</span><small>重置 {resetTime(model.interval_reset_at_ms)} · 周额度 {model.weekly_remaining_percent == null ? "未知" : `${model.weekly_remaining_percent.toFixed(1)}%`}</small></article>)}</div>}<p>保存后由 Agent Worker 实际读取模型目录完成验证；额度从 MiniMax 官方 Token Plan 接口读取。API Key 不回显，不进入 React 状态、命令行、SQLite 或日志。</p></section>
       <section className="credential-settings"><h3>Agent 模型路由</h3><datalist id="desktop-minimax-models">{(providerTest?.available_models ?? []).map((model) => <option key={model} value={model} />)}</datalist>{([['coordinator_model','主分析师'],['fast_model','结构化快速模型'],['deep_model','最终深度综合'],['verifier_model','反方复核模型']] as const).map(([field, label]) => <label key={field}><span>{label}</span><input list="desktop-minimax-models" value={modelRouting[field]} onChange={(event) => setModelRouting((current) => ({ ...current, [field]: event.target.value }))} placeholder="auto" /></label>)}<label><span>独立复核</span><select value={modelRouting.multi_agent_enabled ? "enabled" : "disabled"} onChange={(event) => setModelRouting((current) => ({ ...current, multi_agent_enabled: event.target.value === "enabled" }))}><option value="enabled">启用</option><option value="disabled">停用</option></select></label><label><span>最大并行专家</span><select value={modelRouting.max_parallel_agents} onChange={(event) => setModelRouting((current) => ({ ...current, max_parallel_agents: Number(event.target.value) }))}>{[1,2,3,4].map((value) => <option key={value} value={value}>{value}</option>)}</select></label><div className="credential-actions"><button className="btn-primary" disabled={credentialBusy} onClick={() => void saveModelRouting()}>验证并保存路由</button></div><p>“auto”由 MiniMax 官方模型目录选择。显式模型必须实际出现在当前账号目录中；不可用配置会被拒绝，不会静默回退。最终报告使用深度模型，结构化重试由快速、主分析师和复核模型有界接力。</p></section>
       <section className="credential-settings"><h3>外部研究数据账号</h3><dl><dt>聚宽</dt><dd className={joinquant ? "text-down" : "text-up"}>{joinquant ? "已配置并即时启用" : "尚未配置"}</dd><dt>调用策略</dt><dd>显式调用 · 严格低频 · 不加入自动行情故障切换</dd></dl><label><span>聚宽用户名</span><input ref={joinquantUserInput} autoComplete="off" spellCheck={false} placeholder={joinquant ? "输入新账号以替换" : "用户名"} /></label><label><span>聚宽密码</span><input ref={joinquantPasswordInput} type="password" autoComplete="off" spellCheck={false} placeholder="密码" /></label><div className="credential-actions"><button className="btn-primary" disabled={credentialBusy} onClick={() => void saveJoinquant()}>{joinquant ? "替换并启用" : "安全保存并启用"}</button>{joinquant && <button className="btn" disabled={credentialBusy} onClick={() => void deleteJoinquant()}>删除账号</button>}</div><p>用户名和密码均保存于 Windows Credential Manager，只在 Engine 内构造聚宽客户端；北交所不在该接口覆盖范围内。</p></section>

@@ -250,7 +250,17 @@ shortcut = "4"
         Invoke-Checked -FilePath $java -Arguments @('-XX:+UseParallelGC', '-cp', $tla, 'tlc2.TLC', '-workers', 'auto', '-metadir', $tlcStateDirectory, '-config', 'formal\AgentLifecycle.cfg', 'formal\AgentLifecycle.tla')
     }
 
-    Invoke-ReleaseGateStep 'fault-injection-evidence' 'reliability' 'FAULT-INJECTION TESTED' {
+    Invoke-ReleaseGateStep 'package-proton-cef' 'package' 'INTEGRATION TESTED' {
+        & (Join-Path $PSScriptRoot 'package.ps1')
+        if ($LASTEXITCODE -ne 0) { throw 'Proton packaging failed.' }
+    }
+
+    Invoke-ReleaseGateStep 'fault-injection-core' 'reliability' 'FAULT-INJECTION TESTED' {
+        & (Join-Path $PSScriptRoot 'fault-injection-e2e.ps1') -EvidenceDirectory $EvidenceDirectory -SkipSpaceCheck
+        if ($LASTEXITCODE -ne 0) { throw 'Core fault-injection execution failed.' }
+        Assert-ReleaseEvidence -FileName 'fault-injection-core.json' -Gate 'fault-injection-core'
+    }
+    Invoke-ReleaseGateStep 'fault-injection-desktop-evidence' 'reliability' 'FAULT-INJECTION TESTED' {
         Assert-ReleaseEvidence -FileName 'fault-injection.json' -Gate 'fault-injection'
     }
     Invoke-ReleaseGateStep 'browser-cdp-evidence' 'renderer' 'INTEGRATION TESTED' {
@@ -260,6 +270,7 @@ shortcut = "4"
         Assert-ReleaseEvidence -FileName 'desktop-e2e.json' -Gate 'desktop-e2e-40'
     }
     Invoke-ReleaseGateStep 'migration-evidence' 'storage' 'INTEGRATION TESTED' {
+        & (Join-Path $PSScriptRoot 'migration-e2e.ps1') -EvidenceDirectory $EvidenceDirectory -SkipSpaceCheck
         Assert-ReleaseEvidence -FileName 'migration.json' -Gate 'migration-install-upgrade-uninstall'
     }
     Invoke-ReleaseGateStep 'performance-evidence' 'performance' 'INTEGRATION TESTED' {
@@ -270,11 +281,6 @@ shortcut = "4"
     }
     Invoke-ReleaseGateStep 'credential-rotation-evidence' 'security' 'ASSUMED/TRUSTED BOUNDARY' {
         Assert-ReleaseEvidence -FileName 'credential-rotation.json' -Gate 'credential-rotation'
-    }
-
-    Invoke-ReleaseGateStep 'package-proton-cef' 'package' 'INTEGRATION TESTED' {
-        & (Join-Path $PSScriptRoot 'package.ps1')
-        if ($LASTEXITCODE -ne 0) { throw 'Proton packaging failed.' }
     }
 
     Invoke-ReleaseGateStep 'sbom' 'security' 'INTEGRATION TESTED' {

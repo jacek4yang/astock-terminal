@@ -35,6 +35,13 @@ Cargo、MoonBit、CEF、Vite、npm 与打包中间产物写入
 .\scripts\package.ps1
 ```
 
+The NSIS package is a per-user installation under
+`%LOCALAPPDATA%\Programs\AStock Terminal` and does not request administrator
+rights. Automated migration verification uses an isolated
+`/RELEASETEST=1` path under `ASTOCK_BUILD_ROOT`; that mode skips process,
+registry and shortcut changes while exercising the exact packaged payload and
+uninstaller.
+
 生产发布必须从干净、与 `origin/main` 完全一致的提交执行：
 
 ```powershell

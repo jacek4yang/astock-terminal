@@ -1,6 +1,6 @@
 use astock_engine::Engine;
 use astock_protocol::{read_frame, write_frame, RequestEnvelope, ResponseEnvelope};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::io::{stdin, stdout, BufReader, BufWriter};
 use tokio::sync::{Mutex, Semaphore};
@@ -31,9 +31,30 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let writer = Arc::new(Mutex::new(BufWriter::new(stdout())));
     let permits = Arc::new(Semaphore::new(256));
     let cancellations = Arc::new(Mutex::new(HashMap::<String, CancellationToken>::new()));
+    let mut request_ids = ReplayWindow::new(4_096);
     let mut reader = BufReader::new(stdin());
 
     while let Some(request) = read_frame::<_, RequestEnvelope>(&mut reader).await? {
+        if request.request_id.trim().is_empty() {
+            let response = ResponseEnvelope::failure(
+                &request,
+                "invalid_request_id",
+                "request_id must not be empty",
+                false,
+            );
+            write_frame(&mut *writer.lock().await, &response).await?;
+            continue;
+        }
+        if !request_ids.insert(request.request_id.clone()) {
+            let response = ResponseEnvelope::failure(
+                &request,
+                "duplicate_request_id",
+                "request_id was already observed on this Worker channel",
+                false,
+            );
+            write_frame(&mut *writer.lock().await, &response).await?;
+            continue;
+        }
         if request.kind == "system.shutdown" {
             let response =
                 ResponseEnvelope::success(&request, serde_json::json!({"accepted": true}));
@@ -137,6 +158,35 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+struct ReplayWindow {
+    capacity: usize,
+    order: VecDeque<String>,
+    seen: HashSet<String>,
+}
+
+impl ReplayWindow {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            order: VecDeque::with_capacity(capacity.max(1)),
+            seen: HashSet::with_capacity(capacity.max(1)),
+        }
+    }
+
+    fn insert(&mut self, request_id: String) -> bool {
+        if !self.seen.insert(request_id.clone()) {
+            return false;
+        }
+        self.order.push_back(request_id);
+        if self.order.len() > self.capacity {
+            if let Some(expired) = self.order.pop_front() {
+                self.seen.remove(&expired);
+            }
+        }
+        true
+    }
+}
+
 fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -145,4 +195,20 @@ fn init_tracing() {
         .with_writer(std::io::stderr)
         .json()
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReplayWindow;
+
+    #[test]
+    fn replay_window_rejects_duplicates_and_expires_only_the_oldest_id() {
+        let mut window = ReplayWindow::new(2);
+        assert!(window.insert("one".into()));
+        assert!(!window.insert("one".into()));
+        assert!(window.insert("two".into()));
+        assert!(window.insert("three".into()));
+        assert!(window.insert("one".into()), "expired IDs may be reused");
+        assert!(!window.insert("three".into()));
+    }
 }

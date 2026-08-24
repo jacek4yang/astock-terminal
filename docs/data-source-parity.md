@@ -92,7 +92,7 @@ failure state so the boundary remains visible.
 | Scan | cancellable whole-market scan | `quant.scan.*` | READY |
 | Watchlist | list/add/remove/pin | `workspace.watchlist.*` | READY |
 | Credentials/cache | MiniMax, JoinQuant, quota, cache stats/cleanup | coarse Engine services + Credential Manager | READY for exposed providers |
-| Data directory | adopt/migrate/transactional switch | `storage.data_root.migrate` with backup, manifest verification and atomic pointer switch | ENRICHED |
+| Data directory | adopt/migrate/transactional switch/rollback | `storage.data_root.migrate` plus `storage.data_root.rollback`; schema upgrades first create a verified SQLite online backup, migration uses a checked file manifest, and both activation and rollback atomically switch only the pointer while retaining both copies | ENRICHED |
 | Agent task core | dynamic clarification, Agent-best choice, checkpoints, cancel/recovery | MoonBit reducer + Engine event/checkpoint store | ENRICHED |
 | Agent research | candidate plan and final answer | `agent.research.workflow` emits durable Engine effects for `research.agent_prepare_context` then `research.agent_security_context`; candidate planning plus three report-review model rounds | ENRICHED |
 | Agent history | durable tasks/conversations, list/load/rename/soft-delete and branch-from-point | Engine SQLite event/conversation store + three-page Agent UI; renderer local storage is not a truth source | ENRICHED |

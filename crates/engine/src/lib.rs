@@ -2112,6 +2112,10 @@ impl Engine {
                         ServiceError::new("data_root_migration_failed", message, false)
                     })
             }
+            "storage.data_root.rollback" => data_root::rollback(&self.storage)
+                .await
+                .map(|outcome| json!(outcome))
+                .map_err(|message| ServiceError::new("data_root_rollback_failed", message, false)),
             "quant.scan.start" => {
                 let snapshot = self
                     .scan

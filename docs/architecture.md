@@ -17,6 +17,12 @@ supervision and diagnostics. The Agent Worker owns clarification, planning,
 tool coordination, review and publication decisions. Rust owns deterministic
 market, research, quant, storage and credential services.
 
+Before an existing SQLite schema changes, the storage layer creates and
+integrity-checks an online backup. All pending schema migrations then commit in
+one transaction. Explicit data-root migration and rollback validate SQLite and
+the file manifest, atomically switch only the activation pointer, and never
+delete either the retained source or migrated copy.
+
 The research renderer submits one `agent.research.workflow` request containing
 only user-selected depth/tool policy and the current symbol preference. The
 MoonBit Agent emits a bounded, allowlisted `host_effects + continuation`

@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=0535353220955bd766837cc25dafef6974d9fdbc813adc2b74ffe3fbbdb2432b
+// GENERATED from protocol/schema; schema-sha256=6328583d2712698d4258c6d78bc971b666436f297f26e4f5cadfcc8614db8c52
 // Run: node protocol/codegen.mjs
 
 use serde::{Deserialize, Serialize};
@@ -121,6 +121,7 @@ pub const ENGINE_REQUEST_KINDS: &[&str] = &[
     "storage.cache.stats",
     "storage.cache.cleanup",
     "storage.data_root.migrate",
+    "storage.data_root.rollback",
     "quant.scan.start",
     "quant.scan.status",
     "quant.scan.cancel",

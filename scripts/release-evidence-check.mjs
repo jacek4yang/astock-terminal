@@ -7,6 +7,20 @@ const GIT_COMMIT = /^[a-f0-9]{40}$/i;
 const STATUS = "PASSED";
 
 const REQUIRED_CASES = Object.freeze({
+  "fault-injection-core": [
+    "engine-kill",
+    "agent-kill",
+    "checkpoint-before-crash",
+    "checkpoint-after-crash",
+    "provider-stream-break",
+    "quota-suspension-resume",
+    "oversized-ipc",
+    "corrupt-ipc",
+    "duplicate-ipc",
+    "out-of-order-ipc",
+    "cancel-safety",
+    "sqlite-lock",
+  ],
   "fault-injection": [
     "engine-kill",
     "agent-kill",
