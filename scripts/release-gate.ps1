@@ -199,46 +199,46 @@ try {
         Invoke-Checked -FilePath 'moon' -WorkingDirectory (Join-Path $repository 'app-moon') -Arguments @('prove', 'agent_formal', '--target-dir', $proofTarget)
         $baseConfig = Join-Path $proofTarget 'verif\why3.conf'
         if (-not (Test-Path -LiteralPath $baseConfig -PathType Leaf)) { throw 'Why3 configuration was not generated.' }
-        $parallelConfig = Join-Path $build.Paths.FormalCache 'why3-z3-cvc5.conf'
         $configPrefix = (Get-Content -LiteralPath $baseConfig -Raw) -replace '(?s)\[strategy\].*$', ''
-        $strategy = @'
+        $proved = [ordered]@{}
+        foreach ($prover in @(
+            [pscustomobject]@{ Name = 'Z3'; Version = '5.1.0'; Slug = 'z3' },
+            [pscustomobject]@{ Name = 'CVC5'; Version = '1.3.4'; Slug = 'cvc5' }
+        )) {
+            # Run every obligation independently with each solver. A parallel
+            # Why3 alternative may stop after the first solver succeeds and is
+            # therefore not evidence that the second solver proved anything.
+            $config = Join-Path $build.Paths.FormalCache "why3-$($prover.Slug)-only.conf"
+            $strategy = @"
 [strategy]
 code = "start:
-c Z3,5.1.0 5 1000 | CVC5,1.3.4 5 1000
+c $($prover.Name),$($prover.Version) 5 1000
 "
-desc = "AStock release proof with both pinned SMT solvers"
-name = "AStock_Release"
+desc = "AStock release proof with $($prover.Name)"
+name = "AStock_$($prover.Name)"
 shortcut = "4"
-'@
-        [System.IO.File]::WriteAllText($parallelConfig, $configPrefix + $strategy, [System.Text.UTF8Encoding]::new($false))
-        $proofTarget = Join-Path $build.Paths.Root 'moon-target\agent-prove-release'
-        Invoke-Checked -FilePath 'moon' -WorkingDirectory (Join-Path $repository 'app-moon') -Arguments @('prove', 'agent_formal', '--why3-config', $parallelConfig, '--target-dir', $proofTarget)
-        $proofJson = Join-Path $proofTarget 'verif\agent_formal\agent_formal.proof.json'
-        if (-not (Test-Path -LiteralPath $proofJson)) { throw 'MoonBit proof result was not generated.' }
-        $proof = Get-Content -LiteralPath $proofJson -Raw | ConvertFrom-Json
-        if ($proof.result -ne 'success' -or [int]$proof.summary.valid -le 0) { throw 'MoonBit proof obligations did not succeed.' }
-        $sessions = @(Get-ChildItem -Recurse -Filter why3session.xml (Join-Path $proofTarget 'verif\agent_formal'))
-        $sessionText = ($sessions | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n"
-        if ($sessionText -notmatch 'name="Z3"' -or $sessionText -notmatch 'name="CVC5"') {
-            throw 'Why3 proof session did not exercise both Z3 and cvc5.'
-        }
-        $validByProver = @{ Z3 = 0; CVC5 = 0 }
-        foreach ($session in $sessions) {
-            $text = Get-Content -LiteralPath $session.FullName -Raw
-            $proverNames = @{}
-            foreach ($match in [regex]::Matches($text, '<prover id="([^"]+)" name="(Z3|CVC5)"')) {
-                $proverNames[$match.Groups[1].Value] = $match.Groups[2].Value
+"@
+            [System.IO.File]::WriteAllText($config, $configPrefix + $strategy, [System.Text.UTF8Encoding]::new($false))
+            $solverTarget = Join-Path $build.Paths.Root "moon-target\agent-prove-$($prover.Slug)-release"
+            Invoke-Checked -FilePath 'moon' -WorkingDirectory (Join-Path $repository 'app-moon') -Arguments @('prove', 'agent_formal', '--why3-config', $config, '--target-dir', $solverTarget)
+            $proofJson = Join-Path $solverTarget 'verif\agent_formal\agent_formal.proof.json'
+            if (-not (Test-Path -LiteralPath $proofJson -PathType Leaf)) {
+                throw "$($prover.Name) did not generate a MoonBit proof result."
             }
-            foreach ($entry in $proverNames.GetEnumerator()) {
-                $escapedId = [regex]::Escape($entry.Key)
-                $count = ([regex]::Matches($text, "prover=`"$escapedId`"><result status=`"valid`"")).Count
-                $validByProver[$entry.Value] += $count
+            $proof = Get-Content -LiteralPath $proofJson -Raw | ConvertFrom-Json
+            if ($proof.result -ne 'success' -or [int]$proof.summary.valid -le 0 -or [int]$proof.summary.invalid -ne 0) {
+                throw "$($prover.Name) did not prove every MoonBit obligation."
             }
+            $sessions = @(Get-ChildItem -Recurse -Filter why3session.xml (Join-Path $solverTarget 'verif\agent_formal'))
+            $sessionText = ($sessions | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n"
+            $proverMatch = [regex]::Match($sessionText, "<prover id=`"([^`"]+)`" name=`"$($prover.Name)`"")
+            if (-not $proverMatch.Success) { throw "$($prover.Name) is absent from its Why3 proof session." }
+            $escapedId = [regex]::Escape($proverMatch.Groups[1].Value)
+            $validCount = ([regex]::Matches($sessionText, "<proof prover=`"$escapedId`"><result status=`"valid`"")).Count
+            if ($validCount -le 0) { throw "$($prover.Name) did not discharge an obligation in its Why3 session." }
+            $proved[$prover.Name] = $validCount
         }
-        $validZ3 = $validByProver.Z3
-        $validCvc5 = $validByProver.CVC5
-        if ($validZ3 -le 0 -or $validCvc5 -le 0) { throw 'Both configured SMT solvers must discharge at least one obligation.' }
-        "valid_goals=$($proof.summary.valid); z3_valid=$validZ3; cvc5_valid=$validCvc5"
+        "z3_valid=$($proved.Z3); cvc5_valid=$($proved.CVC5)"
     }
 
     Invoke-ReleaseGateStep 'tlc-agent-model' 'formal' 'MODEL CHECKED' {
