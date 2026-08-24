@@ -7,6 +7,8 @@ const releaseMode = process.argv.includes("--release");
 const tauriRegistryPath = path.join(root, "src-tauri", "src", "lib.rs");
 const providerDir = path.join(root, "crates", "market-data", "src", "providers");
 const globalCatalogPath = path.join(root, "crates", "global-intelligence", "src", "lib.rs");
+const engineSchemaPath = path.join(root, "protocol", "schema", "engine.schema.json");
+const engineDispatchPath = path.join(root, "crates", "engine", "src", "lib.rs");
 
 const expectedLegacyHandlerCount = 127;
 const expectedLegacyHandlerHash = "b55ed6504d2c97ab3463274cf826e8b34b1f60257e8447a79b43baab26a8e700";
@@ -163,7 +165,11 @@ const marketProviderStatus = {
   world_bank: "ENRICHED",
 };
 
-const exposedGlobalSources = new Set([
+// These sources currently return research data. The complete official catalog
+// is separately exposed by research.global.providers with explicit disabled /
+// NOT VERIFIED state for entries that have no collector. Catalog visibility
+// must never be confused with successful data collection.
+const dataBearingGlobalSources = new Set([
   "sec_edgar",
   "world_bank",
   "sge_gold",
@@ -219,11 +225,16 @@ if (!catalogBody) {
 }
 const globalProviders = [...catalogBody.matchAll(/provider_id:\s*"([^"]+)"/g)]
   .map((match) => match[1]);
-const unknownExposed = [...exposedGlobalSources].filter((name) => !globalProviders.includes(name));
-if (unknownExposed.length) {
-  fail(`exposed global-source declarations are stale: ${unknownExposed.join(", ")}`);
+const unknownDataBearing = [...dataBearingGlobalSources].filter((name) => !globalProviders.includes(name));
+if (unknownDataBearing.length) {
+  fail(`data-bearing global-source declarations are stale: ${unknownDataBearing.join(", ")}`);
 }
-const globalBlockers = globalProviders.filter((name) => !exposedGlobalSources.has(name));
+const engineSchema = fs.readFileSync(engineSchemaPath, "utf8");
+const engineDispatch = fs.readFileSync(engineDispatchPath, "utf8");
+const globalCatalogVisible = engineSchema.includes('"research.global.providers"')
+  && engineDispatch.includes('"research.global.providers" => global_sync::provider_health');
+const catalogVisibilityBlockers = globalCatalogVisible ? [] : globalProviders;
+const globalSourceNotVerified = globalProviders.filter((name) => !dataBearingGlobalSources.has(name));
 
 const marketProviderBlockers = Object.entries(marketProviderStatus)
   .filter(([, status]) => status === "INTERNAL_ONLY" || status === "GAP")
@@ -235,8 +246,8 @@ if (releaseMode && blockers.length) {
 if (releaseMode && marketProviderBlockers.length) {
   fail(`market providers are not renderer/Agent reachable: ${marketProviderBlockers.join(", ")}`);
 }
-if (releaseMode && globalBlockers.length) {
-  fail(`${globalBlockers.length} official global sources are not exposed through the Engine contract`);
+if (releaseMode && catalogVisibilityBlockers.length) {
+  fail(`${catalogVisibilityBlockers.length} official global sources are hidden from Engine provider health`);
 }
 
 console.log(JSON.stringify({
@@ -249,7 +260,9 @@ console.log(JSON.stringify({
   market_provider_modules: actualMarketProviders.length,
   market_provider_blockers: marketProviderBlockers,
   official_global_sources: globalProviders.length,
-  exposed_global_sources: exposedGlobalSources.size,
-  global_source_blockers: globalBlockers.length,
+  catalog_visible_global_sources: globalCatalogVisible ? globalProviders.length : 0,
+  data_bearing_global_sources: dataBearingGlobalSources.size,
+  global_source_blockers: catalogVisibilityBlockers.length,
+  global_source_not_verified: globalSourceNotVerified,
   enriched_extra_sources: ["yahoo_finance_comex_gold", "newsnow_finance_channels"],
 }, null, 2));

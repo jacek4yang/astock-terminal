@@ -35,8 +35,10 @@ The 26-entry global catalog must not be confused with 26 working legacy
 collectors. The old `global_sync_start` actively downloads World Bank and an
 explicitly requested SEC CIK; the other entries primarily provide source,
 license, timezone, credential and health metadata. The new contract therefore
-does not claim those catalog rows as live data. World Bank is active, SGE/WGC
-context is newly exposed, and SEC ingestion remains an explicit blocker.
+does not claim those catalog rows as live data. All 26 are visible through
+`research.global.providers`; catalog-only entries remain disabled/`NOT
+VERIFIED`. World Bank and SEC are active collectors, while SGE/WGC context is
+newly exposed through the bounded global-context service.
 
 ## Provider inventory
 
