@@ -511,12 +511,32 @@ pub struct NewsIngestor {
     storage: Option<Storage>,
     entity_linker: Option<Arc<EntityLinker>>,
     provider_attempt_timeout: Duration,
+    persist_documents: bool,
 }
 
 impl NewsIngestor {
     pub fn new(
         providers: Vec<Arc<dyn NewsProvider>>,
         storage: Option<Storage>,
+    ) -> Result<Self, NewsProviderError> {
+        Self::with_document_persistence(providers, storage, true)
+    }
+
+    /// Research discovery needs fresh provider output before potentially
+    /// expensive revision clustering/entity linking completes. Provider
+    /// health, rate limits, disable flags and last-good fallbacks remain
+    /// active; only per-document archival work is skipped for this facade.
+    pub fn without_document_persistence(
+        providers: Vec<Arc<dyn NewsProvider>>,
+        storage: Option<Storage>,
+    ) -> Result<Self, NewsProviderError> {
+        Self::with_document_persistence(providers, storage, false)
+    }
+
+    fn with_document_persistence(
+        providers: Vec<Arc<dyn NewsProvider>>,
+        storage: Option<Storage>,
+        persist_documents: bool,
     ) -> Result<Self, NewsProviderError> {
         let mut ids = HashSet::new();
         let runtime = DashMap::new();
@@ -545,6 +565,7 @@ impl NewsIngestor {
             storage,
             entity_linker,
             provider_attempt_timeout: PROVIDER_ATTEMPT_TIMEOUT,
+            persist_documents,
         })
     }
 
@@ -945,6 +966,21 @@ impl NewsIngestor {
         progress: Option<&Arc<NewsProgressTracker>>,
         attempt: u32,
     ) {
+        if !self.persist_documents {
+            if let Some(progress) = progress {
+                progress.update(
+                    &capabilities.provider_id,
+                    format!(
+                        "已获取 {} 条实时发现数据；不可变归档由耐久同步通道处理",
+                        page.items.len()
+                    ),
+                    attempt,
+                    page.items.len(),
+                    page.items.len(),
+                );
+            }
+            return;
+        }
         let Some(storage) = &self.storage else {
             if let Some(progress) = progress {
                 progress.update(
@@ -975,7 +1011,11 @@ impl NewsIngestor {
             let archived = storage
                 .news_archive_upsert(NewsArchiveInput {
                     canonical_url,
-                    source_id: item.provider_id.clone(),
+                    // Keep the logical channel (for example cls-telegraph or
+                    // jin10) distinct from the provider instance that fetched
+                    // it. Observation.provider_id below retains the physical
+                    // collector identity for health/rate-limit diagnostics.
+                    source_id: item.source_id.clone(),
                     source_name: item.source_name.clone(),
                     license: item.license.clone(),
                     content_type: if item.trust_tier == NewsTrustTier::FirstPartyDisclosure {

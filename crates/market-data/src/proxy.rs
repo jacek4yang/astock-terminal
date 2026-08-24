@@ -1,10 +1,10 @@
 //! SOCKS5 proxy routing for the HTTP layer.
 //!
-//! Policy: domestic market-data platforms (Tencent/Sina/EastMoney/Xueqiu/
-//! THS/Tushare/iwencai) always connect directly — proxying them adds latency
-//! and can trip geo/IP-based risk control. Only hosts on `foreign_hosts`
-//! (default: GitHub & friends, for future use such as fetching research
-//! assets) go through the SOCKS5 proxy, and only when one is configured.
+//! Policy: the application-configured SOCKS5 route never selects domestic
+//! market-data platforms (Tencent/Sina/EastMoney/Xueqiu/THS/Tushare/iwencai).
+//! The underlying HTTP stack may still honor an OS/process HTTP proxy chosen
+//! by the user or managed environment. Only `foreign_hosts` can use the
+//! explicit `ASTOCK_SOCKS5` route.
 //!
 //! Configuration comes from the `ASTOCK_SOCKS5` environment variable
 //! (e.g. `socks5h://127.0.0.1:1080` or a bare `127.0.0.1:1080`); the
@@ -37,7 +37,8 @@ pub const SOCKS5_ENV: &str = "ASTOCK_SOCKS5";
 /// Where a request to a given URL should go.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProxyRoute {
-    /// Connect directly (the default, and always for domestic hosts).
+    /// Do not use the application-configured SOCKS5 route. System HTTP proxy
+    /// behavior remains a trusted environment boundary.
     Direct,
     /// Route through the configured SOCKS5 proxy.
     Socks5,

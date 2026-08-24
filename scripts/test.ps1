@@ -1,0 +1,41 @@
+[CmdletBinding()]
+param(
+    [switch]$SkipRustWorkspace,
+    [switch]$SkipSpaceCheck
+)
+
+. (Join-Path $PSScriptRoot 'Build.Common.ps1')
+$build = Initialize-AStockBuildEnvironment -SkipSpaceCheck:$SkipSpaceCheck
+
+Push-Location $build.RepositoryRoot
+try {
+    Invoke-Checked -FilePath 'node' -Arguments @('protocol/codegen.mjs', '--check')
+    Invoke-Checked -FilePath 'node' -Arguments @('scripts/capability-parity-check.mjs')
+    Invoke-Checked -FilePath 'npm' -Arguments @('--prefix', 'ui', 'test')
+    Invoke-Checked -FilePath 'npm' -Arguments @('--prefix', 'ui', 'run', 'build')
+    Invoke-Checked -FilePath 'cargo' -Arguments @('test', '--locked', '-p', 'astock-protocol', '-p', 'astock-engine')
+    if (-not $SkipRustWorkspace) {
+        Invoke-Checked -FilePath 'cargo' -Arguments @('test', '--locked', '--workspace')
+    }
+    Invoke-Checked -FilePath 'moon' -WorkingDirectory (Join-Path $build.RepositoryRoot 'app-moon') -Arguments @(
+        'test', '--target', 'native', '--target-dir', $build.Paths.MoonAgent
+    )
+    Invoke-Checked -FilePath 'cargo' -Arguments @(
+        'build', '--locked', '--release', '-p', 'astock-engine'
+    )
+    Invoke-Checked -FilePath 'moon' -WorkingDirectory (Join-Path $build.RepositoryRoot 'app-moon') -Arguments @(
+        'build', '--target', 'native', '--release', '--target-dir', $build.Paths.MoonAgent, 'agent_worker'
+    )
+    Set-AStockWorkerEnvironment -Environment $build -Release
+    Invoke-Checked -FilePath 'node' -Arguments @(
+        'scripts/ipc-smoke.mjs', $env:ASTOCK_ENGINE_EXE, $env:ASTOCK_AGENT_EXE
+    )
+    Invoke-Checked -FilePath 'moon' -WorkingDirectory (Join-Path $build.RepositoryRoot 'desktop-moon') -Arguments @(
+        'check', '--target', 'native', '--target-dir', $build.Paths.MoonDesktop
+    )
+    Invoke-Checked -FilePath 'moon' -WorkingDirectory (Join-Path $build.RepositoryRoot 'packaging-moon') -Arguments @(
+        'check', '--target', 'native', '--target-dir', $build.Paths.MoonTools
+    )
+} finally {
+    Pop-Location
+}

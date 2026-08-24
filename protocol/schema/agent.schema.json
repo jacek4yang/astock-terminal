@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://astock.local/schema/agent-v1.json",
+  "title": "AStock Agent task contract v1",
+  "$defs": {
+    "agent_phase": {
+      "type": "string",
+      "enum": [
+        "idle", "preparing", "waiting_for_user", "reasoning",
+        "awaiting_tools", "reviewing", "synthesizing", "verifying",
+        "suspended", "completed", "verification_failed", "cancelled", "hard_failed"
+      ]
+    },
+    "clarification_option": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "recommended"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "description": { "type": ["string", "null"], "maxLength": 240 },
+        "recommended": { "type": "boolean" }
+      }
+    },
+    "clarification_question": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "question", "kind", "options", "allow_other"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "header": { "type": ["string", "null"], "maxLength": 32 },
+        "question": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "kind": { "type": "string", "enum": ["single", "multiple"] },
+        "options": { "type": "array", "minItems": 2, "maxItems": 6, "items": { "$ref": "#/$defs/clarification_option" } },
+        "allow_other": { "type": "boolean" },
+        "target_fields": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+      }
+    },
+    "clarification_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "questions"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "description": { "type": ["string", "null"], "maxLength": 300 },
+        "questions": { "type": "array", "minItems": 1, "maxItems": 3, "items": { "$ref": "#/$defs/clarification_question" } }
+      }
+    },
+    "clarification_answer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["question_id", "option_ids", "decision_mode"],
+      "properties": {
+        "question_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "option_ids": { "type": "array", "items": { "type": "string" } },
+        "answer": { "type": ["string", "null"], "maxLength": 500 },
+        "decision_mode": { "type": "string", "enum": ["user_selected", "agent_best_with_evidence"] }
+      }
+    },
+    "task_spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "objective", "security_universe", "as_of", "research_start",
+        "research_end", "investment_horizon", "comparison_benchmark",
+        "output_type", "evidence_requirement"
+      ],
+      "properties": {
+        "objective": { "type": "string", "minLength": 1 },
+        "security_universe": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "as_of": { "type": "string", "format": "date-time" },
+        "research_start": { "type": "string", "format": "date" },
+        "research_end": { "type": "string", "format": "date" },
+        "investment_horizon": { "type": "string", "minLength": 1 },
+        "comparison_benchmark": { "type": "string", "minLength": 1 },
+        "output_type": { "type": "string", "enum": ["research_report", "manual_plan", "evidence_review"] },
+        "evidence_requirement": { "type": "string", "enum": ["standard", "strict", "primary_sources"] }
+      }
+    }
+  }
+}

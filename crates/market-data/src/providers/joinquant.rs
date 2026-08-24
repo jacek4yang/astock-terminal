@@ -19,6 +19,7 @@ use astock_core::time::parse_date;
 use astock_core::{Bar, DataError, Fetched, Source, Symbol, VolumeUnit};
 use astock_joinquant::{Credentials, DailyBar, JoinQuantClient, JoinQuantError, ValuationSnapshot};
 use chrono::NaiveDate;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::{Mutex, MutexGuard};
 use tokio::time::Instant;
@@ -34,7 +35,7 @@ pub const MIN_INTERVAL: Duration = Duration::from_secs(2);
 /// JoinQuant adapter. All methods return [`DataError::NoProvider`] when no
 /// credentials are configured.
 pub struct JoinQuantProvider {
-    client: Option<JoinQuantClient>,
+    client: RwLock<Option<Arc<JoinQuantClient>>>,
     /// Last upstream-call timestamp; the guard is held for the whole call so
     /// requests are serialized process-wide on top of the 2s spacing.
     gate: Mutex<Option<Instant>>,
@@ -44,7 +45,7 @@ impl JoinQuantProvider {
     /// Wrap an optional client. `None` marks the provider unavailable.
     pub fn new(client: Option<JoinQuantClient>) -> Self {
         JoinQuantProvider {
-            client,
+            client: RwLock::new(client.map(Arc::new)),
             gate: Mutex::new(None),
         }
     }
@@ -63,12 +64,35 @@ impl JoinQuantProvider {
 
     /// Whether credentials are configured.
     pub fn available(&self) -> bool {
-        self.client.is_some()
+        self.client.read().is_ok_and(|client| client.is_some())
     }
 
-    fn client(&self) -> Result<&JoinQuantClient, DataError> {
+    /// Replace credentials without restarting the desktop Engine. Credentials
+    /// remain inside the provider and are never exposed through diagnostics.
+    pub fn configure(&self, username: String, password: String) -> Result<(), DataError> {
+        let client = JoinQuantClient::new(Credentials::new(username, password)).map_err(map_err)?;
+        *self.client.write().map_err(|_| DataError::Parse {
+            upstream: "joinquant credentials".to_string(),
+            message: "credential lock poisoned".to_string(),
+        })? = Some(Arc::new(client));
+        Ok(())
+    }
+
+    /// Remove the active client immediately after credentials are deleted.
+    pub fn clear_credentials(&self) {
+        if let Ok(mut client) = self.client.write() {
+            *client = None;
+        }
+    }
+
+    fn client(&self) -> Result<Arc<JoinQuantClient>, DataError> {
         self.client
-            .as_ref()
+            .read()
+            .map_err(|_| DataError::Parse {
+                upstream: "joinquant credentials".to_string(),
+                message: "credential lock poisoned".to_string(),
+            })?
+            .clone()
             .ok_or(DataError::NoProvider("joinquant (no JQ_USER/JQ_PWD)"))
     }
 

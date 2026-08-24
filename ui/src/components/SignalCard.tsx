@@ -30,7 +30,7 @@ export default function SignalCard({ signal }: { signal: SignalJson }) {
   const mp = s.manual_plan;
 
   return (
-    <div className="card brand-bar-top">
+    <div className="signal-card card brand-bar-top">
       <div className="card-title">
         信号卡
         <span className="muted text-xs font-normal">{s.description}</span>
@@ -92,15 +92,15 @@ export default function SignalCard({ signal }: { signal: SignalJson }) {
             <div className="muted text-xs">切换到专业模式可查看模块评分、交易计划与关键价位</div>
           </div>
         ) : (
-          <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
+          <div className="signal-detail-grid mt-4">
             {/* 五模块评分 */}
-            <div>
+            <section className="signal-score-section">
               <div className="micro-label mb-1.5">五模块评分</div>
               <div className="space-y-1.5">
                 {Object.entries(s.module_scores).map(([name, score]) => (
-                  <div key={name} className="flex items-center gap-2 text-xs">
-                    <span className="w-14 shrink-0">{name}</span>
-                    <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                  <div key={name} className="signal-module-row text-xs">
+                    <span className="signal-module-name">{name}</span>
+                    <div className="signal-module-track h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
                       <div
                         className={
                           "h-full rounded-full " +
@@ -109,7 +109,7 @@ export default function SignalCard({ signal }: { signal: SignalJson }) {
                         style={{ width: `${Math.min(100, score)}%` }}
                       />
                     </div>
-                    <span className="num w-8 text-right">{score}</span>
+                    <span className="num signal-module-score">{score}</span>
                   </div>
                 ))}
               </div>
@@ -130,14 +130,14 @@ export default function SignalCard({ signal }: { signal: SignalJson }) {
                   <div className="muted">暂无明确信号</div>
                 )}
               </div>
-            </div>
+            </section>
 
             {/* 交易计划 */}
-            <div>
+            <section className="signal-plan-section">
               <div className="micro-label mb-1.5">
                 <Term label="交易计划" tip="系统给出的参考入场/止损/目标价位与仓位建议,非投资建议" />
               </div>
-              <table className="w-full text-xs">
+              <table className="signal-plan-table w-full text-xs">
                 <tbody className="[&_td]:py-1">
                   <tr>
                     <td className="muted w-16">方向</td>
@@ -173,10 +173,10 @@ export default function SignalCard({ signal }: { signal: SignalJson }) {
                 仓位建议:{tp.position_size || s.position_advice}
               </div>
               {tp.notes && <div className="muted mt-2 text-xs leading-relaxed">{tp.notes}</div>}
-            </div>
+            </section>
 
             {/* 关键价位 + 风险 */}
-            <div>
+            <section className="signal-levels-section">
               <div className="micro-label mb-1.5">关键价位</div>
               <div className="max-h-32 space-y-1 overflow-auto text-xs">
                 {Object.entries(s.key_levels).map(([k, v]) => (
@@ -204,7 +204,7 @@ export default function SignalCard({ signal }: { signal: SignalJson }) {
                   </div>
                 </>
               )}
-            </div>
+            </section>
 
             {mp && (
               <details className="rounded-lg border border-slate-200 bg-slate-50/60 p-3 dark:border-slate-800 dark:bg-slate-900/50 lg:col-span-3" open>

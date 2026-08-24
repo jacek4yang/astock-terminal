@@ -2,8 +2,8 @@
 //!
 //! Ports the legacy Python `kline_fetcher.py`: Tencent/Sina/EastMoney kline
 //! failover, EastMoney quote/fund-flow/minute/search/clist endpoints, host
-//! pools with failover, UA rotation, a per-client DNS override for the
-//! push2his/push2 hosts, adaptive per-host rate limiting, a bounded TTL
+//! pools with failover, UA rotation, direct domestic routing, adaptive
+//! per-host rate limiting, a bounded TTL
 //! cache, per-provider circuit breakers, and single-flight request
 //! coalescing.
 //!
@@ -52,14 +52,14 @@ pub use hub::MarketData;
 pub use provider::{DataProvider, Failover};
 pub use providers::{
     normalize_finance_news_sources, CninfoAnnouncement, CninfoDisclosureProvider, CninfoPage,
-    EastMoney, EastMoneyF10, EmDataCenter, F10Report, FinanceNewsBatch, FinanceNewsItem,
-    FinanceNewsProvider, FinanceNewsSourceSelection, GlobalAssetPoint, GlobalAssetProvider,
-    GlobalAssetQuote, GoldMarketSnapshot, GoldPrimaryNewsBatch, GoldPrimaryNewsItem,
-    GoldTrendSummary, IndustryClassified, IwencaiOpenApi, JoinQuantProvider, NewsCapabilities,
-    NewsDeliveryMode, NewsErrorKind, NewsIngestProgress, NewsIngestProgressReporter,
-    NewsIngestWorkItem, NewsProviderHealth, NewsTrustTier, SecEdgarProvider, SecFiling, SinaKline,
-    TdxProvider, TencentKline, TushareProvider, WorldBankObservation, WorldBankProvider,
-    DEFAULT_FINANCE_NEWS_SOURCES, FINANCE_NEWS_SOURCES,
+    CninfoStockIdentity, EastMoney, EastMoneyF10, EmDataCenter, F10Report, FinanceNewsBatch,
+    FinanceNewsItem, FinanceNewsProvider, FinanceNewsSourceSelection, GlobalAssetPoint,
+    GlobalAssetProvider, GlobalAssetQuote, GoldMarketSnapshot, GoldPrimaryNewsBatch,
+    GoldPrimaryNewsItem, GoldTrendSummary, IndustryClassified, IwencaiOpenApi, JoinQuantProvider,
+    NewsCapabilities, NewsDeliveryMode, NewsErrorKind, NewsIngestProgress,
+    NewsIngestProgressReporter, NewsIngestWorkItem, NewsProviderHealth, NewsTrustTier,
+    SecEdgarProvider, SecFiling, SinaKline, TdxProvider, TencentKline, TushareProvider,
+    WorldBankObservation, WorldBankProvider, DEFAULT_FINANCE_NEWS_SOURCES, FINANCE_NEWS_SOURCES,
 };
 pub use proxy::{ProxyConfig, ProxyRoute};
 pub use security_master::SecurityMaster;

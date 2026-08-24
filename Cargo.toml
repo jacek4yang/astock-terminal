@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/protocol",
+    "crates/engine",
     "crates/core",
     "crates/trading-rules",
     "crates/market-data",
@@ -38,7 +40,7 @@ rust-version = "1.88"
 [workspace.dependencies]
 # async runtime & http
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip", "stream", "socks"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "gzip", "stream", "socks"] }
 futures = "0.3"
 async-trait = "0.1"
 # serialization
@@ -49,7 +51,7 @@ schemars = "0.8"
 thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # time
 chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
 chrono-tz = "0.10"

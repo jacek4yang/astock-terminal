@@ -1,0 +1,25 @@
+diff --git a/internal/native/ffi/src/engine/cef_win/proton_engine_cef_win.c b/internal/native/ffi/src/engine/cef_win/proton_engine_cef_win.c
+--- a/internal/native/ffi/src/engine/cef_win/proton_engine_cef_win.c
++++ b/internal/native/ffi/src/engine/cef_win/proton_engine_cef_win.c
+@@ -2921,9 +2921,9 @@ static int32_t proton_engine_window_create_browser(
+   memset(&browser_settings, 0, sizeof(browser_settings));
+   window_info.size = sizeof(window_info);
+   browser_settings.size = sizeof(browser_settings);
++  window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
+   if (window->headless) {
+     window_info.windowless_rendering_enabled = 1;
+-    window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
+   } else {
+     window_info.parent_window = window->hwnd;
+     window_info.style =
+@@ -5362,9 +5362,9 @@ static int32_t proton_engine_view_create_browser(
+   memset(&browser_settings, 0, sizeof(browser_settings));
+   window_info.size = sizeof(window_info);
+   browser_settings.size = sizeof(browser_settings);
++  window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
+   if (window->headless) {
+     window_info.windowless_rendering_enabled = 1;
+-    window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
+   } else {
+     window_info.parent_window = window->hwnd;
+     window_info.style =

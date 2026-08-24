@@ -29,6 +29,12 @@ rand.workspace = true
 regex.workspace = true
 once_cell.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# EastMoney's historical cluster currently interoperates with Windows
+# SChannel but intermittently resets rustls handshakes. Linux/CI keeps the
+# workspace rustls backend; the Windows desktop selects native TLS explicitly.
+reqwest = { workspace = true, features = ["native-tls"] }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 tempfile = "3"

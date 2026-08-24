@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://astock.local/schema/envelope-v1.json",
+  "title": "AStock IPC envelope v1",
+  "type": "object",
+  "$defs": {
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "request_id", "kind", "payload"],
+      "properties": {
+        "protocol_version": { "type": "integer", "const": 1 },
+        "request_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "payload": {},
+        "deadline_ms": { "type": ["integer", "null"], "minimum": 1 },
+        "cancellation_id": { "type": ["string", "null"], "maxLength": 128 }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "request_id", "kind", "ok", "payload"],
+      "properties": {
+        "protocol_version": { "type": "integer", "const": 1 },
+        "request_id": { "type": "string" },
+        "kind": { "type": "string" },
+        "ok": { "type": "boolean" },
+        "payload": {},
+        "error": { "$ref": "#/$defs/error" }
+      }
+    },
+    "stream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "stream_id", "seq", "kind", "payload"],
+      "properties": {
+        "protocol_version": { "type": "integer", "const": 1 },
+        "stream_id": { "type": "string" },
+        "seq": { "type": "integer", "minimum": 0 },
+        "kind": { "type": "string" },
+        "payload": {}
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "retryable": { "type": "boolean" },
+        "details": {}
+      }
+    }
+  }
+}

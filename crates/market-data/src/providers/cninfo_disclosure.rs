@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::HttpClient;
 
 const QUERY_URL: &str = "https://www.cninfo.com.cn/new/hisAnnouncement/query";
+const STOCK_SEARCH_URL: &str = "https://www.cninfo.com.cn/new/information/topSearch/query";
 const STATIC_BASE: &str = "https://static.cninfo.com.cn/";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +32,15 @@ pub struct CninfoPage {
     pub page: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CninfoStockIdentity {
+    pub code: String,
+    pub name: String,
+    pub org_id: String,
+    pub category: String,
+    pub delisted: bool,
+}
+
 #[derive(Clone)]
 pub struct CninfoDisclosureProvider {
     http: Arc<HttpClient>,
@@ -52,7 +62,10 @@ impl CninfoDisclosureProvider {
         date_range: Option<&str>,
     ) -> Result<CninfoPage, DataError> {
         let page = page.max(1);
-        let page_size = page_size.clamp(10, 50);
+        // The public front-end contract currently caps a page at 30 rows even
+        // when a larger value is requested. Use the real limit so page counts
+        // and completeness diagnostics remain truthful.
+        let page_size = page_size.clamp(10, 30);
         let form = vec![
             ("pageNum".into(), page.to_string()),
             ("pageSize".into(), page_size.to_string()),
@@ -73,6 +86,95 @@ impl CninfoDisclosureProvider {
         let value = self.http.post_form_json(QUERY_URL, &headers, &form).await?;
         parse_cninfo_page(&value, page)
     }
+
+    /// Resolve the CNInfo-specific `orgId`. The announcement endpoint does
+    /// not accept a bare six-digit code: its `stock` form field must be
+    /// `<code>,<orgId>`. The legacy implementation passed only the code and
+    /// silently returned zero rows for active issuers.
+    pub async fn resolve_stock_identity(
+        &self,
+        security_code: &str,
+    ) -> Result<CninfoStockIdentity, DataError> {
+        let headers = vec![
+            ("Referer".into(), "https://www.cninfo.com.cn/".into()),
+            ("Origin".into(), "https://www.cninfo.com.cn".into()),
+            ("X-Requested-With".into(), "XMLHttpRequest".into()),
+        ];
+        let form = vec![
+            ("keyWord".into(), security_code.to_string()),
+            ("maxNum".into(), "10".into()),
+        ];
+        let value = self
+            .http
+            .post_form_json(STOCK_SEARCH_URL, &headers, &form)
+            .await?;
+        parse_cninfo_stock_identity(&value, security_code)
+            .ok_or_else(|| DataError::Empty(format!("CNInfo orgId lookup for {security_code}")))
+    }
+
+    /// Query a bounded recent window for one security, resolving `orgId`
+    /// first and paging with CNInfo's actual 30-row limit.
+    pub async fn query_recent_for_stock(
+        &self,
+        security_code: &str,
+        market_column: &str,
+        date_range: Option<&str>,
+        max_pages: u32,
+    ) -> Result<CninfoPage, DataError> {
+        let identity = self.resolve_stock_identity(security_code).await?;
+        let stock = format!("{},{}", identity.code, identity.org_id);
+        let first = self
+            .query(Some(&stock), market_column, 1, 30, date_range)
+            .await?;
+        let total = first.total;
+        let total_pages = first.total_pages;
+        let mut rows = first.rows;
+        let last = total_pages.min(max_pages.max(1));
+        for page in 2..=last {
+            let next = self
+                .query(Some(&stock), market_column, page, 30, date_range)
+                .await?;
+            rows.extend(next.rows);
+        }
+        let mut seen = std::collections::HashSet::new();
+        rows.retain(|row| {
+            let key = if row.announcement_id.is_empty() {
+                format!(
+                    "{}:{:?}:{}",
+                    row.security_code, row.announcement_time_ms, row.title
+                )
+            } else {
+                row.announcement_id.clone()
+            };
+            seen.insert(key)
+        });
+        Ok(CninfoPage {
+            rows,
+            total,
+            total_pages,
+            page: 1,
+        })
+    }
+}
+
+fn parse_cninfo_stock_identity(
+    value: &serde_json::Value,
+    security_code: &str,
+) -> Option<CninfoStockIdentity> {
+    value.as_array()?.iter().find_map(|row| {
+        let code = text(row, "code");
+        let org_id = text(row, "orgId");
+        if code != security_code || org_id.is_empty() {
+            return None;
+        }
+        Some(CninfoStockIdentity {
+            code,
+            name: text(row, "zwjc"),
+            org_id,
+            category: text(row, "category"),
+            delisted: text(row, "delisted").eq_ignore_ascii_case("true"),
+        })
+    })
 }
 
 pub fn parse_cninfo_page(value: &serde_json::Value, page: u32) -> Result<CninfoPage, DataError> {
@@ -163,5 +265,20 @@ mod tests {
             "https://static.cninfo.com.cn/finalpage/2026-01-01/a.PDF"
         );
         assert_eq!(page.rows[0].security_code, "000001");
+    }
+
+    #[test]
+    fn parses_exact_cninfo_stock_identity() {
+        let value = serde_json::json!([{
+            "code": "000725", "zwjc": "京东方Ａ", "orgId": "gssz0000725",
+            "category": "A股", "delisted": "false"
+        }, {
+            "code": "200725", "zwjc": "京东方Ｂ", "orgId": "gssz0000725",
+            "category": "B股", "delisted": "false"
+        }]);
+        let identity = parse_cninfo_stock_identity(&value, "000725").unwrap();
+        assert_eq!(identity.code, "000725");
+        assert_eq!(identity.org_id, "gssz0000725");
+        assert!(!identity.delisted);
     }
 }

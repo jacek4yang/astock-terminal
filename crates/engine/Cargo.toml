@@ -1,0 +1,29 @@
+[package]
+name = "astock-engine"
+description = "GUI-independent deterministic financial and persistence worker"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+astock-core = { path = "../core" }
+astock-chanlun = { path = "../chanlun" }
+astock-fundamental = { path = "../fundamental" }
+astock-market-data = { path = "../market-data" }
+astock-minimax = { path = "../minimax" }
+astock-protocol = { path = "../protocol" }
+astock-source-verification = { path = "../source-verification" }
+astock-storage = { path = "../storage" }
+astock-technical = { path = "../technical" }
+astock-trading-rules = { path = "../trading-rules" }
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util = "0.7"
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

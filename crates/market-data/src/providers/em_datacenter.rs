@@ -68,6 +68,13 @@ const CLIST_PAGE_SIZE: u32 = 100;
 /// `ttl::MAX` 的条目——此处缓存是 best-effort,与 `eastmoney_f10` 同一取舍。)
 const REPORT_TTL: Duration = Duration::from_secs(600);
 
+fn is_empty_report_message(message: &str) -> bool {
+    matches!(
+        message.trim(),
+        "返回数据为空" | "暂无数据" | "No data" | "no data"
+    )
+}
+
 /// 报表查询参数。
 struct ReportQuery<'a> {
     /// `DC_WEB_HOST` 或 `DC_SEC_HOST`(后者走 /securities 路径)。
@@ -1200,6 +1207,12 @@ impl EmDataCenter {
                 .and_then(|m| m.as_str())
                 .unwrap_or("unknown")
                 .to_string();
+            // EastMoney uses `success=false` for a legitimate empty report
+            // on several datacenter datasets. Preserve that semantic as an
+            // empty successful snapshot; other messages remain hard errors.
+            if is_empty_report_message(&message) {
+                return Ok((Vec::new(), 0));
+            }
             return Err(DataError::Parse {
                 upstream: format!("{} ({})", query.host, query.op),
                 message,
@@ -1440,6 +1453,181 @@ impl EmDataCenter {
             quote_columns: None,
             max_pages,
             op: "suspensions",
+        };
+        self.report(&key, &query, parse_suspend_row).await
+    }
+
+    /// 龙虎榜详情（单证券）。在上游过滤证券代码，避免先拉取全市场后
+    /// 本地筛选导致分页截断，从而漏掉低频上榜证券。
+    pub async fn billboard_detail_for_symbol(
+        &self,
+        code: &str,
+        start: NaiveDate,
+        end: NaiveDate,
+        max_pages: u32,
+    ) -> Result<Fetched<Vec<BillboardRow>>, DataError> {
+        let key = format!("dc_billboard_symbol_{code}_{start}_{end}_{max_pages}");
+        let query = ReportQuery {
+            host: DC_WEB_HOST,
+            report_name: "RPT_DAILYBILLBOARD_DETAILSNEW",
+            columns: "SECURITY_CODE,SECUCODE,SECURITY_NAME_ABBR,TRADE_DATE,EXPLAIN,CLOSE_PRICE,CHANGE_RATE,BILLBOARD_NET_AMT,BILLBOARD_BUY_AMT,BILLBOARD_SELL_AMT,BILLBOARD_DEAL_AMT,ACCUM_AMOUNT,DEAL_NET_RATIO,DEAL_AMOUNT_RATIO,TURNOVERRATE,FREE_MARKET_CAP,EXPLANATION,D1_CLOSE_ADJCHRATE,D2_CLOSE_ADJCHRATE,D5_CLOSE_ADJCHRATE,D10_CLOSE_ADJCHRATE,SECURITY_TYPE_CODE",
+            filter: Some(format!(
+                "(SECURITY_CODE=\"{code}\")(TRADE_DATE>='{start}')(TRADE_DATE<='{end}')"
+            )),
+            sort_columns: "TRADE_DATE",
+            sort_types: "-1",
+            quote_columns: None,
+            max_pages,
+            op: "billboard_detail_for_symbol",
+        };
+        self.report(&key, &query, parse_billboard_row).await
+    }
+
+    /// 大宗交易（单证券）。过滤在数据中心侧执行，保证结果不受全市场
+    /// 500 行分页上限影响。
+    pub async fn block_trade_for_symbol(
+        &self,
+        code: &str,
+        start: NaiveDate,
+        end: NaiveDate,
+        max_pages: u32,
+    ) -> Result<Fetched<Vec<BlockTradeRow>>, DataError> {
+        let key = format!("dc_blocktrade_symbol_{code}_{start}_{end}_{max_pages}");
+        let query = ReportQuery {
+            host: DC_WEB_HOST,
+            report_name: "RPT_DATA_BLOCKTRADE",
+            columns: "TRADE_DATE,SECURITY_CODE,SECUCODE,SECURITY_NAME_ABBR,CHANGE_RATE,CLOSE_PRICE,DEAL_PRICE,PREMIUM_RATIO,DEAL_VOLUME,DEAL_AMT,TURNOVER_RATE,BUYER_NAME,SELLER_NAME,BUYER_CODE,SELLER_CODE",
+            filter: Some(format!(
+                "(SECURITY_TYPE_WEB=1)(SECURITY_CODE=\"{code}\")(TRADE_DATE>='{start}')(TRADE_DATE<='{end}')"
+            )),
+            sort_columns: "TRADE_DATE",
+            sort_types: "-1",
+            quote_columns: None,
+            max_pages,
+            op: "block_trade_for_symbol",
+        };
+        self.report(&key, &query, parse_block_trade_row).await
+    }
+
+    /// 机构调研（单证券）。
+    pub async fn org_survey_for_symbol(
+        &self,
+        code: &str,
+        since: NaiveDate,
+        max_pages: u32,
+    ) -> Result<Fetched<Vec<OrgSurveyRow>>, DataError> {
+        let key = format!("dc_orgsurvey_symbol_{code}_{since}_{max_pages}");
+        let query = ReportQuery {
+            host: DC_WEB_HOST,
+            report_name: "RPT_ORG_SURVEYNEW",
+            columns: "ALL",
+            filter: Some(format!(
+                "(SECURITY_CODE=\"{code}\")(NUMBERNEW=\"1\")(IS_SOURCE=\"1\")(NOTICE_DATE>'{since}')"
+            )),
+            sort_columns: "NOTICE_DATE,SUM,RECEIVE_START_DATE",
+            sort_types: "-1,-1,-1",
+            quote_columns: Some(
+                "f2~01~SECURITY_CODE~CLOSE_PRICE,f3~01~SECURITY_CODE~CHANGE_RATE",
+            ),
+            max_pages,
+            op: "org_survey_for_symbol",
+        };
+        self.report(&key, &query, parse_org_survey_row).await
+    }
+
+    /// 股东户数历史（单证券）。`RPT_HOLDERNUMLATEST` 对带证券过滤的
+    /// 请求会返回该证券的可用历史，而不是全市场每股一行的截断视图。
+    pub async fn holder_num_for_symbol(
+        &self,
+        code: &str,
+        max_pages: u32,
+    ) -> Result<Fetched<Vec<HolderNumRow>>, DataError> {
+        let key = format!("dc_holdernum_symbol_{code}_{max_pages}");
+        let query = ReportQuery {
+            host: DC_WEB_HOST,
+            report_name: "RPT_HOLDERNUMLATEST",
+            columns: "SECURITY_CODE,SECURITY_NAME_ABBR,END_DATE,INTERVAL_CHRATE,AVG_MARKET_CAP,AVG_HOLD_NUM,TOTAL_MARKET_CAP,TOTAL_A_SHARES,HOLD_NOTICE_DATE,HOLDER_NUM,PRE_HOLDER_NUM,HOLDER_NUM_CHANGE,HOLDER_NUM_RATIO,PRE_END_DATE",
+            filter: Some(format!("(SECURITY_CODE=\"{code}\")")),
+            sort_columns: "HOLD_NOTICE_DATE,END_DATE",
+            sort_types: "-1,-1",
+            quote_columns: Some("f2,f3"),
+            max_pages,
+            op: "holder_num_for_symbol",
+        };
+        self.report(&key, &query, parse_holder_num_row).await
+    }
+
+    /// 业绩预告（单证券，按公告日下限）。不再要求调用方枚举报告期，
+    /// 可同时保留年报、半年报和季报预告。
+    pub async fn earnings_predict_for_symbol(
+        &self,
+        code: &str,
+        since: NaiveDate,
+        max_pages: u32,
+    ) -> Result<Fetched<Vec<EarningsPredictRow>>, DataError> {
+        let key = format!("dc_predict_symbol_{code}_{since}_{max_pages}");
+        let query = ReportQuery {
+            host: DC_SEC_HOST,
+            report_name: "RPT_PUBLIC_OP_NEWPREDICT",
+            columns: "ALL",
+            filter: Some(format!(
+                "(SECURITY_CODE=\"{code}\")(NOTICE_DATE>='{since}')"
+            )),
+            sort_columns: "NOTICE_DATE,REPORT_DATE",
+            sort_types: "-1,-1",
+            quote_columns: None,
+            max_pages,
+            op: "earnings_predict_for_symbol",
+        };
+        self.report(&key, &query, parse_earnings_predict_row).await
+    }
+
+    /// 限售解禁（单证券，包含已发生与未来窗口）。
+    pub async fn lift_stage_for_symbol(
+        &self,
+        code: &str,
+        start: NaiveDate,
+        end: NaiveDate,
+        max_pages: u32,
+    ) -> Result<Fetched<Vec<LiftStageRow>>, DataError> {
+        let key = format!("dc_lift_symbol_{code}_{start}_{end}_{max_pages}");
+        let query = ReportQuery {
+            host: DC_WEB_HOST,
+            report_name: "RPT_LIFT_STAGE",
+            columns: "SECURITY_CODE,SECURITY_NAME_ABBR,FREE_DATE,CURRENT_FREE_SHARES,ABLE_FREE_SHARES,LIFT_MARKET_CAP,FREE_RATIO,NEW,B20_ADJCHRATE,A20_ADJCHRATE,FREE_SHARES_TYPE,TOTAL_RATIO,NON_FREE_SHARES,BATCH_HOLDER_NUM",
+            filter: Some(format!(
+                "(SECURITY_CODE=\"{code}\")(FREE_DATE>='{start}')(FREE_DATE<='{end}')"
+            )),
+            sort_columns: "FREE_DATE,CURRENT_FREE_SHARES",
+            sort_types: "1,-1",
+            quote_columns: None,
+            max_pages,
+            op: "lift_stage_for_symbol",
+        };
+        self.report(&key, &query, parse_lift_stage_row).await
+    }
+
+    /// 指定交易日的停复牌状态（单证券）。该报表按 `DATETIME` 提供
+    /// 截面，不把“今日无记录”误判为历史从未停牌。
+    pub async fn suspensions_for_symbol(
+        &self,
+        code: &str,
+        date: NaiveDate,
+        max_pages: u32,
+    ) -> Result<Fetched<Vec<SuspendRow>>, DataError> {
+        let key = format!("dc_suspend_symbol_{code}_{date}_{max_pages}");
+        let query = ReportQuery {
+            host: DC_WEB_HOST,
+            report_name: "RPT_CUSTOM_SUSPEND_DATA_INTERFACE",
+            columns: "ALL",
+            filter: Some(format!(
+                "(MARKET=\"全部\")(SECURITY_CODE=\"{code}\")(DATETIME='{date}')"
+            )),
+            sort_columns: "SUSPEND_START_DATE",
+            sort_types: "-1",
+            quote_columns: None,
+            max_pages,
+            op: "suspensions_for_symbol",
         };
         self.report(&key, &query, parse_suspend_row).await
     }
@@ -2222,6 +2410,14 @@ mod tests {
     fn board_kind_fs() {
         assert_eq!(BoardKind::Industry.fs(), "m:90+t:2");
         assert_eq!(BoardKind::Concept.fs(), "m:90+t:3");
+    }
+
+    #[test]
+    fn only_known_empty_report_messages_are_non_errors() {
+        assert!(is_empty_report_message("返回数据为空"));
+        assert!(is_empty_report_message(" 暂无数据 "));
+        assert!(!is_empty_report_message("参数错误"));
+        assert!(!is_empty_report_message("访问频率过高"));
     }
 
     // --- 实盘冒烟(默认跳过;`cargo test -p astock-market-data -- --ignored` 运行) ---

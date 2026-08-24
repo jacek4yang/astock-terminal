@@ -1,0 +1,21 @@
+{
+  "backend": {
+    "path": ".",
+    "package": "backend/app"
+  },
+  "frontend": {
+    "path": "../ui",
+    "dev_url": "http://127.0.0.1:5173",
+    "before_dev": "npm run dev -- --host 127.0.0.1",
+    "before_build": "npm run build",
+    "dist": ".astock-renderer-dist"
+  },
+  "package": {
+    "product_name": "AStock Terminal",
+    "identifier": "com.astock.terminal",
+    "version": "5.1.0",
+    "formats": ["app", "zip", "nsis"],
+    "icons": ["../src-tauri/icons/icon.ico"],
+    "output": ".astock-artifacts"
+  }
+}

@@ -4,10 +4,16 @@
  * 错误统一 { error: string, kind: string }。
  */
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { isProton, requestNative } from "../bridge";
 
 /** 是否在 Tauri 桌面环境(纯浏览器 dev 时为 false) */
 export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+/** 是否连接到当前 Proton/CEF 桌面宿主。 */
+export function isDesktop(): boolean {
+  return isProton() || isTauri();
 }
 
 export const NOT_TAURI_MSG = "需在桌面应用中运行(纯浏览器模式无行情数据)";
@@ -20,7 +26,7 @@ export interface ApiError {
 
 /** 规范化 invoke 抛出的错误为可读中文文案 */
 export function errMsg(e: unknown): string {
-  if (!isTauri()) return NOT_TAURI_MSG;
+  if (!isDesktop()) return NOT_TAURI_MSG;
   if (e && typeof e === "object") {
     const obj = e as Record<string, unknown>;
     if (typeof obj.error === "string") return obj.error;
@@ -29,9 +35,102 @@ export function errMsg(e: unknown): string {
   return String(e);
 }
 
+interface NativePage<T> {
+  items: T[];
+  next_cursor: number | null;
+  snapshot_id: string;
+}
+
+async function readAllSharePages<T>(): Promise<T> {
+  const items: unknown[] = [];
+  let cursor: number | null = 0;
+  let snapshotId: string | undefined;
+  while (cursor != null) {
+    const page: NativePage<unknown> = await requestNative<NativePage<unknown>>(
+      "engine",
+      "market.shares.page",
+      { cursor, limit: 500, ...(snapshotId ? { snapshot_id: snapshotId } : {}) },
+      { deadlineMs: 60_000 },
+    );
+    items.push(...page.items);
+    snapshotId = page.snapshot_id;
+    cursor = page.next_cursor;
+  }
+  return items as T;
+}
+
+async function protonCommand<T>(name: string, args: Record<string, unknown> = {}): Promise<T> {
+  switch (name) {
+    case "search_stocks": {
+      const result = await requestNative<{ items: unknown[] }>("engine", "market.search", args);
+      return result.items as T;
+    }
+    case "get_quote": {
+      const result = await requestNative<{ quote: unknown }>("engine", "market.quote", args);
+      return result.quote as T;
+    }
+    case "get_kline":
+      return requestNative<T>("engine", "market.kline", args);
+    case "get_index_kline": {
+      const result = await requestNative<{ bars: unknown[] }>("engine", "market.index_kline", args);
+      return result.bars as T;
+    }
+    case "get_order_book":
+      return requestNative<T>("engine", "market.order_book", args);
+    case "get_minute":
+      return requestNative<T>("engine", "market.minute", args);
+    case "get_fund_flow":
+      return requestNative<T>("engine", "market.fund_flow.daily", args);
+    case "get_realtime_flow":
+      return requestNative<T>("engine", "market.fund_flow.realtime", args);
+    case "get_market_breadth": {
+      const result = await requestNative<{ breadth: unknown }>("engine", "market.overview", {});
+      return result.breadth as T;
+    }
+    case "get_provider_health": {
+      const result = await requestNative<{ provider_health: unknown }>("engine", "market.overview", {});
+      return result.provider_health as T;
+    }
+    case "get_all_a_shares":
+      return readAllSharePages<T>();
+    case "get_stock_bundle": {
+      return requestNative<T>("engine", "market.security_snapshot", args, { deadlineMs: 60_000 });
+    }
+    case "get_source_documents":
+      return requestNative<T>("engine", "research.sources.list", args);
+    case "get_source_document":
+      return requestNative<T>("engine", "research.sources.get", args);
+    case "fetch_source_document":
+      return requestNative<T>("engine", "research.sources.fetch", args, { deadlineMs: 60_000 });
+    case "compare_source_evidence":
+      return requestNative<T>("engine", "research.sources.compare", args);
+    case "watchlist_list":
+      return requestNative<T>("engine", "workspace.watchlist.list", { group: args.group ?? "默认" });
+    case "watchlist_add":
+      return requestNative<T>("engine", "workspace.watchlist.add", {
+        symbol: args.code,
+        group: args.group ?? "默认",
+      });
+    case "watchlist_remove":
+      return requestNative<T>("engine", "workspace.watchlist.remove", {
+        symbol: args.code,
+        group: args.group ?? "默认",
+      });
+    case "watchlist_pin":
+      return requestNative<T>("engine", "workspace.watchlist.pin", {
+        symbol: args.code,
+        group: args.group ?? "默认",
+        pinned: args.pinned,
+      });
+    default:
+      throw new Error(`该功能尚未迁移到新的本地 Engine：${name}`);
+  }
+}
+
 function cmd<T>(name: string, args?: Record<string, unknown>): Promise<T> {
-  if (!isTauri()) return Promise.reject(new Error(NOT_TAURI_MSG));
-  return invoke<T>(name, args);
+  if (isProton()) return protonCommand<T>(name, args);
+  if (isTauri()) return invoke<T>(name, args);
+  return Promise.reject(new Error(NOT_TAURI_MSG));
 }
 
 // ==================== 行情数据 ====================

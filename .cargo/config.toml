@@ -1,0 +1,4 @@
+[build]
+# The Windows product is intentionally built outside the C: workspace. CI
+# overrides this with CARGO_TARGET_DIR so non-Windows runners stay portable.
+target-dir = "D:/astock-build/astock-terminal/cargo-target"

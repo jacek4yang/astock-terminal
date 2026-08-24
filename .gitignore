@@ -9,3 +9,11 @@ ui/dist/
 ui/tsconfig.tsbuildinfo
 src-tauri/gen/
 artifacts/
+.astock-build/
+ui/.astock-renderer-dist/
+desktop-moon/.astock-artifacts/
+**/.mooncakes/
+**/_build/
+app-moon/dist/
+formal/.cache/
+protocol/generated/.stamp

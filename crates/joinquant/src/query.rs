@@ -14,6 +14,7 @@
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use regex::Regex;
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::error::JoinQuantError;
@@ -41,7 +42,7 @@ pub struct DailyBar {
 }
 
 /// Valuation snapshot for one security on one date.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ValuationSnapshot {
     /// Internal security code (`SH600000` / `SZ000001` style).
     pub code: String,
