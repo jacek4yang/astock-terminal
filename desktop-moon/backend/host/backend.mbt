@@ -95,7 +95,7 @@ fn handshake_request(request_id : String) -> Json {
     "request_id": request_id,
     "kind": "system.handshake",
     "payload": {
-      "app_version": "5.1.0",
+      "app_version": "6.0.0",
       "host_version": "moonbit-proton-0.2.1",
       "protocol_version": 1,
     },
