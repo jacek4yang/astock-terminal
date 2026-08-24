@@ -2,11 +2,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { requestNative } = vi.hoisted(() => ({ requestNative: vi.fn() }));
 
-vi.mock("@tauri-apps/api/core", () => ({
-  Channel: class {},
-  invoke: vi.fn(),
-}));
-
 vi.mock("../bridge", () => ({
   isProton: () => true,
   requestNative,

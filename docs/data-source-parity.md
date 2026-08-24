@@ -2,11 +2,11 @@
 
 Updated: 2026-08-24 (Asia/Shanghai)
 
-This document treats the last Tauri application as a migration oracle, not as
-the target architecture. The old application registers 127 UI commands. The
-versioned Engine v1 contract currently exposes 57 coarse request kinds. A lower
-command count is intentional, but a feature is not considered migrated merely
-because its Rust crate still compiles.
+This document treats the frozen v5 Tauri command inventory as a historical
+migration oracle, not as the target architecture. The old application
+registered 127 UI commands. The versioned Engine v1 contract now exposes 130
+coarse request kinds. Counts are not compared one-for-one; a feature only
+became migrated after its contract, consumer and tests were present.
 
 ## Status language
 
@@ -18,19 +18,18 @@ because its Rust crate still compiles.
 - `TRUSTED BOUNDARY`: correctness depends on an external provider, network,
   operating-system facility or user credential and cannot be proved locally.
 
-The old Tauri baseline must not be removed while any release-required row is
-`INTERNAL ONLY` or `GAP`.
+The old Tauri sources were removed only after every one of the 127 legacy UI
+handlers had a reviewed `READY`/`ENRICHED` replacement. Catalog-only external
+sources can still be `NOT VERIFIED`; they are not silently represented as live
+collectors.
 
 `scripts/capability-parity-check.mjs` turns that rule into a build gate. It
 freezes and classifies all 127 legacy handlers, all 14 concrete market-provider
-modules and all 26 registered official global sources. Registry drift fails CI
-until it is reviewed; deleting `src-tauri` while blockers remain also fails.
-The classification currently exposes 54 legacy handlers through new coarse
-services and keeps 73 as explicit migration blockers. This count is deliberately
-conservative: partial coverage does not count as migrated. Even with all six
-current sentiment pools present, the legacy
-arbitrary-date pool query stays blocked until the coarse service has equivalent
-historical semantics.
+modules and all 26 registered official global sources. Registry drift fails the
+release gate until it is reviewed. The final cutover classification maps all
+127 legacy handlers through new coarse services and keeps zero legacy-handler
+blockers. The checker retains the immutable registry count/hash after source
+deletion so later edits cannot rewrite the baseline.
 
 The 26-entry global catalog must not be confused with 26 working legacy
 collectors. The old `global_sync_start` actively downloads World Bank and an
@@ -157,8 +156,8 @@ correct.
 
 ## Non-regression release rules
 
-1. Do not delete `src-tauri` until every release-required `INTERNAL ONLY`/`GAP`
-   row has a new contract, tests and UI/Agent consumer.
+1. The frozen 127/127 migration hash and the no-Tauri/no-Rust-Agent architecture
+   gate must both pass; a legacy runtime may not be reintroduced.
 2. Provider success counts and logical channel counts must never be conflated.
 3. Missing, stale, single-source and conflicting data remain explicit and may
    suspend a task; they are never converted to zero.

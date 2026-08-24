@@ -17,11 +17,13 @@ supervision and diagnostics. The Agent Worker owns clarification, planning,
 tool coordination, review and publication decisions. Rust owns deterministic
 market, research, quant, storage and credential services.
 
-`src-tauri` and `crates/agent` are migration oracles, not production
-components. They must remain until `scripts/capability-parity-check.mjs
---release` reports no blocker, and then must be deleted before
-`scripts/release-architecture-check.mjs` can pass. There is no WebView2 or
-Tauri production fallback.
+The frozen 127-command v5 registry reached 127/127 mapped capabilities before
+the cutover. `src-tauri`, the old Rust Agent crate and all Tauri/WebView2
+dependencies have now been removed. `scripts/capability-parity-check.mjs`
+preserves the exact count and SHA-256 of that reviewed registry as the
+differential oracle, while `scripts/release-architecture-check.mjs` prevents
+either legacy runtime from returning. There is no browser or Tauri production
+fallback.
 
 ## Contract and persistence
 

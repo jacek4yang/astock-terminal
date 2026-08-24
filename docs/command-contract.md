@@ -2,8 +2,9 @@
 
 本文件只记录 v5 的 Tauri command 差异基线，不是 v6 公共接口。v6
 公共合同位于 `protocol/schema`，Renderer 只能调用 Proton typed bridge。
-所有旧命令必须先映射为 `READY/ENRICHED` 或以测试证明为不可达、重复、
-不安全后标记 `RETIRED`，才能删除这里的旧契约。
+全部 127 个旧命令已完成映射并通过冻结清单的数量/SHA-256 校验；旧
+Tauri 源码已删除。本文只保留审计语义，不得作为可调用接口或恢复旧
+运行时的依据。
 
 ## 行情数据(astock-market-data)
 - `get_quote(symbol: string) -> Quote` — {symbol,name,price,pct,change,high,low,open,pre_close,volume,amount,turnover,timestamp}

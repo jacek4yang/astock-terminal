@@ -10,7 +10,7 @@ import {
   agentTasks,
   errKind,
   errMsg,
-  isTauri,
+  isDesktop,
   minimaxStatus,
   NOT_TAURI_MSG,
   type AgentConversation,
@@ -1198,7 +1198,7 @@ export default function AgentChat({
 
   // 初始化:key 检测 + 历史列表 + 刷新后恢复未结束任务
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!isDesktop()) return;
     minimaxStatus()
       .then((s) => setHasKey(s.has_key))
       .catch((e) => {
@@ -1839,7 +1839,7 @@ export default function AgentChat({
             </Link>
           </div>
         )}
-        {!isTauri() && (
+        {!isDesktop() && (
           <div className="border-b border-red-200 bg-red-50 px-4 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
             {NOT_TAURI_MSG}
           </div>

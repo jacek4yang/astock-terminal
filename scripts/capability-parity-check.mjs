@@ -12,9 +12,10 @@ const expectedLegacyHandlerCount = 127;
 const expectedLegacyHandlerHash = "b55ed6504d2c97ab3463274cf826e8b34b1f60257e8447a79b43baab26a8e700";
 
 // Exact legacy capabilities that are reachable through the new coarse Engine
-// contract. Everything else in the frozen 127-command registry is a release
-// blocker and keeps src-tauri as a differential oracle. A handler may only be
-// moved here after its new contract, consumer and test are all present.
+// contract. Before cutover, everything else in the frozen 127-command registry
+// was a release blocker. A handler was only moved here after its new contract,
+// consumer and test were all present. After cutover this set, its count and its
+// immutable hash preserve the reviewed differential oracle without legacy code.
 const migratedHandlers = new Set([
   "market.get_quote",
   "market.get_order_book",
@@ -174,21 +175,22 @@ function fail(message) {
   process.exitCode = 1;
 }
 
-if (!fs.existsSync(tauriRegistryPath)) {
-  fail("src-tauri migration oracle is missing while legacy blockers remain");
-  process.exit();
+let legacyHandlers;
+if (fs.existsSync(tauriRegistryPath)) {
+  const tauriSource = fs.readFileSync(tauriRegistryPath, "utf8");
+  const handlerBody = tauriSource.match(/generate_handler!\[([\s\S]*?)\]\)/)?.[1];
+  if (!handlerBody) {
+    fail("could not locate the frozen Tauri handler registry");
+    process.exit();
+  }
+  legacyHandlers = [...handlerBody.matchAll(/commands::([a-z_]+)::([a-z_]+)/g)]
+    .map((match) => `${match[1]}.${match[2]}`)
+    .sort();
+} else {
+  // After the cutover the exact frozen registry is represented by the
+  // migrated set itself and still checked against the immutable count/hash.
+  legacyHandlers = [...migratedHandlers].sort();
 }
-
-const tauriSource = fs.readFileSync(tauriRegistryPath, "utf8");
-const handlerBody = tauriSource.match(/generate_handler!\[([\s\S]*?)\]\)/)?.[1];
-if (!handlerBody) {
-  fail("could not locate the frozen Tauri handler registry");
-  process.exit();
-}
-
-const legacyHandlers = [...handlerBody.matchAll(/commands::([a-z_]+)::([a-z_]+)/g)]
-  .map((match) => `${match[1]}.${match[2]}`)
-  .sort();
 const handlerHash = crypto.createHash("sha256").update(legacyHandlers.join("\n")).digest("hex");
 if (legacyHandlers.length !== expectedLegacyHandlerCount || handlerHash !== expectedLegacyHandlerHash) {
   fail(`legacy registry drifted: count=${legacyHandlers.length}, sha256=${handlerHash}; review and classify every change`);

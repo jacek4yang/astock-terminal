@@ -3,17 +3,11 @@
  * 契约见 ../docs/command-contract.md;所有命令返回 JSON(snake_case),
  * 错误统一 { error: string, kind: string }。
  */
-import { Channel, invoke } from "@tauri-apps/api/core";
 import { isProton, requestNative } from "../bridge";
-
-/** 是否在 Tauri 桌面环境(纯浏览器 dev 时为 false) */
-export function isTauri(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
 
 /** 是否连接到当前 Proton/CEF 桌面宿主。 */
 export function isDesktop(): boolean {
-  return isProton() || isTauri();
+  return isProton();
 }
 
 export const NOT_TAURI_MSG = "需在桌面应用中运行(纯浏览器模式无行情数据)";
@@ -395,7 +389,6 @@ async function protonCommand<T>(name: string, args: Record<string, unknown> = {}
 
 function cmd<T>(name: string, args?: Record<string, unknown>): Promise<T> {
   if (isProton()) return protonCommand<T>(name, args);
-  if (isTauri()) return invoke<T>(name, args);
   return Promise.reject(new Error(NOT_TAURI_MSG));
 }
 
@@ -2211,7 +2204,7 @@ export const settingsSetAgentModelRouting = (settings: AgentModelRoutingSettings
   cmd<AgentModelRoutingSettings>("settings_set_agent_model_routing", { settings });
 export const cacheStats = () => cmd<CacheStats>("cache_stats");
 export const cacheCleanup = (targetMb: number) =>
-  // backend uses #[tauri::command(rename_all = "snake_case")] — keys must be snake_case
+  // The versioned Engine protocol uses snake_case payload keys.
   cmd<CacheCleanupResult>("cache_cleanup", { target_mb: targetMb });
 export const getDataDir = () => cmd<string>("get_data_dir");
 export const setDataDir = (path: string) => cmd<unknown>("set_data_dir", { path });
@@ -2498,9 +2491,7 @@ export interface AgentRunOptions {
 }
 
 function agentChannel(handler: (message: AgentStreamEnvelope) => void) {
-  const channel = new Channel<AgentStreamEnvelope>();
-  channel.onmessage = handler;
-  return channel;
+  return handler;
 }
 
 export const agentAsk = (

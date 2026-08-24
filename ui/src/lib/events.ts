@@ -1,10 +1,6 @@
-/**
- * Tauri 事件订阅封装(扫描进度等长任务事件流)。
- * 契约:scan-progress {done,total,current_symbol};scan-result 单条结果。
- */
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+/** Proton 事件订阅封装；扫描状态同时由 Engine 快照轮询收敛。 */
+import { isProton, subscribeNativeEvent } from "../bridge";
 import type { ScanResultItem } from "./api";
-import { isTauri } from "./api";
 
 export interface ScanProgress {
   done: number;
@@ -13,10 +9,11 @@ export interface ScanProgress {
 }
 
 type Handler<T> = (payload: T) => void;
+type UnlistenFn = () => void;
 
 function subscribe<T>(event: string, handler: Handler<T>): Promise<UnlistenFn> {
-  if (!isTauri()) return Promise.resolve(() => {});
-  return listen<T>(event, (e) => handler(e.payload));
+  if (!isProton()) return Promise.resolve(() => {});
+  return Promise.resolve(subscribeNativeEvent(event, (payload) => handler(payload as T)));
 }
 
 export const onScanProgress = (handler: Handler<ScanProgress>) =>
