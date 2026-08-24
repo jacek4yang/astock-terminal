@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://astock.local/schema/host-v1.json",
+  "title": "AStock Proton Host service contract v1",
+  "type": "object",
+  "properties": {
+    "renderer_request_kinds": {
+      "type": "array",
+      "prefixItems": [
+        { "const": "diagnostics.status" },
+        { "const": "window.state" },
+        { "const": "window.minimize" },
+        { "const": "window.toggle_maximize" },
+        { "const": "window.begin_drag" },
+        { "const": "window.system_menu" }
+      ]
+    }
+  }
+}

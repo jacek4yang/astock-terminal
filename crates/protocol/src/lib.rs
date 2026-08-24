@@ -141,8 +141,33 @@ mod tests {
     }
 
     #[test]
-    fn all_declared_engine_kinds_are_namespaced() {
-        assert!(ENGINE_REQUEST_KINDS.iter().all(|kind| kind.contains('.')));
+    fn all_declared_request_kinds_are_namespaced_unique_and_public_agent_calls_are_bounded() {
+        for kinds in [
+            ENGINE_REQUEST_KINDS,
+            ENGINE_RENDERER_REQUEST_KINDS,
+            AGENT_REQUEST_KINDS,
+            AGENT_RENDERER_REQUEST_KINDS,
+            HOST_RENDERER_REQUEST_KINDS,
+        ] {
+            assert!(kinds.iter().all(|kind| kind.contains('.')));
+            assert_eq!(
+                kinds.len(),
+                kinds
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+            );
+        }
         assert!(ENGINE_REQUEST_KINDS.contains(&"system.handshake"));
+        assert!(ENGINE_RENDERER_REQUEST_KINDS
+            .iter()
+            .all(|kind| ENGINE_REQUEST_KINDS.contains(kind)));
+        assert!(!ENGINE_RENDERER_REQUEST_KINDS.contains(&"system.shutdown"));
+        assert!(!ENGINE_RENDERER_REQUEST_KINDS.contains(&"research.agent_security_context"));
+        assert!(AGENT_RENDERER_REQUEST_KINDS
+            .iter()
+            .all(|kind| AGENT_REQUEST_KINDS.contains(kind)));
+        assert!(!AGENT_RENDERER_REQUEST_KINDS.contains(&"agent.research.workflow.continue"));
+        assert!(HOST_RENDERER_REQUEST_KINDS.contains(&"window.toggle_maximize"));
     }
 }

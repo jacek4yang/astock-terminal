@@ -17,7 +17,7 @@ dev_build(
   output: "commands.g.mbt",
 )
 
-formatter(ignore: [ "commands.g.mbt" ])
+formatter(ignore: [ "commands.g.mbt", "request_kinds.g.mbt" ])
 
 options(
   "native-stub": [ "window_win.c" ],

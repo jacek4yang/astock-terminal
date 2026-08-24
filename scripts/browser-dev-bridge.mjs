@@ -1,6 +1,9 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const [engineExecutable, agentExecutable] = process.argv.slice(2);
 if (!engineExecutable || !agentExecutable) {
@@ -14,6 +17,18 @@ const ALLOWED_ORIGINS = new Set([
   "http://127.0.0.1:5173",
   "http://localhost:5173",
 ]);
+const schemaDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..", "protocol", "schema");
+
+function schemaKinds(fileName, propertyName) {
+  const schema = JSON.parse(readFileSync(resolve(schemaDirectory, fileName), "utf8"));
+  return new Set(schema.properties[propertyName].prefixItems.map((item) => item.const));
+}
+
+const RENDERER_REQUEST_KINDS = {
+  engine: schemaKinds("engine.schema.json", "renderer_request_kinds"),
+  agent: schemaKinds("agent.schema.json", "renderer_request_kinds"),
+  host: schemaKinds("host.schema.json", "renderer_request_kinds"),
+};
 
 function hasValidToken(request) {
   const supplied = request.headers["x-astock-test-token"];
@@ -281,6 +296,9 @@ const server = createServer(async (request, response) => {
   try {
     const body = await readBody(request);
     if (!body || !["engine", "agent", "host"].includes(body.target)) throw new Error("unsupported target");
+    if (!RENDERER_REQUEST_KINDS[body.target].has(body.request?.kind)) {
+      throw new Error(`Renderer requested a ${body.target} kind outside the protocol contract`);
+    }
     const result = body.target === "host"
       ? hostResponse(body.request)
       : body.target === "agent"

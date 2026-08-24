@@ -1,4 +1,14 @@
-import { MAX_FRAME_BYTES, parseResponseEnvelope, type RequestEnvelope } from "./generated";
+import {
+  AGENT_RENDERER_REQUEST_KINDS,
+  ENGINE_RENDERER_REQUEST_KINDS,
+  HOST_RENDERER_REQUEST_KINDS,
+  MAX_FRAME_BYTES,
+  parseResponseEnvelope,
+  type AgentRendererRequestKind,
+  type EngineRendererRequestKind,
+  type HostRendererRequestKind,
+  type RequestEnvelope,
+} from "./generated";
 
 const PROTOCOL_VERSION = 1;
 
@@ -33,6 +43,16 @@ function browserTestConfig(): { port: number; token: string } | null {
   const token = search.get("bridgeToken") ?? "";
   if (!Number.isInteger(port) || port < 1024 || port > 65535 || token.length < 32) return null;
   return { port, token };
+}
+
+const RENDERER_REQUEST_KIND_SETS: Record<WorkerTarget, ReadonlySet<string>> = {
+  engine: new Set(ENGINE_RENDERER_REQUEST_KINDS),
+  agent: new Set(AGENT_RENDERER_REQUEST_KINDS),
+  host: new Set(HOST_RENDERER_REQUEST_KINDS),
+};
+
+export function isRendererRequestKind(target: WorkerTarget, kind: string): boolean {
+  return RENDERER_REQUEST_KIND_SETS[target].has(kind);
 }
 
 export async function parseBrowserBridgeResponse(response: Response): Promise<unknown> {
@@ -74,12 +94,33 @@ export function createRequestId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
+export function requestNative<T = unknown>(
+  target: "engine",
+  kind: EngineRendererRequestKind,
+  payload?: unknown,
+  options?: NativeRequestOptions,
+): Promise<T>;
+export function requestNative<T = unknown>(
+  target: "agent",
+  kind: AgentRendererRequestKind,
+  payload?: unknown,
+  options?: NativeRequestOptions,
+): Promise<T>;
+export function requestNative<T = unknown>(
+  target: "host",
+  kind: HostRendererRequestKind,
+  payload?: unknown,
+  options?: NativeRequestOptions,
+): Promise<T>;
 export async function requestNative<T>(
   target: WorkerTarget,
   kind: string,
   payload: unknown = {},
   options: NativeRequestOptions = {},
 ): Promise<T> {
+  if (!isRendererRequestKind(target, kind)) {
+    throw new Error(`Renderer 请求未在 ${target} 协议白名单中声明：${kind}`);
+  }
   const invokeOp = window.__MoonBit__?.core?.invokeOp;
   if (!invokeOp && !isBrowserTestBridge()) throw new Error("Proton Host 尚未连接；浏览器预览仅提供界面演示。");
 

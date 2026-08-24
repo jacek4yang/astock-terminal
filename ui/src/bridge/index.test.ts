@@ -1,8 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { parseBrowserBridgeResponse } from "./index";
+import { isRendererRequestKind, parseBrowserBridgeResponse, requestNative } from "./index";
 
 describe("browser test Bridge response parser", () => {
+  it("denies renderer commands that are absent from the versioned target contract", async () => {
+    expect(isRendererRequestKind("agent", "agent.research.workflow")).toBe(true);
+    expect(isRendererRequestKind("agent", "agent.research.workflow.continue")).toBe(false);
+    expect(isRendererRequestKind("host", "window.toggle_maximize")).toBe(true);
+    expect(isRendererRequestKind("host", "window.unknown")).toBe(false);
+    await expect((requestNative as (target: "host", kind: string) => Promise<unknown>)("host", "window.unknown"))
+      .rejects.toThrow("协议白名单");
+  });
+
   it("accepts a valid protocol response", async () => {
     const response = new Response(JSON.stringify({
       protocol_version: 1,

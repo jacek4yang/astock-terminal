@@ -35,7 +35,11 @@ const moonHost = fs.readFileSync(path.join(root, "desktop-moon", "backend", "hos
 const moonHostTests = fs.readFileSync(path.join(root, "desktop-moon", "backend", "host", "worker_supervision_wbtest.mbt"), "utf8");
 const moonEntry = fs.readFileSync(path.join(root, "desktop-moon", "backend", "app", "main.mbt"), "utf8");
 const engineSchema = fs.readFileSync(path.join(root, "protocol", "schema", "engine.schema.json"), "utf8");
+const engineSchemaObject = JSON.parse(engineSchema);
+const agentSchema = JSON.parse(fs.readFileSync(path.join(root, "protocol", "schema", "agent.schema.json"), "utf8"));
+const hostSchema = JSON.parse(fs.readFileSync(path.join(root, "protocol", "schema", "host.schema.json"), "utf8"));
 const browserBridge = fs.readFileSync(path.join(root, "scripts", "browser-dev-bridge.mjs"), "utf8");
+const rendererBridge = fs.readFileSync(path.join(root, "ui", "src", "bridge", "index.ts"), "utf8");
 const acceptanceEvidence = fs.readFileSync(path.join(root, "scripts", "acceptance-evidence.mjs"), "utf8");
 const researchDataGate = fs.readFileSync(path.join(root, "scripts", "research-data-release-gate.mjs"), "utf8");
 const releaseGate = fs.readFileSync(path.join(root, "scripts", "release-gate.ps1"), "utf8");
@@ -237,6 +241,75 @@ if (!browserBridge.includes("executeAgentEffect") || !browserBridge.includes('ef
 if (!browserBridge.includes("const permittedKinds = new Set") ||
     !browserBridge.includes("if (!permittedKinds.has(effect.kind))")) {
   failures.push("browser test Bridge does not enforce the production bounded Agent Effect allowlist");
+}
+const agentRendererKinds = agentSchema.properties.renderer_request_kinds.prefixItems.map((item) => item.const);
+const hostRendererKinds = hostSchema.properties.renderer_request_kinds.prefixItems.map((item) => item.const);
+const engineRendererKinds = engineSchemaObject.properties.renderer_request_kinds.prefixItems.map((item) => item.const);
+const engineWorkerKinds = engineSchemaObject.properties.request_kinds.prefixItems.map((item) => item.const);
+if (engineRendererKinds.length !== 119 ||
+    !engineRendererKinds.every((kind) => engineWorkerKinds.includes(kind))) {
+  failures.push("Engine renderer request allowlist is not the audited 119-kind subset of the Worker contract");
+}
+for (const internalEngineKind of [
+  "system.handshake",
+  "system.shutdown",
+  "system.cancel",
+  "research.agent_prepare_context",
+  "research.agent_security_context",
+  "research.agent_report_verify",
+  "research.market_context",
+  "research.market_candidates",
+  "research.joinquant_context",
+  "research.optional_sources",
+]) {
+  if (engineRendererKinds.includes(internalEngineKind)) {
+    failures.push(`internal Engine kind is exposed to the renderer: ${internalEngineKind}`);
+  }
+}
+for (const requiredAgentKind of [
+  "diagnostics.status",
+  "agent.provider.test",
+  "agent.provider.configure",
+  "agent.start",
+  "agent.restore",
+  "agent.event",
+  "agent.research.workflow",
+  "agent.task.snapshot",
+]) {
+  if (!agentRendererKinds.includes(requiredAgentKind)) {
+    failures.push(`Agent renderer protocol is missing ${requiredAgentKind}`);
+  }
+}
+if (agentRendererKinds.includes("agent.research.workflow.continue")) {
+  failures.push("internal Agent workflow continuation is exposed to the renderer");
+}
+exactStringSet(
+  "Host renderer request contract",
+  hostRendererKinds,
+  [
+    "diagnostics.status",
+    "window.state",
+    "window.minimize",
+    "window.toggle_maximize",
+    "window.begin_drag",
+    "window.system_menu",
+  ],
+);
+for (const marker of [
+  "renderer_engine_request_kind(envelope.kind)",
+  "renderer_agent_request_kind(envelope.kind)",
+  "renderer_host_request_kind(envelope.kind)",
+]) {
+  if (!moonHost.includes(marker)) failures.push(`Proton Host renderer request denial is missing ${marker}`);
+}
+if (!rendererBridge.includes("ENGINE_RENDERER_REQUEST_KINDS") ||
+    !rendererBridge.includes("isRendererRequestKind(target, kind)") ||
+    !rendererBridge.includes("Renderer 请求未在")) {
+  failures.push("React typed Bridge does not fail closed on undeclared target request kinds");
+}
+if (!browserBridge.includes("RENDERER_REQUEST_KINDS") ||
+    !browserBridge.includes("outside the protocol contract")) {
+  failures.push("browser test Bridge does not enforce the generated renderer request contracts");
 }
 const expectedAgentEffectKinds = [
   "research.agent_prepare_context",

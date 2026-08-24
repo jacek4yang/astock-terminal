@@ -2,6 +2,37 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://astock.local/schema/agent-v1.json",
   "title": "AStock Agent task contract v1",
+  "type": "object",
+  "properties": {
+    "request_kinds": {
+      "type": "array",
+      "prefixItems": [
+        { "const": "system.handshake" },
+        { "const": "diagnostics.status" },
+        { "const": "agent.provider.test" },
+        { "const": "agent.provider.configure" },
+        { "const": "agent.start" },
+        { "const": "agent.restore" },
+        { "const": "agent.event" },
+        { "const": "agent.research.workflow" },
+        { "const": "agent.research.workflow.continue" },
+        { "const": "agent.task.snapshot" }
+      ]
+    },
+    "renderer_request_kinds": {
+      "type": "array",
+      "prefixItems": [
+        { "const": "diagnostics.status" },
+        { "const": "agent.provider.test" },
+        { "const": "agent.provider.configure" },
+        { "const": "agent.start" },
+        { "const": "agent.restore" },
+        { "const": "agent.event" },
+        { "const": "agent.research.workflow" },
+        { "const": "agent.task.snapshot" }
+      ]
+    }
+  },
   "$defs": {
     "agent_phase": {
       "type": "string",

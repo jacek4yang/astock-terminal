@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=f5879972ce6a4d2caf805bbc5e92e914e8b04b3b121530f6ac88da0ea83805e2
+// GENERATED from protocol/schema; schema-sha256=c6f719cde75d63a1b8f66c69e9537a8025e4b7a79e1e743f86683dc775e84cf4
 // Run: node protocol/codegen.mjs
 
 ///|
@@ -9,6 +9,15 @@ pub let max_frame_bytes : Int = 8 * 1024 * 1024
 
 ///|
 pub let max_page_size : Int = 500
+
+///|
+pub let agent_request_kinds : Array[String] = ["system.handshake","diagnostics.status","agent.provider.test","agent.provider.configure","agent.start","agent.restore","agent.event","agent.research.workflow","agent.research.workflow.continue","agent.task.snapshot"]
+
+///|
+pub let agent_renderer_request_kinds : Array[String] = ["diagnostics.status","agent.provider.test","agent.provider.configure","agent.start","agent.restore","agent.event","agent.research.workflow","agent.task.snapshot"]
+
+///|
+pub let host_renderer_request_kinds : Array[String] = ["diagnostics.status","window.state","window.minimize","window.toggle_maximize","window.begin_drag","window.system_menu"]
 
 ///|
 pub(all) enum AgentPhase {

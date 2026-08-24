@@ -68,3 +68,13 @@ test "Agent Effect permissions allow only bounded research aggregates" {
   assert_false(permitted_agent_effect_kind("storage.data_root.migrate"))
   assert_false(permitted_agent_effect_kind("research.backtest.start"))
 }
+
+///|
+test "Renderer request contracts are target-specific and deny internal continuation" {
+  assert_true(renderer_engine_request_kind("market.quote"))
+  assert_false(renderer_engine_request_kind("market.unknown"))
+  assert_true(renderer_agent_request_kind("agent.research.workflow"))
+  assert_false(renderer_agent_request_kind("agent.research.workflow.continue"))
+  assert_true(renderer_host_request_kind("window.toggle_maximize"))
+  assert_false(renderer_host_request_kind("window.unknown"))
+}

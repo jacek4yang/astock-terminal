@@ -41,6 +41,13 @@ repetitive rows and reject any context that would approach the 8 MiB frame
 boundary. `release-architecture-check.mjs` fails if Engine tool selection
 returns to the React workbench or either Host allowlist weakens.
 
+Renderer request permissions are generated from the same protocol schemas as
+the Rust, MoonBit and TypeScript contracts. Engine, public Agent and Host kinds
+are checked independently in React, Proton Host and the browser acceptance
+Bridge. The internal `agent.research.workflow.continue` kind is Worker-to-Host
+only and cannot be submitted by Renderer code; unknown Host kinds fail instead
+of falling through to diagnostics.
+
 Every reducer call id remains unique, while an Engine snapshot cache key is
 derived from the task, tool kind and full JSON payload. If Host/Agent/renderer
 dies after an effect intent or result is persisted, the pure

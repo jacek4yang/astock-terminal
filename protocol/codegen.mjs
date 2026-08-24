@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const schemaDir = resolve(root, "protocol/schema");
-const schemaFiles = ["envelope.schema.json", "agent.schema.json", "engine.schema.json"];
+const schemaFiles = ["envelope.schema.json", "agent.schema.json", "engine.schema.json", "host.schema.json"];
 const canonicalText = (value) => value.replace(/\r\n?/g, "\n");
 const sources = await Promise.all(
   schemaFiles.map(async (name) => canonicalText(await readFile(resolve(schemaDir, name), "utf8"))),
@@ -14,6 +14,10 @@ const schemas = Object.fromEntries(schemaFiles.map((name, index) => [name, JSON.
 const hash = createHash("sha256").update(sources.join("\n")).digest("hex");
 const phases = schemas["agent.schema.json"].$defs.agent_phase.enum;
 const kinds = schemas["engine.schema.json"].properties.request_kinds.prefixItems.map((item) => item.const);
+const engineRendererKinds = schemas["engine.schema.json"].properties.renderer_request_kinds.prefixItems.map((item) => item.const);
+const agentKinds = schemas["agent.schema.json"].properties.request_kinds.prefixItems.map((item) => item.const);
+const agentRendererKinds = schemas["agent.schema.json"].properties.renderer_request_kinds.prefixItems.map((item) => item.const);
+const hostRendererKinds = schemas["host.schema.json"].properties.renderer_request_kinds.prefixItems.map((item) => item.const);
 const header = (comment) => `${comment} GENERATED from protocol/schema; schema-sha256=${hash}\n${comment} Run: node protocol/codegen.mjs\n`;
 
 const rust = `${header("//")}
@@ -24,6 +28,10 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_PAGE_SIZE: usize = 500;
 pub const ENGINE_REQUEST_KINDS: &[&str] = &[${kinds.map((kind) => `\n    "${kind}",`).join("")}\n];
+pub const ENGINE_RENDERER_REQUEST_KINDS: &[&str] = &[${engineRendererKinds.map((kind) => `\n    "${kind}",`).join("")}\n];
+pub const AGENT_REQUEST_KINDS: &[&str] = &[${agentKinds.map((kind) => `\n    "${kind}",`).join("")}\n];
+pub const AGENT_RENDERER_REQUEST_KINDS: &[&str] = &[${agentRendererKinds.map((kind) => `\n    "${kind}",`).join("")}\n];
+pub const HOST_RENDERER_REQUEST_KINDS: &[&str] = &[${hostRendererKinds.map((kind) => `\n    "${kind}",`).join("")}\n];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -141,6 +149,14 @@ export const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 export const MAX_PAGE_SIZE = 500;
 export const ENGINE_REQUEST_KINDS = ${JSON.stringify(kinds)} as const;
 export type EngineRequestKind = (typeof ENGINE_REQUEST_KINDS)[number];
+export const ENGINE_RENDERER_REQUEST_KINDS = ${JSON.stringify(engineRendererKinds)} as const;
+export type EngineRendererRequestKind = (typeof ENGINE_RENDERER_REQUEST_KINDS)[number];
+export const AGENT_REQUEST_KINDS = ${JSON.stringify(agentKinds)} as const;
+export type AgentRequestKind = (typeof AGENT_REQUEST_KINDS)[number];
+export const AGENT_RENDERER_REQUEST_KINDS = ${JSON.stringify(agentRendererKinds)} as const;
+export type AgentRendererRequestKind = (typeof AGENT_RENDERER_REQUEST_KINDS)[number];
+export const HOST_RENDERER_REQUEST_KINDS = ${JSON.stringify(hostRendererKinds)} as const;
+export type HostRendererRequestKind = (typeof HOST_RENDERER_REQUEST_KINDS)[number];
 export type AgentPhase = ${phases.map((phase) => `"${phase}"`).join(" | ")};
 
 export interface RequestEnvelope<T = unknown> {
@@ -256,6 +272,15 @@ pub let max_frame_bytes : Int = 8 * 1024 * 1024
 pub let max_page_size : Int = 500
 
 ///|
+pub let agent_request_kinds : Array[String] = ${JSON.stringify(agentKinds)}
+
+///|
+pub let agent_renderer_request_kinds : Array[String] = ${JSON.stringify(agentRendererKinds)}
+
+///|
+pub let host_renderer_request_kinds : Array[String] = ${JSON.stringify(hostRendererKinds)}
+
+///|
 pub(all) enum AgentPhase {${phases.map((phase) => `\n  ${phase.split("_").map((part) => part[0].toUpperCase() + part.slice(1)).join("")}`).join("")}\n} derive(Debug, Eq, ToJson, FromJson)
 
 ///|
@@ -342,10 +367,23 @@ pub extend ClarificationAnswer with ToJson::{to_json}
 pub extend ClarificationAnswer with FromJson::{from_json}
 `;
 
+const moonStringPredicate = (functionName, values) => `///|
+fn ${functionName}(kind : String) -> Bool {
+  ${values.map((kind) => `kind == "${kind}"`).join(" ||\n  ")}
+}
+`;
+
+const desktopHostKinds = `${header("///")}
+${moonStringPredicate("renderer_engine_request_kind", engineRendererKinds)}
+${moonStringPredicate("renderer_agent_request_kind", agentRendererKinds)}
+${moonStringPredicate("renderer_host_request_kind", hostRendererKinds)}
+`;
+
 const outputs = [
   [resolve(root, "crates/protocol/src/generated.rs"), rust],
   [resolve(root, "ui/src/bridge/generated.ts"), typescript],
   [resolve(root, "app-moon/protocol/generated.mbt"), moonbit],
+  [resolve(root, "desktop-moon/backend/host/request_kinds.g.mbt"), desktopHostKinds],
 ];
 
 const check = process.argv.includes("--check");

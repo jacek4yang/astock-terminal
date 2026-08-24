@@ -637,14 +637,30 @@ pub async fn Backend::route(
   request : @shared.AppRequest,
 ) -> Json {
   match request.target {
-    "engine" =>
+    "engine" => {
+      let envelope : HostRequestEnvelope = @json.from_json(request.request)
+      guard renderer_engine_request_kind(envelope.kind) else {
+        fail("Renderer requested an Engine kind outside the protocol contract")
+      }
       self.engine.request(
         request.request,
         timeout_ms=worker_timeout(request.request, 180000),
       )
-    "agent" => self.route_agent(request.request)
+    }
+    "agent" => {
+      let envelope : HostRequestEnvelope = @json.from_json(request.request)
+      guard renderer_agent_request_kind(envelope.kind) else {
+        fail(
+          "Renderer requested an Agent kind outside the public protocol contract",
+        )
+      }
+      self.route_agent(request.request)
+    }
     "host" => {
       let envelope : HostRequestEnvelope = @json.from_json(request.request)
+      guard renderer_host_request_kind(envelope.kind) else {
+        fail("Renderer requested a Host kind outside the protocol contract")
+      }
       match envelope.kind {
         "window.state" => {
           let state = self.window_handle().state()
@@ -679,7 +695,7 @@ pub async fn Backend::route(
           host_reply(envelope, { "accepted": begin_window_drag() })
         "window.system_menu" =>
           host_reply(envelope, { "accepted": show_window_system_menu() })
-        _ =>
+        "diagnostics.status" =>
           host_reply(envelope, {
             "status": "ready",
             "host_version": "moonbit-proton-0.2.1",
@@ -701,6 +717,7 @@ pub async fn Backend::route(
               },
             },
           })
+        _ => fail("unsupported declared Host request kind")
       }
     }
     other => fail("unsupported Host target: " + other)
