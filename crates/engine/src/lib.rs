@@ -632,6 +632,84 @@ impl Engine {
                     "evidence_note": "successful_sources统计采集Provider，successful_channels统计内容频道；无revision_id的实时条目只作发现证据，重要结论必须优先回链不可变归档、公告、交易所或公司原文"
                 }))
             }
+            "research.news.providers" => {
+                let providers = self.market.finance_news.provider_health().await;
+                serde_json::to_value(providers).map_err(serialize_error)
+            }
+            "research.news.provider.set" => {
+                let payload: NewsProviderTogglePayload = decode_payload(&request.payload)?;
+                let provider_id = payload.provider_id.trim();
+                if provider_id.is_empty() || provider_id.len() > 128 {
+                    return Err(ServiceError::new(
+                        "invalid_payload",
+                        "provider_id 必须是 1 至 128 个字符",
+                        false,
+                    ));
+                }
+                self.market
+                    .finance_news
+                    .set_provider_enabled(provider_id, payload.enabled)
+                    .await
+                    .map_err(|error| {
+                        ServiceError::new(
+                            format!("news_provider_{:?}", error.kind).to_ascii_lowercase(),
+                            error.message,
+                            error.retryable,
+                        )
+                    })?;
+                Ok(Value::Null)
+            }
+            "research.news.archive.recent" => {
+                let payload: LimitPayload = decode_payload(&request.payload)?;
+                let rows = self
+                    .storage
+                    .news_archive_recent(payload.limit.unwrap_or(100).clamp(1, 500))
+                    .await
+                    .map_err(storage)?;
+                serde_json::to_value(rows).map_err(serialize_error)
+            }
+            "research.news.archive.revisions" => {
+                let payload: NewsDocumentPayload = decode_payload(&request.payload)?;
+                let document_id = validate_news_identifier(&payload.document_id, "document_id")?;
+                let rows = self
+                    .storage
+                    .news_archive_revisions(document_id)
+                    .await
+                    .map_err(storage)?;
+                if rows.len() > 500 {
+                    return Err(ServiceError::new(
+                        "result_too_large",
+                        "单一资讯文档的修订链超过 500 条，请先运行归档诊断",
+                        false,
+                    ));
+                }
+                serde_json::to_value(rows).map_err(serialize_error)
+            }
+            "research.news.archive.integrity" => {
+                let status = self
+                    .storage
+                    .news_archive_integrity_check()
+                    .await
+                    .map_err(storage)?;
+                Ok(Value::String(status))
+            }
+            "research.news.archive.observations" => {
+                let payload: NewsObservationPayload = decode_payload(&request.payload)?;
+                let provider_id = payload
+                    .provider_id
+                    .as_deref()
+                    .map(|value| validate_news_identifier(value, "provider_id"))
+                    .transpose()?;
+                let rows = self
+                    .storage
+                    .news_ingest_observations(
+                        provider_id,
+                        payload.limit.unwrap_or(10).clamp(1, 500),
+                    )
+                    .await
+                    .map_err(storage)?;
+                serde_json::to_value(rows).map_err(serialize_error)
+            }
             "research.data_reconcile" => {
                 let payload: SymbolPayload = decode_payload(&request.payload)?;
                 let symbol = parse_live_symbol(&payload.symbol)?;
@@ -1937,6 +2015,28 @@ struct DisclosureDetailPayload {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct NewsProviderTogglePayload {
+    provider_id: String,
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewsDocumentPayload {
+    document_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewsObservationPayload {
+    #[serde(default)]
+    provider_id: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TaskIdPayload {
     task_id: String,
 }
@@ -2220,6 +2320,19 @@ fn parse_board_code(raw: &str) -> Result<String, ServiceError> {
             format!("board_code 必须是 BK + 4 位数字（如 BK0447），收到 `{raw}`"),
             false,
         ))
+    }
+}
+
+fn validate_news_identifier<'a>(raw: &'a str, field: &str) -> Result<&'a str, ServiceError> {
+    let value = raw.trim();
+    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+        Err(ServiceError::new(
+            "invalid_payload",
+            format!("{field} 必须是 1 至 256 个无控制字符的文本"),
+            false,
+        ))
+    } else {
+        Ok(value)
     }
 }
 
@@ -2800,6 +2913,16 @@ mod tests {
         assert_eq!(pool_error.code, "invalid_payload");
         let board_error = parse_board_code("000001").unwrap_err();
         assert_eq!(board_error.code, "invalid_payload");
+    }
+
+    #[test]
+    fn news_archive_identifiers_reject_empty_or_control_text() {
+        assert_eq!(
+            validate_news_identifier(" document:123 ", "document_id").unwrap(),
+            "document:123"
+        );
+        assert!(validate_news_identifier("\n", "document_id").is_err());
+        assert!(validate_news_identifier(&"x".repeat(257), "provider_id").is_err());
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=c76e4ecfd16c815faabc9d509c49becd7331a1fecf3bfaf4335031157c1dcd67
+// GENERATED from protocol/schema; schema-sha256=40ff66813452013352fc3cabade2df489fc6bec563d9b8fb4069303a1972435f
 // Run: node protocol/codegen.mjs
 
 use serde::{Deserialize, Serialize};
@@ -45,6 +45,12 @@ pub const ENGINE_REQUEST_KINDS: &[&str] = &[
     "research.disclosures.sync.start",
     "research.disclosures.sync.status",
     "research.disclosures.sync.cancel",
+    "research.news.providers",
+    "research.news.provider.set",
+    "research.news.archive.recent",
+    "research.news.archive.revisions",
+    "research.news.archive.integrity",
+    "research.news.archive.observations",
     "research.fundamentals",
     "research.earnings_driver.tree",
     "research.earnings_driver.shock",

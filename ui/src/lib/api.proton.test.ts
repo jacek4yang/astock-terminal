@@ -17,18 +17,24 @@ import {
   disclosureSyncCancel,
   disclosureSyncStart,
   disclosureSyncStatus,
+  checkNewsArchiveIntegrity,
   getBoardConstituents,
   getDisclosureDetail,
   getDisclosureProviderHealth,
   getGlobalGoldenChains,
   getGlobalProviderHealth,
   getGlobalTransmissionPaths,
+  getNewsArchiveRecent,
+  getNewsArchiveRevisions,
+  getNewsIngestObservations,
+  getNewsProviderHealth,
   getPool,
   globalSyncCancel,
   globalSyncStart,
   globalSyncStatus,
   queryGlobalDocuments,
   queryDisclosures,
+  setNewsProviderEnabled,
 } from "./api";
 
 describe("Proton global research bridge", () => {
@@ -114,6 +120,34 @@ describe("Proton global research bridge", () => {
       security_code: "300308",
       days: 90,
       max_pages: 2,
+    });
+  });
+
+  it("routes news provider diagnostics and immutable archive reads", async () => {
+    await getNewsProviderHealth();
+    await setNewsProviderEnabled("cninfo-announcements", false);
+    await getNewsArchiveRecent(75);
+    await getNewsArchiveRevisions("document:abc");
+    await checkNewsArchiveIntegrity();
+    await getNewsIngestObservations("cninfo-announcements", 25);
+
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "research.news.providers",
+      "research.news.provider.set",
+      "research.news.archive.recent",
+      "research.news.archive.revisions",
+      "research.news.archive.integrity",
+      "research.news.archive.observations",
+    ]);
+    expect(requestNative.mock.calls[1][2]).toEqual({
+      provider_id: "cninfo-announcements",
+      enabled: false,
+    });
+    expect(requestNative.mock.calls[2][2]).toEqual({ limit: 75 });
+    expect(requestNative.mock.calls[3][2]).toEqual({ document_id: "document:abc" });
+    expect(requestNative.mock.calls[5][2]).toEqual({
+      provider_id: "cninfo-announcements",
+      limit: 25,
     });
   });
 });
