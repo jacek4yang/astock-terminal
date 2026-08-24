@@ -250,6 +250,12 @@ shortcut = "4"
         Invoke-Checked -FilePath $java -Arguments @('-XX:+UseParallelGC', '-cp', $tla, 'tlc2.TLC', '-workers', 'auto', '-metadir', $tlcStateDirectory, '-config', 'formal\AgentLifecycle.cfg', 'formal\AgentLifecycle.tla')
     }
 
+    # The user requires the non-invasive Codex in-app browser acceptance to
+    # pass before any packaged desktop process is started.
+    Invoke-ReleaseGateStep 'browser-cdp-evidence' 'renderer' 'INTEGRATION TESTED' {
+        Assert-ReleaseEvidence -FileName 'browser-cdp.json' -Gate 'browser-cdp'
+    }
+
     Invoke-ReleaseGateStep 'package-proton-cef' 'package' 'INTEGRATION TESTED' {
         & (Join-Path $PSScriptRoot 'package.ps1')
         if ($LASTEXITCODE -ne 0) { throw 'Proton packaging failed.' }
@@ -261,10 +267,9 @@ shortcut = "4"
         Assert-ReleaseEvidence -FileName 'fault-injection-core.json' -Gate 'fault-injection-core'
     }
     Invoke-ReleaseGateStep 'fault-injection-desktop-evidence' 'reliability' 'FAULT-INJECTION TESTED' {
+        & (Join-Path $PSScriptRoot 'fault-injection-desktop.ps1') -EvidenceDirectory $EvidenceDirectory -SkipSpaceCheck
+        if ($LASTEXITCODE -ne 0) { throw 'Desktop fault-injection execution failed.' }
         Assert-ReleaseEvidence -FileName 'fault-injection.json' -Gate 'fault-injection'
-    }
-    Invoke-ReleaseGateStep 'browser-cdp-evidence' 'renderer' 'INTEGRATION TESTED' {
-        Assert-ReleaseEvidence -FileName 'browser-cdp.json' -Gate 'browser-cdp'
     }
     Invoke-ReleaseGateStep 'desktop-e2e-evidence' 'desktop' 'INTEGRATION TESTED' {
         Assert-ReleaseEvidence -FileName 'desktop-e2e.json' -Gate 'desktop-e2e-40'

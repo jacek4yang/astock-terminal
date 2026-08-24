@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$PackageDirectory,
+    [ValidateSet('smoke','renderer-fault')]
+    [string]$Mode = 'smoke',
     [switch]$Headless = $true,
     [switch]$SkipSpaceCheck
 )
@@ -46,12 +48,16 @@ $startInfo.Environment['ASTOCK_RELEASE_TEST_CDP'] = '1'
 $startInfo.Environment['PROTON_REMOTE_DEBUGGING_PORT'] = [string]$port
 $startInfo.Environment['LOCALAPPDATA'] = $localAppData
 $startInfo.Environment['APPDATA'] = $appData
-if ($Headless) { $startInfo.Environment['PROTON_HEADLESS'] = '1' }
+if ($Headless) {
+    $startInfo.Environment['PROTON_HEADLESS'] = '1'
+    $startInfo.Environment['PROTON_DISABLE_GPU'] = '1'
+}
 $process = [System.Diagnostics.Process]::Start($startInfo)
 if (-not $process) { throw 'Unable to launch the packaged Proton/CEF application.' }
 
 try {
-    $output = & node (Join-Path $PSScriptRoot 'desktop-cdp-smoke.mjs') $port $commit
+    $runner = if ($Mode -eq 'renderer-fault') { 'desktop-renderer-fault.mjs' } else { 'desktop-cdp-smoke.mjs' }
+    $output = & node (Join-Path $PSScriptRoot $runner) $port $commit
     if ($LASTEXITCODE -ne 0) {
         if ($process.HasExited) { throw "Packaged desktop exited before CDP verification (exit $($process.ExitCode)); another single-instance window may already be running." }
         throw 'Packaged desktop CDP smoke failed.'

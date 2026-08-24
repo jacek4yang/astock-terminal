@@ -28,6 +28,7 @@ try {
       bodyText: document.body?.innerText?.slice(0, 4000) ?? "",
       nav: [...document.querySelectorAll("nav[aria-label='主功能导航'] button")].map((button) => button.textContent?.trim()),
       buildCommit: document.querySelector('meta[name="astock-build-commit"]')?.getAttribute("content") ?? null,
+      canvas2d: Boolean(document.createElement("canvas").getContext("2d")),
     }))()`);
     if (snapshot?.ready) break;
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -37,6 +38,7 @@ try {
     if (!snapshot.nav?.some((label) => label?.includes(expected))) throw new Error(`primary navigation is missing ${expected}`);
   }
   if (!snapshot.bodyText.includes("只读研究")) throw new Error("manual-research safety boundary is not visible");
+  if (!snapshot.canvas2d) throw new Error("CEF canvas rendering is unavailable");
   if (snapshot.buildCommit && snapshot.buildCommit !== expectedCommit) throw new Error("renderer build metadata does not match the expected commit");
   if (logErrors.length) throw new Error(`packaged renderer logged errors: ${logErrors.join(" | ")}`);
   process.stdout.write(`${JSON.stringify({
@@ -46,6 +48,7 @@ try {
     navigation: snapshot.nav,
     expected_commit: expectedCommit,
     console_error_count: logErrors.length,
+    canvas_2d_available: snapshot.canvas2d,
   })}\n`);
 } finally {
   await cdp.call("Browser.close").catch(() => {});

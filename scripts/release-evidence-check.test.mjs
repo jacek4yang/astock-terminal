@@ -1,9 +1,22 @@
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { validateEvidence } from "./release-evidence-check.mjs";
+import { BROWSER_CDP_SCENARIOS, DESKTOP_E2E_SCENARIOS } from "./release-scenarios.mjs";
 
 const commit = "a".repeat(40);
+const artifactRoot = fs.mkdtempSync(path.join(os.tmpdir(), "astock-release-evidence-"));
+const artifactPath = path.join(artifactRoot, "trace.json");
+fs.writeFileSync(artifactPath, '{"ok":true}\n', "utf8");
+const artifactHash = crypto.createHash("sha256").update(fs.readFileSync(artifactPath)).digest("hex");
+after(() => {
+  fs.unlinkSync(artifactPath);
+  fs.rmdirSync(artifactRoot);
+});
 
 function base(gate, caseIds) {
   return {
@@ -16,6 +29,21 @@ function base(gate, caseIds) {
     runner: { os: "Windows 11", arch: "x64" },
     cases: caseIds.map((id) => ({ id, status: "PASSED", duration_ms: 1 })),
   };
+}
+
+function evidencedCases(caseIds) {
+  return caseIds.map((id) => ({
+    id,
+    status: "PASSED",
+    duration_ms: 1,
+    assertion_count: 1,
+    artifacts: [{
+      kind: "test-trace",
+      path: artifactPath,
+      sha256: artifactHash,
+      captured_at_utc: "2026-08-24T00:00:30.000Z",
+    }],
+  }));
 }
 
 function completePerformance() {
@@ -55,7 +83,43 @@ test("rejects a four-field placeholder masquerading as browser evidence", () => 
 
 test("requires all named browser scenarios", () => {
   const evidence = base("browser-cdp", ["market-overview"]);
+  evidence.cases = evidencedCases(["market-overview"]);
   assert.throws(() => validateEvidence(evidence, "browser-cdp", commit), /stock-detail/);
+});
+
+test("pins exactly the approved v6 browser and desktop scenario catalogs", () => {
+  assert.equal(BROWSER_CDP_SCENARIOS.length, 12);
+  assert.equal(new Set(BROWSER_CDP_SCENARIOS).size, 12);
+  assert.equal(DESKTOP_E2E_SCENARIOS.length, 40);
+  assert.equal(new Set(DESKTOP_E2E_SCENARIOS).size, 40);
+  assert.ok(DESKTOP_E2E_SCENARIOS.includes("normal-agent-research"));
+  assert.ok(DESKTOP_E2E_SCENARIOS.includes("window-double-click-maximize"));
+  assert.ok(DESKTOP_E2E_SCENARIOS.includes("release-no-debug-leakage-local-gate-disclosure"));
+});
+
+test("rejects desktop cases padded with unnamed placeholders", () => {
+  const ids = Array.from({ length: 40 }, (_, index) => `placeholder-${index}`);
+  const evidence = base("desktop-e2e-40", ids);
+  evidence.cases = evidencedCases(ids);
+  assert.throws(() => validateEvidence(evidence, "desktop-e2e-40", commit), /packaged-launch/);
+});
+
+test("requires immutable per-case browser artifacts", () => {
+  const evidence = base("browser-cdp", BROWSER_CDP_SCENARIOS);
+  assert.throws(() => validateEvidence(evidence, "browser-cdp", commit), /no assertions/);
+});
+
+test("recomputes artifact hashes instead of trusting the evidence JSON", () => {
+  const evidence = base("browser-cdp", BROWSER_CDP_SCENARIOS);
+  evidence.cases = evidencedCases(BROWSER_CDP_SCENARIOS);
+  evidence.cases[0].artifacts[0].sha256 = "e".repeat(64);
+  assert.throws(() => validateEvidence(evidence, "browser-cdp", commit), /SHA-256 does not match/);
+});
+
+test("accepts the complete desktop catalog only with auditable artifacts", () => {
+  const evidence = base("desktop-e2e-40", DESKTOP_E2E_SCENARIOS);
+  evidence.cases = evidencedCases(DESKTOP_E2E_SCENARIOS);
+  assert.doesNotThrow(() => validateEvidence(evidence, "desktop-e2e-40", commit));
 });
 
 test("accepts complete core fault evidence without pretending renderer coverage", () => {
@@ -92,6 +156,16 @@ test("full fault evidence still requires desktop renderer and GPU failures", () 
     "sqlite-lock",
   ]);
   assert.throws(() => validateEvidence(evidence, "fault-injection", commit), /renderer-kill/);
+});
+
+test("desktop fault cases require hashed traces, not only pass labels", () => {
+  const ids = [
+    "engine-kill", "agent-kill", "checkpoint-before-crash", "checkpoint-after-crash",
+    "provider-stream-break", "quota-suspension-resume", "oversized-ipc", "corrupt-ipc",
+    "duplicate-ipc", "out-of-order-ipc", "cancel-safety", "sqlite-lock", "renderer-kill", "gpu-failure",
+  ];
+  const evidence = base("fault-injection", ids);
+  assert.throws(() => validateEvidence(evidence, "fault-injection", commit), /renderer-kill has no assertions/);
 });
 
 test("rejects a performance metric outside its budget", () => {

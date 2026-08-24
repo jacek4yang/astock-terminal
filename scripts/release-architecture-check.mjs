@@ -19,6 +19,10 @@ const migrationEvidence = fs.readFileSync(path.join(root, "scripts", "migration-
 const faultEvidence = fs.readFileSync(path.join(root, "scripts", "fault-injection-e2e.ps1"), "utf8");
 const buildCommon = fs.readFileSync(path.join(root, "scripts", "Build.Common.ps1"), "utf8");
 const desktopCdpSession = fs.readFileSync(path.join(root, "scripts", "desktop-cdp-session.ps1"), "utf8");
+const desktopRendererFault = fs.readFileSync(path.join(root, "scripts", "desktop-renderer-fault.mjs"), "utf8");
+const desktopFaultEvidence = fs.readFileSync(path.join(root, "scripts", "fault-injection-desktop.ps1"), "utf8");
+const rendererRecoveryPatch = fs.readFileSync(path.join(root, "patches", "proton-0.2.1-windows-renderer-recovery.patch"), "utf8");
+const gpuPolicyPatch = fs.readFileSync(path.join(root, "patches", "proton-0.2.1-windows-gpu-policy.patch"), "utf8");
 
 if (fs.existsSync(path.join(root, "src-tauri"))) failures.push("src-tauri differential oracle has not been removed");
 if (/"src-tauri"/.test(cargo)) failures.push("Cargo workspace still contains src-tauri");
@@ -86,8 +90,28 @@ if (!moonEntry.includes('ASTOCK_RELEASE_TEST_CDP') || !moonEntry.includes('PROTO
 if (!buildCommon.includes('proton-0.2.1-explicit-remote-debug.patch') || !buildCommon.includes('AStock production hardening: choosing a port must never turn CDP on')) {
   failures.push("Proton runtime does not require explicit application permission before enabling CDP");
 }
+if (!buildCommon.includes('proton-0.2.1-windows-renderer-recovery.patch') || !buildCommon.includes('AStock production hardening: CEF does not recreate a crashed renderer')) {
+  failures.push("Proton runtime does not provide bounded Windows renderer crash recovery");
+}
+for (const recoveryMarker of ["renderer_recovery_count < 3", "> 60000", "reload_ignore_cache", "renderer_recovery_exhausted"]) {
+  if (!rendererRecoveryPatch.includes(recoveryMarker)) failures.push(`renderer recovery patch is missing ${recoveryMarker}`);
+}
+if (!buildCommon.includes('proton-0.2.1-windows-gpu-policy.patch')) failures.push("Windows GPU policy patch is not applied during bootstrap");
+for (const gpuMarker of ["PROTON_DISABLE_GPU", "AStock production GPU policy", "disable-gpu-compositing"]) {
+  if (!gpuPolicyPatch.includes(gpuMarker)) failures.push(`Windows GPU policy patch is missing ${gpuMarker}`);
+}
+if (!desktopCdpSession.includes("PROTON_DISABLE_GPU")) failures.push("headless CEF acceptance does not explicitly exercise software GPU fallback");
 for (const cdpMarker of ["ASTOCK_RELEASE_TEST_CDP", "PROTON_REMOTE_DEBUGGING_PORT", "desktop-cdp-smoke.mjs", "ProcessStartInfo", "WindowStyle"]) {
   if (!desktopCdpSession.includes(cdpMarker)) failures.push(`packaged desktop CDP harness is missing ${cdpMarker}`);
+}
+for (const faultMarker of ["Page.crash", "renderer_fault_injected", "host_restart_required", "Browser.close"]) {
+  if (!desktopRendererFault.includes(faultMarker)) failures.push(`packaged renderer fault harness is missing ${faultMarker}`);
+}
+for (const faultMarker of ["renderer-kill", "gpu-failure", "PROTON_DISABLE_GPU=1", "fault-injection.json", "production_data_touched = $false"]) {
+  if (!desktopFaultEvidence.includes(faultMarker)) failures.push(`desktop fault evidence harness is missing ${faultMarker}`);
+}
+if (releaseGate.indexOf("browser-cdp-evidence") > releaseGate.indexOf("package-proton-cef")) {
+  failures.push("release gate can launch the packaged desktop before Codex browser evidence passes");
 }
 
 const moon = fs.readFileSync(path.join(root, "desktop-moon", "backend", "moon.mod"), "utf8");

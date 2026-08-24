@@ -8,7 +8,10 @@ It is not a manually authored pass marker. Every evidence JSON must contain:
 - unique, individually passed cases with measured durations;
 - every gate-specific scenario required by `scripts/release-evidence-check.mjs`.
 
-The desktop gate requires at least 40 passed cases. Packaged CEF inspection is
+The desktop gate requires the exact 40 named v6 scenarios in
+`scripts/release-scenarios.mjs`; unrelated placeholder cases cannot satisfy the
+count. Every browser and desktop case must record a positive assertion count
+and at least one absolute, timestamped artifact with its SHA-256. Packaged CEF inspection is
 deny-by-default: the application must explicitly receive
 `ASTOCK_RELEASE_TEST_CDP=1`, while the isolated runner chooses a random loopback
 port. Supplying only `PROTON_REMOTE_DEBUGGING_PORT` must not enable CDP. The

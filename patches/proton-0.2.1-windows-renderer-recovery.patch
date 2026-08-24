@@ -1,0 +1,43 @@
+diff --git a/internal/native/ffi/src/engine/cef_win/proton_engine_cef_win.c b/internal/native/ffi/src/engine/cef_win/proton_engine_cef_win.c
+--- a/internal/native/ffi/src/engine/cef_win/proton_engine_cef_win.c
++++ b/internal/native/ffi/src/engine/cef_win/proton_engine_cef_win.c
+@@ -122,5 +122,7 @@ struct proton_engine_window {
+   int destroy_requested;
+   int closed;
++  uint32_t renderer_recovery_count;
++  ULONGLONG renderer_recovery_window_started_ms;
+   struct proton_engine_view *views;
+   int finalize_queued;
+   struct proton_engine_window *next;
+@@ -2817,6 +2819,31 @@ static void CEF_CALLBACK proton_engine_on_render_process_terminated(
+   if (window == NULL || window->bridge_config_json == NULL || window->closed) {
+     return;
+   }
++  /* AStock production hardening: CEF does not recreate a crashed renderer for
++     this host automatically. Bound recovery to three reloads per minute so a
++     one-off renderer/GPU failure is recoverable without hiding crash loops. */
++  ULONGLONG now_ms = GetTickCount64();
++  if (window->renderer_recovery_window_started_ms == 0 ||
++      now_ms - window->renderer_recovery_window_started_ms > 60000) {
++    window->renderer_recovery_window_started_ms = now_ms;
++    window->renderer_recovery_count = 0;
++  }
++  if (browser != NULL && browser->reload_ignore_cache != NULL &&
++      window->renderer_recovery_count < 3) {
++    window->renderer_recovery_count += 1;
++    fprintf(stderr,
++            "{\"component\":\"proton-cef\",\"event\":\"renderer_recovery\"," \
++            "\"attempt\":%u,\"termination_status\":%d,\"error_code\":%d}\n",
++            window->renderer_recovery_count, (int)status, error_code);
++    fflush(stderr);
++    browser->reload_ignore_cache(browser);
++    return;
++  }
++  fprintf(stderr,
++          "{\"component\":\"proton-cef\",\"event\":\"renderer_recovery_exhausted\"," \
++          "\"termination_status\":%d,\"error_code\":%d}\n",
++          (int)status, error_code);
++  fflush(stderr);
+   cef_frame_t *frame = browser != NULL ? browser->get_main_frame(browser) : NULL;
+   char *url =
+       frame != NULL ? proton_engine_userfree_to_utf8(frame->get_url(frame))

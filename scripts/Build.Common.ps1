@@ -47,6 +47,46 @@ function Enable-AStockProtonLiveResize {
     if ($LASTEXITCODE -ne 0) { throw 'Failed to apply the Proton Windows live-resize patch.' }
 }
 
+function Enable-AStockProtonGpuPolicy {
+    param([Parameter(Mandatory)][string]$RepositoryRoot)
+
+    # Proton 0.2.1 disables Windows GPU acceleration unconditionally. Keep it
+    # enabled for production and make software compositing an explicit,
+    # auditable headless/fault-test mode.
+    $protonRoot = Join-Path $RepositoryRoot 'desktop-moon\.mooncakes\moonbit-community\proton'
+    $source = Join-Path $protonRoot 'internal\native\ffi\src\engine\cef_win\proton_engine_cef_win.c'
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { return }
+    $text = Get-Content -LiteralPath $source -Raw
+    if ($text.Contains('AStock production GPU policy: normal desktop windows keep hardware')) { return }
+    $patch = Join-Path $RepositoryRoot 'patches\proton-0.2.1-windows-gpu-policy.patch'
+    & git -C $RepositoryRoot apply --check --unsafe-paths --directory='desktop-moon/.mooncakes/moonbit-community/proton' $patch
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Pinned Proton source does not match the audited Windows GPU policy patch.'
+    }
+    & git -C $RepositoryRoot apply --unsafe-paths --directory='desktop-moon/.mooncakes/moonbit-community/proton' $patch
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to apply the Proton Windows GPU policy patch.' }
+}
+
+function Enable-AStockProtonRendererRecovery {
+    param([Parameter(Mandatory)][string]$RepositoryRoot)
+
+    # Proton 0.2.1 reports a terminated CEF renderer as a fatal bridge error.
+    # The pinned Windows patch performs at most three reload recoveries per
+    # minute before preserving Proton's fail-closed failure path.
+    $protonRoot = Join-Path $RepositoryRoot 'desktop-moon\.mooncakes\moonbit-community\proton'
+    $source = Join-Path $protonRoot 'internal\native\ffi\src\engine\cef_win\proton_engine_cef_win.c'
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { return }
+    $text = Get-Content -LiteralPath $source -Raw
+    if ($text.Contains('AStock production hardening: CEF does not recreate a crashed renderer')) { return }
+    $patch = Join-Path $RepositoryRoot 'patches\proton-0.2.1-windows-renderer-recovery.patch'
+    & git -C $RepositoryRoot apply --check --unsafe-paths --directory='desktop-moon/.mooncakes/moonbit-community/proton' $patch
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Pinned Proton source does not match the audited Windows renderer recovery patch.'
+    }
+    & git -C $RepositoryRoot apply --unsafe-paths --directory='desktop-moon/.mooncakes/moonbit-community/proton' $patch
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to apply the Proton Windows renderer recovery patch.' }
+}
+
 function Enable-AStockProtonBundleWindowsPaths {
     param([Parameter(Mandatory)][string]$RepositoryRoot)
 
@@ -96,7 +136,9 @@ function Initialize-AStockBuildEnvironment {
 
     $repoRoot = Get-AStockRepositoryRoot
     Enable-AStockProtonAlloyRuntime -RepositoryRoot $repoRoot
+    Enable-AStockProtonGpuPolicy -RepositoryRoot $repoRoot
     Enable-AStockProtonLiveResize -RepositoryRoot $repoRoot
+    Enable-AStockProtonRendererRecovery -RepositoryRoot $repoRoot
     Enable-AStockProtonBundleWindowsPaths -RepositoryRoot $repoRoot
     Enable-AStockProtonExplicitRemoteDebug -RepositoryRoot $repoRoot
     $buildRoot = if ([string]::IsNullOrWhiteSpace($env:ASTOCK_BUILD_ROOT)) {

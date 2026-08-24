@@ -1,6 +1,8 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { BROWSER_CDP_SCENARIOS, DESKTOP_E2E_SCENARIOS } from "./release-scenarios.mjs";
 
 const HEX_SHA256 = /^[a-f0-9]{64}$/i;
 const GIT_COMMIT = /^[a-f0-9]{40}$/i;
@@ -37,34 +39,8 @@ const REQUIRED_CASES = Object.freeze({
     "renderer-kill",
     "gpu-failure",
   ],
-  "browser-cdp": [
-    "market-overview",
-    "stock-detail",
-    "agent-task",
-    "conversation-history",
-    "conversation-branch",
-    "dynamic-clarification",
-    "tool-activity",
-    "evidence-navigation",
-    "settings",
-    "responsive-1200",
-    "responsive-900",
-    "console-clean",
-  ],
-  "desktop-e2e-40": [
-    "packaged-launch",
-    "window-drag",
-    "window-double-click-maximize",
-    "window-restore",
-    "window-edge-resize",
-    "window-minimize",
-    "taskbar-icon",
-    "native-context-menu",
-    "high-dpi",
-    "external-source-isolation",
-    "worker-recovery",
-    "layout-persistence",
-  ],
+  "browser-cdp": BROWSER_CDP_SCENARIOS,
+  "desktop-e2e-40": DESKTOP_E2E_SCENARIOS,
   "migration-install-upgrade-uninstall": [
     "clean-install",
     "legacy-upgrade",
@@ -117,6 +93,13 @@ function validateCases(evidence, gate) {
     ids.add(item.id);
     invariant(item.status === STATUS, `${gate}: case ${item.id} is not PASSED`);
     invariant(Number.isFinite(item.duration_ms) && item.duration_ms >= 0, `${gate}: case ${item.id} has invalid duration_ms`);
+    const requiresArtifacts = gate === "browser-cdp" || gate === "desktop-e2e-40" ||
+      (gate === "fault-injection" && (item.id === "renderer-kill" || item.id === "gpu-failure"));
+    if (requiresArtifacts) {
+      invariant(Number.isInteger(item.assertion_count) && item.assertion_count > 0, `${gate}: case ${item.id} has no assertions`);
+      invariant(Array.isArray(item.artifacts) && item.artifacts.length > 0, `${gate}: case ${item.id} has no immutable artifacts`);
+      for (const artifact of item.artifacts) validateCaseArtifact(artifact, gate, item.id);
+    }
   }
   for (const required of REQUIRED_CASES[gate] ?? []) {
     invariant(ids.has(required), `${gate}: required case is missing: ${required}`);
@@ -124,6 +107,20 @@ function validateCases(evidence, gate) {
   if (gate === "desktop-e2e-40") {
     invariant(evidence.cases.length >= 40, `${gate}: expected at least 40 passed desktop scenarios`);
   }
+}
+
+function validateCaseArtifact(artifact, gate, caseId) {
+  invariant(isRecord(artifact), `${gate}: case ${caseId} has an invalid artifact`);
+  invariant(typeof artifact.kind === "string" && artifact.kind.trim(), `${gate}: case ${caseId} artifact.kind is required`);
+  invariant(typeof artifact.path === "string" && (path.win32.isAbsolute(artifact.path) || path.posix.isAbsolute(artifact.path)), `${gate}: case ${caseId} artifact.path must be absolute`);
+  invariant(HEX_SHA256.test(artifact.sha256 ?? ""), `${gate}: case ${caseId} artifact has no SHA-256`);
+  invariant(validUtc(artifact.captured_at_utc), `${gate}: case ${caseId} artifact timestamp is invalid`);
+  invariant(fs.existsSync(artifact.path), `${gate}: case ${caseId} artifact does not exist`);
+  const stat = fs.statSync(artifact.path);
+  invariant(stat.isFile(), `${gate}: case ${caseId} artifact is not a file`);
+  invariant(stat.size > 0 && stat.size <= 64 * 1024 * 1024, `${gate}: case ${caseId} artifact must be non-empty and at most 64 MiB`);
+  const actualHash = crypto.createHash("sha256").update(fs.readFileSync(artifact.path)).digest("hex");
+  invariant(actualHash.toLowerCase() === artifact.sha256.toLowerCase(), `${gate}: case ${caseId} artifact SHA-256 does not match`);
 }
 
 function validatePerformance(evidence) {
