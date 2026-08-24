@@ -72,26 +72,26 @@ failure state so the boundary remains visible.
 | Market | quote, order book, K-line, minute, breadth, all shares, flow, index K-line | bounded `market.*` plus normalized security master | READY |
 | Candidate discovery | liquid A-share universe with executable lot-cost filter | `research.market_candidates` plus independent EastMoney industry enrichment | ENRICHED |
 | Composite stock analysis | bundle, technical signal, Chanlun daily | `market.security_snapshot` | READY |
-| Intraday Chanlun | minute-structure analysis | none | GAP |
+| Intraday Chanlun | minute-structure analysis | `analysis.chanlun.minute` | READY |
 | Fundamentals | statements, valuation | `research.fundamentals` | READY |
-| Earnings driver | driver tree, shocks, snapshots | mature Rust only | INTERNAL ONLY |
+| Earnings driver | driver tree, shocks, snapshots | `research.earnings_driver.*` | READY |
 | News retrieval | multi-channel live data plus archive fallback | `research.news` | ENRICHED |
-| News operations | center refresh/state, cluster merge/split, evidence review, entity review | mature Rust/storage only | INTERNAL ONLY |
+| News operations | center refresh/state, cluster merge/split, evidence review, entity review | `research.news.*` and `research.entities.*` | READY |
 | Disclosures | per-security CNInfo index and PDF original links | `research.security_events` | READY |
-| Disclosures | cancellable bulk sync/status, PDF archival/extraction, detail/health and review UI | mature Rust only | INTERNAL ONLY |
+| Disclosures | cancellable bulk sync/status, PDF archival/extraction, detail/health and review UI | `research.disclosures.*` | READY |
 | Source evidence | fetch/list/get/compare | `research.sources.*` | READY |
 | Data quality | quote reconciliation | `research.data_reconcile` | ENRICHED |
-| Data quality | SLO, lineage, observations, history, valuation reconciliation/health report | mature Rust/storage only | INTERNAL ONLY |
+| Data quality | SLO, lineage, observations, history, valuation reconciliation/health report | `diagnostics.data_quality`, `research.quote_reconcile`, `research.valuation_reconcile` | ENRICHED |
 | EastMoney datacenter | pools, billboard, margin, boards | `research.market_context` | READY |
 | EastMoney datacenter | survey, holders, forecast, unlock, suspension, block trade, billboard and announcement bundle | `research.security_events` | ENRICHED |
-| Knowledge graph | as-of graph, history, timeline, snapshot/diff, supply-chain shock | mature Rust only | INTERNAL ONLY |
-| Quant/backtest | research jobs, snapshots, strategies, backtests, regime | mature Rust only | INTERNAL ONLY |
+| Knowledge graph | as-of graph, history, timeline, snapshot/diff, supply-chain shock | `research.graph.*` and `research.market.relationship` | READY |
+| Quant/backtest | research jobs, snapshots, strategies, persistent backtests, regime | `research.quant.*`, `research.backtest.*`, `research.market.regime` | ENRICHED |
 | Global context | gold cross-market snapshot/primary publications and World Bank macro context | `research.global_context` | ENRICHED |
-| Global/event/relation | SEC filing sync, golden chains, transmission, event analysis, relation review | mature Rust only | INTERNAL ONLY |
-| Scan | cancellable whole-market scan | candidate discovery is available; full scan snapshots are not | INTERNAL ONLY |
+| Global/event/relation | SEC filing sync, golden chains, transmission, event analysis, relation review | `research.global.*`, `research.events.*`, `research.relations.*` | READY for implemented providers; catalog-only sources stay NOT VERIFIED |
+| Scan | cancellable whole-market scan | `quant.scan.*` | READY |
 | Watchlist | list/add/remove/pin | `workspace.watchlist.*` | READY |
 | Credentials/cache | MiniMax, JoinQuant, quota, cache stats/cleanup | coarse Engine services + Credential Manager | READY for exposed providers |
-| Data directory | adopt/migrate/transactional switch | adoption exists; explicit data-move workflow incomplete | INTERNAL ONLY |
+| Data directory | adopt/migrate/transactional switch | `storage.data_root.migrate` with backup, manifest verification and atomic pointer switch | ENRICHED |
 | Agent task core | dynamic clarification, Agent-best choice, checkpoints, cancel/recovery | MoonBit reducer + Engine event/checkpoint store | ENRICHED |
 | Agent research | candidate plan and final answer | market/news/fundamental/security-event/reconciliation tools plus three model rounds | ENRICHED |
 | Agent history | durable tasks/conversations, list/load/rename/soft-delete and branch-from-point | Engine SQLite event/conversation store + three-page Agent UI; renderer local storage is not a truth source | ENRICHED |

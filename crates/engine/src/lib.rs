@@ -1,4 +1,5 @@
 mod analysis;
+mod backtest;
 mod credentials;
 mod data_quality;
 mod data_root;
@@ -7,6 +8,7 @@ mod event_analysis;
 mod event_store;
 mod global_sync;
 mod graph_services;
+mod market_regime;
 mod news_center;
 mod quant_research;
 mod relation_extraction;
@@ -45,6 +47,7 @@ pub struct Engine {
     disclosure_sync: disclosure_sync::DisclosureSyncService,
     event_analysis: event_analysis::EventAnalysisService,
     relation_extraction: relation_extraction::RelationExtractionService,
+    backtest: backtest::BacktestService,
     quant_research: quant_research::QuantResearchService,
     global_sync: global_sync::GlobalSyncService,
     provider_boot: credentials::BootStatus,
@@ -85,6 +88,9 @@ impl Engine {
         let quant_research = quant_research::QuantResearchService::restore(&storage)
             .await
             .map_err(|error| format!("restore Quant Lab jobs: {error}"))?;
+        let backtest = backtest::BacktestService::restore(&storage)
+            .await
+            .map_err(|error| format!("restore backtest jobs: {error}"))?;
         if let Ok(records) = storage.securities_list().await {
             market.security_master.merge_records(records);
         }
@@ -99,6 +105,7 @@ impl Engine {
             disclosure_sync: disclosure_sync::DisclosureSyncService::default(),
             event_analysis: event_analysis::EventAnalysisService::default(),
             relation_extraction: relation_extraction::RelationExtractionService::default(),
+            backtest,
             quant_research,
             global_sync: global_sync::GlobalSyncService::default(),
             provider_boot,
@@ -132,7 +139,7 @@ impl Engine {
             "system.handshake" => Ok(json!({
                 "protocol_version": PROTOCOL_VERSION,
                 "engine_version": ENGINE_VERSION,
-                "capabilities": ["market", "research", "fundamentals", "valuation", "multi_source_news", "security_events", "global_context", "data_quality", "market_scan", "storage", "credentials", "agent_event_store_v2"],
+                "capabilities": ["market", "research", "fundamentals", "valuation", "multi_source_news", "security_events", "global_context", "data_quality", "market_scan", "backtest_v2", "market_regime", "storage", "credentials", "agent_event_store_v2"],
                 "max_frame_bytes": astock_protocol::MAX_FRAME_BYTES,
                 "max_page_size": astock_protocol::MAX_PAGE_SIZE
             })),
@@ -1111,6 +1118,32 @@ impl Engine {
                     .await
                     .map_err(quant_research_error)
             }
+            "research.backtest.strategies" => Ok(backtest::strategies()),
+            "research.backtest.run" => {
+                let payload: backtest::BacktestRequest = decode_payload(&request.payload)?;
+                backtest::run(&self.market, &self.rules, payload)
+                    .await
+                    .map_err(backtest_error)
+            }
+            "research.backtest.start" => {
+                let payload: backtest::BacktestRequest = decode_payload(&request.payload)?;
+                self.backtest
+                    .start(
+                        self.market.clone(),
+                        self.rules.clone(),
+                        self.storage.clone(),
+                        payload,
+                    )
+                    .await
+                    .map_err(backtest_error)
+            }
+            "research.backtest.status" => {
+                serde_json::to_value(self.backtest.status()).map_err(serialize_error)
+            }
+            "research.backtest.cancel" => Ok(json!({"cancelled": self.backtest.cancel()})),
+            "research.market.regime" => market_regime::get(&self.market)
+                .await
+                .map_err(market_regime_error),
             "research.data_reconcile" => {
                 let payload: SymbolPayload = decode_payload(&request.payload)?;
                 let symbol = parse_live_symbol(&payload.symbol)?;
@@ -2747,6 +2780,14 @@ fn graph_service_error(error: String) -> ServiceError {
 
 fn quant_research_error(error: String) -> ServiceError {
     ServiceError::new("quant_research", error, false)
+}
+
+fn backtest_error(error: String) -> ServiceError {
+    ServiceError::new("backtest", error, false)
+}
+
+fn market_regime_error(error: String) -> ServiceError {
+    ServiceError::new("market_regime", error, true)
 }
 
 async fn persist_driver_tree(

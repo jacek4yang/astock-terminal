@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 astock-core = { path = "../core" }
 astock-chanlun = { path = "../chanlun" }
+astock-backtest = { path = "../backtest" }
 astock-disclosure = { path = "../disclosure" }
 astock-entity-linking = { path = "../entity-linking" }
 astock-event-intelligence = { path = "../event-intelligence" }

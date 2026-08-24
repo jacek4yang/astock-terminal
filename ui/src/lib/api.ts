@@ -226,6 +226,18 @@ async function protonCommand<T>(name: string, args: Record<string, unknown> = {}
       return requestNative<T>("engine", "research.quant.snapshots.get", args);
     case "quant_research_snapshot_list":
       return requestNative<T>("engine", "research.quant.snapshots.list", args);
+    case "list_strategies":
+      return requestNative<T>("engine", "research.backtest.strategies", {});
+    case "run_backtest":
+      return requestNative<T>("engine", "research.backtest.run", args, { deadlineMs: 120_000 });
+    case "backtest_start":
+      return requestNative<T>("engine", "research.backtest.start", args, { deadlineMs: 60_000 });
+    case "backtest_status":
+      return requestNative<T>("engine", "research.backtest.status", {});
+    case "backtest_cancel":
+      return requestNative<T>("engine", "research.backtest.cancel", {});
+    case "get_market_regime":
+      return requestNative<T>("engine", "research.market.regime", {}, { deadlineMs: 60_000 });
     case "get_market_breadth": {
       const result = await requestNative<{ breadth: unknown }>("engine", "market.overview", {});
       return result.breadth as T;
@@ -2856,6 +2868,68 @@ export const quantResearchSnapshotGet = (snapshotId: string) =>
   cmd<QuantResearchSnapshot | null>("quant_research_snapshot_get", { snapshot_id: snapshotId });
 export const quantResearchSnapshotList = (limit = 20) =>
   cmd<QuantSnapshotListItem[]>("quant_research_snapshot_list", { limit });
+
+// ==================== 回测与市场环境 ====================
+
+export interface BacktestStrategyMeta {
+  name: string;
+  kind?: "single" | "rotation" | string;
+  label?: string;
+  description: string;
+  multi_symbol: boolean;
+  params?: Array<{
+    name: string;
+    ty: "int" | "number" | string;
+    default: unknown;
+    description: string;
+  }>;
+}
+
+export interface BacktestRequest {
+  symbol?: string;
+  strategy?: string;
+  params?: Record<string, unknown>;
+  pool?: string[];
+  fast?: number;
+  slow?: number;
+  entry_n?: number;
+  exit_n?: number;
+  bars?: number;
+}
+
+export interface BacktestJobSnapshot<T = unknown> {
+  job_id: string | null;
+  status: "idle" | "running" | "completed" | "failed" | "cancelled" | "suspended" | string;
+  phase: string;
+  progress: number | null;
+  started_at: number | null;
+  updated_at: number;
+  result: T | null;
+  error: string | null;
+}
+
+export interface MarketRegime {
+  regime: "进攻" | "中性" | "防守";
+  score: number;
+  available_signals: number;
+  expected_signals: number;
+  verification_status: "complete" | "partial";
+  breadth: Record<string, number> | null;
+  breadth_error: string | null;
+  source: string;
+  fetched_at: string;
+  source_version_id: string;
+}
+
+export const listStrategies = () => cmd<BacktestStrategyMeta[]>("list_strategies");
+export const runBacktest = <T = unknown>(request: BacktestRequest) =>
+  cmd<T>("run_backtest", { ...request });
+export const backtestStart = (request: BacktestRequest) =>
+  cmd<{ job_id: string; started: boolean }>("backtest_start", { ...request });
+export const backtestStatus = <T = unknown>() =>
+  cmd<BacktestJobSnapshot<T>>("backtest_status");
+export const backtestCancel = () => cmd<{ cancelled: boolean }>("backtest_cancel");
+export const getMarketRegime = () => cmd<MarketRegime>("get_market_regime");
 
 // ==================== 东财数据中心 ====================
 

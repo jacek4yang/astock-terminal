@@ -438,6 +438,7 @@ dependencies = [
 name = "astock-engine"
 version = "6.0.0"
 dependencies = [
+ "astock-backtest",
  "astock-chanlun",
  "astock-core",
  "astock-disclosure",

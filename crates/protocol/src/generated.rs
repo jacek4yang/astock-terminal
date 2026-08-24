@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=286e5ee47e551c8a5471298f8a8cb8763e811b019a4a50281274a11cbcdec18c
+// GENERATED from protocol/schema; schema-sha256=edad09db499cf6a53d93c83beee2f8a7803ba1f8912aea494594194dadab792c
 // Run: node protocol/codegen.mjs
 
 use serde::{Deserialize, Serialize};
@@ -84,6 +84,12 @@ pub const ENGINE_REQUEST_KINDS: &[&str] = &[
     "research.quant.cancel",
     "research.quant.snapshots.get",
     "research.quant.snapshots.list",
+    "research.backtest.strategies",
+    "research.backtest.run",
+    "research.backtest.start",
+    "research.backtest.status",
+    "research.backtest.cancel",
+    "research.market.regime",
     "research.fundamentals",
     "research.earnings_driver.tree",
     "research.earnings_driver.shock",

@@ -13,6 +13,9 @@ vi.mock("../bridge", () => ({
 }));
 
 import {
+  backtestCancel,
+  backtestStart,
+  backtestStatus,
   chanlunMinute,
   disclosureSyncCancel,
   disclosureSyncStart,
@@ -27,6 +30,7 @@ import {
   getGlobalGoldenChains,
   getGlobalProviderHealth,
   getGlobalTransmissionPaths,
+  getMarketRegime,
   graphAsOf,
   graphEdgeTimeline,
   graphHistoryBounds,
@@ -53,6 +57,7 @@ import {
   quantResearchSnapshotList,
   quantResearchStart,
   quantResearchStatus,
+  listStrategies,
   queryDisclosures,
   queryRelationReviews,
   queryNewsCenter,
@@ -419,5 +424,32 @@ describe("Proton global research bridge", () => {
     expect(requestNative.mock.calls[1][2]).toEqual({ job_id: "quant-job" });
     expect(requestNative.mock.calls[3][2]).toEqual({ snapshot_id: "quant-snapshot:one" });
     expect(requestNative.mock.calls[4][2]).toEqual({ limit: 25 });
+  });
+
+  it("routes versioned backtests and market regime through the Engine", async () => {
+    await listStrategies();
+    await backtestStart({
+      symbol: "300308",
+      strategy: "ma_cross",
+      params: { fast: 5, slow: 60 },
+      bars: 750,
+    });
+    await backtestStatus();
+    await backtestCancel();
+    await getMarketRegime();
+
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "research.backtest.strategies",
+      "research.backtest.start",
+      "research.backtest.status",
+      "research.backtest.cancel",
+      "research.market.regime",
+    ]);
+    expect(requestNative.mock.calls[1][2]).toEqual({
+      symbol: "300308",
+      strategy: "ma_cross",
+      params: { fast: 5, slow: 60 },
+      bars: 750,
+    });
   });
 });
