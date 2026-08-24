@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$CertificateThumbprint = $env:ASTOCK_SIGNING_CERT_THUMBPRINT,
-    [string]$EvidenceDirectory = $env:ASTOCK_RELEASE_EVIDENCE_DIR
+    [string]$EvidenceDirectory = $env:ASTOCK_RELEASE_EVIDENCE_DIR,
+    [string]$TimestampUrl = $env:ASTOCK_RFC3161_TIMESTAMP_URL
 )
 
 Set-StrictMode -Version Latest
@@ -285,10 +286,14 @@ shortcut = "4"
 
     Invoke-ReleaseGateStep 'authenticode' 'signing' 'ASSUMED/TRUSTED BOUNDARY' {
         Assert-SigningCertificate
-        Resolve-AStockTool -Name 'signtool' -Candidates @(
-            'D:\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe',
-            'C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe'
-        ) | Out-Null
+        if ([string]::IsNullOrWhiteSpace($TimestampUrl)) {
+            throw 'ASTOCK_RFC3161_TIMESTAMP_URL is required for production signing.'
+        }
+        & (Join-Path $PSScriptRoot 'sign-release.ps1') `
+            -CertificateThumbprint $CertificateThumbprint `
+            -TimestampUrl $TimestampUrl `
+            -EvidenceDirectory $EvidenceDirectory
+        if ($LASTEXITCODE -ne 0) { throw 'Release signing pipeline failed.' }
         Assert-ReleaseEvidence -FileName 'signed-artifacts.json' -Gate 'authenticode-valid-all-pe'
     }
 } finally {

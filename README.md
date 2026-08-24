@@ -48,6 +48,12 @@ $env:ASTOCK_SIGNING_CERT_THUMBPRINT = '<CurrentUser\\My certificate thumbprint>'
 Release 必须明确写明 `GitHub Actions: NOT VERIFIED — billing/spending
 restriction; release gates executed locally`。
 
+生产签名还必须设置 `ASTOCK_SIGNING_CERT_THUMBPRINT` 与
+`ASTOCK_RFC3161_TIMESTAMP_URL`。门禁会签署 App 中所有未签名 PE，保留并
+验证已有有效的 CEF 签名，借助 NSIS `!uninstfinalize` 签署卸载器，重建
+签名后的 ZIP/NSIS，并生成 `SHA256SUMS` 与 `signed-artifacts.json`；任一
+PE 的 Authenticode 状态不是 `Valid` 都会中止发布。
+
 ## 配置与凭证
 
 MiniMax Key 保存在 Windows 凭据管理器，不写入数据库或日志。Tushare、问财、聚宽及 SOCKS5 为可选配置；未配置时相应数据源会标记为不可用，核心页面继续降级运行。

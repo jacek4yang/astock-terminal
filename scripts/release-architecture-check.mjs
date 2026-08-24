@@ -11,6 +11,8 @@ const moonKernel = fs.readFileSync(path.join(root, "app-moon", "agent_core", "st
 const moonHost = fs.readFileSync(path.join(root, "desktop-moon", "backend", "host", "backend.mbt"), "utf8");
 const engineSchema = fs.readFileSync(path.join(root, "protocol", "schema", "engine.schema.json"), "utf8");
 const browserBridge = fs.readFileSync(path.join(root, "scripts", "browser-dev-bridge.mjs"), "utf8");
+const releaseGate = fs.readFileSync(path.join(root, "scripts", "release-gate.ps1"), "utf8");
+const releaseSigner = fs.readFileSync(path.join(root, "scripts", "sign-release.ps1"), "utf8");
 
 if (fs.existsSync(path.join(root, "src-tauri"))) failures.push("src-tauri differential oracle has not been removed");
 if (/"src-tauri"/.test(cargo)) failures.push("Cargo workspace still contains src-tauri");
@@ -51,6 +53,12 @@ if (!browserBridge.includes("executeAgentEffect") || !browserBridge.includes('ef
 }
 for (const kind of ["research.agent_prepare_context", "research.agent_security_context"]) {
   if (!engineSchema.includes(`\"${kind}\"`)) failures.push(`Engine protocol is missing ${kind}`);
+}
+if (!releaseGate.includes("sign-release.ps1") || !releaseGate.includes("ASTOCK_RFC3161_TIMESTAMP_URL")) {
+  failures.push("release gate does not execute the RFC3161 signing pipeline");
+}
+for (const signingMarker of ["!uninstfinalize", "/fd SHA256", "/tr $TimestampUrl", "/td SHA256", "SHA256SUMS", "signed-artifacts.json"]) {
+  if (!releaseSigner.includes(signingMarker)) failures.push(`release signing pipeline is missing ${signingMarker}`);
 }
 
 const moon = fs.readFileSync(path.join(root, "desktop-moon", "backend", "moon.mod"), "utf8");
