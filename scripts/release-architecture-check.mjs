@@ -15,6 +15,7 @@ const engineSchema = fs.readFileSync(path.join(root, "protocol", "schema", "engi
 const browserBridge = fs.readFileSync(path.join(root, "scripts", "browser-dev-bridge.mjs"), "utf8");
 const releaseGate = fs.readFileSync(path.join(root, "scripts", "release-gate.ps1"), "utf8");
 const releaseSigner = fs.readFileSync(path.join(root, "scripts", "sign-release.ps1"), "utf8");
+const releaseEvidenceValidator = fs.readFileSync(path.join(root, "scripts", "release-evidence-check.mjs"), "utf8");
 const packageHardener = fs.readFileSync(path.join(root, "scripts", "harden-package.ps1"), "utf8");
 const migrationEvidence = fs.readFileSync(path.join(root, "scripts", "migration-e2e.ps1"), "utf8");
 const faultEvidence = fs.readFileSync(path.join(root, "scripts", "fault-injection-e2e.ps1"), "utf8");
@@ -22,6 +23,7 @@ const externalEvidence = fs.readFileSync(path.join(root, "scripts", "external-se
 const credentialEvidence = fs.readFileSync(path.join(root, "scripts", "record-credential-rotation.ps1"), "utf8");
 const performanceEvidence = fs.readFileSync(path.join(root, "scripts", "performance-e2e.ps1"), "utf8");
 const performanceCdp = fs.readFileSync(path.join(root, "scripts", "performance-cdp.mjs"), "utf8");
+const releasePublisher = fs.readFileSync(path.join(root, "scripts", "publish-v6.ps1"), "utf8");
 const buildCommon = fs.readFileSync(path.join(root, "scripts", "Build.Common.ps1"), "utf8");
 const desktopCdpSession = fs.readFileSync(path.join(root, "scripts", "desktop-cdp-session.ps1"), "utf8");
 const desktopRendererFault = fs.readFileSync(path.join(root, "scripts", "desktop-renderer-fault.mjs"), "utf8");
@@ -49,6 +51,8 @@ const activeRuntimeDocs = [
   "docs/agent-runtime-hardening.md",
   "docs/data-contracts.md",
   "docs/news-center.md",
+  "docs/data-source-tushare.md",
+  "docs/data-source-joinquant-v2.md",
 ].map((name) => [name, fs.readFileSync(path.join(root, ...name.split("/")), "utf8")]);
 
 if (fs.existsSync(path.join(root, "src-tauri"))) failures.push("src-tauri differential oracle has not been removed");
@@ -122,8 +126,21 @@ for (const [name, source] of activeRuntimeDocs) {
   for (const staleDocMarker of ["cargo check -p astock-app", "真实 Tauri 桌面进程", "稳定 Tauri 响应"]) {
     if (source.includes(staleDocMarker)) failures.push(`${name} still instructs the obsolete v5 runtime: ${staleDocMarker}`);
   }
+  for (const unsafeCredentialInstruction of [
+    "复用 storage `kv` 表存 token",
+    "所有凭证只存本地(与 Tushare token 同模式)",
+  ]) {
+    if (source.includes(unsafeCredentialInstruction)) {
+      failures.push(`${name} still recommends obsolete credential storage: ${unsafeCredentialInstruction}`);
+    }
+  }
 }
 if (agentWorkbench.includes("requestDurableTool")) failures.push("React Agent workbench still owns Engine tool execution");
+for (const obsoleteCredentialWrapper of ["settings_set_provider_credentials", "jq_pwd", "ProviderCredentials"]) {
+  if (agentWorkbench.includes(obsoleteCredentialWrapper) || fs.readFileSync(path.join(root, "ui", "src", "lib", "api.ts"), "utf8").includes(obsoleteCredentialWrapper)) {
+    failures.push(`React still exposes the obsolete aggregate credential wrapper: ${obsoleteCredentialWrapper}`);
+  }
+}
 for (const leakedTool of ["market.overview", "research.market_context", "research.market_candidates", "research.data_reconcile"]) {
   if (agentWorkbench.includes(`\"${leakedTool}\"`)) failures.push(`React Agent workbench still selects ${leakedTool}`);
 }
@@ -134,9 +151,21 @@ if (!moonAgent.includes('"agent.research.workflow"') || !moonAgent.includes('"ho
 for (const recoveryMarker of ["ReconcileInterruptedWorkflow", "ResearchPlanSelected", "ProviderSuspended"]) {
   if (!moonKernel.includes(recoveryMarker)) failures.push(`MoonBit reducer is missing ${recoveryMarker}`);
 }
+for (const publicationGateMarker of [
+  'tool == "research.agent_report_verify"',
+  'contains(state.evidence_ids, "engine-report-verifier-v1")',
+  'state.pending_tools.is_empty()',
+]) {
+  if (!moonKernel.includes(publicationGateMarker)) {
+    failures.push(`MoonBit reducer publication gate is missing ${publicationGateMarker}`);
+  }
+}
 if (!moonAgent.includes('payload.stringify()')) failures.push("Agent tool cache identity does not include the complete Engine payload");
 if (!agentWorkbench.includes('agent.task.load') || !agentWorkbench.includes('recoverLatestCheckpoint')) {
   failures.push("React does not restore the newest durable Agent checkpoint before resuming");
+}
+if (!agentWorkbench.includes("persistDurableTransition") || !agentWorkbench.includes("completed.result")) {
+  failures.push("React cannot backfill a missing checkpoint from an already completed durable Agent effect");
 }
 if (moonAgent.includes('"agent.research" =>') || moonAgent.includes('"agent.plan" =>')) {
   failures.push("MoonBit Agent still exposes renderer-supplied legacy research orchestration endpoints");
@@ -161,8 +190,40 @@ for (const kind of ["storage.data_root.migrate", "storage.data_root.rollback"]) 
 if (!releaseGate.includes("sign-release.ps1") || !releaseGate.includes("ASTOCK_RFC3161_TIMESTAMP_URL")) {
   failures.push("release gate does not execute the RFC3161 signing pipeline");
 }
-for (const signingMarker of ["!uninstfinalize", "/fd SHA256", "/tr $TimestampUrl", "/td SHA256", "SHA256SUMS", "signed-artifacts.json"]) {
+for (const signingMarker of [
+  "!uninstfinalize",
+  "/fd SHA256",
+  "/tr $TimestampUrl",
+  "/td SHA256",
+  "SHA256SUMS",
+  "signed-artifacts.json",
+  "packaged_pe_count = $peFiles.Count",
+  "pe_inventory = $peInventory",
+  "release-evidence-check.mjs",
+]) {
   if (!releaseSigner.includes(signingMarker)) failures.push(`release signing pipeline is missing ${signingMarker}`);
+}
+for (const publicationMarker of [
+  "ConfirmProductionRelease",
+  "Assert-AStockCleanWorktree",
+  "visibility -ne 'PRIVATE'",
+  "Authenticode is not Valid",
+  "-FilePath 'git' -Arguments @('tag', '-s'",
+  "$releaseArguments = @('release', 'create'",
+  "GitHub Actions: NOT VERIFIED — billing/spending restriction; release gates executed locally",
+  "Manifest target escapes its base directory",
+  "Local and remote immutable tag objects differ",
+  "$signedEvidence.pe_inventory",
+  "Get-ChildItem -LiteralPath $appDirectory -Recurse -File",
+]) {
+  if (!releasePublisher.includes(publicationMarker)) failures.push(`v6 publication guard is missing ${publicationMarker}`);
+}
+for (const evidenceMarker of [
+  "packaged-app-pe-plus-installer",
+  "duplicate PE inventory path",
+  "PE inventory must contain every packaged PE plus the installer",
+]) {
+  if (!releaseEvidenceValidator.includes(evidenceMarker)) failures.push(`signed PE evidence validation is missing ${evidenceMarker}`);
 }
 for (const packageMarker of ["RequestExecutionLevel user", "$LOCALAPPDATA\\Programs\\AStock Terminal", "/RELEASETEST=", "HKCU", "makensis"]) {
   if (!packageHardener.includes(packageMarker)) failures.push(`package hardening is missing ${packageMarker}`);

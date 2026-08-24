@@ -15,6 +15,9 @@ fs.writeFileSync(artifactPath, '{"ok":true}\n', "utf8");
 const artifactHash = crypto.createHash("sha256").update(fs.readFileSync(artifactPath)).digest("hex");
 after(() => {
   fs.unlinkSync(artifactPath);
+  for (let index = 0; index < 4; index += 1) {
+    fs.unlinkSync(path.join(artifactRoot, `pe-${index}.exe`));
+  }
   fs.rmdirSync(artifactRoot);
 });
 
@@ -130,6 +133,32 @@ function completeExternalServices() {
     dataset: "qfq_daily", row_count: 20, total_rows: 20, source: "JoinQuant", fetched_at: "2026-08-24T00:00:30Z",
   };
   return { ...evidence, trusted_boundary: true, secrets_in_evidence: false };
+}
+
+function completeSignedArtifacts() {
+  const roles = ["host", "engine", "agent", "cef-helper", "nsis"];
+  const paths = [artifactPath, ...Array.from({ length: 4 }, (_, index) => path.join(artifactRoot, `pe-${index}.exe`))];
+  const artifacts = roles.map((kind, index) => ({
+    kind,
+    path: paths[index],
+    authenticode_status: "Valid",
+    sha256: artifactHash,
+  }));
+  return {
+    ...base("authenticode-valid-all-pe", ["packaged-pe-verification"]),
+    inventory_scope: "packaged-app-pe-plus-installer",
+    packaged_pe_count: 4,
+    artifacts,
+    pe_inventory: paths.map((artifact) => ({
+      path: artifact,
+      authenticode_status: "Valid",
+      sha256: artifactHash,
+    })),
+  };
+}
+
+for (let index = 0; index < 4; index += 1) {
+  fs.copyFileSync(artifactPath, path.join(artifactRoot, `pe-${index}.exe`));
 }
 
 test("rejects a four-field placeholder masquerading as browser evidence", () => {
@@ -297,4 +326,23 @@ test("rejects live evidence that does not preserve the exact 20,000 CNY constrai
   const evidence = completeExternalServices();
   evidence.cases.find((item) => item.id === "minimax-20000-manual-plan").details.capital_cny = 10_000;
   assert.throws(() => validateEvidence(evidence, "minimax-plus-joinquant-live", commit), /capital constraint/);
+});
+
+test("recomputes every signed release artifact hash", () => {
+  const evidence = completeSignedArtifacts();
+  assert.doesNotThrow(() => validateEvidence(evidence, "authenticode-valid-all-pe", commit));
+  evidence.artifacts[2].sha256 = "0".repeat(64);
+  assert.throws(() => validateEvidence(evidence, "authenticode-valid-all-pe", commit), /SHA-256 does not match/);
+});
+
+test("rejects duplicate signed artifact labels", () => {
+  const evidence = completeSignedArtifacts();
+  evidence.artifacts[4].kind = "host";
+  assert.throws(() => validateEvidence(evidence, "authenticode-valid-all-pe", commit), /duplicate artifact kind/);
+});
+
+test("rejects an incomplete or forged packaged PE inventory", () => {
+  const evidence = completeSignedArtifacts();
+  evidence.pe_inventory.pop();
+  assert.throws(() => validateEvidence(evidence, "authenticode-valid-all-pe", commit), /every packaged PE plus the installer/);
 });

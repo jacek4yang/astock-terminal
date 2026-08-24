@@ -159,6 +159,19 @@ foreach ($entry in $requiredArtifacts.GetEnumerator()) {
         sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
     }
 }
+$peInventory = @(
+    foreach ($file in @($peFiles | Sort-Object FullName) + @(Get-Item -LiteralPath $setupPath)) {
+        $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+        if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+            throw "Release PE inventory contains a non-Valid signature: $($file.FullName)"
+        }
+        [pscustomobject][ordered]@{
+            path = $file.FullName
+            authenticode_status = 'Valid'
+            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+        }
+    }
+)
 
 $manifestEntries = @($setupPath, $zipPath, $hostPath, $enginePath, $agentPath, $cefHelperPath)
 $manifestPath = Assert-InBuildRoot (Join-Path $artifacts 'SHA256SUMS')
@@ -188,9 +201,19 @@ $evidence = [pscustomobject][ordered]@{
         [pscustomobject]@{ id = 'nsis-signed-uninstaller'; status = 'PASSED'; duration_ms = 0 },
         [pscustomobject]@{ id = 'signed-zip-rebuild'; status = 'PASSED'; duration_ms = 0 }
     )
+    inventory_scope = 'packaged-app-pe-plus-installer'
+    packaged_pe_count = $peFiles.Count
     artifacts = $evidenceArtifacts
+    pe_inventory = $peInventory
 }
 $evidence | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $evidencePath -Encoding utf8NoBOM
+
+Invoke-Checked -FilePath 'node' -WorkingDirectory $build.RepositoryRoot -Arguments @(
+    (Join-Path $PSScriptRoot 'release-evidence-check.mjs'),
+    $evidencePath,
+    'authenticode-valid-all-pe',
+    $commit
+)
 
 Write-Host "Signed artifact evidence: $evidencePath"
 Write-Host "Signed artifact hashes:   $manifestPath"

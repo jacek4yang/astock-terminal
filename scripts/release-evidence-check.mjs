@@ -259,15 +259,52 @@ function validateExternalServices(evidence) {
 
 function validateSignedArtifacts(evidence) {
   invariant(Array.isArray(evidence.artifacts) && evidence.artifacts.length > 0, "authenticode-valid-all-pe: artifacts must be non-empty");
-  const requiredKinds = new Set(["host", "engine", "agent", "cef-helper", "nsis"]);
+  const allowedKinds = new Set(["host", "engine", "agent", "cef-helper", "nsis"]);
+  const requiredKinds = new Set(allowedKinds);
+  const seenKinds = new Set();
+  const requiredPaths = new Set();
   for (const artifact of evidence.artifacts) {
     invariant(isRecord(artifact), "authenticode-valid-all-pe: invalid artifact entry");
     invariant(typeof artifact.path === "string" && path.isAbsolute(artifact.path), "authenticode-valid-all-pe: artifact path must be absolute");
+    invariant(allowedKinds.has(artifact.kind), `authenticode-valid-all-pe: unexpected artifact kind ${artifact.kind}`);
+    invariant(!seenKinds.has(artifact.kind), `authenticode-valid-all-pe: duplicate artifact kind ${artifact.kind}`);
+    seenKinds.add(artifact.kind);
     invariant(artifact.authenticode_status === "Valid", `authenticode-valid-all-pe: ${artifact.path} is not Valid`);
     invariant(HEX_SHA256.test(artifact.sha256 ?? ""), `authenticode-valid-all-pe: ${artifact.path} has no SHA-256`);
+    invariant(fs.existsSync(artifact.path), `authenticode-valid-all-pe: ${artifact.path} does not exist`);
+    const stat = fs.statSync(artifact.path);
+    invariant(stat.isFile() && stat.size > 0, `authenticode-valid-all-pe: ${artifact.path} must be a non-empty file`);
+    const actualHash = crypto.createHash("sha256").update(fs.readFileSync(artifact.path)).digest("hex");
+    invariant(actualHash.toLowerCase() === artifact.sha256.toLowerCase(), `authenticode-valid-all-pe: ${artifact.path} SHA-256 does not match`);
+    const normalizedPath = path.resolve(artifact.path).toLowerCase();
+    invariant(!requiredPaths.has(normalizedPath), `authenticode-valid-all-pe: duplicate required artifact path ${artifact.path}`);
+    requiredPaths.add(normalizedPath);
     requiredKinds.delete(artifact.kind);
   }
   invariant(requiredKinds.size === 0, `authenticode-valid-all-pe: missing signed artifact kinds: ${[...requiredKinds].join(", ")}`);
+  invariant(evidence.inventory_scope === "packaged-app-pe-plus-installer", "authenticode-valid-all-pe: PE inventory scope is invalid");
+  invariant(Number.isInteger(evidence.packaged_pe_count) && evidence.packaged_pe_count >= 4,
+    "authenticode-valid-all-pe: packaged_pe_count must include the application PE set");
+  invariant(Array.isArray(evidence.pe_inventory) && evidence.pe_inventory.length === evidence.packaged_pe_count + 1,
+    "authenticode-valid-all-pe: PE inventory must contain every packaged PE plus the installer");
+  const inventoryPaths = new Set();
+  for (const artifact of evidence.pe_inventory) {
+    invariant(isRecord(artifact), "authenticode-valid-all-pe: invalid PE inventory entry");
+    invariant(typeof artifact.path === "string" && path.isAbsolute(artifact.path), "authenticode-valid-all-pe: PE inventory path must be absolute");
+    const normalizedPath = path.resolve(artifact.path).toLowerCase();
+    invariant(!inventoryPaths.has(normalizedPath), `authenticode-valid-all-pe: duplicate PE inventory path ${artifact.path}`);
+    inventoryPaths.add(normalizedPath);
+    invariant(artifact.authenticode_status === "Valid", `authenticode-valid-all-pe: ${artifact.path} inventory status is not Valid`);
+    invariant(HEX_SHA256.test(artifact.sha256 ?? ""), `authenticode-valid-all-pe: ${artifact.path} inventory entry has no SHA-256`);
+    invariant(fs.existsSync(artifact.path), `authenticode-valid-all-pe: ${artifact.path} inventory entry does not exist`);
+    const stat = fs.statSync(artifact.path);
+    invariant(stat.isFile() && stat.size > 0, `authenticode-valid-all-pe: ${artifact.path} inventory entry must be a non-empty file`);
+    const actualHash = crypto.createHash("sha256").update(fs.readFileSync(artifact.path)).digest("hex");
+    invariant(actualHash.toLowerCase() === artifact.sha256.toLowerCase(), `authenticode-valid-all-pe: ${artifact.path} inventory SHA-256 does not match`);
+  }
+  for (const requiredPath of requiredPaths) {
+    invariant(inventoryPaths.has(requiredPath), `authenticode-valid-all-pe: required artifact is absent from PE inventory: ${requiredPath}`);
+  }
 }
 
 export function validateEvidence(evidence, expectedGate, expectedCommit) {

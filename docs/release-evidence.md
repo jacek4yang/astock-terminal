@@ -66,6 +66,10 @@ and consume evidence in this order (no secret is a command-line argument):
 
 Authenticode evidence lists every shipped PE with an absolute path, SHA-256 and
 `Valid` status, including Host, Engine, Agent, CEF helper and NSIS installer.
+The validator reopens every listed file and recomputes its SHA-256; the signing
+runner also invokes that validator immediately after signing. Publication
+re-enumerates the application `.exe`/`.dll` set plus the installer and rejects
+any added, removed or changed PE.
 
 `scripts/release-gate.ps1` validates the complete contract and then hashes each
 evidence file into the immutable release report. Failed prerequisites mark
@@ -73,3 +77,12 @@ dependent gates as `SKIPPED` without executing them, and skipped gates still
 fail the overall report. Production signing depends on every critical gate. A
 minimal JSON containing only `gate`, `status` and `commit` is deliberately
 rejected.
+
+After a `PASSED` report exists on a clean `main` identical to `origin/main`,
+`scripts/publish-v6.ps1` is the only supported publication entry. It rechecks
+the report and manifests, the actual Authenticode state and signer certificate,
+private-repository visibility, the exact Actions disclosure, signed tag target
+and release assets. Publication requires the explicit
+`-ConfirmProductionRelease` switch plus PowerShell confirmation. A transient
+GitHub upload failure may resume from the same already-verified immutable tag;
+the script never moves or deletes that tag.

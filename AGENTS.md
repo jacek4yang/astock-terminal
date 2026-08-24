@@ -35,3 +35,4 @@
 - Do not silently fall back to C:. CI must explicitly override build roots with runner temporary storage.
 - Keep tests deterministic by default. Live provider tests stay ignored and require an explicit opt-in.
 - Classify reliability claims accurately: formally proved, model checked, property tested, integration tested, fault-injection tested, trusted boundary, or not verified.
+- `scripts/publish-v6.ps1` is the only production publication entry. Never create, move or push `v6.0.0` unless the exact clean `main` commit has a fully `PASSED` immutable report and every shipped PE is Authenticode `Valid`.
