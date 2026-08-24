@@ -31,6 +31,20 @@ const desktopWindowEvidence = fs.readFileSync(path.join(root, "scripts", "deskto
 const rendererRecoveryPatch = fs.readFileSync(path.join(root, "patches", "proton-0.2.1-windows-renderer-recovery.patch"), "utf8");
 const gpuPolicyPatch = fs.readFileSync(path.join(root, "patches", "proton-0.2.1-windows-gpu-policy.patch"), "utf8");
 const qualityWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "quality.yml"), "utf8");
+const engineCredentials = fs.readFileSync(path.join(root, "crates", "engine", "src", "credentials.rs"), "utf8");
+const engineRuntime = fs.readFileSync(path.join(root, "crates", "engine", "src", "lib.rs"), "utf8");
+const marketHub = fs.readFileSync(path.join(root, "crates", "market-data", "src", "hub.rs"), "utf8");
+const marketHttp = fs.readFileSync(path.join(root, "crates", "market-data", "src", "http.rs"), "utf8");
+const credentialRuntimeSources = [
+  ["engine credentials", engineCredentials],
+  ["market hub", marketHub],
+  ["market proxy", fs.readFileSync(path.join(root, "crates", "market-data", "src", "proxy.rs"), "utf8")],
+  ["Tushare provider", fs.readFileSync(path.join(root, "crates", "market-data", "src", "providers", "tushare.rs"), "utf8")],
+  ["iWencai provider", fs.readFileSync(path.join(root, "crates", "market-data", "src", "providers", "iwencai_openapi.rs"), "utf8")],
+  ["JoinQuant provider", fs.readFileSync(path.join(root, "crates", "market-data", "src", "providers", "joinquant.rs"), "utf8")],
+  ["SEC provider", fs.readFileSync(path.join(root, "crates", "market-data", "src", "providers", "sec_edgar.rs"), "utf8")],
+  ["global source catalog", fs.readFileSync(path.join(root, "crates", "global-intelligence", "src", "lib.rs"), "utf8")],
+];
 const activeRuntimeDocs = [
   "docs/agent-runtime-hardening.md",
   "docs/data-contracts.md",
@@ -47,6 +61,39 @@ for (const section of ["dependencies", "devDependencies"]) {
   }
 }
 if (ui.scripts?.tauri) failures.push("ui scripts still expose the obsolete Tauri entrypoint");
+for (const [name, source] of credentialRuntimeSources) {
+  for (const forbiddenSecretPath of [
+    "std::env::set_var",
+    "std::env::remove_var",
+    "std::env::var(",
+    "Provider::from_env",
+    "ProxyConfig::from_env",
+    "JoinQuantProvider::from_env",
+  ]) {
+    if (source.includes(forbiddenSecretPath)) {
+      failures.push(`${name} still moves provider credentials through process environment: ${forbiddenSecretPath}`);
+    }
+  }
+}
+for (const credentialBoundaryMarker of [
+  "load_market_credentials",
+  "MarketDataCredentials",
+  "MarketDataCredentials::new",
+  "MarketData::with_storage_and_credentials",
+]) {
+  if (!engineCredentials.includes(credentialBoundaryMarker) && !engineRuntime.includes(credentialBoundaryMarker) && !marketHub.includes(credentialBoundaryMarker)) {
+    failures.push(`Credential Manager to MarketData memory boundary is missing ${credentialBoundaryMarker}`);
+  }
+}
+for (const publicSecretField of ["pub tushare_token", "pub iwencai_key", "pub sec_edgar_user_agent", "pub socks5"]) {
+  if (marketHub.includes(publicSecretField)) failures.push(`MarketData credential bundle exposes secret field: ${publicSecretField}`);
+}
+for (const proxyLeakMarker of ["debug!(proxy = %url", "warn!(proxy = %url", "error!(proxy = %url"]) {
+  if (marketHttp.includes(proxyLeakMarker)) failures.push(`SOCKS5 credential can leak through HTTP diagnostics: ${proxyLeakMarker}`);
+}
+if (!marketHttp.includes("pub fn proxy_configured(&self) -> bool") || marketHttp.includes("pub fn proxy_config(&self)")) {
+  failures.push("HTTP diagnostics must expose only SOCKS5 configured state, never the credential-bearing proxy object");
+}
 for (const staleWorkflowMarker of [
   "Tauri",
   "cargo check -p astock-app",

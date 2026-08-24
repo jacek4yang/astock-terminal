@@ -4,7 +4,7 @@ use astock_global_intelligence::{
     normalize_local_publication, DstDisambiguation, GlobalDocumentInput, GlobalEntity,
     GlobalObservationInput, GlobalProviderRuntime, GlobalStore, NormalizedGlobalClock,
 };
-use astock_market_data::{MarketData, SecEdgarProvider, WorldBankProvider};
+use astock_market_data::{MarketData, WorldBankProvider};
 use astock_source_verification::SourceVerifier;
 use astock_storage::Storage;
 use chrono::{Datelike, NaiveDate, NaiveDateTime};
@@ -155,13 +155,14 @@ impl GlobalSyncService {
         let sync = Arc::clone(&self.inner);
         tokio::spawn(async move {
             let store = GlobalStore::new(storage.clone());
-            let providers = match provider_health_for_engine(&store).await {
-                Ok(providers) => providers,
-                Err(error) => {
-                    fail(&sync, format!("读取海外来源状态失败：{error}"));
-                    return;
-                }
-            };
+            let providers =
+                match provider_health_for_engine(&store, market.sec_edgar.available()).await {
+                    Ok(providers) => providers,
+                    Err(error) => {
+                        fail(&sync, format!("读取海外来源状态失败：{error}"));
+                        return;
+                    }
+                };
             {
                 let mut snapshot = sync.snapshot.lock().expect("global sync poisoned");
                 snapshot.sources_total = providers.len() as u32;
@@ -271,20 +272,38 @@ impl GlobalSyncService {
     }
 }
 
-pub async fn provider_health(storage: Storage) -> Result<Vec<GlobalProviderRuntime>, String> {
-    provider_health_for_engine(&GlobalStore::new(storage))
+pub async fn provider_health(
+    storage: Storage,
+    sec_edgar_available: bool,
+) -> Result<Vec<GlobalProviderRuntime>, String> {
+    provider_health_for_engine(&GlobalStore::new(storage), sec_edgar_available)
         .await
         .map_err(|error| error.to_string())
 }
 
 async fn provider_health_for_engine(
     store: &GlobalStore,
+    sec_edgar_available: bool,
 ) -> astock_global_intelligence::Result<Vec<GlobalProviderRuntime>> {
     let mut providers = store.provider_health().await?;
     for provider in &mut providers {
         if !IMPLEMENTED_PROVIDERS.contains(&provider.provider_id.as_str()) {
             provider.enabled = false;
             provider.last_error = Some("NOT VERIFIED：当前 Engine 尚未实现此官方来源采集器".into());
+        } else if provider.provider_id == "sec_edgar" {
+            provider.enabled = sec_edgar_available;
+            if sec_edgar_available {
+                if provider
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|message| message.contains("Credential Manager"))
+                {
+                    provider.last_error = None;
+                }
+            } else {
+                provider.last_error =
+                    Some("需要在 Windows Credential Manager 中配置 provider-sec-user-agent".into());
+            }
         }
     }
     Ok(providers)
@@ -469,7 +488,7 @@ async fn sync_sec(
         "SEC EDGAR",
         &format!("CIK {cik}"),
     );
-    let provider = SecEdgarProvider::new(market.http.clone());
+    let provider = market.sec_edgar.clone();
     let filings = match provider.submissions(cik).await {
         Ok(rows) => rows,
         Err(error) => {
@@ -492,7 +511,7 @@ async fn sync_sec(
         );
     }
     let verifier = SourceVerifier::new(storage.clone());
-    let user_agent = std::env::var("ASTOCK_SEC_USER_AGENT").ok();
+    let user_agent = provider.user_agent().map(str::to_string);
     for (index, filing) in filings.into_iter().enumerate() {
         if token.is_cancelled() {
             return;

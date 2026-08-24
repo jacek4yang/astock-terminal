@@ -1,9 +1,10 @@
 //! JoinQuant (聚宽) provider adapter over `astock-joinquant` (optional,
 //! credential-gated).
 //!
-//! Credentials come from the `JQ_USER` / `JQ_PWD` env vars; without them the
-//! provider is `available() == false` — listed on the health panel but every
-//! call returns [`DataError::NoProvider`]. **Not** part of the automatic
+//! Credentials are injected in memory by Engine after reading Windows
+//! Credential Manager; without them the provider is `available() == false` —
+//! listed on the health panel but every call returns [`DataError::NoProvider`].
+//! **Not** part of the automatic
 //! failover chain: it is an explicit-call source only (daily bars, index
 //! components, valuation snapshots, macro CPI), like [`super::tushare`].
 //!
@@ -24,11 +25,6 @@ use std::time::Duration;
 use tokio::sync::{Mutex, MutexGuard};
 use tokio::time::Instant;
 
-/// Env var carrying the JoinQuant login name.
-pub const USER_ENV: &str = "JQ_USER";
-/// Env var carrying the JoinQuant password.
-pub const PWD_ENV: &str = "JQ_PWD";
-
 /// Minimum spacing between upstream calls (strict low-frequency policy).
 pub const MIN_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -48,18 +44,6 @@ impl JoinQuantProvider {
             client: RwLock::new(client.map(Arc::new)),
             gate: Mutex::new(None),
         }
-    }
-
-    /// Build from the `JQ_USER` / `JQ_PWD` env vars (unavailable when either
-    /// is missing or blank).
-    pub fn from_env() -> Self {
-        let client = match (std::env::var(USER_ENV), std::env::var(PWD_ENV)) {
-            (Ok(u), Ok(p)) if !u.trim().is_empty() && !p.is_empty() => {
-                JoinQuantClient::new(Credentials::new(u, p)).ok()
-            }
-            _ => None,
-        };
-        Self::new(client)
     }
 
     /// Whether credentials are configured.
@@ -93,7 +77,7 @@ impl JoinQuantProvider {
                 message: "credential lock poisoned".to_string(),
             })?
             .clone()
-            .ok_or(DataError::NoProvider("joinquant (no JQ_USER/JQ_PWD)"))
+            .ok_or(DataError::NoProvider("joinquant (not configured)"))
     }
 
     /// Serialize calls and enforce [`MIN_INTERVAL`] spacing; the returned

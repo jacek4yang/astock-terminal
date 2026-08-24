@@ -1,8 +1,9 @@
 //! U.S. SEC EDGAR submissions adapter.
 //!
 //! Automated access is disabled until the user supplies a Fair Access
-//! User-Agent (`ASTOCK_SEC_USER_AGENT`) containing their application identity
-//! and contact. The adapter never sends an invented contact address.
+//! User-Agent containing their application identity and contact. Engine reads
+//! it from Windows Credential Manager and injects it in memory; the adapter
+//! never reads process environment variables or invents a contact address.
 
 use std::sync::Arc;
 
@@ -36,11 +37,25 @@ pub struct SecFiling {
 #[derive(Clone)]
 pub struct SecEdgarProvider {
     http: Arc<HttpClient>,
+    user_agent: Option<String>,
 }
 
 impl SecEdgarProvider {
-    pub fn new(http: Arc<HttpClient>) -> Self {
-        Self { http }
+    pub fn new(http: Arc<HttpClient>, user_agent: Option<String>) -> Self {
+        Self {
+            http,
+            user_agent: user_agent.filter(|value| !value.trim().is_empty()),
+        }
+    }
+
+    pub fn available(&self) -> bool {
+        self.user_agent.is_some()
+    }
+
+    /// Fair Access identity for the source verifier in the same Engine
+    /// process. It must never be serialized, logged or returned to Renderer.
+    pub fn user_agent(&self) -> Option<&str> {
+        self.user_agent.as_deref()
     }
 
     pub async fn submissions(&self, cik: &str) -> Result<Vec<SecFiling>, DataError> {
@@ -52,15 +67,12 @@ impl SecEdgarProvider {
             });
         }
         let cik = format!("{digits:0>10}");
-        let user_agent = std::env::var("ASTOCK_SEC_USER_AGENT")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or(DataError::NoProvider(
-                "sec_edgar_missing_ASTOCK_SEC_USER_AGENT",
-            ))?;
+        let user_agent = self
+            .user_agent()
+            .ok_or(DataError::NoProvider("sec_edgar_not_configured"))?;
         let url = format!("{SUBMISSIONS_BASE}/CIK{cik}.json");
         let headers = vec![
-            ("User-Agent".into(), user_agent),
+            ("User-Agent".into(), user_agent.to_string()),
             ("Accept-Encoding".into(), "gzip, deflate".into()),
             ("Host".into(), "data.sec.gov".into()),
         ];

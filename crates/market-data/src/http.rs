@@ -84,9 +84,9 @@ impl Default for HttpClient {
 }
 
 impl HttpClient {
-    /// Build the shared client with proxy routing from `ASTOCK_SOCKS5`.
+    /// Build a direct shared client with no credential-bearing proxy.
     pub fn new() -> Self {
-        Self::with_proxy(ProxyConfig::from_env())
+        Self::with_proxy(ProxyConfig::direct())
     }
 
     /// Build the shared client with an explicit proxy policy.
@@ -106,11 +106,11 @@ impl HttpClient {
         let proxied = match proxy.proxy_url() {
             Some(url) => match reqwest::Proxy::all(&url) {
                 Ok(p) => {
-                    debug!(proxy = %url, "socks5 proxy configured for foreign hosts");
+                    debug!("credential-backed socks5 proxy configured for foreign hosts");
                     Some(Self::build_client(Some(p), false))
                 }
-                Err(e) => {
-                    warn!(proxy = %url, error = %e, "invalid socks5 proxy URL; all traffic direct");
+                Err(_) => {
+                    warn!("invalid credential-backed socks5 proxy URL; all traffic direct");
                     None
                 }
             },
@@ -184,9 +184,10 @@ impl HttpClient {
         }
     }
 
-    /// The active proxy policy (for diagnostics / the settings page).
-    pub fn proxy_config(&self) -> &ProxyConfig {
-        &self.proxy
+    /// Whether a credential-backed proxy was accepted at startup. The proxy
+    /// address itself is deliberately not exposed to diagnostics or IPC.
+    pub fn proxy_configured(&self) -> bool {
+        self.proxied.is_some()
     }
 
     fn current_ua(&self) -> &'static str {

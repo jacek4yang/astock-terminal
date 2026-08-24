@@ -58,7 +58,6 @@ pub struct Engine {
     backtest: backtest::BacktestService,
     quant_research: quant_research::QuantResearchService,
     global_sync: global_sync::GlobalSyncService,
-    provider_boot: credentials::BootStatus,
     credential_migration_error: Option<String>,
     data_root: DataRootDecision,
 }
@@ -70,12 +69,15 @@ impl Engine {
             .await
             .err()
             .map(|error| error.message);
-        let provider_boot = credentials::load_into_environment()
+        let market_credentials = credentials::load_market_credentials()
             .map_err(|error| format!("load provider credentials: {}", error.message))?;
         event_store::migrate(&storage)
             .await
             .map_err(|error| format!("migrate Agent event store: {error}"))?;
-        let market = Arc::new(MarketData::with_storage(storage.clone()));
+        let market = Arc::new(MarketData::with_storage_and_credentials(
+            storage.clone(),
+            market_credentials,
+        ));
         let fundamental = Arc::new(FundamentalClient::new(Arc::new(EastMoneyF10::new(
             market.http.clone(),
             market.cache.clone(),
@@ -116,7 +118,6 @@ impl Engine {
             backtest,
             quant_research,
             global_sync: global_sync::GlobalSyncService::default(),
-            provider_boot,
             credential_migration_error,
             data_root,
         })
@@ -1259,8 +1260,7 @@ impl Engine {
                     .as_deref()
                     .map(str::trim)
                     .filter(|value| !value.is_empty());
-                let sec =
-                    astock_market_data::providers::SecEdgarProvider::new(self.market.http.clone());
+                let sec = self.market.sec_edgar.clone();
                 let (
                     ts_daily,
                     ts_basic,
@@ -1339,7 +1339,7 @@ impl Engine {
                     "configured": {
                         "tushare": tushare_available,
                         "iwencai": iwencai_available,
-                        "sec_edgar": std::env::var("ASTOCK_SEC_USER_AGENT").is_ok(),
+                        "sec_edgar": sec.available(),
                     },
                     "capabilities": {
                         "tushare_raw_daily": tushare_available,
@@ -1718,10 +1718,13 @@ impl Engine {
             }
             "research.global.sync.status" => Ok(json!(self.global_sync.status())),
             "research.global.sync.cancel" => Ok(json!({ "cancelled": self.global_sync.cancel() })),
-            "research.global.providers" => global_sync::provider_health(self.storage.clone())
-                .await
-                .map(|providers| json!(providers))
-                .map_err(|message| ServiceError::new("global_intelligence", message, false)),
+            "research.global.providers" => global_sync::provider_health(
+                self.storage.clone(),
+                self.market.sec_edgar.available(),
+            )
+            .await
+            .map(|providers| json!(providers))
+            .map_err(|message| ServiceError::new("global_intelligence", message, false)),
             "research.global.documents" => {
                 let payload: astock_global_intelligence::GlobalDocumentQuery =
                     decode_payload(&request.payload)?;

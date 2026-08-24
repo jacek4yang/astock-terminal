@@ -12,7 +12,8 @@
 //! - 板块归属 (sector membership) as the fallback for EastMoney's board
 //!   snapshot.
 //!
-//! The API key is optional (`IWENCAI_KEY` env var; settings page later).
+//! The API key is optional and injected in memory by Engine after reading
+//! Windows Credential Manager.
 //! Without one the provider is unavailable: every call returns
 //! [`DataError::NoProvider`] and the hub marks it on the health panel.
 //!
@@ -32,9 +33,6 @@ use tracing::debug;
 
 /// OpenAPI base URL.
 pub const IWENCAI_API: &str = "https://openapi.iwencai.com";
-
-/// Env var carrying the user's iwencai OpenAPI key.
-pub const KEY_ENV: &str = "IWENCAI_KEY";
 
 const QUERY2DATA: &str = "/v1/query2data";
 const COMPREHENSIVE_SEARCH: &str = "/v1/comprehensive/search";
@@ -77,11 +75,6 @@ impl IwencaiOpenApi {
             key: key.filter(|k| !k.trim().is_empty()),
             sem: Semaphore::new(MAX_CONCURRENT),
         }
-    }
-
-    /// Build from the `IWENCAI_KEY` env var (`None` when unset).
-    pub fn from_env(http: Arc<HttpClient>, cache: Arc<TtlCache>) -> Self {
-        Self::new(http, cache, std::env::var(KEY_ENV).ok())
     }
 
     /// Whether an API key is configured.

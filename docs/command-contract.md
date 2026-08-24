@@ -123,11 +123,11 @@ Tauri 源码已删除。本文只保留审计语义，不得作为可调用接�
 
 - `settings_set_provider_credentials({tushare_token?, iwencai_key?, jq_user?, jq_pwd?, socks5?}) -> {status: ProviderStatus, message: string}`
   - 每个字段都是 `Option<string>`:**不传/传 null 或空串 = 清除该项**;非空 = 覆盖保存。
-  - 保存到 storage kv 表(key 前缀 `provider.`),同时 `set_var`/`remove_var` 写入进程环境变量(`TUSHARE_TOKEN` / `IWENCAI_KEY` / `JQ_USER` / `JQ_PWD` / `ASTOCK_SOCKS5`),即时生效;返回的 `message` 提示"部分 provider 需重启后重新建连"(已构造的 provider 实例持有旧配置)。
-  - 敏感项(tushare_token / iwencai_key / jq_pwd)在 kv 里用 **base64 包一层,仅防 shoulder-surfing,不是加密**;任何能读 meta.db 的人都能还原。凭证本体绝不写日志、绝不回传前端。
+  - 这是冻结的 v5 行为，不得在 v6 实现或调用；v6 typed bridge 按单个 Provider 把值直接写入 Windows Credential Manager，并要求重启 Engine 后生效。
+  - v5 曾把敏感项以可逆 base64 保存到 SQLite；v6 启动迁移只有在 Credential Manager 写入并读回验证成功后才删除旧记录。凭证本体绝不写日志或回传前端。
 - `settings_get_provider_status() -> ProviderStatus`
   - `ProviderStatus = {tushare_token: bool, iwencai_key: bool, jq_user: bool, jq_pwd: bool, socks5: bool}`,只回报"是否已配置",绝不回传 token 本体。
-- 启动时(`AppState::init`,构造 MarketData 之前)先从 kv 读出各项并注入进程环境变量,market-data / joinquant 现有的 env 读取路径零改动即可生效。
+- v6 启动时由 Engine 直接从 Credential Manager 读取到不可序列化的进程内结构，并显式构造 Provider；不经过 SQLite、环境变量、命令行或 IPC。
 
 ## 缓存维护
 - `cache_stats() -> {kline_bytes, sqlite_bytes, tool_cache_bytes, chat_bytes, total_bytes, disk_free_bytes?}`

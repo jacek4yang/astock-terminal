@@ -1,5 +1,6 @@
 //! Provider credentials backed exclusively by the operating-system keyring.
 
+use astock_market_data::MarketDataCredentials;
 use astock_minimax::{KeyStore, SecretKey};
 use astock_storage::Storage;
 use base64::Engine as _;
@@ -14,45 +15,30 @@ const SERVICE: &str = "astock-terminal";
 struct Slot {
     id: &'static str,
     account: &'static str,
-    env_key: &'static str,
     legacy_key: &'static str,
-    captured_at_startup: bool,
 }
 
 const TUSHARE: Slot = Slot {
     id: "tushare",
     account: "provider-tushare-token",
-    env_key: "TUSHARE_TOKEN",
     legacy_key: "provider.tushare_token",
-    captured_at_startup: true,
 };
 const IWENCAI: Slot = Slot {
     id: "iwencai",
     account: "provider-iwencai-key",
-    env_key: "IWENCAI_KEY",
     legacy_key: "provider.iwencai_key",
-    captured_at_startup: true,
 };
 const SEC_EDGAR: Slot = Slot {
     id: "sec_edgar",
     account: "provider-sec-user-agent",
-    env_key: "ASTOCK_SEC_USER_AGENT",
     legacy_key: "provider.sec_user_agent",
-    captured_at_startup: false,
 };
 const SOCKS5: Slot = Slot {
     id: "socks5",
     account: "provider-socks5",
-    env_key: "ASTOCK_SOCKS5",
     legacy_key: "provider.socks5",
-    captured_at_startup: true,
 };
 const OPTIONAL_SLOTS: &[Slot] = &[TUSHARE, IWENCAI, SEC_EDGAR, SOCKS5];
-
-#[derive(Debug, Clone, Default)]
-pub(super) struct BootStatus {
-    pub socks5: bool,
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -237,20 +223,18 @@ async fn migrate_legacy_joinquant(storage_ref: &Storage) -> Result<(), ServiceEr
     Ok(())
 }
 
-pub(super) fn load_into_environment() -> Result<BootStatus, ServiceError> {
-    let mut boot = BootStatus::default();
-    for slot in OPTIONAL_SLOTS {
-        match load(*slot)? {
-            Some(value) if !value.expose().trim().is_empty() => {
-                std::env::set_var(slot.env_key, value.expose());
-                if slot.id == "socks5" {
-                    boot.socks5 = true;
-                }
-            }
-            _ => std::env::remove_var(slot.env_key),
-        }
-    }
-    Ok(boot)
+pub(super) fn load_market_credentials() -> Result<MarketDataCredentials, ServiceError> {
+    let value = |slot: Slot| -> Result<Option<String>, ServiceError> {
+        Ok(load(slot)?
+            .map(|secret| secret.expose().trim().to_string())
+            .filter(|secret| !secret.is_empty()))
+    };
+    Ok(MarketDataCredentials::new(
+        value(TUSHARE)?,
+        value(IWENCAI)?,
+        value(SEC_EDGAR)?,
+        value(SOCKS5)?,
+    ))
 }
 
 pub(super) fn status(engine: &Engine) -> Result<Value, ServiceError> {
@@ -258,14 +242,14 @@ pub(super) fn status(engine: &Engine) -> Result<Value, ServiceError> {
         Ok(json!({
             "configured": configured(slot)?,
             "active": active,
-            "restart_required": slot.captured_at_startup,
+            "restart_required": true,
         }))
     };
     Ok(json!({
         "tushare": row(TUSHARE, engine.market.tushare.available())?,
         "iwencai": row(IWENCAI, engine.market.iwencai.available())?,
-        "sec_edgar": row(SEC_EDGAR, std::env::var(SEC_EDGAR.env_key).is_ok())?,
-        "socks5": row(SOCKS5, engine.provider_boot.socks5)?,
+        "sec_edgar": row(SEC_EDGAR, engine.market.sec_edgar.available())?,
+        "socks5": row(SOCKS5, engine.market.http.proxy_configured())?,
     }))
 }
 
@@ -283,27 +267,21 @@ pub(super) fn set(payload: ProviderCredentialPayload) -> Result<Value, ServiceEr
             false,
         ));
     }
-    std::env::set_var(slot.env_key, key.expose());
     Ok(json!({
         "stored": true,
         "provider": slot.id,
-        "restart_required": slot.captured_at_startup,
-        "message": if slot.captured_at_startup {
-            "凭据已安全保存；重启桌面应用后该数据源生效"
-        } else {
-            "凭据已安全保存并在当前进程生效"
-        }
+        "restart_required": true,
+        "message": "凭据已安全保存；重启桌面应用后该数据源生效"
     }))
 }
 
 pub(super) fn delete(payload: ProviderIdPayload) -> Result<Value, ServiceError> {
     let slot = slot(payload.provider.trim())?;
     store(slot).delete_key().map_err(credential_store)?;
-    std::env::remove_var(slot.env_key);
     Ok(json!({
         "deleted": true,
         "provider": slot.id,
-        "restart_required": slot.captured_at_startup,
+        "restart_required": true,
     }))
 }
 

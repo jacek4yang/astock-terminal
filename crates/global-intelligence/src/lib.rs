@@ -83,6 +83,9 @@ pub struct GlobalSourceDefinition {
     pub official_url: &'static str,
     pub original_timezone: &'static str,
     pub license_policy: &'static str,
+    /// Opaque Windows Credential Manager slot. The legacy field name is kept
+    /// only for the existing database column and v1 JSON compatibility; this
+    /// crate never reads credentials or process environment variables.
     pub credential_env: Option<&'static str>,
     pub target_latency_secs: u32,
     pub rate_limit_per_minute: u32,
@@ -102,7 +105,7 @@ pub fn official_global_sources() -> Vec<GlobalSourceDefinition> {
             original_timezone: "America/New_York",
             license_policy:
                 "美国政府公开披露；自动访问遵守 SEC Fair Access，必须声明机构与联系方式",
-            credential_env: Some("ASTOCK_SEC_USER_AGENT"),
+            credential_env: Some("provider-sec-user-agent"),
             target_latency_secs: 60,
             rate_limit_per_minute: 300,
         },
@@ -126,7 +129,7 @@ pub fn official_global_sources() -> Vec<GlobalSourceDefinition> {
             official_url: "https://disclosure2.edinet-fsa.go.jp/",
             original_timezone: "Asia/Tokyo",
             license_policy: "使用 EDINET API v2；API Key 由用户配置，遵守金融厅使用条款",
-            credential_env: Some("EDINET_API_KEY"),
+            credential_env: Some("provider-edinet-api-key"),
             target_latency_secs: 120,
             rate_limit_per_minute: 1,
         },
@@ -138,7 +141,7 @@ pub fn official_global_sources() -> Vec<GlobalSourceDefinition> {
             official_url: "https://opendart.fss.or.kr/",
             original_timezone: "Asia/Seoul",
             license_policy: "使用官方 OpenDART API；Key 由用户配置",
-            credential_env: Some("OPENDART_API_KEY"),
+            credential_env: Some("provider-opendart-api-key"),
             target_latency_secs: 120,
             rate_limit_per_minute: 20,
         },
@@ -174,7 +177,7 @@ pub fn official_global_sources() -> Vec<GlobalSourceDefinition> {
             official_url: "https://www.bls.gov/developers/",
             original_timezone: "America/New_York",
             license_policy: "官方 Public Data API；高频批量查询可配置注册 Key",
-            credential_env: Some("BLS_API_KEY"),
+            credential_env: Some("provider-bls-api-key"),
             target_latency_secs: 120,
             rate_limit_per_minute: 20,
         },
@@ -186,7 +189,7 @@ pub fn official_global_sources() -> Vec<GlobalSourceDefinition> {
             official_url: "https://apps.bea.gov/api/",
             original_timezone: "America/New_York",
             license_policy: "官方 API；Key 由用户配置",
-            credential_env: Some("BEA_API_KEY"),
+            credential_env: Some("provider-bea-api-key"),
             target_latency_secs: 180,
             rate_limit_per_minute: 20,
         },
@@ -283,7 +286,7 @@ pub fn official_global_sources() -> Vec<GlobalSourceDefinition> {
             official_url: "https://comtradeapi.un.org/",
             original_timezone: "UTC",
             license_policy: "联合国 Comtrade API；大批量/商业使用依账户许可",
-            credential_env: Some("UN_COMTRADE_KEY"),
+            credential_env: Some("provider-un-comtrade-api-key"),
             target_latency_secs: 86_400,
             rate_limit_per_minute: 10,
         },
@@ -295,7 +298,7 @@ pub fn official_global_sources() -> Vec<GlobalSourceDefinition> {
             official_url: "https://apiportal.wto.org/",
             original_timezone: "Europe/Zurich",
             license_policy: "WTO 官方 API；Key 与许可由用户配置",
-            credential_env: Some("WTO_API_KEY"),
+            credential_env: Some("provider-wto-api-key"),
             target_latency_secs: 3_600,
             rate_limit_per_minute: 10,
         },
@@ -307,7 +310,7 @@ pub fn official_global_sources() -> Vec<GlobalSourceDefinition> {
             official_url: "https://www.eia.gov/opendata/",
             original_timezone: "America/New_York",
             license_policy: "美国政府 EIA Open Data API v2；Key 由用户配置",
-            credential_env: Some("EIA_API_KEY"),
+            credential_env: Some("provider-eia-api-key"),
             target_latency_secs: 600,
             rate_limit_per_minute: 20,
         },
@@ -331,7 +334,7 @@ pub fn official_global_sources() -> Vec<GlobalSourceDefinition> {
             official_url: "https://www.iea.org/data-and-statistics",
             original_timezone: "Europe/Paris",
             license_policy: "按 IEA 数据许可；未获许可时仅保存公开元数据和链接",
-            credential_env: Some("IEA_API_KEY"),
+            credential_env: Some("provider-iea-api-key"),
             target_latency_secs: 3_600,
             rate_limit_per_minute: 6,
         },
@@ -814,14 +817,13 @@ impl GlobalStore {
             .run(move |conn| {
                 let now = now_secs();
                 for source in catalog {
-                    let enabled = source
-                        .credential_env
-                        .map(|key| std::env::var(key).is_ok())
-                        .unwrap_or(true);
+                    // This catalog has no credential capability. Credentialed
+                    // sources start disabled; Engine overlays actual runtime
+                    // availability after its direct Credential Manager read.
+                    let enabled = source.credential_env.is_none();
                     let missing = source
                         .credential_env
-                        .filter(|key| std::env::var(key).is_err())
-                        .map(|key| format!("缺少配置 {key}"));
+                        .map(|key| format!("需要在 Windows Credential Manager 中配置 {key}"));
                     conn.execute(
                         "INSERT INTO global_provider_state
                          (provider_id,provider_name,region,category,official_url,original_timezone,
@@ -1340,6 +1342,20 @@ mod tests {
             aliases: Vec::new(),
             translation_status: "not_required".into(),
         }
+    }
+
+    #[test]
+    fn credentialed_sources_use_opaque_credential_manager_slots() {
+        let catalog = official_global_sources();
+        let credential_ids = catalog
+            .iter()
+            .filter_map(|source| source.credential_env)
+            .collect::<Vec<_>>();
+        assert!(!credential_ids.is_empty());
+        assert!(credential_ids.iter().all(|id| id.starts_with("provider-")));
+        assert!(credential_ids
+            .iter()
+            .all(|id| !id.contains('_') && !id.chars().any(char::is_uppercase)));
     }
 
     #[test]

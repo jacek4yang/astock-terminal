@@ -29,8 +29,9 @@ use crate::http::HttpClient;
 use crate::provider::DataProvider;
 use crate::providers::{
     EastMoney, EmDataCenter, FinanceNewsProvider, GlobalAssetProvider, IwencaiOpenApi,
-    JoinQuantProvider, SinaKline, TdxProvider, TencentKline, TushareProvider,
+    JoinQuantProvider, SecEdgarProvider, SinaKline, TdxProvider, TencentKline, TushareProvider,
 };
+use crate::proxy::ProxyConfig;
 use crate::security_master::SecurityMaster;
 use crate::validate::{filter_valid_bars, filter_valid_index_bars};
 use astock_core::{
@@ -601,6 +602,35 @@ fn validate_market_breadth(breadth: &MarketBreadth) -> Result<(), DataError> {
     Ok(())
 }
 
+/// Credential material supplied by Engine after a direct Windows Credential
+/// Manager read. This type intentionally does not implement `Debug` or
+/// serialization and must never cross IPC.
+#[derive(Clone, Default)]
+pub struct MarketDataCredentials {
+    tushare_token: Option<String>,
+    iwencai_key: Option<String>,
+    sec_edgar_user_agent: Option<String>,
+    socks5: Option<String>,
+}
+
+impl MarketDataCredentials {
+    /// Construct the non-serializable credential bundle consumed once by
+    /// [`MarketData`]. Values remain private to prevent ad-hoc diagnostics.
+    pub fn new(
+        tushare_token: Option<String>,
+        iwencai_key: Option<String>,
+        sec_edgar_user_agent: Option<String>,
+        socks5: Option<String>,
+    ) -> Self {
+        Self {
+            tushare_token,
+            iwencai_key,
+            sec_edgar_user_agent,
+            socks5,
+        }
+    }
+}
+
 /// Composite market-data facade: kline failover + breaker + single-flight,
 /// everything else delegated to EastMoney.
 #[derive(Clone)]
@@ -620,15 +650,17 @@ pub struct MarketData {
     pub em_datacenter: Arc<EmDataCenter>,
     /// TDX (通达信) adapter; its server pool is probed lazily on first use.
     pub tdx: Arc<TdxProvider>,
-    /// Optional JoinQuant adapter (credentials from `JQ_USER`/`JQ_PWD`);
+    /// Optional JoinQuant adapter (configured in memory by Engine);
     /// `available() == false` without them. Explicit-call source only —
     /// never in the automatic failover chain.
     pub joinquant: Arc<JoinQuantProvider>,
-    /// Optional Tushare pro adapter (token from `TUSHARE_TOKEN`);
+    /// Optional Tushare pro adapter (token injected in memory by Engine);
     /// `available() == false` when no token is configured.
     pub tushare: Arc<TushareProvider>,
-    /// Optional iwencai OpenAPI adapter (key from `IWENCAI_KEY`).
+    /// Optional iwencai OpenAPI adapter (key injected in memory by Engine).
     pub iwencai: Arc<IwencaiOpenApi>,
+    /// Optional SEC EDGAR adapter with an in-memory Fair Access identity.
+    pub sec_edgar: Arc<SecEdgarProvider>,
     /// Public, credential-free finance headlines with bounded caching/retry.
     pub finance_news: Arc<FinanceNewsProvider>,
     /// Cross-market gold quotes and bounded daily trend history.
@@ -647,23 +679,60 @@ impl Default for MarketData {
 impl MarketData {
     /// Build the full stack with a fresh shared HTTP client and cache.
     pub fn new() -> Self {
-        Self::with_shared(Arc::new(HttpClient::new()), Arc::new(TtlCache::default()))
+        Self::with_credentials(MarketDataCredentials::default())
+    }
+
+    /// Build from explicit in-memory credentials. Intended for Engine and
+    /// isolated live tests; production callers must source these values from
+    /// Windows Credential Manager.
+    pub fn with_credentials(credentials: MarketDataCredentials) -> Self {
+        let http = Arc::new(HttpClient::with_proxy(ProxyConfig::with_socks5(
+            credentials.socks5.clone(),
+        )));
+        Self::build(
+            http,
+            Arc::new(TtlCache::default()),
+            None,
+            BreakerConfig::default(),
+            None,
+            credentials,
+        )
     }
 
     /// Build from existing shared components.
     pub fn with_shared(http: Arc<HttpClient>, cache: Arc<TtlCache>) -> Self {
-        Self::build(http, cache, None, BreakerConfig::default(), None)
+        Self::build(
+            http,
+            cache,
+            None,
+            BreakerConfig::default(),
+            None,
+            MarketDataCredentials::default(),
+        )
     }
 
     /// Production constructor with persistent news cursors, provider enable
     /// flags and last-good snapshots in the shared application storage.
     pub fn with_storage(storage: Storage) -> Self {
+        Self::with_storage_and_credentials(storage, MarketDataCredentials::default())
+    }
+
+    /// Production constructor with explicit credential material supplied by
+    /// Engine's Credential Manager boundary.
+    pub fn with_storage_and_credentials(
+        storage: Storage,
+        credentials: MarketDataCredentials,
+    ) -> Self {
+        let http = Arc::new(HttpClient::with_proxy(ProxyConfig::with_socks5(
+            credentials.socks5.clone(),
+        )));
         Self::build(
-            Arc::new(HttpClient::new()),
+            http,
             Arc::new(TtlCache::default()),
             None,
             BreakerConfig::default(),
             Some(storage),
+            credentials,
         )
     }
 
@@ -679,6 +748,7 @@ impl MarketData {
             Some(chain),
             breaker_config,
             None,
+            MarketDataCredentials::default(),
         )
     }
 
@@ -688,16 +758,32 @@ impl MarketData {
         chain: Option<Vec<Arc<dyn DataProvider>>>,
         breaker_config: BreakerConfig,
         storage: Option<Storage>,
+        credentials: MarketDataCredentials,
     ) -> Self {
+        let MarketDataCredentials {
+            tushare_token,
+            iwencai_key,
+            sec_edgar_user_agent,
+            socks5: _,
+        } = credentials;
         let tencent = Arc::new(TencentKline::new(http.clone()));
         let sina = Arc::new(SinaKline::new(http.clone()));
         let eastmoney = Arc::new(EastMoney::new(http.clone(), cache.clone()));
         let em_datacenter = Arc::new(EmDataCenter::new(http.clone(), cache.clone()));
         let tdx = Arc::new(TdxProvider::new());
         let security_master = Arc::new(SecurityMaster::default());
-        let joinquant = Arc::new(JoinQuantProvider::from_env());
-        let tushare = Arc::new(TushareProvider::from_env(http.clone(), cache.clone()));
-        let iwencai = Arc::new(IwencaiOpenApi::from_env(http.clone(), cache.clone()));
+        let joinquant = Arc::new(JoinQuantProvider::new(None));
+        let tushare = Arc::new(TushareProvider::new(
+            http.clone(),
+            cache.clone(),
+            tushare_token,
+        ));
+        let iwencai = Arc::new(IwencaiOpenApi::new(
+            http.clone(),
+            cache.clone(),
+            iwencai_key,
+        ));
+        let sec_edgar = Arc::new(SecEdgarProvider::new(http.clone(), sec_edgar_user_agent));
         let finance_news = Arc::new(match storage.clone() {
             Some(storage) => FinanceNewsProvider::with_storage(
                 http.clone(),
@@ -747,6 +833,7 @@ impl MarketData {
             joinquant,
             tushare,
             iwencai,
+            sec_edgar,
             finance_news,
             global_assets,
             security_master,
