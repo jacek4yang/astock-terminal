@@ -1360,6 +1360,15 @@ impl Engine {
                     }
                 }))
             }
+            "storage.data_root.migrate" => {
+                let payload: DataRootMigrationPayload = decode_payload(&request.payload)?;
+                data_root::migrate(&self.storage, &payload.destination)
+                    .await
+                    .map(|outcome| json!(outcome))
+                    .map_err(|message| {
+                        ServiceError::new("data_root_migration_failed", message, false)
+                    })
+            }
             "quant.scan.start" => {
                 let snapshot = self
                     .scan
@@ -1670,6 +1679,12 @@ struct JoinQuantCredentialPayload {
 #[serde(deny_unknown_fields)]
 struct CacheCleanupPayload {
     target_mb: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DataRootMigrationPayload {
+    destination: String,
 }
 
 #[derive(Deserialize)]

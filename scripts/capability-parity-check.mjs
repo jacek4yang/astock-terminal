@@ -69,6 +69,7 @@ const migratedHandlers = new Set([
   "settings.cache_stats",
   "settings.cache_cleanup",
   "settings.get_data_dir",
+  "settings.set_data_dir",
   "agent.agent_ask",
   "agent.agent_conversation_delete",
   "agent.agent_conversation_load",

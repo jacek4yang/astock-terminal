@@ -57,6 +57,7 @@
         { "const": "credentials.joinquant.delete" },
         { "const": "storage.cache.stats" },
         { "const": "storage.cache.cleanup" },
+        { "const": "storage.data_root.migrate" },
         { "const": "quant.scan.start" },
         { "const": "quant.scan.status" },
         { "const": "quant.scan.cancel" },
