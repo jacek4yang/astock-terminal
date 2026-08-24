@@ -121,6 +121,28 @@ test "durable operation identity includes the full structured payload" {
 }
 
 ///|
+test "only an explicit durable Agent cancel event may preempt the Worker" {
+  let cancel : HostRequestEnvelope = @json.from_json({
+    "request_id": "cancel-1",
+    "kind": "agent.event",
+    "payload": { "task_id": "task-1", "seq": 2, "event_kind": "cancel" },
+  })
+  assert_true(durable_agent_cancel_event(cancel))
+  let resume_event : HostRequestEnvelope = @json.from_json({
+    "request_id": "resume-1",
+    "kind": "agent.event",
+    "payload": { "task_id": "task-1", "seq": 2, "event_kind": "resume" },
+  })
+  assert_false(durable_agent_cancel_event(resume_event))
+  let workflow : HostRequestEnvelope = @json.from_json({
+    "request_id": "workflow-1",
+    "kind": "agent.research.workflow",
+    "payload": { "task_id": "task-1" },
+  })
+  assert_false(durable_agent_cancel_event(workflow))
+}
+
+///|
 #cfg(platform="windows")
 async test "Host owns Agent durability and reuses a completed operation" {
   guard @env.get_env_var("ASTOCK_HOST_DURABILITY_TEST") is Some("1") &&

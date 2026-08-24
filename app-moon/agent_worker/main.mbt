@@ -463,8 +463,11 @@ async fn Worker::provider_config(self : Worker, key : String) -> ProviderConfig 
 
 ///|
 async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
-  // Deadlines and cancellation are enforced by the supervisor before a
-  // request reaches this synchronous pure-kernel dispatch.
+  // Deadlines are enforced by the Host. An explicit durable cancel event can
+  // preempt this synchronous Worker by terminating/restarting it, restoring
+  // the last committed checkpoint, and then dispatching event_kind=cancel.
+  // cancellation_id remains correlation metadata; it is never interpreted by
+  // the pure reducer itself.
   ignore(request.deadline_ms)
   ignore(request.cancellation_id)
   if request.request_id.trim().is_empty() {

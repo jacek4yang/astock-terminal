@@ -2009,6 +2009,7 @@ impl Engine {
                 Ok(json!({
                     "fetched_at_ms": fetched_at_ms,
                     "models": quota.models.into_iter().map(|model| json!({
+                        "provider": "minimax",
                         "model_name": model.model_name,
                         "interval_total": model.current_interval_total_count,
                         "interval_used": model.current_interval_usage_count,

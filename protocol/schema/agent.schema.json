@@ -118,6 +118,99 @@
         "output_type": { "type": "string", "enum": ["research_report", "manual_plan", "evidence_review"] },
         "evidence_requirement": { "type": "string", "enum": ["standard", "strict", "primary_sources"] }
       }
+    },
+    "agent_question": {
+      "$ref": "#/$defs/clarification_question",
+      "description": "Stable public name for one model-generated Agent clarification question."
+    },
+    "conversation_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conversation_id", "title", "phase", "message_count", "evidence_count", "created_at", "updated_at"],
+      "properties": {
+        "conversation_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "phase": { "$ref": "#/$defs/agent_phase" },
+        "message_count": { "type": "integer", "minimum": 0 },
+        "evidence_count": { "type": "integer", "minimum": 0 },
+        "parent_conversation_id": { "type": ["string", "null"], "maxLength": 128 },
+        "branch_from_message_id": { "type": ["string", "null"], "maxLength": 128 },
+        "created_at": { "type": "integer", "minimum": 0 },
+        "updated_at": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "task_checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_id", "phase", "accepted_seq", "pending_tool_ids", "completed_tool_ids", "evidence_ids", "state_version"],
+      "properties": {
+        "task_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "phase": { "$ref": "#/$defs/agent_phase" },
+        "accepted_seq": { "type": "integer", "minimum": 0 },
+        "pending_tool_ids": { "type": "array", "items": { "type": "string", "maxLength": 128 }, "maxItems": 256 },
+        "completed_tool_ids": { "type": "array", "items": { "type": "string", "maxLength": 128 }, "maxItems": 2048 },
+        "evidence_ids": { "type": "array", "items": { "type": "string", "maxLength": 128 }, "maxItems": 4096 },
+        "state_version": { "type": "string", "minLength": 1, "maxLength": 80 }
+      }
+    },
+    "tool_activity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["call_id", "kind", "title", "detail", "status", "cache_hit", "evidence_count"],
+      "properties": {
+        "call_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "detail": { "type": "string", "maxLength": 1000 },
+        "status": { "type": "string", "enum": ["pending", "running", "succeeded", "failed", "skipped"] },
+        "cache_hit": { "type": "boolean" },
+        "evidence_count": { "type": "integer", "minimum": 0 },
+        "started_at_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "finished_at_ms": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "evidence_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence_id", "source", "quality_status"],
+      "properties": {
+        "evidence_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "source": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "source_version_id": { "type": ["string", "null"], "maxLength": 160 },
+        "as_of": { "type": ["string", "null"], "format": "date-time" },
+        "fetched_at": { "type": ["string", "null"], "format": "date-time" },
+        "quality_status": { "type": "string", "enum": ["verified", "single_source", "stale", "conflicting", "missing", "blocked"] },
+        "original_url": { "type": ["string", "null"], "format": "uri", "maxLength": 2048 }
+      }
+    },
+    "verification_finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message", "evidence_ids", "blocking"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "severity": { "type": "string", "enum": ["info", "warning", "error"] },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "evidence_ids": { "type": "array", "items": { "type": "string", "maxLength": 128 }, "maxItems": 256 },
+        "blocking": { "type": "boolean" }
+      }
+    },
+    "provider_quota": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "model_name"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "model_name": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "interval_used": { "type": ["integer", "null"], "minimum": 0 },
+        "interval_total": { "type": ["integer", "null"], "minimum": 0 },
+        "interval_remaining_percent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+        "interval_reset_at_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "weekly_used": { "type": ["integer", "null"], "minimum": 0 },
+        "weekly_total": { "type": ["integer", "null"], "minimum": 0 },
+        "weekly_remaining_percent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+        "weekly_reset_at_ms": { "type": ["integer", "null"], "minimum": 0 }
+      }
     }
   }
 }

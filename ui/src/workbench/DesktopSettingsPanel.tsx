@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { requestNative } from "../bridge";
+import type { ProviderQuota } from "../bridge/generated";
 import DataQualityWorkbench from "../components/DataQualityWorkbench";
 import { getProviderHealth, type AgentModelRoutingSettings, type ProviderHealthItem } from "../lib/api";
 import { useAppStore } from "../store";
@@ -13,19 +14,7 @@ type EngineStatus = {
   data_root?: { path?: string; origin?: string; legacy_path?: string | null };
 };
 
-type QuotaModel = {
-  model_name: string;
-  interval_total?: number | null;
-  interval_used?: number | null;
-  interval_remaining_percent?: number | null;
-  interval_reset_at_ms?: number | null;
-  weekly_total?: number | null;
-  weekly_used?: number | null;
-  weekly_remaining_percent?: number | null;
-  weekly_reset_at_ms?: number | null;
-};
-
-type QuotaStatus = { fetched_at_ms: number; models: QuotaModel[] };
+type QuotaStatus = { fetched_at_ms: number; models: ProviderQuota[] };
 type ProviderTest = { provider: string; model: string; fast_model?: string; deep_model?: string; verifier_model?: string; available_models?: string[]; api_host: string; catalog_verified: boolean };
 type CacheStats = {
   kline_parquet_bytes: number;

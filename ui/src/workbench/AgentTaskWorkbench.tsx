@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { AgentPhase, TaskSpec } from "../bridge/generated";
+import type { AgentPhase, ConversationSummary, TaskSpec } from "../bridge/generated";
 import { isProton, requestNative, subscribeNativeEvent } from "../bridge";
 import type { ClarificationDraft, ClarificationQuestion, ClarificationRequest } from "../lib/agentClarification";
 import { emptyClarificationDraft } from "../lib/agentClarification";
@@ -79,18 +79,6 @@ type AgentSession = {
   draft?: ClarificationDraft;
   checkpoint?: unknown;
   verification?: DeterministicVerification | null;
-};
-
-type ConversationSummary = {
-  conversation_id: string;
-  title: string;
-  phase: AgentPhase;
-  message_count: number;
-  evidence_count: number;
-  parent_conversation_id?: string | null;
-  branch_from_message_id?: string | null;
-  created_at: number;
-  updated_at: number;
 };
 
 type StoredConversation = ConversationSummary & { session: AgentSession };
@@ -277,10 +265,12 @@ export default function AgentTaskWorkbench() {
   const [durableTaskReady, setDurableTaskReady] = useState(true);
   const [verification, setVerification] = useState<DeterministicVerification | null>(null);
   const [busy, setBusy] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [busyStage, setBusyStage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const restoredTaskRef = useRef<string | null>(null);
+  const cancelRequestedTaskRef = useRef<string | null>(null);
 
   useEffect(() => {
     const applyDraft = (prompt: string) => {
@@ -517,6 +507,7 @@ export default function AgentTaskWorkbench() {
         append("system", `报告校验未通过，未发布不完整结论：${reply.verification_findings?.join("；") || "请查看证据与诊断"}。`);
       } else append("system", `研究执行完成，但 Worker 未返回报告正文。当前状态：${phaseLabel[next.phase ?? "idle"]}。`);
     } catch (cause) {
+      if (cancelRequestedTaskRef.current === state.task_id) return;
       const message = cause instanceof Error ? cause.message : String(cause);
       setError(message);
       append("system", `研究暂停：${message}。任务检查点已保留，可直接重试。`);
@@ -528,6 +519,40 @@ export default function AgentTaskWorkbench() {
         // separately and must not hide the root cause.
       }
     } finally {
+      if (cancelRequestedTaskRef.current !== state.task_id) {
+        setBusy(false);
+        setBusyStage("");
+      }
+    }
+  };
+
+  const stopResearch = async () => {
+    const active = task;
+    if (!busy || stopping || !active?.task_id) return;
+    cancelRequestedTaskRef.current = active.task_id;
+    setStopping(true);
+    setBusyStage("正在安全停止研究并保存最后一个已提交检查点…");
+    setError(null);
+    try {
+      const reply = await requestDurableAgent<TaskTransition>("agent.event", {
+        task_id: active.task_id,
+        seq: Math.max(1, active.accepted_seq ?? 0) + 1,
+        event_kind: "cancel",
+      }, 120_000);
+      const next = applyTransition(reply);
+      if (next.phase !== "cancelled") throw new Error(`停止请求返回了意外状态：${phaseLabel[next.phase ?? "idle"]}`);
+      append("system", "研究已按你的要求停止。已完成的工具结果和证据仍保存在任务日志中，不会发布未校验结论。");
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setError(`停止研究失败：${message}`);
+      try {
+        await recoverLatestCheckpoint(active.task_id);
+      } catch {
+        // The cancellation error remains the primary diagnostic.
+      }
+    } finally {
+      cancelRequestedTaskRef.current = null;
+      setStopping(false);
       setBusy(false);
       setBusyStage("");
     }
@@ -787,7 +812,7 @@ export default function AgentTaskWorkbench() {
   return <div className="agent-console agent-golden-layout">
     <header className="agent-console-header">
       <div><span className="agent-orb" /><strong>AStock Agent</strong><span className={`status-pill phase-${status}`}>{phaseLabel[status]}</span></div>
-      <div className="agent-run-metrics"><span>工具 {task?.completed_tool_count ?? 0}/{(task?.completed_tool_count ?? 0) + (task?.pending_tool_count ?? 0)}</span><span>证据 {task?.evidence_ids?.length ?? 0}</span><span title="仅展示 Worker 返回的真实缓存统计">缓存命中 {cacheRequests ? `${Math.round(cacheHits / cacheRequests * 100)}% (${cacheHits}/${cacheRequests})` : "— 暂无样本"}</span>{task?.task_id && <span title="历史会话只负责展示；此状态表示执行检查点已从 Engine 日志核验">任务日志 {durableTaskReady ? "已核验" : "核验中"}</span>}<button onClick={() => setHistoryOpen(true)} disabled={busy}>历史 {history.length || ""}</button><button onClick={newResearch} disabled={busy}>＋ 新对话</button></div>
+      <div className="agent-run-metrics"><span>工具 {task?.completed_tool_count ?? 0}/{(task?.completed_tool_count ?? 0) + (task?.pending_tool_count ?? 0)}</span><span>证据 {task?.evidence_ids?.length ?? 0}</span><span title="仅展示 Worker 返回的真实缓存统计">缓存命中 {cacheRequests ? `${Math.round(cacheHits / cacheRequests * 100)}% (${cacheHits}/${cacheRequests})` : "— 暂无样本"}</span>{task?.task_id && <span title="历史会话只负责展示；此状态表示执行检查点已从 Engine 日志核验">任务日志 {durableTaskReady ? "已核验" : "核验中"}</span>}{busy && task?.task_id && <button className="agent-stop" onClick={() => void stopResearch()} disabled={stopping}>{stopping ? "停止中…" : "■ 停止研究"}</button>}<button onClick={() => setHistoryOpen(true)} disabled={busy}>历史 {history.length || ""}</button><button onClick={newResearch} disabled={busy}>＋ 新对话</button></div>
     </header>
 
     {historyOpen && <div className="agent-history-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setHistoryOpen(false); }}>

@@ -636,6 +636,8 @@
 .clarification-model-card > footer button:disabled { color: #71829a; background: #26384d; }
 .agent-run-metrics button { margin-left: 8px; padding: 3px 7px; border: 1px solid #304662; border-radius: 3px; color: #91a8c2; background: #0d1b2d; font: 9px inherit; }
 .agent-run-metrics button:hover:not(:disabled) { color: #e1eaf4; border-color: #4778b8; }
+.agent-run-metrics button.agent-stop { color: #f2a1a7; border-color: #7b3a44; background: #26151d; }
+.agent-run-metrics button.agent-stop:hover:not(:disabled) { color: #ffd7da; border-color: #bc5663; background: #351820; }
 .agent-history-backdrop { position: fixed; z-index: 2500; inset: 0; display: flex; justify-content: flex-end; background: #02070db8; backdrop-filter: blur(2px); }
 .agent-history-panel { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; width: min(440px, calc(100vw - 24px)); height: 100%; border-left: 1px solid #304969; background: #091522; box-shadow: -18px 0 46px #0009; }
 .agent-history-panel > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px; border-bottom: 1px solid #20334b; }

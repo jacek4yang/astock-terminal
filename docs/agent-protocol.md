@@ -8,6 +8,8 @@ React Renderer 只通过声明过的 Proton typed bridge 调用桌面 Host。Moo
 
 `conversation_id` 是稳定会话身份，`task_id` 是一次研究任务身份。请求使用协议 v1 envelope，并携带 `request_id`、`deadline_ms` 和 `cancellation_id`。Worker 标准输出只允许 4 字节 little-endian 长度加 UTF-8 JSON 的协议帧，单帧上限 8 MiB；结构化日志写入标准错误。
 
+`protocol/schema/agent.schema.json` 同时定义并生成跨语言稳定模型：`TaskSpec`、`AgentQuestion`（与单个动态澄清问题同构）、`ConversationSummary`、`TaskCheckpoint`、`ToolActivity`、`EvidenceRef`、`VerificationFinding` 和 `ProviderQuota`。Rust、MoonBit 与 TypeScript 生成物必须由 `protocol-codegen --check` 保持一致；Renderer 不再为这些公开模型维护另一套手写形状。
+
 ## 持久化真相与 Effect
 
 任务状态由 `reduce(state, event) -> (state, effects)` 推进。网络、时间、工具、存储和日志都在 reducer 外执行。桌面 Host 在执行工具前，先把用户输入、任务事件、检查点和 Effect 意图写入 Engine；工具结果带幂等键持久化后，才作为新事件继续 reducer。恢复时根据持久化事件和检查点重放，重复、过期、跳号或乱序事件会被拒绝。
@@ -21,6 +23,8 @@ Host 是通用 Effect runner，不包含金融算法。当前生产路径只允�
 页面切换不会卸载 Agent 主视图。会话、任务、事件、Effect、检查点和报告保存在 Engine 数据库中，React 状态只用于当前视图；会话中的任务快照只能展示，不能作为可执行恢复状态。打开历史或重试前，Renderer 必须读取 `agent.task.load`，核对 `task_id` 与 `accepted_seq` 后才允许继续，读取失败时按钮保持关闭。会话支持列表、服务端搜索、新建、重命名、软删除、恢复，以及从指定用户消息或检查点分支为新研究。搜索最多返回协议页大小范围内的结果，不会把全部历史搬入 Renderer。
 
 Provider 额度不足、已知的额度暂停和可恢复断流进入 `Suspended` 并保留检查点；用户可在额度恢复后继续。无法恢复的协议错误、损坏状态或校验失败会进入显式失败状态，不伪装成完成。
+
+Agent Worker 使用单一有序双向管道，因此显式停止不是在同一管道后面排队的普通消息。Host 收到持久化 `event_kind=cancel` 时会先终止正在执行的 Agent Worker，使活动帧读取失败并把未完成操作记为失败；随后重新启动、完成版本/能力握手、恢复最后一个已提交检查点，再把取消事件写入日志并转换到 `Cancelled`。任何请求超时也会废弃该 Worker 通道，下一次调用必须重启握手，禁止把迟到响应误认作下一请求。取消不会发布未校验报告，已持久化工具结果仍可供审计。
 
 ## 动态澄清
 

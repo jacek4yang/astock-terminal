@@ -100,6 +100,19 @@ for (const section of ["dependencies", "devDependencies"]) {
   }
 }
 if (ui.scripts?.tauri) failures.push("ui scripts still expose the obsolete Tauri entrypoint");
+for (const stableAgentModel of [
+  "task_spec",
+  "clarification_request",
+  "agent_question",
+  "conversation_summary",
+  "task_checkpoint",
+  "tool_activity",
+  "evidence_ref",
+  "verification_finding",
+  "provider_quota",
+]) {
+  if (!agentSchema.$defs?.[stableAgentModel]) failures.push(`Agent protocol schema is missing stable model: ${stableAgentModel}`);
+}
 if (ui.dependencies?.["dockview-react"] || ui.devDependencies?.["dockview-react"]) {
   failures.push("v6 three-page renderer still depends on the retired Dockview IDE shell");
 }

@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=21885987a7488bb0e51eaacce89681d72c6f04bb50b5936e7cf67353094a256e
+// GENERATED from protocol/schema; schema-sha256=6946a569e672aadbc444c9a1907eaa65ae50b79711731ad84adf5742c1d1b0ff
 // Run: node protocol/codegen.mjs
 
 export const PROTOCOL_VERSION = 1 as const;
@@ -92,6 +92,73 @@ export interface ClarificationAnswer {
   option_ids: string[];
   answer?: string | null;
   decision_mode: "user_selected" | "agent_best_with_evidence";
+}
+
+export type AgentQuestion = ClarificationQuestion;
+
+export interface ConversationSummary {
+  conversation_id: string;
+  title: string;
+  phase: AgentPhase;
+  message_count: number;
+  evidence_count: number;
+  parent_conversation_id?: string | null;
+  branch_from_message_id?: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface TaskCheckpoint {
+  task_id: string;
+  phase: AgentPhase;
+  accepted_seq: number;
+  pending_tool_ids: string[];
+  completed_tool_ids: string[];
+  evidence_ids: string[];
+  state_version: string;
+}
+
+export interface ToolActivity {
+  call_id: string;
+  kind: string;
+  title: string;
+  detail: string;
+  status: "pending" | "running" | "succeeded" | "failed" | "skipped";
+  cache_hit: boolean;
+  evidence_count: number;
+  started_at_ms?: number | null;
+  finished_at_ms?: number | null;
+}
+
+export interface EvidenceRef {
+  evidence_id: string;
+  source: string;
+  source_version_id?: string | null;
+  as_of?: string | null;
+  fetched_at?: string | null;
+  quality_status: "verified" | "single_source" | "stale" | "conflicting" | "missing" | "blocked";
+  original_url?: string | null;
+}
+
+export interface VerificationFinding {
+  code: string;
+  severity: "info" | "warning" | "error";
+  message: string;
+  evidence_ids: string[];
+  blocking: boolean;
+}
+
+export interface ProviderQuota {
+  provider: string;
+  model_name: string;
+  interval_used?: number | null;
+  interval_total?: number | null;
+  interval_remaining_percent?: number | null;
+  interval_reset_at_ms?: number | null;
+  weekly_used?: number | null;
+  weekly_total?: number | null;
+  weekly_remaining_percent?: number | null;
+  weekly_reset_at_ms?: number | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

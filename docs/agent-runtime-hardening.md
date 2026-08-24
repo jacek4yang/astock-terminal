@@ -27,6 +27,7 @@ MoonBit Agent 的纯 reducer 只处理事件并产生 Effect；Rust Engine 保�
 6. 已成功的幂等键直接复用；崩溃留下的 pending 记录只允许上述三个可重放研究聚合以 `:retry:N` 重新执行。
 7. 每个非 start 的用户事件或研究工作流调用前，Host 都把 Engine 中最新检查点恢复到 Agent；Worker 重启后的正确性不依赖 React 恰好观察到故障。
 8. Agent/Engine 连续丢失三次 2 秒心跳后由 Job Object 监督器重启并重新握手；首次启动与重启都必须匹配 schema 固定的协议 v1、6.0.0 版本、8 MiB 帧限制、Agent reducer 版本和最低能力子集，只有 `ok=true` 不会被接纳；Provider 暂停保留检查点，不发布未完成报告。
+9. 用户显式停止长研究时，Host 会抢占单通道 Agent Worker，记录被中断操作、重启握手并从最新持久化检查点提交 `cancel` 事件；超时通道同样立即作废，不能继续接收迟到帧。
 
 ### 自动恢复分类
 
@@ -76,6 +77,8 @@ Effect 幂等身份由任务、工具 kind 和完整结构化 JSON payload 构�
 | Worker 连续三次心跳失败 | Job Object 监督器重启并重新握手 |
 | 鉴权/协议/存储错误 | 立即失败，不自动循环 |
 | Token Plan 耗尽 | 挂起并保留检查点，用户恢复后继续 |
+| 长研究期间显式停止 | 抢占 Worker、恢复最后检查点、持久化取消并进入 `Cancelled` |
+| Worker 响应超时后迟到 | 原通道被终止，下一请求重启握手，不消费迟到帧 |
 | 报告引用或数字无法复现 | `VerificationFailed`，不发布 |
 
 ## 7. 验证限制

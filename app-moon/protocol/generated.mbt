@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=21885987a7488bb0e51eaacce89681d72c6f04bb50b5936e7cf67353094a256e
+// GENERATED from protocol/schema; schema-sha256=6946a569e672aadbc444c9a1907eaa65ae50b79711731ad84adf5742c1d1b0ff
 // Run: node protocol/codegen.mjs
 
 ///|
@@ -96,6 +96,9 @@ pub(all) struct ClarificationQuestion {
 } derive(Debug, Eq, ToJson, FromJson)
 
 ///|
+pub type AgentQuestion = ClarificationQuestion
+
+///|
 pub extend ClarificationQuestion with ToJson::{to_json}
 
 ///|
@@ -127,3 +130,110 @@ pub extend ClarificationAnswer with ToJson::{to_json}
 
 ///|
 pub extend ClarificationAnswer with FromJson::{from_json}
+
+///|
+pub(all) struct ConversationSummary {
+  conversation_id : String
+  title : String
+  phase : AgentPhase
+  message_count : Int
+  evidence_count : Int
+  parent_conversation_id : String?
+  branch_from_message_id : String?
+  created_at : Int64
+  updated_at : Int64
+} derive(Debug, Eq, ToJson, FromJson)
+
+///|
+pub extend ConversationSummary with ToJson::{to_json}
+
+///|
+pub extend ConversationSummary with FromJson::{from_json}
+
+///|
+pub(all) struct TaskCheckpoint {
+  task_id : String
+  phase : AgentPhase
+  accepted_seq : Int
+  pending_tool_ids : Array[String]
+  completed_tool_ids : Array[String]
+  evidence_ids : Array[String]
+  state_version : String
+} derive(Debug, Eq, ToJson, FromJson)
+
+///|
+pub extend TaskCheckpoint with ToJson::{to_json}
+
+///|
+pub extend TaskCheckpoint with FromJson::{from_json}
+
+///|
+pub(all) struct ToolActivity {
+  call_id : String
+  kind : String
+  title : String
+  detail : String
+  status : String
+  cache_hit : Bool
+  evidence_count : Int
+  started_at_ms : Int64?
+  finished_at_ms : Int64?
+} derive(Debug, Eq, ToJson, FromJson)
+
+///|
+pub extend ToolActivity with ToJson::{to_json}
+
+///|
+pub extend ToolActivity with FromJson::{from_json}
+
+///|
+pub(all) struct EvidenceRef {
+  evidence_id : String
+  source : String
+  source_version_id : String?
+  as_of : String?
+  fetched_at : String?
+  quality_status : String
+  original_url : String?
+} derive(Debug, Eq, ToJson, FromJson)
+
+///|
+pub extend EvidenceRef with ToJson::{to_json}
+
+///|
+pub extend EvidenceRef with FromJson::{from_json}
+
+///|
+pub(all) struct VerificationFinding {
+  code : String
+  severity : String
+  message : String
+  evidence_ids : Array[String]
+  blocking : Bool
+} derive(Debug, Eq, ToJson, FromJson)
+
+///|
+pub extend VerificationFinding with ToJson::{to_json}
+
+///|
+pub extend VerificationFinding with FromJson::{from_json}
+
+///|
+pub(all) struct ProviderQuota {
+  provider : String
+  model_name : String
+  interval_used : Int64?
+  interval_total : Int64?
+  interval_remaining_percent : Double?
+  interval_reset_at_ms : Int64?
+  weekly_used : Int64?
+  weekly_total : Int64?
+  weekly_remaining_percent : Double?
+  weekly_reset_at_ms : Int64?
+} derive(Debug, Eq, ToJson, FromJson)
+
+///|
+pub extend ProviderQuota with ToJson::{to_json}
+
+///|
+pub extend ProviderQuota with FromJson::{from_json}

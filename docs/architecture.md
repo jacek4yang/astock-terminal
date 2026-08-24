@@ -66,6 +66,12 @@ Stateful Agent operations are single-flight at the Host boundary. A concurrent
 duplicate waits for the first operation, then reuses its committed result;
 only an orphaned journal intent after a process loss can enter the bounded
 read-only retry path.
+An explicit durable cancel event is the only exception to waiting behind a
+long Agent request: because the Agent channel is ordered and synchronous, Host
+terminates that Worker, records the interrupted operation as failed, restarts
+and re-handshakes, restores the last Engine checkpoint, and then journals and
+reduces the cancel event. A timed-out Worker channel is likewise terminated so
+a delayed frame can never be correlated with a later request.
 
 Every reducer call id remains unique, while an Engine snapshot cache key is
 derived from the task, tool kind and full JSON payload. If Host/Agent/renderer

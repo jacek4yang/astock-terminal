@@ -170,4 +170,46 @@ mod tests {
         assert!(!AGENT_RENDERER_REQUEST_KINDS.contains(&"agent.research.workflow.continue"));
         assert!(HOST_RENDERER_REQUEST_KINDS.contains(&"window.toggle_maximize"));
     }
+
+    #[test]
+    fn stable_agent_public_models_round_trip_without_language_specific_fields() {
+        let checkpoint = TaskCheckpoint {
+            task_id: "task-1".into(),
+            phase: AgentPhase::Suspended,
+            accepted_seq: 7,
+            pending_tool_ids: vec!["tool-2".into()],
+            completed_tool_ids: vec!["tool-1".into()],
+            evidence_ids: vec!["evf-price".into()],
+            state_version: "moonbit-agent-kernel-v1".into(),
+        };
+        let value = serde_json::to_value(&checkpoint).unwrap();
+        assert_eq!(
+            serde_json::from_value::<TaskCheckpoint>(value).unwrap(),
+            checkpoint
+        );
+
+        let quota = ProviderQuota {
+            provider: "minimax".into(),
+            model_name: "verified-model".into(),
+            interval_used: Some(3),
+            interval_total: Some(10),
+            interval_remaining_percent: Some(70.0),
+            interval_reset_at_ms: Some(1_800_000_000_000),
+            weekly_used: None,
+            weekly_total: None,
+            weekly_remaining_percent: None,
+            weekly_reset_at_ms: None,
+        };
+        let value = serde_json::to_value(&quota).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ProviderQuota>(value).unwrap(),
+            quota
+        );
+        assert!(serde_json::from_value::<ProviderQuota>(json!({
+            "provider": "minimax",
+            "model_name": "verified-model",
+            "secret": "must-not-be-a-public-field"
+        }))
+        .is_err());
+    }
 }

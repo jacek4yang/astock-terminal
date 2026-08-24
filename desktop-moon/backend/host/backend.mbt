@@ -110,6 +110,17 @@ struct DurableAgentInput {
 } derive(FromJson)
 
 ///|
+fn durable_agent_cancel_event(envelope : HostRequestEnvelope) -> Bool {
+  if envelope.kind != "agent.event" {
+    return false
+  }
+  let input : DurableAgentInput = @json.from_json(envelope.payload) catch {
+    _ => return false
+  }
+  input.event_kind == Some("cancel")
+}
+
+///|
 struct DurableEffectIdentity {
   worker_request_kind : String?
   target : String?
@@ -902,6 +913,16 @@ pub async fn Backend::route(
         )
       }
       if durable_agent_request_kind(envelope.kind) {
+        // The Agent Worker intentionally has one ordered protocol channel. An
+        // explicit cancel event must therefore preempt a long provider/tool
+        // request before it can enter the durability mutex. The interrupted
+        // operation is recorded as failed, then this cancel event restores the
+        // last committed checkpoint and transitions it to Cancelled.
+        if durable_agent_cancel_event(envelope) && self.agent.in_flight > 0 {
+          guard self.agent.interrupt_and_restart() else {
+            fail("Agent Worker could not be restarted for durable cancellation")
+          }
+        }
         self.route_durable_agent(request.request)
       } else {
         self.route_agent(request.request)

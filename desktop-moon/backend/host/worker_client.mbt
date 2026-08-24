@@ -197,10 +197,20 @@ pub async fn WorkerClient::request(
   }
   self.lock.acquire()
   defer self.lock.release()
+  if !worker_process_running(self.pid) {
+    self.restart_locked()
+  }
   self.request_count += 1
   errdefer {
     self.failure_count += 1
     self.status = "degraded"
+    // A timed-out single ordered channel can no longer prove which response
+    // belongs to the next request. Kill it immediately; the next request or
+    // heartbeat will restart and re-handshake instead of consuming a stale
+    // frame under the wrong request_id.
+    if worker_process_running(self.pid) {
+      ignore(terminate_worker_process(self.pid))
+    }
   }
   let reply = @async.with_timeout(timeout_ms, () => {
     self.write_frame(request)
@@ -223,9 +233,7 @@ fn WorkerClient::restart_budget_available(self : WorkerClient) -> Bool {
 }
 
 ///|
-async fn WorkerClient::restart(self : WorkerClient) -> Unit {
-  self.lock.acquire()
-  defer self.lock.release()
+async fn WorkerClient::restart_locked(self : WorkerClient) -> Unit {
   if self.closed {
     return
   }
@@ -279,6 +287,31 @@ async fn WorkerClient::restart(self : WorkerClient) -> Unit {
   validate_worker_handshake(self.name, handshake_request_id, reply)
   self.heartbeat_misses = 0
   self.status = "ready"
+}
+
+///|
+async fn WorkerClient::restart(self : WorkerClient) -> Unit {
+  self.lock.acquire()
+  defer self.lock.release()
+  self.restart_locked()
+}
+
+///|
+/// Preempt a long synchronous Worker operation. The process termination makes
+/// the active framed read fail, after which this call acquires the channel lock
+/// and performs a clean spawn plus version/capability handshake. This is used
+/// only for an explicit durable Agent cancel event.
+pub async fn WorkerClient::interrupt_and_restart(self : WorkerClient) -> Bool {
+  if self.closed {
+    return false
+  }
+  let previous_pid = self.pid
+  self.status = "cancelling"
+  if worker_process_running(previous_pid) {
+    ignore(terminate_worker_process(previous_pid))
+  }
+  self.restart()
+  self.pid != previous_pid && self.status == "ready"
 }
 
 ///|

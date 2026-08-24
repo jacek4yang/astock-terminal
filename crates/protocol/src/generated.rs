@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=21885987a7488bb0e51eaacce89681d72c6f04bb50b5936e7cf67353094a256e
+// GENERATED from protocol/schema; schema-sha256=6946a569e672aadbc444c9a1907eaa65ae50b79711731ad84adf5742c1d1b0ff
 // Run: node protocol/codegen.mjs
 
 use serde::{Deserialize, Serialize};
@@ -427,4 +427,99 @@ pub struct ClarificationAnswer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
     pub decision_mode: String,
+}
+
+pub type AgentQuestion = ClarificationQuestion;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationSummary {
+    pub conversation_id: String,
+    pub title: String,
+    pub phase: AgentPhase,
+    pub message_count: u64,
+    pub evidence_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_from_message_id: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskCheckpoint {
+    pub task_id: String,
+    pub phase: AgentPhase,
+    pub accepted_seq: u64,
+    pub pending_tool_ids: Vec<String>,
+    pub completed_tool_ids: Vec<String>,
+    pub evidence_ids: Vec<String>,
+    pub state_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolActivity {
+    pub call_id: String,
+    pub kind: String,
+    pub title: String,
+    pub detail: String,
+    pub status: String,
+    pub cache_hit: bool,
+    pub evidence_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceRef {
+    pub evidence_id: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_version_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetched_at: Option<String>,
+    pub quality_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationFinding {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+    pub evidence_ids: Vec<String>,
+    pub blocking: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderQuota {
+    pub provider: String,
+    pub model_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_used: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_remaining_percent: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_reset_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weekly_used: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weekly_total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weekly_remaining_percent: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weekly_reset_at_ms: Option<u64>,
 }
