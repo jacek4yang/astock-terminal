@@ -9,6 +9,7 @@ const agentWorkbench = fs.readFileSync(path.join(root, "ui", "src", "workbench",
 const moonAgent = fs.readFileSync(path.join(root, "app-moon", "agent_worker", "main.mbt"), "utf8");
 const moonKernel = fs.readFileSync(path.join(root, "app-moon", "agent_core", "state.mbt"), "utf8");
 const moonHost = fs.readFileSync(path.join(root, "desktop-moon", "backend", "host", "backend.mbt"), "utf8");
+const moonEntry = fs.readFileSync(path.join(root, "desktop-moon", "backend", "app", "main.mbt"), "utf8");
 const engineSchema = fs.readFileSync(path.join(root, "protocol", "schema", "engine.schema.json"), "utf8");
 const browserBridge = fs.readFileSync(path.join(root, "scripts", "browser-dev-bridge.mjs"), "utf8");
 const releaseGate = fs.readFileSync(path.join(root, "scripts", "release-gate.ps1"), "utf8");
@@ -16,6 +17,8 @@ const releaseSigner = fs.readFileSync(path.join(root, "scripts", "sign-release.p
 const packageHardener = fs.readFileSync(path.join(root, "scripts", "harden-package.ps1"), "utf8");
 const migrationEvidence = fs.readFileSync(path.join(root, "scripts", "migration-e2e.ps1"), "utf8");
 const faultEvidence = fs.readFileSync(path.join(root, "scripts", "fault-injection-e2e.ps1"), "utf8");
+const buildCommon = fs.readFileSync(path.join(root, "scripts", "Build.Common.ps1"), "utf8");
+const desktopCdpSession = fs.readFileSync(path.join(root, "scripts", "desktop-cdp-session.ps1"), "utf8");
 
 if (fs.existsSync(path.join(root, "src-tauri"))) failures.push("src-tauri differential oracle has not been removed");
 if (/"src-tauri"/.test(cargo)) failures.push("Cargo workspace still contains src-tauri");
@@ -77,6 +80,15 @@ for (const faultMarker of ["fault-injection-core.mjs", "provider-stream-break", 
   if (!faultEvidence.includes(faultMarker)) failures.push(`core fault harness is missing ${faultMarker}`);
 }
 if (!releaseGate.includes("fault-injection-e2e.ps1")) failures.push("release gate does not execute core fault injection");
+if (!moonEntry.includes('ASTOCK_RELEASE_TEST_CDP') || !moonEntry.includes('PROTON_HEADLESS')) {
+  failures.push("packaged desktop entry does not expose fail-closed headless CDP release measurement");
+}
+if (!buildCommon.includes('proton-0.2.1-explicit-remote-debug.patch') || !buildCommon.includes('AStock production hardening: choosing a port must never turn CDP on')) {
+  failures.push("Proton runtime does not require explicit application permission before enabling CDP");
+}
+for (const cdpMarker of ["ASTOCK_RELEASE_TEST_CDP", "PROTON_REMOTE_DEBUGGING_PORT", "desktop-cdp-smoke.mjs", "ProcessStartInfo", "WindowStyle"]) {
+  if (!desktopCdpSession.includes(cdpMarker)) failures.push(`packaged desktop CDP harness is missing ${cdpMarker}`);
+}
 
 const moon = fs.readFileSync(path.join(root, "desktop-moon", "backend", "moon.mod"), "utf8");
 for (const dependency of [

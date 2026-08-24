@@ -1,4 +1,16 @@
 ///|
+fn environment_flag(name : String) -> Bool {
+  match @env.get_env_var(name) {
+    Some(value) =>
+      match value.trim().to_owned().to_lower() {
+        "" | "0" | "false" | "no" | "off" => false
+        _ => true
+      }
+    None => false
+  }
+}
+
+///|
 /// Windows-first Proton/CEF Host. The Host owns only desktop orchestration,
 /// permissions, Worker supervision, IPC routing and diagnostics.
 async fn main {
@@ -8,14 +20,25 @@ async fn main {
     }
     defer backend.close()
     group.spawn_bg(no_wait=true, allow_failure=true, () => backend.supervise())
-    @proton.asset(
+    let application = @proton.asset(
       "AStock Terminal",
       "index.html",
       width=1440,
       height=900,
       resizable=true,
     )
-    .titlebar_style(@proton.TitlebarStyle::Overlay)
+    let application = if environment_flag("PROTON_HEADLESS") {
+      // Proton rejects overlay titlebars in off-screen mode. This path exists
+      // only for packaged release measurement; normal desktop windows retain
+      // the native overlay and its drag/maximize behavior.
+      application.titlebar_style(@proton.TitlebarStyle::Default)
+    } else {
+      application.titlebar_style(@proton.TitlebarStyle::Overlay)
+    }
+    application
+    // CEF CDP is deny-by-default. The production shortcut never sets this
+    // variable; release automation opts in on a random loopback-only port.
+    .debug(enabled=environment_flag("ASTOCK_RELEASE_TEST_CDP"))
     .single_instance("com.astock.terminal")
     .window_lifecycle(
       on_ready=fn(context) { backend.attach_window(context.handle()) },

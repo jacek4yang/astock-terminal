@@ -68,6 +68,27 @@ function Enable-AStockProtonBundleWindowsPaths {
     if ($LASTEXITCODE -ne 0) { throw 'Failed to apply the Proton Bundle Windows path patch.' }
 }
 
+function Enable-AStockProtonExplicitRemoteDebug {
+    param([Parameter(Mandatory)][string]$RepositoryRoot)
+
+    # Proton 0.2.1 treats a remote-debugging port as implicit permission to
+    # enable CDP. AStock separates permission from port selection so production
+    # shortcuts remain deny-by-default and release automation must explicitly
+    # opt in through the desktop entry's ASTOCK_RELEASE_TEST_CDP gate.
+    $protonRoot = Join-Path $RepositoryRoot 'desktop-moon\.mooncakes\moonbit-community\proton'
+    $source = Join-Path $protonRoot 'facade_manifest.mbt'
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { return }
+    $text = Get-Content -LiteralPath $source -Raw
+    if ($text.Contains('AStock production hardening: choosing a port must never turn CDP on')) { return }
+    $patch = Join-Path $RepositoryRoot 'patches\proton-0.2.1-explicit-remote-debug.patch'
+    & git -C $RepositoryRoot apply --check --unsafe-paths --directory='desktop-moon/.mooncakes/moonbit-community/proton' $patch
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Pinned Proton source does not match the audited explicit remote-debug patch.'
+    }
+    & git -C $RepositoryRoot apply --unsafe-paths --directory='desktop-moon/.mooncakes/moonbit-community/proton' $patch
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to apply the Proton explicit remote-debug patch.' }
+}
+
 function Initialize-AStockBuildEnvironment {
     param(
         [switch]$SkipSpaceCheck
@@ -77,6 +98,7 @@ function Initialize-AStockBuildEnvironment {
     Enable-AStockProtonAlloyRuntime -RepositoryRoot $repoRoot
     Enable-AStockProtonLiveResize -RepositoryRoot $repoRoot
     Enable-AStockProtonBundleWindowsPaths -RepositoryRoot $repoRoot
+    Enable-AStockProtonExplicitRemoteDebug -RepositoryRoot $repoRoot
     $buildRoot = if ([string]::IsNullOrWhiteSpace($env:ASTOCK_BUILD_ROOT)) {
         'D:\astock-build\astock-terminal'
     } else {

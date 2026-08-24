@@ -86,13 +86,13 @@ const REQUIRED_CASES = Object.freeze({
 });
 
 const REQUIRED_PERFORMANCE_METRICS = Object.freeze({
-  workspace_restore_p95_ms: { comparison: "<=", budget: 1500 },
-  command_feedback_p95_ms: { comparison: "<=", budget: 100 },
-  logical_rows_scroll_fps: { comparison: ">=", budget: 50 },
-  agent_render_hz: { comparison: "<=", budget: 10 },
-  idle_cpu_p95_pct: { comparison: "<", budget: 2 },
-  cold_start_regression_pct: { comparison: "<=", budget: 15 },
-  memory_regression_pct: { comparison: "<=", budget: 15 },
+  workspace_restore_p95_ms: { comparison: "<=", budget: 1500, aggregation: "p95", minSamples: 30, unit: "ms" },
+  command_feedback_p95_ms: { comparison: "<=", budget: 100, aggregation: "p95", minSamples: 30, unit: "ms" },
+  logical_rows_scroll_fps: { comparison: ">=", budget: 50, aggregation: "p05", minSamples: 10, unit: "fps" },
+  agent_render_hz: { comparison: "<=", budget: 10, aggregation: "max", minSamples: 10, unit: "hz" },
+  idle_cpu_p95_pct: { comparison: "<", budget: 2, aggregation: "p95", minSamples: 60, unit: "pct" },
+  cold_start_regression_pct: { comparison: "<=", budget: 15, aggregation: "p95_regression", minSamples: 10, unit: "pct" },
+  memory_regression_pct: { comparison: "<=", budget: 15, aggregation: "p95_regression", minSamples: 10, unit: "pct" },
 });
 
 function invariant(condition, message) {
@@ -127,6 +127,15 @@ function validateCases(evidence, gate) {
 }
 
 function validatePerformance(evidence) {
+  invariant(isRecord(evidence.environment), "performance-budgets: measurement environment is required");
+  invariant(evidence.environment.mode === "packaged-proton-cef", "performance-budgets: measurements must use the packaged Proton/CEF application");
+  for (const field of ["cpu", "gpu", "power_profile"]) {
+    invariant(typeof evidence.environment[field] === "string" && evidence.environment[field].trim(), `performance-budgets: environment.${field} is required`);
+  }
+  invariant(Number.isFinite(evidence.environment.memory_bytes) && evidence.environment.memory_bytes > 0, "performance-budgets: environment.memory_bytes is required");
+  invariant(Number.isFinite(evidence.environment.display_scale_pct) && evidence.environment.display_scale_pct > 0, "performance-budgets: environment.display_scale_pct is required");
+  invariant(HEX_SHA256.test(evidence.environment.proton_skeleton_sha256 ?? ""), "performance-budgets: Proton skeleton SHA-256 is required");
+  invariant(HEX_SHA256.test(evidence.environment.application_package_sha256 ?? ""), "performance-budgets: application package SHA-256 is required");
   invariant(Array.isArray(evidence.metrics), "performance-budgets: metrics must be an array");
   const metrics = new Map(evidence.metrics.map((metric) => [metric.id, metric]));
   for (const [id, policy] of Object.entries(REQUIRED_PERFORMANCE_METRICS)) {
@@ -135,6 +144,24 @@ function validatePerformance(evidence) {
     invariant(Number.isFinite(metric.value), `performance-budgets: ${id} has invalid value`);
     invariant(metric.comparison === policy.comparison, `performance-budgets: ${id} comparison must be ${policy.comparison}`);
     invariant(metric.budget === policy.budget, `performance-budgets: ${id} budget must be ${policy.budget}`);
+    invariant(metric.aggregation === policy.aggregation, `performance-budgets: ${id} aggregation must be ${policy.aggregation}`);
+    invariant(metric.unit === policy.unit, `performance-budgets: ${id} unit must be ${policy.unit}`);
+    invariant(Array.isArray(metric.samples) && metric.samples.length >= policy.minSamples, `performance-budgets: ${id} requires at least ${policy.minSamples} samples`);
+    invariant(metric.samples.every((sample) => Number.isFinite(sample) && sample >= 0), `performance-budgets: ${id} samples must be finite and non-negative`);
+    let calculated;
+    if (policy.aggregation === "p95_regression") {
+      invariant(Array.isArray(metric.baseline_samples) && metric.baseline_samples.length >= policy.minSamples, `performance-budgets: ${id} requires at least ${policy.minSamples} baseline samples`);
+      invariant(metric.baseline_samples.every((sample) => Number.isFinite(sample) && sample > 0), `performance-budgets: ${id} baseline samples must be finite and positive`);
+      calculated = ((quantile(metric.samples, 0.95) / quantile(metric.baseline_samples, 0.95)) - 1) * 100;
+    } else if (policy.aggregation === "p95") {
+      calculated = quantile(metric.samples, 0.95);
+    } else if (policy.aggregation === "p05") {
+      calculated = quantile(metric.samples, 0.05);
+    } else {
+      calculated = Math.max(...metric.samples);
+    }
+    const tolerance = Math.max(0.01, Math.abs(calculated) * 0.001);
+    invariant(Math.abs(metric.value - calculated) <= tolerance, `performance-budgets: ${id} value does not match its ${policy.aggregation} samples`);
     const passed = policy.comparison === ">="
       ? metric.value >= policy.budget
       : policy.comparison === "<"
@@ -142,6 +169,12 @@ function validatePerformance(evidence) {
         : metric.value <= policy.budget;
     invariant(passed && metric.status === STATUS, `performance-budgets: ${id} exceeds its release budget`);
   }
+}
+
+function quantile(values, probability) {
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = Math.max(0, Math.min(sorted.length - 1, Math.ceil(probability * sorted.length) - 1));
+  return sorted[index];
 }
 
 function validateCredentialRotation(evidence) {

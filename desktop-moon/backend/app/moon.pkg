@@ -1,5 +1,6 @@
 import {
   "astock/desktop_backend/host",
+  "moonbitlang/core/env",
   "moonbitlang/async",
   "moonbit-community/proton",
 }

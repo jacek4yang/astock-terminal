@@ -8,8 +8,23 @@ It is not a manually authored pass marker. Every evidence JSON must contain:
 - unique, individually passed cases with measured durations;
 - every gate-specific scenario required by `scripts/release-evidence-check.mjs`.
 
-The desktop gate requires at least 40 passed cases. Performance evidence carries
-the measured value, fixed budget and comparison for every release metric.
+The desktop gate requires at least 40 passed cases. Packaged CEF inspection is
+deny-by-default: the application must explicitly receive
+`ASTOCK_RELEASE_TEST_CDP=1`, while the isolated runner chooses a random loopback
+port. Supplying only `PROTON_REMOTE_DEBUGGING_PORT` must not enable CDP. The
+runner accepts only the expected `ws://127.0.0.1:<random-port>/devtools/page/...`
+endpoint, binds the package metadata to the full source commit and places all
+profile/data state under `ASTOCK_BUILD_ROOT`. These variables are release-test
+capabilities and are never set by the installed production shortcut.
+
+Performance evidence carries the raw samples, aggregation, unit, fixed budget
+and comparison for every release metric. The validator independently recomputes
+p95/p05/max values and p95 regressions instead of trusting the reported value.
+Restore and command latency require at least 30 samples, scroll/render at least
+10, idle CPU at least 60, and cold-start/memory comparisons at least 10 samples
+for both the application and pinned Proton skeleton. Evidence must identify the
+packaged application and skeleton SHA-256 plus CPU, GPU, memory, power profile
+and display scale; browser previews and synthetic claims are rejected.
 External-service evidence explicitly remains a trusted boundary even after a
 live MiniMax Plus and JoinQuant smoke test. Credential evidence records only
 rotation/readback booleans and never a key, password or reversible secret.

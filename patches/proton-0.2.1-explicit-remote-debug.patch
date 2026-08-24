@@ -1,0 +1,16 @@
+diff --git a/facade_manifest.mbt b/facade_manifest.mbt
+--- a/facade_manifest.mbt
++++ b/facade_manifest.mbt
+@@ -123,8 +123,7 @@ fn App::inline_manifest(self : App) -> @manifest.AppManifest {
+ ///|
+ fn runtime_debug_override_enabled() -> Bool {
+-  proton_dev_mode_enabled() ||
+-  (match @env.get_env_var("PROTON_REMOTE_DEBUGGING_PORT") {
+-    Some(value) => value.trim().to_owned() != ""
+-    None => false
+-  })
++  // AStock production hardening: choosing a port must never turn CDP on by
++  // itself. The application explicitly enables debug only for its isolated
++  // release-test mode; normal Proton development remains unchanged.
++  proton_dev_mode_enabled()
+ }
