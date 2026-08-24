@@ -2,6 +2,7 @@ mod analysis;
 mod credentials;
 mod data_quality;
 mod data_root;
+mod disclosure_sync;
 mod event_store;
 mod global_sync;
 mod scan;
@@ -35,6 +36,7 @@ pub struct Engine {
     fundamental: Arc<FundamentalClient>,
     rules: RuleSet,
     scan: scan::ScanService,
+    disclosure_sync: disclosure_sync::DisclosureSyncService,
     global_sync: global_sync::GlobalSyncService,
     provider_boot: credentials::BootStatus,
     credential_migration_error: Option<String>,
@@ -77,6 +79,7 @@ impl Engine {
             fundamental,
             rules,
             scan: scan::ScanService::default(),
+            disclosure_sync: disclosure_sync::DisclosureSyncService::default(),
             global_sync: global_sync::GlobalSyncService::default(),
             provider_boot,
             credential_migration_error,
@@ -1095,6 +1098,67 @@ impl Engine {
                         .map_err(upstream)?,
                 )
             }
+            "research.disclosures.list" => {
+                let mut query: astock_disclosure::DisclosureQuery =
+                    decode_payload(&request.payload)?;
+                query.page = query.page.max(1);
+                query.page_size = query.page_size.clamp(1, 500);
+                if let Some(code) = query.security_code.as_deref() {
+                    Symbol::new(code).map_err(|error| {
+                        ServiceError::new("invalid_payload", error.to_string(), false)
+                    })?;
+                }
+                let page = astock_disclosure::DisclosureStore::new(self.storage.clone())
+                    .query(query)
+                    .await
+                    .map_err(disclosure_error)?;
+                serde_json::to_value(page).map_err(serialize_error)
+            }
+            "research.disclosures.detail" => {
+                let payload: DisclosureDetailPayload = decode_payload(&request.payload)?;
+                let disclosure_id = payload.disclosure_id.trim();
+                if disclosure_id.is_empty() || disclosure_id.len() > 128 {
+                    return Err(ServiceError::new(
+                        "invalid_payload",
+                        "disclosure_id 必须是 1 至 128 个字符",
+                        false,
+                    ));
+                }
+                let detail = astock_disclosure::DisclosureStore::new(self.storage.clone())
+                    .detail(disclosure_id)
+                    .await
+                    .map_err(disclosure_error)?;
+                serde_json::to_value(detail).map_err(serialize_error)
+            }
+            "research.disclosures.providers" => {
+                let providers = disclosure_sync::provider_health(self.storage.clone())
+                    .await
+                    .map_err(|error| ServiceError::new("disclosure", error, true))?;
+                serde_json::to_value(providers).map_err(serialize_error)
+            }
+            "research.disclosures.sync.start" => {
+                let payload: disclosure_sync::DisclosureSyncRequest =
+                    decode_payload(&request.payload)?;
+                let started = self
+                    .disclosure_sync
+                    .start(self.market.clone(), self.storage.clone(), payload)
+                    .await
+                    .map_err(|error| {
+                        let code = if error.contains("仍在后台运行") {
+                            "already_running"
+                        } else {
+                            "invalid_payload"
+                        };
+                        ServiceError::new(code, error, code == "already_running")
+                    })?;
+                serde_json::to_value(started).map_err(serialize_error)
+            }
+            "research.disclosures.sync.status" => {
+                serde_json::to_value(self.disclosure_sync.status()).map_err(serialize_error)
+            }
+            "research.disclosures.sync.cancel" => {
+                Ok(json!({ "cancelled": self.disclosure_sync.cancel() }))
+            }
             "research.global_context" => {
                 let world_bank =
                     astock_market_data::providers::WorldBankProvider::new(self.market.http.clone());
@@ -1867,6 +1931,12 @@ struct BoardConstituentsPayload {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct DisclosureDetailPayload {
+    disclosure_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TaskIdPayload {
     task_id: String,
 }
@@ -1975,6 +2045,15 @@ fn upstream(error: impl std::fmt::Display) -> ServiceError {
 
 fn storage(error: impl std::fmt::Display) -> ServiceError {
     ServiceError::new("storage", error.to_string(), true)
+}
+
+fn disclosure_error(error: astock_disclosure::Error) -> ServiceError {
+    let retryable = !matches!(error, astock_disclosure::Error::NotFound(_));
+    ServiceError::new("disclosure", error.to_string(), retryable)
+}
+
+fn serialize_error(error: serde_json::Error) -> ServiceError {
+    ServiceError::new("serialization", error.to_string(), false)
 }
 
 async fn persist_driver_tree(

@@ -14,7 +14,12 @@ vi.mock("../bridge", () => ({
 
 import {
   chanlunMinute,
+  disclosureSyncCancel,
+  disclosureSyncStart,
+  disclosureSyncStatus,
   getBoardConstituents,
+  getDisclosureDetail,
+  getDisclosureProviderHealth,
   getGlobalGoldenChains,
   getGlobalProviderHealth,
   getGlobalTransmissionPaths,
@@ -23,6 +28,7 @@ import {
   globalSyncStart,
   globalSyncStatus,
   queryGlobalDocuments,
+  queryDisclosures,
 } from "./api";
 
 describe("Proton global research bridge", () => {
@@ -72,5 +78,42 @@ describe("Proton global research bridge", () => {
     expect(requestNative.mock.calls[0][2]).toEqual({ symbol: "300308" });
     expect(requestNative.mock.calls[1][2]).toEqual({ pool: "strong", date: "2026-08-24" });
     expect(requestNative.mock.calls[2][2]).toEqual({ board_code: "bk0447" });
+  });
+
+  it("routes the complete disclosure workflow through the Engine", async () => {
+    await queryDisclosures({
+      security_code: "300308",
+      keyword: null,
+      category: null,
+      status: null,
+      primary_only: true,
+      page: 1,
+      page_size: 50,
+    });
+    await getDisclosureDetail("disc:verified");
+    await getDisclosureProviderHealth();
+    await disclosureSyncStart({ security_code: "300308", days: 90, max_pages: 2 });
+    await disclosureSyncStatus();
+    await disclosureSyncCancel();
+
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "research.disclosures.list",
+      "research.disclosures.detail",
+      "research.disclosures.providers",
+      "research.disclosures.sync.start",
+      "research.disclosures.sync.status",
+      "research.disclosures.sync.cancel",
+    ]);
+    expect(requestNative.mock.calls[0][2]).toMatchObject({
+      security_code: "300308",
+      primary_only: true,
+      page_size: 50,
+    });
+    expect(requestNative.mock.calls[1][2]).toEqual({ disclosure_id: "disc:verified" });
+    expect(requestNative.mock.calls[3][2]).toEqual({
+      security_code: "300308",
+      days: 90,
+      max_pages: 2,
+    });
   });
 });

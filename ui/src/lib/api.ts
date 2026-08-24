@@ -94,6 +94,27 @@ async function protonCommand<T>(name: string, args: Record<string, unknown> = {}
         { board_code: args.bk_code },
         { deadlineMs: 60_000 },
       );
+    case "query_disclosures":
+      return requestNative<T>(
+        "engine",
+        "research.disclosures.list",
+        (args.query ?? {}) as Record<string, unknown>,
+      );
+    case "get_disclosure_detail":
+      return requestNative<T>("engine", "research.disclosures.detail", args);
+    case "get_disclosure_provider_health":
+      return requestNative<T>("engine", "research.disclosures.providers", {});
+    case "disclosure_sync_start":
+      return requestNative<T>(
+        "engine",
+        "research.disclosures.sync.start",
+        (args.request ?? {}) as Record<string, unknown>,
+        { deadlineMs: 60_000 },
+      );
+    case "disclosure_sync_status":
+      return requestNative<T>("engine", "research.disclosures.sync.status", {});
+    case "disclosure_sync_cancel":
+      return requestNative<T>("engine", "research.disclosures.sync.cancel", {});
     case "get_market_breadth": {
       const result = await requestNative<{ breadth: unknown }>("engine", "market.overview", {});
       return result.breadth as T;

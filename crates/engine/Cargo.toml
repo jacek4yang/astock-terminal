@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 astock-core = { path = "../core" }
 astock-chanlun = { path = "../chanlun" }
+astock-disclosure = { path = "../disclosure" }
 astock-fundamental = { path = "../fundamental" }
 astock-global-intelligence = { path = "../global-intelligence" }
 astock-market-data = { path = "../market-data" }
