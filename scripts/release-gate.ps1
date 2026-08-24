@@ -91,13 +91,7 @@ function Assert-ReleaseEvidence {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Required evidence is missing: $path"
     }
-    $evidence = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
-    if ($evidence.gate -ne $Gate -or $evidence.status -ne 'PASSED' -or $evidence.commit -ne $commit) {
-        throw "Evidence $FileName does not prove $Gate for commit $commit"
-    }
-    if (-not $evidence.completed_at_utc) {
-        throw "Evidence $FileName has no completion time"
-    }
+    Invoke-Checked -FilePath 'node' -Arguments @('scripts/release-evidence-check.mjs', $path, $Gate, $commit)
     Get-FileHash -Algorithm SHA256 -LiteralPath $path | Format-List
 }
 
@@ -140,6 +134,7 @@ try {
     Invoke-ReleaseGateStep 'version-contract' 'source' 'INTEGRATION TESTED' {
         Invoke-Checked -FilePath 'node' -Arguments @('scripts/release-version-check.mjs', '6.0.0')
         Invoke-Checked -FilePath 'node' -Arguments @('protocol/codegen.mjs', '--check')
+        Invoke-Checked -FilePath 'node' -Arguments @('--test', 'scripts/release-evidence-check.test.mjs')
     }
 
     Invoke-ReleaseGateStep 'architecture-cutover' 'architecture' 'INTEGRATION TESTED' {
