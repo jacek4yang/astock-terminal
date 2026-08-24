@@ -94,7 +94,7 @@ function validateCases(evidence, gate) {
     ids.add(item.id);
     invariant(item.status === STATUS, `${gate}: case ${item.id} is not PASSED`);
     invariant(Number.isFinite(item.duration_ms) && item.duration_ms >= 0, `${gate}: case ${item.id} has invalid duration_ms`);
-    const requiresArtifacts = gate === "browser-cdp" || gate === "desktop-window-native" || gate === "desktop-e2e-40" ||
+    const requiresArtifacts = gate === "browser-cdp" || gate === "desktop-window-native" || gate === "desktop-e2e-40" || gate === "performance-budgets" ||
       (gate === "fault-injection" && (item.id === "renderer-kill" || item.id === "gpu-failure"));
     if (requiresArtifacts) {
       invariant(Number.isInteger(item.assertion_count) && item.assertion_count > 0, `${gate}: case ${item.id} has no assertions`);
@@ -127,13 +127,28 @@ function validateCaseArtifact(artifact, gate, caseId) {
 function validatePerformance(evidence) {
   invariant(isRecord(evidence.environment), "performance-budgets: measurement environment is required");
   invariant(evidence.environment.mode === "packaged-proton-cef", "performance-budgets: measurements must use the packaged Proton/CEF application");
+  invariant(evidence.environment.pinned_proton_version === "0.2.1", "performance-budgets: Proton baseline must be pinned to 0.2.1");
+  invariant(evidence.environment.cef_version === "147.0.14+g76d2442", "performance-budgets: CEF baseline version is not pinned");
+  invariant(evidence.environment.chromium_version === "147.0.7727.138", "performance-budgets: Chromium baseline version is not pinned");
   for (const field of ["cpu", "gpu", "power_profile"]) {
     invariant(typeof evidence.environment[field] === "string" && evidence.environment[field].trim(), `performance-budgets: environment.${field} is required`);
   }
   invariant(Number.isFinite(evidence.environment.memory_bytes) && evidence.environment.memory_bytes > 0, "performance-budgets: environment.memory_bytes is required");
   invariant(Number.isFinite(evidence.environment.display_scale_pct) && evidence.environment.display_scale_pct > 0, "performance-budgets: environment.display_scale_pct is required");
   invariant(HEX_SHA256.test(evidence.environment.proton_skeleton_sha256 ?? ""), "performance-budgets: Proton skeleton SHA-256 is required");
+  invariant(HEX_SHA256.test(evidence.environment.proton_skeleton_source_sha256 ?? ""), "performance-budgets: Proton skeleton source SHA-256 is required");
   invariant(HEX_SHA256.test(evidence.environment.application_package_sha256 ?? ""), "performance-budgets: application package SHA-256 is required");
+  invariant(isRecord(evidence.measurement), "performance-budgets: measurement contract is required");
+  invariant(evidence.measurement.packaged_application === true, "performance-budgets: packaged application measurement is required");
+  invariant(evidence.measurement.browser_preview === false, "performance-budgets: browser preview cannot satisfy packaged performance evidence");
+  invariant(evidence.measurement.release_test_fixture === true, "performance-budgets: audited release performance fixture is required");
+  invariant(evidence.measurement.logical_rows === 100_000, "performance-budgets: the logical table fixture must contain exactly 100,000 rows");
+  invariant(Number.isInteger(evidence.measurement.maximum_dom_rows) && evidence.measurement.maximum_dom_rows > 0 && evidence.measurement.maximum_dom_rows <= 200,
+    "performance-budgets: virtualized DOM must contain between 1 and 200 rows");
+  validateCaseArtifact(evidence.measurement.raw_samples, "performance-budgets", "raw-samples");
+  const caseArtifacts = evidence.cases.flatMap((item) => item.artifacts ?? []);
+  invariant(caseArtifacts.some((artifact) => artifact.path === evidence.measurement.raw_samples.path && artifact.sha256 === evidence.measurement.raw_samples.sha256),
+    "performance-budgets: raw samples are not bound to the measurement case");
   invariant(Array.isArray(evidence.metrics), "performance-budgets: metrics must be an array");
   const metrics = new Map(evidence.metrics.map((metric) => [metric.id, metric]));
   for (const [id, policy] of Object.entries(REQUIRED_PERFORMANCE_METRICS)) {

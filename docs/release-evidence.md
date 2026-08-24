@@ -35,7 +35,13 @@ Restore and command latency require at least 30 samples, scroll/render at least
 10, idle CPU at least 60, and cold-start/memory comparisons at least 10 samples
 for both the application and pinned Proton skeleton. Evidence must identify the
 packaged application and skeleton SHA-256 plus CPU, GPU, memory, power profile
-and display scale; browser previews and synthetic claims are rejected.
+and display scale; browser previews and synthetic claims are rejected. The
+release-only fixture contains exactly 100,000 logical rows, must retain at most
+200 DOM rows, and uses the production Agent event coalescer. Its raw CDP and
+process-tree samples are stored outside the repository on `ASTOCK_BUILD_ROOT`,
+hashed, and bound to the evidence case. `performance-e2e.ps1` refuses to launch
+the packaged desktop unless the same clean commit already has valid Codex
+in-app browser evidence; a failed measurement never replaces prior evidence.
 External-service evidence explicitly remains a trusted boundary even after a
 live MiniMax Plus and JoinQuant smoke test. It must contain a real model-catalog
 lookup, Token Plan quota snapshot, a complete 20,000 CNY manual-plan run over

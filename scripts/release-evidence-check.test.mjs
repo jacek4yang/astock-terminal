@@ -51,16 +51,34 @@ function completePerformance() {
     id, value, comparison, budget, aggregation, unit, status: "PASSED", samples: Array(count).fill(value),
   });
   return {
-    ...base("performance-budgets", ["measurement-environment"]),
+    ...base("performance-budgets", ["packaged-proton-cef-measurement"]),
+    cases: evidencedCases(["packaged-proton-cef-measurement"]),
     environment: {
       mode: "packaged-proton-cef",
+      pinned_proton_version: "0.2.1",
+      cef_version: "147.0.14+g76d2442",
+      chromium_version: "147.0.7727.138",
       cpu: "test cpu",
       gpu: "test gpu",
       power_profile: "balanced",
       memory_bytes: 16 * 1024 ** 3,
       display_scale_pct: 100,
       proton_skeleton_sha256: "b".repeat(64),
+      proton_skeleton_source_sha256: "d".repeat(64),
       application_package_sha256: "c".repeat(64),
+    },
+    measurement: {
+      packaged_application: true,
+      browser_preview: false,
+      release_test_fixture: true,
+      logical_rows: 100_000,
+      maximum_dom_rows: 52,
+      raw_samples: {
+        kind: "packaged-performance-raw-samples",
+        path: artifactPath,
+        sha256: artifactHash,
+        captured_at_utc: "2026-08-24T00:00:30.000Z",
+      },
     },
     metrics: [
       metric("workspace_restore_p95_ms", 1000, "<=", 1500, "p95", "ms", 30),
@@ -234,6 +252,19 @@ test("recomputes performance aggregates instead of trusting the claimed value", 
   const evidence = completePerformance();
   evidence.metrics[2].value = 90;
   assert.throws(() => validateEvidence(evidence, "performance-budgets", commit), /does not match its p05 samples/);
+});
+
+test("rejects browser-only or unbounded performance fixtures", () => {
+  const evidence = completePerformance();
+  evidence.measurement.browser_preview = true;
+  evidence.measurement.maximum_dom_rows = 100_000;
+  assert.throws(() => validateEvidence(evidence, "performance-budgets", commit), /browser preview/);
+});
+
+test("requires performance raw samples to be hashed and bound to its case", () => {
+  const evidence = completePerformance();
+  evidence.measurement.raw_samples.sha256 = "f".repeat(64);
+  assert.throws(() => validateEvidence(evidence, "performance-budgets", commit), /SHA-256 does not match/);
 });
 
 test("accepts complete credential-rotation evidence without embedded secrets", () => {

@@ -20,6 +20,8 @@ const migrationEvidence = fs.readFileSync(path.join(root, "scripts", "migration-
 const faultEvidence = fs.readFileSync(path.join(root, "scripts", "fault-injection-e2e.ps1"), "utf8");
 const externalEvidence = fs.readFileSync(path.join(root, "scripts", "external-services-e2e.ps1"), "utf8");
 const credentialEvidence = fs.readFileSync(path.join(root, "scripts", "record-credential-rotation.ps1"), "utf8");
+const performanceEvidence = fs.readFileSync(path.join(root, "scripts", "performance-e2e.ps1"), "utf8");
+const performanceCdp = fs.readFileSync(path.join(root, "scripts", "performance-cdp.mjs"), "utf8");
 const buildCommon = fs.readFileSync(path.join(root, "scripts", "Build.Common.ps1"), "utf8");
 const desktopCdpSession = fs.readFileSync(path.join(root, "scripts", "desktop-cdp-session.ps1"), "utf8");
 const desktopRendererFault = fs.readFileSync(path.join(root, "scripts", "desktop-renderer-fault.mjs"), "utf8");
@@ -106,6 +108,7 @@ for (const [name, source] of [
   ["migration", migrationEvidence],
   ["external Provider", externalEvidence],
   ["credential rotation", credentialEvidence],
+  ["performance", performanceEvidence],
   ["signing", releaseSigner],
 ]) {
   if (!source.includes("Assert-AStockCleanWorktree")) failures.push(`${name} evidence does not reject a dirty worktree`);
@@ -151,12 +154,36 @@ for (const dependencyMarker of [
   "'fault-injection-desktop-evidence' 'reliability' 'FAULT-INJECTION TESTED' -Requires @('browser-cdp-evidence','package-proton-cef','fault-injection-core') -Action",
   "'desktop-window-native-evidence' 'desktop' 'INTEGRATION TESTED' -Requires @('browser-cdp-evidence','package-proton-cef') -Action",
   "'desktop-e2e-evidence' 'desktop' 'INTEGRATION TESTED' -Requires @('browser-cdp-evidence','package-proton-cef','desktop-window-native-evidence') -Action",
+  "'performance-evidence' 'performance' 'INTEGRATION TESTED' -Requires @('browser-cdp-evidence','package-proton-cef') -Action",
   "'authenticode' 'signing' 'ASSUMED/TRUSTED BOUNDARY' -Requires $productionSigningPrerequisites -Action",
   "'credential-rotation-evidence'",
   "'external-services-evidence'",
   "status = 'SKIPPED'",
 ]) {
   if (!releaseGate.includes(dependencyMarker)) failures.push(`release gate dependency control is missing ${dependencyMarker}`);
+}
+for (const marker of [
+  "browser-cdp.json",
+  "Assert-AStockCleanWorktree",
+  "performance-cdp.mjs",
+  "backend/skeleton",
+  "logical_rows = [int]$raw.assertions.logical_rows",
+  "application_package_sha256",
+  "proton_skeleton_source_sha256",
+  "release-evidence-check.mjs",
+]) {
+  if (!performanceEvidence.includes(marker)) failures.push(`packaged performance harness is missing ${marker}`);
+}
+for (const marker of [
+  "100_000",
+  "workspaceRestoreSamples",
+  "commandFeedbackSamples",
+  "scrollFpsSamples",
+  "agentRenderSamples",
+  "processTreeSamples",
+  "skeleton_cold_start_ms",
+]) {
+  if (!performanceCdp.includes(marker)) failures.push(`packaged performance CDP runner is missing ${marker}`);
 }
 
 const moon = fs.readFileSync(path.join(root, "desktop-moon", "backend", "moon.mod"), "utf8");

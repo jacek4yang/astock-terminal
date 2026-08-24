@@ -1,4 +1,5 @@
-///| Packaging adapter that consumes the already-built Host executable. This
+///|
+/// Packaging adapter that consumes the already-built Host executable. This
 /// deliberately bypasses `proton_cli package`, whose 0.2.1 implementation
 /// creates a new project-local `_build` tree.
 fn required_env(name : String) -> String {

@@ -11,6 +11,7 @@ import { useRuntimeStatus } from "./runtime";
 import { useResearchContext, useWorkspaceStore, type WorkbenchPreset } from "./store";
 
 const StockPage = lazy(() => import("../pages/StockPage"));
+const ReleasePerformanceHarness = lazy(() => import("./ReleasePerformanceHarness"));
 
 const primaryNavigation: Array<[WorkbenchPreset, string, string, string]> = [
   ["market", "今日市场", "大盘、自选与完整个股资料", "M3 12h4l3-8 4 16 3-8h4"],
@@ -93,6 +94,8 @@ export default function WorkbenchShell() {
   const activePrimary: "market" | "agent" | "settings" = routeSymbol ? "market" : preset === "settings" ? "settings" : preset === "agent" ? "agent" : "market";
   const pageKind = routeSymbol ? "stock" : activePrimary;
   const [pageTitle, pageSubtitle] = pageCopy[pageKind];
+  const releasePerformanceMode = isProton()
+    && new URLSearchParams(window.location.search).get("releasePerf") === "1";
 
   const isWindowDragSurface = (target: EventTarget | null) => {
     if (!(target instanceof Element)) return true;
@@ -129,6 +132,12 @@ export default function WorkbenchShell() {
     event.preventDefault();
     void requestNative("host", "window.system_menu").catch(() => undefined);
   };
+
+  if (releasePerformanceMode) {
+    return <Suspense fallback={<div className="panel-loader">正在载入打包性能夹具…</div>}>
+      <ReleasePerformanceHarness />
+    </Suspense>;
+  }
 
   return <div className="classic-shell">
     <header

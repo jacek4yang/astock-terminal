@@ -294,7 +294,9 @@ shortcut = "4"
         & (Join-Path $PSScriptRoot 'migration-e2e.ps1') -EvidenceDirectory $EvidenceDirectory -SkipSpaceCheck
         Assert-ReleaseEvidence -FileName 'migration.json' -Gate 'migration-install-upgrade-uninstall'
     }
-    Invoke-ReleaseGateStep 'performance-evidence' 'performance' 'INTEGRATION TESTED' {
+    Invoke-ReleaseGateStep 'performance-evidence' 'performance' 'INTEGRATION TESTED' -Requires @('browser-cdp-evidence','package-proton-cef') -Action {
+        & (Join-Path $PSScriptRoot 'performance-e2e.ps1') -EvidenceDirectory $EvidenceDirectory -SkipSpaceCheck
+        if ($LASTEXITCODE -ne 0) { throw 'Packaged Proton/CEF performance execution failed.' }
         Assert-ReleaseEvidence -FileName 'performance.json' -Gate 'performance-budgets'
     }
     Invoke-ReleaseGateStep 'external-services-evidence' 'providers' 'ASSUMED/TRUSTED BOUNDARY' {

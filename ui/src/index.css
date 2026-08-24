@@ -14,6 +14,13 @@
   --wb-warning: #f0b44c;
 }
 
+.release-performance-harness { display: grid; grid-template-rows: 48px minmax(0, 1fr); width: 100%; height: 100%; color: #d8e1ed; background: #07101c; }
+.release-performance-harness > header { display: flex; align-items: center; justify-content: space-between; padding: 0 16px; border-bottom: 1px solid #213047; background: #0b1625; }
+.release-performance-harness > header strong { font-size: 13px; }.release-performance-harness > header span { color: #7f91aa; font: 10px ui-monospace, monospace; }
+.release-performance-scroll { min-width: 0; min-height: 0; overflow: auto; contain: strict; background: #081321; }
+.release-performance-row { position: absolute; top: 0; left: 0; display: grid; grid-template-columns: 90px minmax(0, 1fr) 120px; align-items: center; width: 100%; padding: 0 14px; border-bottom: 1px solid #16263b; contain: layout paint; }
+.release-performance-row span, .release-performance-row em { color: #7890ad; font: 10px ui-monospace, monospace; }.release-performance-row b { overflow: hidden; color: #c6d2e1; font-size: 11px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }.release-performance-row em { text-align: right; font-style: normal; }
+
 .workbench-shell {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 0;
