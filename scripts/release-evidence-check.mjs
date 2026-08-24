@@ -185,6 +185,61 @@ function validateCredentialRotation(evidence) {
     invariant(evidence[field] === true, `credential-rotation: ${field} must be true`);
   }
   invariant(evidence.secrets_in_evidence === false, "credential-rotation: evidence must not contain secrets");
+  invariant(typeof evidence.attestation === "string" && evidence.attestation.trim(), "credential-rotation: release-operator attestation is required");
+  const cases = new Map(evidence.cases.map((item) => [item.id, item]));
+  for (const id of ["minimax", "joinquant"]) {
+    const details = cases.get(id)?.details;
+    invariant(isRecord(details), `credential-rotation: ${id} details are required`);
+    invariant(details.operator_confirmed_rotated === true, `credential-rotation: ${id} rotation was not confirmed`);
+    invariant(details.credential_manager_readable === true, `credential-rotation: ${id} Credential Manager readback failed`);
+  }
+}
+
+function validateExternalServices(evidence) {
+  invariant(evidence.trusted_boundary === true, "minimax-plus-joinquant-live: trusted_boundary must be explicit");
+  invariant(evidence.secrets_in_evidence === false, "minimax-plus-joinquant-live: evidence must not contain secrets");
+  const cases = new Map(evidence.cases.map((item) => [item.id, item]));
+  const details = (id) => {
+    const value = cases.get(id)?.details;
+    invariant(isRecord(value), `minimax-plus-joinquant-live: ${id} details are required`);
+    return value;
+  };
+
+  const provider = details("minimax-provider-discovery");
+  invariant(provider.catalog_verified === true, "minimax-provider-discovery: catalog was not verified");
+  invariant(typeof provider.model === "string" && provider.model.trim(), "minimax-provider-discovery: model is required");
+  invariant(Number.isInteger(provider.model_count) && provider.model_count > 0, "minimax-provider-discovery: model_count must be positive");
+  invariant(["mainland", "international"].includes(provider.api_region), "minimax-provider-discovery: api_region is invalid");
+
+  const plan = details("minimax-20000-manual-plan");
+  invariant(plan.capital_cny === 20_000, "minimax-20000-manual-plan: exact capital constraint was not preserved");
+  invariant(plan.phase === "completed", "minimax-20000-manual-plan: task did not complete");
+  invariant(Number.isInteger(plan.model_rounds) && plan.model_rounds >= 4, "minimax-20000-manual-plan: multi-pass review is missing");
+  invariant(Number.isInteger(plan.evidence_count) && plan.evidence_count > 0, "minimax-20000-manual-plan: evidence is missing");
+  invariant(Number.isInteger(plan.report_chars) && plan.report_chars >= 800, "minimax-20000-manual-plan: report is too short");
+  invariant(HEX_SHA256.test(plan.report_sha256 ?? ""), "minimax-20000-manual-plan: report SHA-256 is missing");
+  invariant(plan.verifier_version === "engine-report-verifier-v1", "minimax-20000-manual-plan: independent verifier is missing");
+  invariant(Number.isInteger(plan.numeric_claims_checked) && plan.numeric_claims_checked > 0, "minimax-20000-manual-plan: numeric claims were not checked");
+  invariant(Number.isInteger(plan.distinct_citations) && plan.distinct_citations >= 4, "minimax-20000-manual-plan: citations are insufficient");
+
+  const stream = details("minimax-stream-resume");
+  invariant(stream.implementation === "moonbit-agent-worker", "minimax-stream-resume: wrong implementation boundary");
+  invariant(stream.transport === "sse" && stream.real_stream_completed === true, "minimax-stream-resume: real SSE completion is missing");
+  invariant(stream.incomplete_stream_rejected === true && stream.partial_output_discarded === true && stream.complete_response_retry_tested === true,
+    "minimax-stream-resume: safe retry assertions are incomplete");
+
+  const quota = details("minimax-quota");
+  invariant(Number.isInteger(quota.model_count) && quota.model_count > 0, "minimax-quota: no model quota was returned");
+  invariant(Number.isFinite(quota.fetched_at_ms) && quota.fetched_at_ms > 0, "minimax-quota: fetch timestamp is missing");
+
+  const auth = details("joinquant-auth");
+  invariant(auth.configured === true, "joinquant-auth: Credential Manager authentication was not confirmed");
+  const data = details("joinquant-minimal-data");
+  invariant(data.dataset === "qfq_daily", "joinquant-minimal-data: qfq_daily was not tested");
+  invariant(Number.isInteger(data.row_count) && data.row_count > 0, "joinquant-minimal-data: no rows were returned");
+  invariant(Number.isInteger(data.total_rows) && data.total_rows >= data.row_count, "joinquant-minimal-data: total_rows is invalid");
+  invariant(data.source === "JoinQuant", "joinquant-minimal-data: source identity is invalid");
+  invariant(typeof data.fetched_at === "string" && Number.isFinite(Date.parse(data.fetched_at)), "joinquant-minimal-data: fetched_at is invalid");
 }
 
 function validateSignedArtifacts(evidence) {
@@ -216,9 +271,7 @@ export function validateEvidence(evidence, expectedGate, expectedCommit) {
   validateCases(evidence, expectedGate);
 
   if (expectedGate === "performance-budgets") validatePerformance(evidence);
-  if (expectedGate === "minimax-plus-joinquant-live") {
-    invariant(evidence.trusted_boundary === true, `${expectedGate}: trusted_boundary must be explicit`);
-  }
+  if (expectedGate === "minimax-plus-joinquant-live") validateExternalServices(evidence);
   if (expectedGate === "credential-rotation") validateCredentialRotation(evidence);
   if (expectedGate === "authenticode-valid-all-pe") validateSignedArtifacts(evidence);
   return { gate: expectedGate, cases: evidence.cases.length, completed_at_utc: evidence.completed_at_utc };

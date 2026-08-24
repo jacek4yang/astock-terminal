@@ -13,6 +13,7 @@ $commit = (& git -C $build.RepositoryRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[a-f0-9]{40}$') {
     throw 'Unable to resolve the fault-injection evidence source commit.'
 }
+Assert-AStockCleanWorktree -RepositoryRoot $build.RepositoryRoot
 if ([string]::IsNullOrWhiteSpace($EvidenceDirectory)) {
     $EvidenceDirectory = Join-Path $build.Paths.Artifacts 'release-evidence'
 }
@@ -52,11 +53,12 @@ function Add-Case {
 }
 
 $watch = [System.Diagnostics.Stopwatch]::StartNew()
-Invoke-Checked -FilePath 'cargo' -WorkingDirectory $build.RepositoryRoot -Arguments @(
-    'test', '--locked', '-p', 'astock-minimax', 'stream_break', '--', '--nocapture'
+Invoke-Checked -FilePath 'moon' -WorkingDirectory (Join-Path $build.RepositoryRoot 'app-moon') -Arguments @(
+    'test', '--target', 'native', '--target-dir', $build.Paths.MoonAgent,
+    '-p', 'astock/terminal/agent_worker', '-f', '*stream*'
 )
 $watch.Stop()
-Add-Case -Id 'provider-stream-break' -DurationMs $watch.ElapsedMilliseconds -Layer 'deterministic local HTTP/SSE fault server'
+Add-Case -Id 'provider-stream-break' -DurationMs $watch.ElapsedMilliseconds -Layer 'MoonBit SSE framing and complete-response retry with injected partial stream failure'
 
 $watch.Restart()
 Invoke-Checked -FilePath 'cargo' -WorkingDirectory $build.RepositoryRoot -Arguments @(

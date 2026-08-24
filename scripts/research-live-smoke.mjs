@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 
 const [engineExecutable, agentExecutable] = process.argv.slice(2);
 if (!engineExecutable || !agentExecutable) throw new Error("usage: node scripts/research-live-smoke.mjs <engine.exe> <agent-worker.exe>");
@@ -65,6 +66,29 @@ class FramedWorker {
 const engine = new FramedWorker("engine", engineExecutable);
 const agent = new FramedWorker("agent", agentExecutable);
 const startedAt = Date.now();
+
+function chinaDate(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const byType = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${byType.year}-${byType.month}-${byType.day}`;
+}
+
+function daysBefore(dateText, days) {
+  const date = new Date(`${dateText}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() - days);
+  return date.toISOString().slice(0, 10);
+}
+
+async function timed(run) {
+  const began = Date.now();
+  const value = await run();
+  return { value, duration_ms: Date.now() - began };
+}
 
 async function persistCheckpoint(taskId, payload) {
   if (!payload?.state || payload.checkpoint == null) return;
@@ -145,17 +169,52 @@ async function runWorkflow(taskId, acceptedSeq, payload) {
 }
 
 try {
-  await Promise.all([
+  const [engineHandshake, agentHandshake] = await Promise.all([
     engine.request("system.handshake", { app_version: "research-live-smoke", protocol_version: 1 }, 15_000),
     agent.request("system.handshake", { app_version: "research-live-smoke", protocol_version: 1 }, 15_000),
   ]);
+  if (engineHandshake.protocol_version !== 1 || agentHandshake.protocol_version !== 1) {
+    throw new Error("Engine/Agent protocol handshake mismatch");
+  }
+  if (!agentHandshake.capabilities?.includes("sse_stream_recovery")) {
+    throw new Error("MoonBit Agent does not advertise SSE stream recovery");
+  }
+
+  const credentials = await timed(() => engine.request("credentials.status", {}, 30_000));
+  if (credentials.value.providers?.minimax !== true) throw new Error("MiniMax credential is not configured");
+  if (credentials.value.providers?.joinquant !== true) throw new Error("JoinQuant credentials are not configured");
+
+  const provider = await timed(() => agent.request("agent.provider.test", {}, 90_000));
+  if (provider.value.catalog_verified !== true || !provider.value.model || !provider.value.available_models?.length) {
+    throw new Error("MiniMax Plus model catalog was not verified");
+  }
+
+  const quota = await timed(() => engine.request("credentials.minimax.quota", {}, 90_000));
+  if (!Array.isArray(quota.value.models) || quota.value.models.length < 1) {
+    throw new Error("MiniMax Plus quota returned no model windows");
+  }
+
+  const researchEnd = chinaDate();
+  const researchStart = daysBefore(researchEnd, 365);
+  const joinquantStart = daysBefore(researchEnd, 120);
+  const joinquant = await timed(() => engine.request("research.joinquant_context", {
+    symbol: "000725",
+    benchmark: "000300",
+    start: joinquantStart,
+    end: researchEnd,
+  }, 240_000));
+  const joinquantDaily = joinquant.value.datasets?.qfq_daily;
+  if (joinquant.value.configured !== true || joinquantDaily?.ok !== true || !Array.isArray(joinquantDaily.rows) || joinquantDaily.rows.length < 1) {
+    throw new Error(`JoinQuant authenticated call returned no usable qfq daily rows: ${joinquantDaily?.error ?? "missing dataset"}`);
+  }
+
   const taskId = crypto.randomUUID();
   const taskSpec = {
     objective: "基于截至当前可取得的最新数据，为2万元资金生成仅供人工执行的A股投资计划；反复核验新闻、行情、资金、财务与估值，证据不足就暂停或保留现金",
     security_universe: ["AGENT_BEST_AFTER_EVIDENCE"],
     as_of: new Date().toISOString(),
-    research_start: "2025-08-24",
-    research_end: "2026-08-24",
+    research_start: researchStart,
+    research_end: researchEnd,
     investment_horizon: "1至3个月",
     comparison_benchmark: "000300",
     output_type: "manual_plan",
@@ -166,13 +225,14 @@ try {
   const started = await agent.request("agent.start", { task_id: taskId, seq: 1, spec: taskSpec }, 30_000);
   if (started.state?.phase !== "preparing") throw new Error(`unexpected start phase ${started.state?.phase}`);
   await persistCheckpoint(taskId, started);
-  const researched = await runWorkflow(taskId, started.state.accepted_seq, {
-    task_id: taskId,
-    depth: "exhaustive",
-    tool_policy: "full",
-    preferred_symbols: [],
-    capital: 20_000,
-  });
+  const workflow = await timed(() => runWorkflow(taskId, started.state.accepted_seq, {
+      task_id: taskId,
+      depth: "exhaustive",
+      tool_policy: "full",
+      preferred_symbols: [],
+      capital: 20_000,
+    }));
+  const researched = workflow.value;
   if (researched.state?.phase !== "completed") throw new Error(`unexpected final phase ${researched.state?.phase}`);
   if (researched.state?.model_rounds !== 4) throw new Error(`expected 4 model rounds, got ${researched.state?.model_rounds}`);
   if (typeof researched.report !== "string" || researched.report.length < 800) throw new Error("final report is missing or too short");
@@ -184,10 +244,45 @@ try {
   console.log(JSON.stringify({
     ok: true,
     elapsed_ms: Date.now() - startedAt,
-    model_rounds: researched.state.model_rounds,
-    evidence_count: researched.state.evidence_ids?.length ?? 0,
-    report_chars: researched.report.length,
-    phase: researched.state.phase,
+    provider: {
+      duration_ms: provider.duration_ms,
+      catalog_verified: provider.value.catalog_verified,
+      model: provider.value.model,
+      model_count: provider.value.available_models.length,
+      api_region: provider.value.api_host.includes("minimaxi.com") ? "mainland" : "international",
+    },
+    quota: {
+      duration_ms: quota.duration_ms,
+      model_count: quota.value.models.length,
+      fetched_at_ms: quota.value.fetched_at_ms,
+    },
+    joinquant: {
+      credential_status_duration_ms: credentials.duration_ms,
+      duration_ms: joinquant.duration_ms,
+      configured: joinquant.value.configured,
+      dataset: "qfq_daily",
+      row_count: joinquantDaily.rows.length,
+      total_rows: joinquantDaily.total_rows,
+      source: joinquantDaily.source,
+      fetched_at: joinquantDaily.fetched_at,
+    },
+    manual_plan: {
+      duration_ms: workflow.duration_ms,
+      capital_cny: 20_000,
+      model_rounds: researched.state.model_rounds,
+      evidence_count: researched.state.evidence_ids?.length ?? 0,
+      report_chars: researched.report.length,
+      report_sha256: crypto.createHash("sha256").update(researched.report, "utf8").digest("hex"),
+      phase: researched.state.phase,
+      verifier_version: researched.verification.version,
+      numeric_claims_checked: researched.verification.numeric_claims_checked,
+      distinct_citations: researched.verification.distinct_citations,
+    },
+    stream: {
+      transport: "sse",
+      worker_capability: "sse_stream_recovery",
+      real_stream_completed: true,
+    },
     architecture: "MoonBit Agent effects -> durable Engine tools -> Agent continuation",
   }));
 } finally {

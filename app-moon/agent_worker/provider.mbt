@@ -30,6 +30,31 @@ struct ChatCompletionResponse {
 } derive(FromJson)
 
 ///|
+/// Only user-visible content is decoded from an SSE delta. MiniMax may also
+/// send reasoning fields in the same object; leaving them out of this wire
+/// type makes it impossible for the worker to append them to a report.
+struct ChatDeltaResponse {
+  content : String?
+} derive(FromJson)
+
+///|
+struct ChatStreamChoiceResponse {
+  delta : ChatDeltaResponse
+} derive(FromJson)
+
+///|
+struct ChatStreamResponse {
+  choices : Array[ChatStreamChoiceResponse]
+} derive(FromJson)
+
+///|
+priv enum SseLine {
+  Ignore
+  Done
+  Content(String)
+}
+
+///|
 struct ProviderConfig {
   api_host : String
   model : String
@@ -215,6 +240,95 @@ fn visible_model_text(content : String) -> String raise {
 }
 
 ///|
+/// Decode one complete SSE line. TCP chunk boundaries are handled by the
+/// caller at byte level, so UTF-8 is never decoded while a code point is only
+/// partially available. Unknown SSE metadata and keep-alives are ignored.
+fn decode_sse_line(line : String) -> SseLine raise {
+  let line = line.trim_end(chars="\r").to_owned()
+  if line.is_empty() || line.has_prefix(":") {
+    return Ignore
+  }
+  guard line.has_prefix("data:") else { return Ignore }
+  let data = line[5:].trim().to_owned()
+  if data == "[DONE]" {
+    return Done
+  }
+  guard !data.is_empty() else { return Ignore }
+  let payload = @json.parse(data) catch {
+    _ => fail("minimax_sse_invalid_json")
+  }
+  let completion : ChatStreamResponse = @json.from_json(payload) catch {
+    _ => fail("minimax_sse_invalid_delta")
+  }
+  if completion.choices.is_empty() {
+    return Ignore
+  }
+  match completion.choices[0].delta.content {
+    Some(content) if !content.is_empty() => Content(content)
+    _ => Ignore
+  }
+}
+
+///|
+/// Parse an arbitrary sequence of transport chunks. The same byte-framing
+/// logic is used by the network path and deterministic tests, including
+/// chunks split in the middle of a multi-byte Chinese character.
+fn decode_sse_chunks(chunks : Array[Bytes]) -> String raise {
+  let output = StringBuilder::new()
+  let mut pending : Bytes = b""
+  let mut output_bytes = 0
+  let mut events = 0
+  let mut done = false
+  for chunk in chunks {
+    if done {
+      break
+    }
+    pending = pending + chunk
+    while pending.find(b"\n") is Some(index) {
+      let line_bytes = pending[:index]
+      pending = pending[index + 1:].to_owned()
+      let line = @utf8.decode(line_bytes)
+      match decode_sse_line(line) {
+        Ignore => ()
+        Done => {
+          done = true
+          break
+        }
+        Content(content) => {
+          events += 1
+          output_bytes += @utf8.encode(content).length()
+          if events > 32768 || output_bytes > 120000 {
+            fail("minimax_sse_response_too_large")
+          }
+          output.write_string(content)
+        }
+      }
+    }
+    if pending.length() > 262144 {
+      fail("minimax_sse_line_too_large")
+    }
+  }
+  if !done && !pending.is_empty() {
+    match decode_sse_line(@utf8.decode(pending)) {
+      Done => done = true
+      Content(content) => {
+        events += 1
+        output_bytes += @utf8.encode(content).length()
+        if events > 32768 || output_bytes > 120000 {
+          fail("minimax_sse_response_too_large")
+        }
+        output.write_string(content)
+      }
+      Ignore => ()
+    }
+  }
+  if !done {
+    fail("minimax_sse_incomplete_stream")
+  }
+  output.to_string()
+}
+
+///|
 /// Select the strongest available reasoning model without baking one model
 /// into the renderer. MiniMax's model catalog is authoritative.
 fn choose_model(models : Array[AvailableModel]) -> String raise {
@@ -388,9 +502,9 @@ async fn chat_json(
 }
 
 ///|
-/// Text completion for the final user-visible report. Unlike clarification
-/// calls, this deliberately keeps the response as plain text.
-async fn chat_text(
+/// One streamed text completion for the final user-visible report. A stream
+/// that closes before `[DONE]` is never returned to the reducer or renderer.
+async fn chat_text_stream_once(
   provider : ProviderConfig,
   key : String,
   system : String,
@@ -402,35 +516,84 @@ async fn chat_text(
       { "role": "system", "content": system },
       { "role": "user", "content": user },
     ],
-    "stream": false,
+    "stream": true,
     "temperature": 0.1,
     "reasoning_split": true,
     "max_completion_tokens": 8192,
   }
   let headers = provider_headers(key)
-  let (response, body) = @http.post(
-    provider.api_host + "/v1/chat/completions",
-    request,
-    headers~,
-  )
+  headers["Accept"] = "text/event-stream"
+  let client = @http.Client(provider.api_host, headers~)
+  defer client.close()
+  let response = client.post("/v1/chat/completions", request)
   if response.code != 200 {
     fail("minimax_chat_http_" + response.code.to_string())
   }
-  let payload = body.json() catch {
-    _ =>
-      fail(
-        "MiniMax返回了非JSON响应，可能是服务网关或区域端点异常；请在配置页刷新额度后重试",
-      )
+  let chunks : Array[Bytes] = []
+  let mut total_transport_bytes = 0
+  while client.read_some(max_len=16384) is Some(chunk) {
+    total_transport_bytes += chunk.length()
+    if total_transport_bytes > 2097152 {
+      fail("minimax_sse_transport_too_large")
+    }
+    chunks.push(chunk)
   }
-  let completion : ChatCompletionResponse = @json.from_json(payload)
-  if completion.choices.is_empty() {
-    fail("minimax_chat_empty_choices")
-  }
-  let text = visible_model_text(completion.choices[0].message.content)
+  let text = visible_model_text(decode_sse_chunks(chunks))
   if text.length() < 120 {
     fail("minimax_research_report_too_short")
   }
   text
+}
+
+///|
+/// MiniMax report generation is recovered at the complete-response boundary:
+/// a broken or malformed partial stream is discarded, then the same durable
+/// research input is retried from the beginning. Partial text is never
+/// concatenated with a later attempt and never becomes task history.
+async fn retry_complete_text(
+  attempts : Array[String],
+  timeout_ms : Int,
+  run_attempt : async (String) -> String,
+) -> String {
+  for prompt in attempts {
+    let result : String? = Some(
+      @async.with_timeout(timeout_ms, () => run_attempt(prompt)),
+    ) catch {
+      error => {
+        // Errors are deliberately collapsed here: provider bodies, partial
+        // output and transport internals must not enter user-visible history.
+        ignore(error)
+        None
+      }
+    }
+    match result {
+      Some(text) => return text
+      None => ()
+    }
+  }
+  fail(
+    "MiniMax流式报告连续三次未完整结束；任务检查点已保留，请稍后恢复",
+  )
+}
+
+///|
+async fn chat_text(
+  provider : ProviderConfig,
+  key : String,
+  system : String,
+  user : String,
+) -> String {
+  retry_complete_text(
+    [
+      user,
+      user +
+      "\n上一次传输未形成完整可发布报告。请从头生成完整报告，不要续写或引用上一次未完成输出。",
+      user +
+      "\n这是最后一次有界恢复：从头输出完整最终报告；不要输出思考过程、续写标记或Markdown围栏。",
+    ],
+    180000,
+    prompt => chat_text_stream_once(provider, key, system, prompt),
+  )
 }
 
 ///|

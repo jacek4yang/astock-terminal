@@ -61,6 +61,13 @@ restriction; release gates executed locally`。
 签名后的 ZIP/NSIS，并生成 `SHA256SUMS` 与 `signed-artifacts.json`；任一
 PE 的 Authenticode 状态不是 `Valid` 都会中止发布。
 
+聊天、工单或日志中出现过的 Provider 凭据一律视为已泄露。正式门禁前应先在
+MiniMax 和聚宽侧创建新凭据/密码、撤销旧值，再通过桌面配置页写入 Windows
+Credential Manager。随后使用 `record-credential-rotation.ps1` 做显式操作员
+确认和只读回读，再运行 `external-services-e2e.ps1`；后者才会执行真实模型目录、
+额度、SSE 两万元研究计划和聚宽最小数据验收。两个脚本都不接受凭据参数，也不
+把报告正文、账号或密钥写入证据。
+
 ## 配置与凭证
 
 MiniMax Key 保存在 Windows 凭据管理器，不写入数据库或日志。Tushare、问财、聚宽及 SOCKS5 为可选配置；未配置时相应数据源会标记为不可用，核心页面继续降级运行。

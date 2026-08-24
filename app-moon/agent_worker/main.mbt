@@ -506,7 +506,7 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
         "reducer_version": "moonbit-agent-kernel-v1",
         "capabilities": [
           "pure_reducer", "replay", "evidence_gate", "provider_discovery", "candidate_planning",
-          "multi_pass_review", "deterministic_report_verification",
+          "multi_pass_review", "deterministic_report_verification", "sse_stream_recovery",
         ],
         "max_frame_bytes": @protocol.max_frame_bytes,
       })

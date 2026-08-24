@@ -7,6 +7,7 @@ const cargo = fs.readFileSync(path.join(root, "Cargo.toml"), "utf8");
 const ui = JSON.parse(fs.readFileSync(path.join(root, "ui", "package.json"), "utf8"));
 const agentWorkbench = fs.readFileSync(path.join(root, "ui", "src", "workbench", "AgentTaskWorkbench.tsx"), "utf8");
 const moonAgent = fs.readFileSync(path.join(root, "app-moon", "agent_worker", "main.mbt"), "utf8");
+const moonProvider = fs.readFileSync(path.join(root, "app-moon", "agent_worker", "provider.mbt"), "utf8");
 const moonKernel = fs.readFileSync(path.join(root, "app-moon", "agent_core", "state.mbt"), "utf8");
 const moonHost = fs.readFileSync(path.join(root, "desktop-moon", "backend", "host", "backend.mbt"), "utf8");
 const moonEntry = fs.readFileSync(path.join(root, "desktop-moon", "backend", "app", "main.mbt"), "utf8");
@@ -17,6 +18,8 @@ const releaseSigner = fs.readFileSync(path.join(root, "scripts", "sign-release.p
 const packageHardener = fs.readFileSync(path.join(root, "scripts", "harden-package.ps1"), "utf8");
 const migrationEvidence = fs.readFileSync(path.join(root, "scripts", "migration-e2e.ps1"), "utf8");
 const faultEvidence = fs.readFileSync(path.join(root, "scripts", "fault-injection-e2e.ps1"), "utf8");
+const externalEvidence = fs.readFileSync(path.join(root, "scripts", "external-services-e2e.ps1"), "utf8");
+const credentialEvidence = fs.readFileSync(path.join(root, "scripts", "record-credential-rotation.ps1"), "utf8");
 const buildCommon = fs.readFileSync(path.join(root, "scripts", "Build.Common.ps1"), "utf8");
 const desktopCdpSession = fs.readFileSync(path.join(root, "scripts", "desktop-cdp-session.ps1"), "utf8");
 const desktopRendererFault = fs.readFileSync(path.join(root, "scripts", "desktop-renderer-fault.mjs"), "utf8");
@@ -86,6 +89,26 @@ for (const migrationMarker of ["migration-engine-e2e.mjs", "uninstall-preserves-
 if (!releaseGate.includes("migration-e2e.ps1")) failures.push("release gate does not execute isolated migration E2E");
 for (const faultMarker of ["fault-injection-core.mjs", "provider-stream-break", "sqlite-lock"]) {
   if (!faultEvidence.includes(faultMarker)) failures.push(`core fault harness is missing ${faultMarker}`);
+}
+for (const streamMarker of ['"stream": true', 'decode_sse_chunks', 'minimax_sse_incomplete_stream', 'retry_complete_text']) {
+  if (!moonProvider.includes(streamMarker)) failures.push(`MoonBit Provider SSE recovery is missing ${streamMarker}`);
+}
+for (const externalMarker of ["credential-rotation.json", "research-live-smoke.mjs", "minimax-stream-resume", "joinquant-minimal-data", "secrets_in_evidence = $false"]) {
+  if (!externalEvidence.includes(externalMarker)) failures.push(`external Provider evidence harness is missing ${externalMarker}`);
+}
+for (const credentialMarker of ["ConfirmOldCredentialsRevoked", "credential-readback-smoke.mjs", "credential_manager_readback_verified = $true", "secrets_in_evidence = $false"]) {
+  if (!credentialEvidence.includes(credentialMarker)) failures.push(`credential rotation evidence harness is missing ${credentialMarker}`);
+}
+for (const [name, source] of [
+  ["core fault", faultEvidence],
+  ["desktop fault", desktopFaultEvidence],
+  ["native window", desktopWindowEvidence],
+  ["migration", migrationEvidence],
+  ["external Provider", externalEvidence],
+  ["credential rotation", credentialEvidence],
+  ["signing", releaseSigner],
+]) {
+  if (!source.includes("Assert-AStockCleanWorktree")) failures.push(`${name} evidence does not reject a dirty worktree`);
 }
 if (!releaseGate.includes("fault-injection-e2e.ps1")) failures.push("release gate does not execute core fault injection");
 if (!moonEntry.includes('ASTOCK_RELEASE_TEST_CDP') || !moonEntry.includes('PROTON_HEADLESS')) {

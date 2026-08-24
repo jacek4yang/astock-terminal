@@ -15,6 +15,7 @@ $commit = (& git -C $repository rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[a-f0-9]{40}$') {
     throw 'Unable to resolve the native window test source commit.'
 }
+Assert-AStockCleanWorktree -RepositoryRoot $repository
 if (-not $AllowInteractiveInput) {
     throw 'Native window acceptance sends bounded mouse input to the isolated test window and requires -AllowInteractiveInput.'
 }

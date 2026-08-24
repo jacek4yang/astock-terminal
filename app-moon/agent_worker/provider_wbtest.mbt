@@ -17,6 +17,71 @@ test "plain response publishes only final visible text" {
 }
 
 ///|
+test "SSE decoder preserves split UTF-8 and ignores private reasoning deltas" {
+  let wire = "data: {\"choices\":[{\"delta\":{\"reasoning_details\":\"private\",\"content\":\"研究\"}}]}\n\n" +
+    "data: {\"choices\":[{\"delta\":{\"content\":\"结论\"}}]}\r\n\r\n" +
+    "data: [DONE]\n\n"
+  let bytes = @utf8.encode(wire)
+  let chunks = [
+    bytes[:7].to_owned(),
+    bytes[7:43].to_owned(),
+    bytes[43:47].to_owned(),
+    bytes[47:bytes.length() - 5].to_owned(),
+    bytes[bytes.length() - 5:].to_owned(),
+  ]
+  assert_eq(decode_sse_chunks(chunks), "研究结论")
+}
+
+///|
+test "SSE decoder rejects a stream without DONE" {
+  let result : String? = Some(
+    decode_sse_chunks([
+      @utf8.encode(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"残缺\"}}]}\n\n",
+      ),
+    ]),
+  ) catch {
+    _ => None
+  }
+  assert_true(result is None)
+}
+
+///|
+test "SSE decoder ignores comments and metadata" {
+  let text = decode_sse_chunks([
+    @utf8.encode(
+      ": keep-alive\nevent: message\nid: 7\ndata: {\"choices\":[{\"delta\":{\"content\":\"可见\"}}]}\n\ndata: [DONE]\n",
+    ),
+  ])
+  assert_eq(text, "可见")
+}
+
+///|
+async test "stream recovery discards a failed partial attempt and restarts" {
+  let mut calls = 0
+  let result = retry_complete_text(["first", "second", "third"], 1000, prompt => {
+    calls += 1
+    if calls == 1 {
+      return decode_sse_chunks([
+        @utf8.encode(
+          "data: {\"choices\":[{\"delta\":{\"content\":\"partial-must-be-discarded\"}}]}\n\n",
+        ),
+      ])
+    }
+    decode_sse_chunks([
+      @utf8.encode(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"complete:" +
+        prompt +
+        "\"}}]}\n\ndata: [DONE]\n\n",
+      ),
+    ])
+  })
+  assert_eq(calls, 2)
+  assert_eq(result, "complete:second")
+  assert_false(result.contains("partial"))
+}
+
+///|
 test "model routing selects only catalog models" {
   let provider = ProviderConfig::{
     api_host: "https://api.example.invalid",

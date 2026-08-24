@@ -5,6 +5,16 @@ function Get-AStockRepositoryRoot {
     return (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 }
 
+function Assert-AStockCleanWorktree {
+    param([Parameter(Mandatory)][string]$RepositoryRoot)
+
+    $status = @(& git -C $RepositoryRoot status --porcelain=v1 --untracked-files=all)
+    if ($LASTEXITCODE -ne 0) { throw 'Unable to inspect the Git worktree.' }
+    if ($status.Count -ne 0) {
+        throw 'Immutable release evidence requires a completely clean worktree, including untracked files.'
+    }
+}
+
 function Enable-AStockProtonAlloyRuntime {
     param([Parameter(Mandatory)][string]$RepositoryRoot)
 

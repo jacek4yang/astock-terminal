@@ -15,6 +15,7 @@ $commit = (& git -C $build.RepositoryRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[a-f0-9]{40}$') {
     throw 'Unable to resolve the immutable source commit for signing.'
 }
+Assert-AStockCleanWorktree -RepositoryRoot $build.RepositoryRoot
 
 function Resolve-ReleaseTool {
     param([Parameter(Mandatory)][string]$Name, [string[]]$Candidates = @())

@@ -74,6 +74,46 @@ function completePerformance() {
   };
 }
 
+function completeExternalServices() {
+  const evidence = base("minimax-plus-joinquant-live", [
+    "minimax-provider-discovery",
+    "minimax-20000-manual-plan",
+    "minimax-stream-resume",
+    "minimax-quota",
+    "joinquant-auth",
+    "joinquant-minimal-data",
+  ]);
+  const byId = new Map(evidence.cases.map((item) => [item.id, item]));
+  byId.get("minimax-provider-discovery").details = {
+    catalog_verified: true, model: "MiniMax-M3", model_count: 2, api_region: "mainland",
+  };
+  byId.get("minimax-20000-manual-plan").details = {
+    capital_cny: 20_000,
+    phase: "completed",
+    model_rounds: 4,
+    evidence_count: 12,
+    report_chars: 1200,
+    report_sha256: "d".repeat(64),
+    verifier_version: "engine-report-verifier-v1",
+    numeric_claims_checked: 8,
+    distinct_citations: 8,
+  };
+  byId.get("minimax-stream-resume").details = {
+    implementation: "moonbit-agent-worker",
+    transport: "sse",
+    real_stream_completed: true,
+    incomplete_stream_rejected: true,
+    partial_output_discarded: true,
+    complete_response_retry_tested: true,
+  };
+  byId.get("minimax-quota").details = { model_count: 2, fetched_at_ms: 1_800_000_000_000 };
+  byId.get("joinquant-auth").details = { configured: true };
+  byId.get("joinquant-minimal-data").details = {
+    dataset: "qfq_daily", row_count: 20, total_rows: 20, source: "JoinQuant", fetched_at: "2026-08-24T00:00:30Z",
+  };
+  return { ...evidence, trusted_boundary: true, secrets_in_evidence: false };
+}
+
 test("rejects a four-field placeholder masquerading as browser evidence", () => {
   assert.throws(
     () => validateEvidence({ gate: "browser-cdp", status: "PASSED", commit, completed_at_utc: "2026-08-24T00:01:00.000Z" }, "browser-cdp", commit),
@@ -204,6 +244,26 @@ test("accepts complete credential-rotation evidence without embedded secrets", (
     old_credentials_revoked: true,
     credential_manager_readback_verified: true,
     secrets_in_evidence: false,
+    attestation: "operator confirmed rotation and revocation",
   };
+  for (const item of evidence.cases) {
+    item.details = { operator_confirmed_rotated: true, credential_manager_readable: true };
+  }
   assert.equal(validateEvidence(evidence, "credential-rotation", commit).cases, 2);
+});
+
+test("accepts detailed secret-free MiniMax Plus and JoinQuant live evidence", () => {
+  assert.equal(validateEvidence(completeExternalServices(), "minimax-plus-joinquant-live", commit).cases, 6);
+});
+
+test("rejects a pass-only label for MiniMax stream recovery", () => {
+  const evidence = completeExternalServices();
+  delete evidence.cases.find((item) => item.id === "minimax-stream-resume").details.partial_output_discarded;
+  assert.throws(() => validateEvidence(evidence, "minimax-plus-joinquant-live", commit), /safe retry assertions/);
+});
+
+test("rejects live evidence that does not preserve the exact 20,000 CNY constraint", () => {
+  const evidence = completeExternalServices();
+  evidence.cases.find((item) => item.id === "minimax-20000-manual-plan").details.capital_cny = 10_000;
+  assert.throws(() => validateEvidence(evidence, "minimax-plus-joinquant-live", commit), /capital constraint/);
 });

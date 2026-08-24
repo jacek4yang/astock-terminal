@@ -13,6 +13,7 @@ $commit = (& git -C $build.RepositoryRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[a-f0-9]{40}$') {
     throw 'Unable to resolve the migration evidence source commit.'
 }
+Assert-AStockCleanWorktree -RepositoryRoot $build.RepositoryRoot
 if ([string]::IsNullOrWhiteSpace($EvidenceDirectory)) {
     $EvidenceDirectory = Join-Path $build.Paths.Artifacts 'release-evidence'
 }

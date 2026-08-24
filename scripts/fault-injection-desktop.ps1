@@ -11,6 +11,7 @@ $ErrorActionPreference = 'Stop'
 $build = Initialize-AStockBuildEnvironment -SkipSpaceCheck:$SkipSpaceCheck
 $commit = (& git -C $build.RepositoryRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[a-f0-9]{40}$') { throw 'Unable to resolve the desktop fault-injection source commit.' }
+Assert-AStockCleanWorktree -RepositoryRoot $build.RepositoryRoot
 if ([string]::IsNullOrWhiteSpace($PackageDirectory)) { $PackageDirectory = Join-Path $build.Paths.Artifacts 'astock-terminal' }
 if ([string]::IsNullOrWhiteSpace($EvidenceDirectory)) { $EvidenceDirectory = Join-Path $build.Paths.Artifacts 'release-evidence' }
 $packageRoot = [System.IO.Path]::GetFullPath($PackageDirectory)

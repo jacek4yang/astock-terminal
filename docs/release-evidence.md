@@ -37,8 +37,27 @@ for both the application and pinned Proton skeleton. Evidence must identify the
 packaged application and skeleton SHA-256 plus CPU, GPU, memory, power profile
 and display scale; browser previews and synthetic claims are rejected.
 External-service evidence explicitly remains a trusted boundary even after a
-live MiniMax Plus and JoinQuant smoke test. Credential evidence records only
-rotation/readback booleans and never a key, password or reversible secret.
+live MiniMax Plus and JoinQuant smoke test. It must contain a real model-catalog
+lookup, Token Plan quota snapshot, a complete 20,000 CNY manual-plan run over
+MoonBit SSE, the independent Engine verifier summary, a deterministic partial
+stream rejection/retry check, and an authenticated JoinQuant `qfq_daily`
+result with at least one row. The report itself is not retained; evidence keeps
+only counts, timestamps and SHA-256. Pass-only case labels are rejected.
+
+Credential evidence records only explicit release-operator rotation/revocation
+attestation and Credential Manager readback booleans, never a key, account,
+password or reversible secret. The live Provider runner refuses to make any
+network request unless credential evidence for the exact same clean commit has
+already passed validation. After saving fresh credentials through the desktop
+configuration page and revoking the values exposed before release, generate
+and consume evidence in this order (no secret is a command-line argument):
+
+```powershell
+.\scripts\record-credential-rotation.ps1 `
+  -ConfirmMinimaxRotated -ConfirmJoinQuantRotated -ConfirmOldCredentialsRevoked
+.\scripts\external-services-e2e.ps1
+```
+
 Authenticode evidence lists every shipped PE with an absolute path, SHA-256 and
 `Valid` status, including Host, Engine, Agent, CEF helper and NSIS installer.
 
