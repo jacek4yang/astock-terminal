@@ -170,6 +170,14 @@ async function protonCommand<T>(name: string, args: Record<string, unknown> = {}
       }
       return { status: await protonCommand<ProviderStatus>("settings_get_provider_status"), message: "凭据已写入 Windows Credential Manager；需重启的数据源已明确标记。" } as T;
     }
+    case "settings_get_agent_model_routing":
+      return requestNative<T>("engine", "settings.agent_models.get", {});
+    case "settings_set_agent_model_routing": {
+      const settings = args.settings as AgentModelRoutingSettings;
+      const saved = await requestNative<T>("engine", "settings.agent_models.set", settings);
+      await requestNative("agent", "agent.provider.configure", { routing: settings, validate: false });
+      return saved;
+    }
     case "get_all_a_shares":
       return readAllSharePages<T>();
     case "get_stock_bundle": {

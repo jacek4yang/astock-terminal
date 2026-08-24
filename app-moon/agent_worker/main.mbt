@@ -42,6 +42,12 @@ struct PlanPayload {
 } derive(FromJson)
 
 ///|
+struct ModelRoutingPayload {
+  routing : ModelRouting
+  validate : Bool?
+} derive(FromJson)
+
+///|
 struct EventPayload {
   task_id : String
   seq : Int
@@ -200,11 +206,16 @@ fn parse_event(payload : EventPayload) -> @agent.AgentEvent raise {
 struct Worker {
   tasks : Map[String, @agent.AgentState]
   mut provider : ProviderConfig?
+  mut model_routing : ModelRouting
 }
 
 ///|
 fn Worker::new() -> Worker {
-  { tasks: Map([], capacity=32), provider: None }
+  {
+    tasks: Map([], capacity=32),
+    provider: None,
+    model_routing: default_model_routing(),
+  }
 }
 
 ///|
@@ -226,7 +237,7 @@ async fn Worker::provider_config(self : Worker, key : String) -> ProviderConfig 
   match self.provider {
     Some(provider) => provider
     None => {
-      let provider = discover_provider(key)
+      let provider = discover_provider(key).with_routing(self.model_routing)
       self.provider = Some(provider)
       provider
     }
@@ -283,15 +294,58 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
       } else {
         // Force catalog discovery so replacing a key or changing its Plus
         // entitlement takes effect without restarting the desktop process.
-        let provider = discover_provider(key)
+        let provider = discover_provider(key).with_routing(self.model_routing)
         self.provider = Some(provider)
         response(request, true, {
           "provider": "minimax_plus",
           "model": provider.model,
           "fast_model": provider.fast_model,
+          "deep_model": provider.deep_model,
+          "verifier_model": provider.verifier_model,
+          "available_models": provider.available_models,
+          "multi_agent_enabled": provider.multi_agent_enabled,
+          "max_parallel_agents": provider.max_parallel_agents,
           "api_host": provider.api_host,
           "catalog_verified": true,
         })
+      }
+    }
+    "agent.provider.configure" => {
+      let payload : ModelRoutingPayload = @json.from_json(request.payload)
+      let routing = payload.routing
+      if routing.max_parallel_agents < 1 || routing.max_parallel_agents > 4 {
+        response(
+          request,
+          false,
+          null,
+          error=error_payload(
+            "invalid_model_routing", "并行复核数量必须在1到4之间", false,
+          ),
+        )
+      } else {
+        self.model_routing = routing
+        self.provider = None
+        let key = read_minimax_key()
+        if !payload.validate.unwrap_or(false) || key.trim().is_empty() {
+          response(request, true, {
+            "stored": true,
+            "catalog_verified": false,
+            "routing": routing.to_json(),
+          })
+        } else {
+          let provider = self.provider_config(key)
+          response(request, true, {
+            "stored": true,
+            "catalog_verified": true,
+            "model": provider.model,
+            "fast_model": provider.fast_model,
+            "deep_model": provider.deep_model,
+            "verifier_model": provider.verifier_model,
+            "available_models": provider.available_models,
+            "multi_agent_enabled": provider.multi_agent_enabled,
+            "max_parallel_agents": provider.max_parallel_agents,
+          })
+        }
       }
     }
     "agent.start" => {

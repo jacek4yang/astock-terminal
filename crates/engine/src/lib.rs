@@ -4,6 +4,7 @@ mod data_quality;
 mod data_root;
 mod event_store;
 mod scan;
+mod settings;
 
 use astock_core::{Adjust, KlinePeriod, Symbol};
 use astock_fundamental::{
@@ -1234,6 +1235,11 @@ impl Engine {
             }
             "quant.scan.status" => Ok(json!(self.scan.status().await)),
             "quant.scan.cancel" => Ok(json!({ "cancelled": self.scan.cancel().await })),
+            "settings.agent_models.get" => Ok(json!(settings::get(&self.storage).await)),
+            "settings.agent_models.set" => {
+                let payload: settings::AgentModelRouting = decode_payload(&request.payload)?;
+                Ok(json!(settings::set(&self.storage, payload).await?))
+            }
             "agent.task.create" => {
                 let payload: event_store::CreateTask = decode_payload(&request.payload)?;
                 let inserted = event_store::create_task(&self.storage, payload)

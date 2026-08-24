@@ -17,6 +17,32 @@ test "plain response publishes only final visible text" {
 }
 
 ///|
+test "model routing selects only catalog models" {
+  let provider = ProviderConfig::{
+    api_host: "https://api.example.invalid",
+    model: "MiniMax-M3",
+    fast_model: "MiniMax-M2.7-highspeed",
+    deep_model: "MiniMax-M3",
+    verifier_model: "MiniMax-M3",
+    available_models: ["MiniMax-M3", "MiniMax-M2.7-highspeed"],
+    multi_agent_enabled: true,
+    max_parallel_agents: 3,
+  }
+  let routed = provider.with_routing(ModelRouting::{
+    coordinator_model: "MiniMax-M3",
+    fast_model: "MiniMax-M2.7-highspeed",
+    deep_model: "MiniMax-M3",
+    verifier_model: "MiniMax-M3",
+    multi_agent_enabled: false,
+    max_parallel_agents: 2,
+  })
+  assert_eq(routed.model, "MiniMax-M3")
+  assert_eq(routed.fast_model, "MiniMax-M2.7-highspeed")
+  assert_eq(routed.max_parallel_agents, 2)
+  assert_false(routed.multi_agent_enabled)
+}
+
+///|
 test "publication verifier rejects thin drafts and accepts complete manual plans" {
   let task = @protocol.TaskSpec::{
     objective: "两万元投资计划",

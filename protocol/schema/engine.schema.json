@@ -59,6 +59,8 @@
         { "const": "quant.scan.start" },
         { "const": "quant.scan.status" },
         { "const": "quant.scan.cancel" },
+        { "const": "settings.agent_models.get" },
+        { "const": "settings.agent_models.set" },
         { "const": "agent.task.create" },
         { "const": "agent.event.append" },
         { "const": "agent.checkpoint.put" },

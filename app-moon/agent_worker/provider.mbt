@@ -34,7 +34,89 @@ struct ProviderConfig {
   api_host : String
   model : String
   fast_model : String
+  deep_model : String
+  verifier_model : String
+  available_models : Array[String]
+  multi_agent_enabled : Bool
+  max_parallel_agents : Int
 } derive(Debug)
+
+///|
+struct ModelRouting {
+  coordinator_model : String
+  fast_model : String
+  deep_model : String
+  verifier_model : String
+  multi_agent_enabled : Bool
+  max_parallel_agents : Int
+} derive(FromJson, ToJson)
+
+///|
+extend ModelRouting with ToJson::{to_json}
+
+///|
+fn default_model_routing() -> ModelRouting {
+  ModelRouting::{
+    coordinator_model: "auto",
+    fast_model: "auto",
+    deep_model: "auto",
+    verifier_model: "auto",
+    multi_agent_enabled: true,
+    max_parallel_agents: 3,
+  }
+}
+
+///|
+fn selected_model(
+  available : Array[String],
+  requested : String,
+  fallback : String,
+) -> String raise {
+  let requested = requested.trim().to_owned()
+  if requested.is_empty() || requested == "auto" {
+    return fallback
+  }
+  if !available.contains(requested) {
+    fail("configured_model_not_available:" + requested)
+  }
+  requested
+}
+
+///|
+fn ProviderConfig::with_routing(
+  self : ProviderConfig,
+  routing : ModelRouting,
+) -> ProviderConfig raise {
+  if routing.max_parallel_agents < 1 || routing.max_parallel_agents > 4 {
+    fail("invalid_max_parallel_agents")
+  }
+  ProviderConfig::{
+    api_host: self.api_host,
+    model: selected_model(
+      self.available_models,
+      routing.coordinator_model,
+      self.model,
+    ),
+    fast_model: selected_model(
+      self.available_models,
+      routing.fast_model,
+      self.fast_model,
+    ),
+    deep_model: selected_model(
+      self.available_models,
+      routing.deep_model,
+      self.model,
+    ),
+    verifier_model: selected_model(
+      self.available_models,
+      routing.verifier_model,
+      self.model,
+    ),
+    available_models: self.available_models,
+    multi_agent_enabled: routing.multi_agent_enabled,
+    max_parallel_agents: routing.max_parallel_agents,
+  }
+}
 
 ///|
 /// Bounded liquid-market candidate supplied by the Rust Engine. This is a
@@ -185,10 +267,16 @@ async fn discover_provider(key : String) -> ProviderConfig {
       } else {
         let catalog : AvailableModelsResponse = @json.from_json(body.json())
         let model = choose_model(catalog.data)
+        let available_models = catalog.data.map(fn(item) { item.id })
         Some(ProviderConfig::{
           api_host: host,
           model,
           fast_model: choose_fast_model(catalog.data, model),
+          deep_model: model,
+          verifier_model: model,
+          available_models,
+          multi_agent_enabled: true,
+          max_parallel_agents: 3,
         })
       }
     } catch {
@@ -274,7 +362,13 @@ async fn chat_json(
     "\n这是最后一次有界重试：只输出一个完整JSON对象，不要思考文本、解释或Markdown。",
   ]
   for index, prompt in attempts {
-    let model = if index == 0 { provider.fast_model } else { provider.model }
+    let model = if index == 0 {
+      provider.fast_model
+    } else if index == 1 {
+      provider.model
+    } else {
+      provider.verifier_model
+    }
     let result : Json? = Some(
       chat_json_once(provider, key, system, prompt, model),
     ) catch {
@@ -303,7 +397,7 @@ async fn chat_text(
   user : String,
 ) -> String {
   let request : Json = {
-    "model": provider.model,
+    "model": provider.deep_model,
     "messages": [
       { "role": "system", "content": system },
       { "role": "user", "content": user },

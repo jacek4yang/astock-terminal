@@ -81,6 +81,8 @@ const migratedHandlers = new Set([
   "scan.scan_cancel",
   "settings.settings_get_provider_status",
   "settings.settings_set_provider_credentials",
+  "settings.settings_get_agent_model_routing",
+  "settings.settings_set_agent_model_routing",
 ]);
 
 const marketProviderStatus = {
