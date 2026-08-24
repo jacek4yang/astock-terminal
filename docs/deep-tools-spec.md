@@ -22,6 +22,13 @@ MoonBit Agent 只通过版本化协议请求 Engine 工具。Rust Engine 负责
 market、storage、graph、fundamental 等确定性能力；Renderer 不持有
 Rust `ToolContext` 或数据库连接。
 
+生产研究入口固定为 `agent.research.workflow`。Renderer 不再逐项调用
+行情、新闻或对账接口。Agent 先发出 `research.agent_prepare_context`
+Effect 获取市场/宏观/资讯/候选池，再根据明确证券或模型候选计划发出
+`research.agent_security_context` Effect。`market`、`evidence`、`auto`、
+`full` 工具策略由 Agent 写入 Effect；未获选择的凭据型来源明确返回
+`skipped_by_tool_policy`，不会被伪装为接口成功或零值。
+
 ## Agent playbook
 深度研究流程:全面分析 = 行情资金 → 技术结构 → 基本面(get_fundamentals)→ 估值(run_valuation)→ 产业链位置(get_industry_chain)→ 同类对比(compare_stocks)→ 市场状态(get_market_regime)→ 综合:结论/证据/不确定性/失效条件。
 事件类问题 = run_supply_chain_shock → 个股验证(get_quote/get_fundamentals)→ 已 price-in 判断。

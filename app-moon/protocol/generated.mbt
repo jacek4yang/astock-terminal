@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=edad09db499cf6a53d93c83beee2f8a7803ba1f8912aea494594194dadab792c
+// GENERATED from protocol/schema; schema-sha256=0535353220955bd766837cc25dafef6974d9fdbc813adc2b74ffe3fbbdb2432b
 // Run: node protocol/codegen.mjs
 
 ///|

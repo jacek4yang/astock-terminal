@@ -7,10 +7,20 @@ use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     init_tracing();
-    if let Err(error) = run().await {
+    // The Engine dispatcher intentionally keeps all versioned services in one
+    // process. Aggregate Agent snapshots reuse those async services one level
+    // deep; Windows' default 2 MiB Tokio worker stack is insufficient for the
+    // generated future. Four 8 MiB workers keep the total reservation bounded
+    // while preserving concurrent provider I/O and deterministic CPU work.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(4)
+        .thread_stack_size(8 * 1024 * 1024)
+        .build()
+        .expect("build Engine runtime");
+    if let Err(error) = runtime.block_on(run()) {
         tracing::error!(error = %error, "engine terminated");
         std::process::exit(1);
     }

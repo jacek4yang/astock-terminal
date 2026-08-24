@@ -450,7 +450,7 @@ async fn generate_research_report(
   let review_system = "你是A股研究质量审计员。只基于输入证据做结构化审查，不输出私有推理链。逐个候选列出支持证据、反方证据、新闻与公告时效、基本面/估值缺口、数据冲突、可能淘汰原因。不能从缺失值推断结论。只输出JSON对象，字段必须为candidate_reviews、market_regime、portfolio_constraints、data_gaps；candidate_reviews为数组。"
   let review_input : Json = {
     "task_spec": spec.to_json(),
-    "desktop_engine_context": context,
+    "engine_research_context": context,
     "review_round": "evidence_assessment",
   }
   let evidence_review = chat_json(
@@ -462,7 +462,7 @@ async fn generate_research_report(
   let challenge_system = "你是独立反方复核员。审查第一轮证据评估与原始资料，主动寻找过时新闻、单一来源、幸存者偏差、价格不可成交、A股100股一手约束、费用滑点、相关性过高、基本面与技术面冲突。输出JSON对象，字段必须为unsupported_claims、candidate_rejections、required_corrections、residual_risks、release_decision。不得补造数据。"
   let challenge_input : Json = {
     "task_spec": spec.to_json(),
-    "desktop_engine_context": context,
+    "engine_research_context": context,
     "evidence_review": evidence_review,
     "review_round": "adversarial_challenge",
   }
@@ -476,7 +476,7 @@ async fn generate_research_report(
     output_rules
   let user : Json = {
     "task_spec": spec.to_json(),
-    "desktop_engine_context": context,
+    "engine_research_context": context,
     "evidence_review": evidence_review,
     "adversarial_review": adversarial_review,
     "output_contract": "astock-evidence-report/plain-text-v1",

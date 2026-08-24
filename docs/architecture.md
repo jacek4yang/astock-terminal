@@ -17,6 +17,31 @@ supervision and diagnostics. The Agent Worker owns clarification, planning,
 tool coordination, review and publication decisions. Rust owns deterministic
 market, research, quant, storage and credential services.
 
+The research renderer submits one `agent.research.workflow` request containing
+only user-selected depth/tool policy and the current symbol preference. The
+MoonBit Agent emits a bounded, allowlisted `host_effects + continuation`
+contract: it first requests the market/macro/news/candidate snapshot, reviews
+that result (and invokes MiniMax for candidate selection when necessary), then
+requests the selected securities' evidence snapshot before three report review
+rounds. The Host does not choose a symbol, data source, tool, parameter or stop
+condition; it persists the Agent checkpoint/effect intent, executes only
+`target=engine`, persists the result, and returns it to the continuation. The
+Rust aggregate services window repetitive rows and reject any context that
+would approach the 8 MiB frame boundary. `release-architecture-check.mjs`
+fails if Engine tool selection returns to the React workbench.
+
+Every reducer call id remains unique, while an Engine snapshot cache key is
+derived from the task, tool kind and full JSON payload. If Host/Agent/renderer
+dies after an effect intent or result is persisted, the pure
+`ReconcileInterruptedWorkflow` event moves pending calls to a separate
+reconciled audit list (never to the completed list), retains the selected
+security set, and replays only the two allowlisted read-only aggregate
+services. A succeeded matching result is reused; an orphaned pending read is
+retried under a journaled suffix. Mutating or unknown effects remain
+fail-closed. Provider credentials, quota, rate limits or temporary
+availability move the task to `Suspended`; after recovery, the same workflow
+continues from the newest Engine checkpoint and parameter-addressed cache.
+
 The frozen 127-command v5 registry reached 127/127 mapped capabilities before
 the cutover. `src-tauri`, the old Rust Agent crate and all Tauri/WebView2
 dependencies have now been removed. `scripts/capability-parity-check.mjs`

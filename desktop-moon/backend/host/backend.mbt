@@ -22,6 +22,73 @@ struct DeadlineEnvelope {
 } derive(FromJson)
 
 ///|
+/// Standard Worker response projection used by the generic Agent effect
+/// runner. The Host never interprets financial payloads or chooses tools.
+struct WorkerResponseEnvelope {
+  ok : Bool
+  payload : Json
+  error : Json?
+} derive(FromJson)
+
+///|
+struct WorkflowTaskState {
+  task_id : String
+  accepted_seq : Int
+  phase : String
+} derive(FromJson, ToJson)
+
+///|
+extend WorkflowTaskState with ToJson::{to_json}
+
+///|
+struct AgentHostEffect {
+  task_id : String
+  caused_by_seq : Int
+  call_id : String
+  target : String
+  kind : String
+  payload : Json
+  deadline_ms : Int
+  idempotency_key : String
+} derive(FromJson)
+
+///|
+struct AgentContinuation {
+  kind : String
+  workflow : Json
+} derive(FromJson)
+
+///|
+struct AgentWorkflowPayload {
+  state : WorkflowTaskState?
+  checkpoint : Json?
+  host_effects : Array[AgentHostEffect]?
+  continuation : AgentContinuation?
+} derive(FromJson)
+
+///|
+struct DurableEffectView {
+  status : String
+  result : Json?
+  idempotency_key : String
+} derive(FromJson)
+
+///|
+struct DurableEffectList {
+  items : Array[DurableEffectView]
+} derive(FromJson)
+
+///|
+struct DurableEventView {
+  seq : Int
+} derive(FromJson)
+
+///|
+struct DurableTaskView {
+  events : Array[DurableEventView]
+} derive(FromJson)
+
+///|
 fn worker_timeout(request : Json, maximum : Int) -> Int {
   let projected : DeadlineEnvelope = @json.from_json(request) catch {
     _ => return 30000
@@ -126,6 +193,314 @@ fn host_reply(envelope : HostRequestEnvelope, payload : Json) -> Json {
 }
 
 ///|
+fn correlate_worker_reply(
+  envelope : HostRequestEnvelope,
+  reply : WorkerResponseEnvelope,
+) -> Json {
+  {
+    "protocol_version": 1,
+    "request_id": envelope.request_id,
+    "kind": envelope.kind,
+    "ok": reply.ok,
+    "payload": reply.payload,
+    "error": match reply.error {
+      Some(error) => error
+      None => null
+    },
+  }
+}
+
+///|
+fn worker_request(
+  request_id : String,
+  kind : String,
+  payload : Json,
+  deadline_ms : Int,
+) -> Json {
+  {
+    "protocol_version": 1,
+    "request_id": request_id,
+    "kind": kind,
+    "payload": payload,
+    "deadline_ms": deadline_ms,
+  }
+}
+
+///|
+async fn Backend::engine_response(
+  self : Backend,
+  request_id : String,
+  kind : String,
+  payload : Json,
+  timeout_ms : Int,
+) -> WorkerResponseEnvelope {
+  let raw = self.engine.request(
+    worker_request(request_id, kind, payload, timeout_ms),
+    timeout_ms~,
+  )
+  @json.from_json(raw)
+}
+
+///|
+fn response_error(reply : WorkerResponseEnvelope) -> String {
+  match reply.error {
+    Some(error) => error.stringify()
+    None => "Worker request failed without an error payload"
+  }
+}
+
+///|
+async fn Backend::require_engine(
+  self : Backend,
+  request_id : String,
+  kind : String,
+  payload : Json,
+  timeout_ms : Int,
+) -> Json {
+  let reply = self.engine_response(request_id, kind, payload, timeout_ms)
+  if !reply.ok {
+    fail("Engine durability operation failed: " + response_error(reply))
+  }
+  reply.payload
+}
+
+///|
+/// Persist every intermediate Agent checkpoint before executing the effects
+/// exposed by that response. The event bodies are intentionally generic: the
+/// Agent owns semantic state while the Host only maintains sequence durability.
+async fn Backend::persist_workflow_checkpoint(
+  self : Backend,
+  parent_id : String,
+  projection : AgentWorkflowPayload,
+) -> Unit {
+  guard projection.state is Some(state) &&
+    projection.checkpoint is Some(checkpoint) else {
+    return
+  }
+  let loaded_json = self.require_engine(
+    parent_id + ":task-load:" + state.accepted_seq.to_string(),
+    "agent.task.load",
+    { "task_id": state.task_id },
+    30000,
+  )
+  let loaded : DurableTaskView = @json.from_json(loaded_json)
+  let mut durable_max = 0
+  for event in loaded.events {
+    if event.seq > durable_max {
+      durable_max = event.seq
+    }
+  }
+  while durable_max < state.accepted_seq {
+    durable_max += 1
+    ignore(
+      self.require_engine(
+        parent_id + ":event:" + durable_max.to_string(),
+        "agent.event.append",
+        {
+          "task_id": state.task_id,
+          "seq": durable_max,
+          "event_id": "workflow:" +
+          state.task_id +
+          ":" +
+          durable_max.to_string(),
+          "event_kind": "agent.workflow.transition",
+          "event": { "worker_state": state.to_json() },
+        },
+        30000,
+      ),
+    )
+  }
+  ignore(
+    self.require_engine(
+      parent_id + ":checkpoint:" + state.accepted_seq.to_string(),
+      "agent.checkpoint.put",
+      {
+        "task_id": state.task_id,
+        "accepted_seq": state.accepted_seq,
+        "phase": state.phase,
+        "checkpoint": checkpoint,
+      },
+      30000,
+    ),
+  )
+}
+
+///|
+async fn Backend::execute_agent_effect(
+  self : Backend,
+  parent_id : String,
+  effect : AgentHostEffect,
+) -> Json {
+  if effect.target != "engine" {
+    return {
+      "call_id": effect.call_id,
+      "ok": false,
+      "payload": null,
+      "error": "Agent requested a target outside the Engine allowlist",
+      "cache_hit": false,
+    }
+  }
+  let listed = self.require_engine(
+    parent_id + ":effect-list:" + effect.call_id,
+    "agent.effect.list",
+    { "task_id": effect.task_id },
+    30000,
+  )
+  let history : DurableEffectList = @json.from_json(listed)
+  let prior : Array[DurableEffectView] = []
+  for item in history.items {
+    if item.idempotency_key == effect.idempotency_key ||
+      item.idempotency_key.has_prefix(effect.idempotency_key + ":retry:") {
+      prior.push(item)
+    }
+  }
+  for item in prior {
+    if item.status == "succeeded" && item.result is Some(result) {
+      return {
+        "call_id": effect.call_id,
+        "ok": true,
+        "payload": result,
+        "error": null,
+        "cache_hit": true,
+      }
+    }
+  }
+  for item in prior {
+    if item.status == "pending" {
+      // These two aggregate services are read-only snapshots. If the process
+      // died after intent persistence, a new attempt is safe and is recorded
+      // under a retry key; every mutating/future target remains fail-closed.
+      if effect.kind != "research.agent_prepare_context" &&
+        effect.kind != "research.agent_security_context" {
+        return {
+          "call_id": effect.call_id,
+          "ok": false,
+          "payload": null,
+          "error": "相同工具 Effect 仍为 pending；为防止重复副作用已停止执行",
+          "cache_hit": false,
+        }
+      }
+    }
+  }
+  let retry = prior.length()
+  let idempotency_key = if retry == 0 {
+    effect.idempotency_key
+  } else {
+    effect.idempotency_key + ":retry:" + retry.to_string()
+  }
+  let effect_id = "host-tool:" +
+    effect.task_id +
+    ":" +
+    effect.call_id +
+    ":" +
+    retry.to_string()
+  ignore(
+    self.require_engine(
+      parent_id + ":effect-begin:" + effect.call_id,
+      "agent.effect.begin",
+      {
+        "effect_id": effect_id,
+        "task_id": effect.task_id,
+        "caused_by_seq": effect.caused_by_seq,
+        "effect_kind": "engine." + effect.kind,
+        "effect": {
+          "target": "engine",
+          "kind": effect.kind,
+          "payload": effect.payload,
+        },
+        "idempotency_key": idempotency_key,
+      },
+      30000,
+    ),
+  )
+  let tool_reply = self.engine_response(
+    parent_id + ":tool:" + effect.call_id,
+    effect.kind,
+    effect.payload,
+    effect.deadline_ms,
+  )
+  let stored_result : Json = if tool_reply.ok {
+    tool_reply.payload
+  } else {
+    { "error": response_error(tool_reply) }
+  }
+  ignore(
+    self.require_engine(
+      parent_id + ":effect-complete:" + effect.call_id,
+      "agent.effect.complete",
+      {
+        "effect_id": effect_id,
+        "status": if tool_reply.ok {
+          "succeeded"
+        } else {
+          "failed"
+        },
+        "result": stored_result,
+      },
+      30000,
+    ),
+  )
+  {
+    "call_id": effect.call_id,
+    "ok": tool_reply.ok,
+    "payload": if tool_reply.ok {
+      tool_reply.payload
+    } else {
+      null
+    },
+    "error": if tool_reply.ok {
+      null
+    } else {
+      response_error(tool_reply)
+    },
+    "cache_hit": false,
+  }
+}
+
+///|
+/// Interpret only the generic `host_effects + continuation` shell contract.
+/// All selection, tool kinds, parameters and stopping decisions originate in
+/// the MoonBit Agent Worker.
+async fn Backend::route_agent(self : Backend, request : Json) -> Json {
+  let envelope : HostRequestEnvelope = @json.from_json(request)
+  let maximum = worker_timeout(request, 900000)
+  let mut reply_json = self.agent.request(request, timeout_ms=maximum)
+  let mut round = 0
+  while round < 4 {
+    let reply : WorkerResponseEnvelope = @json.from_json(reply_json)
+    if !reply.ok {
+      return correlate_worker_reply(envelope, reply)
+    }
+    let projection : AgentWorkflowPayload = @json.from_json(reply.payload) catch {
+      _ => return correlate_worker_reply(envelope, reply)
+    }
+    self.persist_workflow_checkpoint(envelope.request_id, projection)
+    let effects = projection.host_effects.unwrap_or([])
+    if effects.is_empty() {
+      return correlate_worker_reply(envelope, reply)
+    }
+    guard projection.continuation is Some(continuation) else {
+      fail("Agent returned host effects without a continuation")
+    }
+    let results : Array[Json] = []
+    for effect in effects {
+      results.push(self.execute_agent_effect(envelope.request_id, effect))
+    }
+    round += 1
+    reply_json = self.agent.request(
+      worker_request(
+        envelope.request_id + ":continuation:" + round.to_string(),
+        continuation.kind,
+        { "workflow": continuation.workflow, "tool_results": results },
+        maximum,
+      ),
+      timeout_ms=maximum,
+    )
+  }
+  fail("Agent exceeded the bounded Host effect continuation limit")
+}
+
+///|
 fn handshake_request(request_id : String) -> Json {
   {
     "protocol_version": 1,
@@ -166,11 +541,7 @@ pub async fn Backend::route(
         request.request,
         timeout_ms=worker_timeout(request.request, 180000),
       )
-    "agent" =>
-      self.agent.request(
-        request.request,
-        timeout_ms=worker_timeout(request.request, 300000),
-      )
+    "agent" => self.route_agent(request.request)
     "host" => {
       let envelope : HostRequestEnvelope = @json.from_json(request.request)
       match envelope.kind {

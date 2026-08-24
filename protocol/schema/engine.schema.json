@@ -26,6 +26,8 @@
         { "const": "market.fund_flow.daily" },
         { "const": "market.fund_flow.realtime" },
         { "const": "research.market_context" },
+        { "const": "research.agent_prepare_context" },
+        { "const": "research.agent_security_context" },
         { "const": "research.global_context" },
         { "const": "research.global.sync.start" },
         { "const": "research.global.sync.status" },

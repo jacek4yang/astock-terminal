@@ -66,7 +66,8 @@ class WorkerChannel {
     if (body.length > MAX_FRAME_BYTES) return Promise.reject(new Error("request frame exceeds 8 MiB"));
     const header = Buffer.alloc(4);
     header.writeUInt32LE(body.length);
-    const timeoutMs = Math.max(1_000, Math.min(300_000, Number(request.deadline_ms) || 30_000));
+    const ceiling = this.name === "agent" ? 900_000 : 600_000;
+    const timeoutMs = Math.max(1_000, Math.min(ceiling, Number(request.deadline_ms) || 30_000));
     this.requestCount += 1;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -136,6 +137,109 @@ function hostResponse(request) {
   };
 }
 
+function workerRequest(parent, suffix, kind, payload, deadlineMs) {
+  return {
+    protocol_version: 1,
+    request_id: `${parent.request_id}:${suffix}`,
+    kind,
+    payload,
+    deadline_ms: deadlineMs,
+  };
+}
+
+function requireSuccess(reply, operation) {
+  if (!reply?.ok) throw new Error(`${operation}: ${reply?.error?.message ?? JSON.stringify(reply?.error ?? "unknown Worker failure")}`);
+  return reply.payload;
+}
+
+async function enginePayload(parent, suffix, kind, payload, deadlineMs = 30_000) {
+  return requireSuccess(await engine.request(workerRequest(parent, suffix, kind, payload, deadlineMs)), kind);
+}
+
+async function persistWorkflowCheckpoint(parent, payload) {
+  const state = payload?.state;
+  if (!state?.task_id || !Number.isInteger(state.accepted_seq) || payload.checkpoint == null) return;
+  const loaded = await enginePayload(parent, `task-load:${state.accepted_seq}`, "agent.task.load", { task_id: state.task_id });
+  let durableMax = Math.max(0, ...(loaded.events ?? []).map((event) => Number(event.seq) || 0));
+  while (durableMax < state.accepted_seq) {
+    durableMax += 1;
+    await enginePayload(parent, `event:${durableMax}`, "agent.event.append", {
+      task_id: state.task_id,
+      seq: durableMax,
+      event_id: `workflow:${state.task_id}:${durableMax}`,
+      event_kind: "agent.workflow.transition",
+      event: { worker_state: state },
+    });
+  }
+  await enginePayload(parent, `checkpoint:${state.accepted_seq}`, "agent.checkpoint.put", {
+    task_id: state.task_id,
+    accepted_seq: state.accepted_seq,
+    phase: state.phase,
+    checkpoint: payload.checkpoint,
+  });
+}
+
+async function executeAgentEffect(parent, effect) {
+  if (effect?.target !== "engine") {
+    return { call_id: effect?.call_id ?? "invalid", ok: false, payload: null, error: "Agent requested a target outside the Engine allowlist", cache_hit: false };
+  }
+  const history = await enginePayload(parent, `effect-list:${effect.call_id}`, "agent.effect.list", { task_id: effect.task_id });
+  const prior = (history.items ?? []).filter((item) => item.idempotency_key === effect.idempotency_key || item.idempotency_key?.startsWith(`${effect.idempotency_key}:retry:`));
+  const completed = prior.find((item) => item.status === "succeeded" && item.result != null);
+  if (completed) return { call_id: effect.call_id, ok: true, payload: completed.result, error: null, cache_hit: true };
+  const replayableRead = effect.kind === "research.agent_prepare_context" || effect.kind === "research.agent_security_context";
+  if (prior.some((item) => item.status === "pending") && !replayableRead) {
+    return { call_id: effect.call_id, ok: false, payload: null, error: "相同工具 Effect 仍为 pending；为防止重复副作用已停止执行", cache_hit: false };
+  }
+  const retry = prior.length;
+  const idempotencyKey = retry === 0 ? effect.idempotency_key : `${effect.idempotency_key}:retry:${retry}`;
+  const effectId = `browser-tool:${effect.task_id}:${effect.call_id}:${retry}`;
+  await enginePayload(parent, `effect-begin:${effect.call_id}`, "agent.effect.begin", {
+    effect_id: effectId,
+    task_id: effect.task_id,
+    caused_by_seq: effect.caused_by_seq,
+    effect_kind: `engine.${effect.kind}`,
+    effect: { target: "engine", kind: effect.kind, payload: effect.payload },
+    idempotency_key: idempotencyKey,
+  });
+  const reply = await engine.request(workerRequest(parent, `tool:${effect.call_id}`, effect.kind, effect.payload, effect.deadline_ms));
+  const result = reply.ok ? reply.payload : { error: reply.error?.message ?? JSON.stringify(reply.error ?? "Engine tool failed") };
+  await enginePayload(parent, `effect-complete:${effect.call_id}`, "agent.effect.complete", {
+    effect_id: effectId,
+    status: reply.ok ? "succeeded" : "failed",
+    result,
+  });
+  return {
+    call_id: effect.call_id,
+    ok: Boolean(reply.ok),
+    payload: reply.ok ? reply.payload : null,
+    error: reply.ok ? null : result.error,
+    cache_hit: false,
+  };
+}
+
+async function routeAgent(request) {
+  let reply = await agent.request(request);
+  for (let round = 1; round <= 4; round += 1) {
+    if (!reply.ok) return { ...reply, request_id: request.request_id, kind: request.kind };
+    const payload = reply.payload;
+    await persistWorkflowCheckpoint(request, payload);
+    const effects = Array.isArray(payload?.host_effects) ? payload.host_effects : [];
+    if (!effects.length) return { ...reply, request_id: request.request_id, kind: request.kind };
+    if (!payload?.continuation?.kind || payload.continuation.workflow == null) throw new Error("Agent returned host effects without a continuation");
+    const toolResults = [];
+    for (const effect of effects) toolResults.push(await executeAgentEffect(request, effect));
+    reply = await agent.request(workerRequest(
+      request,
+      `continuation:${round}`,
+      payload.continuation.kind,
+      { workflow: payload.continuation.workflow, tool_results: toolResults },
+      Math.min(900_000, Number(request.deadline_ms) || 900_000),
+    ));
+  }
+  throw new Error("Agent exceeded the bounded browser-test effect continuation limit");
+}
+
 await Promise.all([
   engine.request({ protocol_version: 1, request_id: "browser-engine-handshake", kind: "system.handshake", payload: { app_version: "browser-test", protocol_version: 1 }, deadline_ms: 15_000 }),
   agent.request({ protocol_version: 1, request_id: "browser-agent-handshake", kind: "system.handshake", payload: { app_version: "browser-test", protocol_version: 1 }, deadline_ms: 15_000 }),
@@ -167,7 +271,11 @@ const server = createServer(async (request, response) => {
   try {
     const body = await readBody(request);
     if (!body || !["engine", "agent", "host"].includes(body.target)) throw new Error("unsupported target");
-    const result = body.target === "host" ? hostResponse(body.request) : await channels[body.target].request(body.request);
+    const result = body.target === "host"
+      ? hostResponse(body.request)
+      : body.target === "agent"
+        ? await routeAgent(body.request)
+        : await channels[body.target].request(body.request);
     json(response, 200, result, allowedOrigin);
   } catch (error) {
     json(response, 502, { error: error instanceof Error ? error.message : String(error) }, allowedOrigin);

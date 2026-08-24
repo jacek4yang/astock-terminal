@@ -183,3 +183,85 @@ test "report publication requires successful verification" {
   let publish = reduce(failed, 8, VerificationPassed)
   assert_false(publish.accepted)
 }
+
+///|
+test "review may request another bounded tool wave" {
+  let preparing = reduce(
+      initial("task-more-evidence"),
+      1,
+      Start(complete_spec()),
+    ).state
+  let reasoning = reduce(preparing, 2, Prepared).state
+  let awaiting = reduce(
+      reasoning,
+      3,
+      ToolRequested(call_id="prepare", tool="research.agent_prepare_context"),
+    ).state
+  let reviewing = reduce(
+      awaiting,
+      4,
+      ToolSucceeded(call_id="prepare", evidence_ids=["prepare"]),
+    ).state
+  let next_reasoning = reduce(reviewing, 5, MoreEvidenceRequired)
+  assert_true(next_reasoning.accepted)
+  assert_eq(next_reasoning.state.phase, Reasoning)
+  let completed = reduce(next_reasoning.state, 6, EvidenceReviewCompleted)
+  assert_true(completed.accepted)
+  assert_eq(completed.state.phase, Reviewing)
+}
+
+///|
+test "interrupted tools reconcile without pretending they completed" {
+  let preparing = reduce(initial("task-reconcile"), 1, Start(complete_spec())).state
+  let state = reduce(preparing, 2, Prepared).state
+  let requested = reduce(
+    state,
+    state.accepted_seq + 1,
+    ToolRequested(
+      call_id="call-interrupted",
+      tool="research.agent_prepare_context",
+    ),
+  )
+  inspect(requested.accepted, content="true")
+  let reconciled = reduce(
+    requested.state,
+    requested.state.accepted_seq + 1,
+    ReconcileInterruptedWorkflow,
+  )
+  inspect(reconciled.accepted, content="true")
+  inspect(reconciled.state.phase_name(), content="reasoning")
+  inspect(reconciled.state.pending_tools.length(), content="0")
+  inspect(reconciled.state.completed_call_ids.length(), content="0")
+  assert_eq(reconciled.state.reconciled_call_ids, ["call-interrupted"])
+}
+
+///|
+test "provider suspension preserves a research plan and resumes safely" {
+  let preparing = reduce(
+      initial("task-provider-resume"),
+      1,
+      Start(complete_spec()),
+    ).state
+  let state = reduce(preparing, 2, Prepared).state
+  let selected = reduce(
+    state,
+    state.accepted_seq + 1,
+    ResearchPlanSelected(["300308", "000001"]),
+  )
+  inspect(selected.accepted, content="true")
+  let suspended = reduce(
+    selected.state,
+    selected.state.accepted_seq + 1,
+    ProviderSuspended("provider_unavailable"),
+  )
+  inspect(suspended.state.phase_name(), content="suspended")
+  assert_eq(suspended.state.research_symbols, ["300308", "000001"])
+  let resumed = reduce(
+    suspended.state,
+    suspended.state.accepted_seq + 1,
+    Resume,
+  )
+  inspect(resumed.accepted, content="true")
+  inspect(resumed.state.phase_name(), content="reasoning")
+  assert_true(resumed.state.terminal_reason is None)
+}

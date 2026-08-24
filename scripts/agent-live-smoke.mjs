@@ -77,47 +77,36 @@ try {
   if (!provider.catalog_verified || !provider.model) throw new Error("MiniMax model catalog was not verified");
 
   const taskId = crypto.randomUUID();
+  const beganAt = Date.now();
   const started = await worker.request("agent.start", {
     task_id: taskId,
     seq: 1,
     spec: {
-      objective: "基于给定快照生成仅供人工执行的投资研究计划，并明确数据缺口",
-      security_universe: ["600519"],
-      as_of: "2026-08-24T15:00:00+08:00",
-      research_start: "2025-08-24",
-      research_end: "2026-08-24",
-      investment_horizon: "1至3个月",
-      comparison_benchmark: "000300",
+      objective: "为2万元资金生成仅供人工执行的最新A股投资计划",
+      security_universe: [],
+      as_of: "",
+      research_start: "",
+      research_end: "",
+      investment_horizon: "",
+      comparison_benchmark: "",
       output_type: "manual_plan",
       evidence_requirement: "strict",
     },
-  }, 20_000);
-  if (started.state?.phase !== "preparing") throw new Error(`unexpected start phase ${started.state?.phase}`);
-
-  const beganAt = Date.now();
-  const researched = await worker.request("agent.research", {
-    task_id: taskId,
-    context: {
-      source: "live_smoke_fixture",
-      symbol: "600519",
-      retrieved_at: "2026-08-24T15:00:00+08:00",
-      snapshot: {
-        quote: { name: "贵州茅台", price: 1500, change_pct: 0.5 },
-        data_boundary: "故意只提供最小行情快照，用于验证模型会标注数据缺口",
-      },
-    },
-  }, 240_000);
-  if (researched.state?.phase !== "completed") throw new Error(`unexpected research phase ${researched.state?.phase}`);
-  if (typeof researched.report !== "string" || researched.report.length < 120) throw new Error("research report was missing or too short");
-  if (researched.report.includes("<think>")) throw new Error("private reasoning leaked into the report");
+  }, 120_000);
+  if (started.state?.phase !== "waiting_for_user") throw new Error(`unexpected start phase ${started.state?.phase}`);
+  const questions = started.state?.clarification?.questions ?? [];
+  if (!questions.length || questions.length > 3) throw new Error("model-generated clarification questions are missing or unbounded");
+  if (questions.some((question) => !question.question || !Array.isArray(question.options) || question.options.length < 2)) {
+    throw new Error("dynamic clarification did not provide selectable model-generated options");
+  }
   console.log(JSON.stringify({
     ok: true,
     provider: provider.provider,
     model: provider.model,
     region: provider.api_host.includes("minimaxi.com") ? "mainland" : "international",
-    report_chars: researched.report.length,
+    clarification_questions: questions.length,
     elapsed_ms: Date.now() - beganAt,
-    phase: researched.state.phase,
+    phase: started.state.phase,
   }));
 } finally {
   await worker.close();

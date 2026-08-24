@@ -25,20 +25,63 @@ struct RestorePayload {
 } derive(FromJson)
 
 ///|
-/// Engine-fetched, versioned research context supplied by the renderer. The
-/// credential and database layout never cross this boundary.
-struct ResearchPayload {
+/// Renderer supplies only user-selected execution preferences. Tool order,
+/// candidate planning and evidence policy remain inside the Agent Worker.
+struct ResearchWorkflowPayload {
   task_id : String
-  context : Json
+  depth : String
+  tool_policy : String
+  preferred_symbols : Array[String]
+  capital : Double?
 } derive(FromJson)
 
 ///|
-/// Candidate-planning input. All rows originate in the Rust Engine and the
-/// returned symbols are validated against this exact bounded list.
-struct PlanPayload {
+struct WorkflowToolResult {
+  call_id : String
+  ok : Bool
+  payload : Json
+  error : String?
+  cache_hit : Bool
+} derive(FromJson)
+
+///|
+struct ResearchWorkflowState {
   task_id : String
-  candidates : Array[ResearchCandidate]
+  stage : String
+  depth : String
+  tool_policy : String
+  preferred_symbols : Array[String]
+  capital : Double?
+  prepare_context : Json?
+  research_plan : ResearchPlan?
+} derive(FromJson, ToJson)
+
+///|
+extend ResearchWorkflowState with ToJson::{to_json}
+
+///|
+struct ResearchWorkflowContinuePayload {
+  workflow : ResearchWorkflowState
+  tool_results : Array[WorkflowToolResult]
+} derive(FromJson)
+
+///|
+struct CandidatePage {
+  items : Array[ResearchCandidate]
+} derive(FromJson)
+
+///|
+struct AgentPrepareContext {
+  market_overview : Json
   market_context : Json
+  global_context : Json
+  market_news : Json
+  candidates : CandidatePage
+} derive(FromJson)
+
+///|
+struct AgentSecurityContext {
+  securities : Array[Json]
 } derive(FromJson)
 
 ///|
@@ -112,6 +155,8 @@ fn state_json(state : @agent.AgentState) -> Json {
     }),
     "pending_tool_count": state.pending_tools.length(),
     "completed_tool_count": state.completed_call_ids.length(),
+    "reconciled_call_count": state.reconciled_call_ids.length(),
+    "research_symbols": state.research_symbols,
     "evidence_ids": state.evidence_ids,
     "blocking_verification_errors": state.blocking_verification_errors,
     "terminal_reason": match state.terminal_reason {
@@ -184,6 +229,7 @@ fn parse_event(payload : EventPayload) -> @agent.AgentEvent raise {
         call_id=required(payload.call_id, "call_id"),
         retryable=payload.retryable.unwrap_or(false),
       )
+    "reconcile_interrupted_workflow" => ReconcileInterruptedWorkflow
     "review_ready" => ReviewReady
     "synthesis_ready" => SynthesisReady
     "verification_passed" => VerificationPassed
@@ -192,6 +238,8 @@ fn parse_event(payload : EventPayload) -> @agent.AgentEvent raise {
         payload.errors.unwrap_or(["unspecified_verification_error"]),
       )
     "quota_suspended" => QuotaSuspended
+    "provider_suspended" =>
+      ProviderSuspended(payload.reason.unwrap_or("provider_unavailable"))
     "resume" => Resume
     "cancel" => Cancel
     "hard_failure" =>
@@ -230,6 +278,150 @@ fn transition_state(
     )
   }
   transition.state
+}
+
+///|
+fn valid_security_symbol(symbol : String) -> Bool {
+  symbol.length() == 6 && symbol.all(fn(char) { char >= '0' && char <= '9' })
+}
+
+///|
+fn bounded_research_symbols(
+  state : @agent.AgentState,
+  preferred : Array[String],
+  maximum : Int,
+) -> Array[String] {
+  let symbols : Array[String] = []
+  for
+    symbol in [
+      ..state.research_symbols,
+      ..preferred,
+      ..state.spec.unwrap().security_universe,
+    ] {
+    if valid_security_symbol(symbol) &&
+      !symbols.contains(symbol) &&
+      symbols.length() < maximum {
+      symbols.push(symbol)
+    }
+  }
+  symbols
+}
+
+///|
+fn host_engine_effect(
+  task_id : String,
+  caused_by_seq : Int,
+  call_id : String,
+  kind : String,
+  payload : Json,
+  deadline_ms : Int,
+) -> Json {
+  {
+    "task_id": task_id,
+    "caused_by_seq": caused_by_seq,
+    "call_id": call_id,
+    "target": "engine",
+    "kind": kind,
+    "payload": payload,
+    "deadline_ms": deadline_ms,
+    // The reducer call id is unique for sequence safety while cache identity
+    // is stable across crash reconciliation and includes every tool argument.
+    "idempotency_key": task_id + ":tool:" + kind + ":" + payload.stringify(),
+  }
+}
+
+///|
+fn explicit_research_plan(symbols : Array[String]) -> ResearchPlan {
+  ResearchPlan::{
+    symbols: symbols.copy(),
+    selection_summary: "优先研究用户明确指定或上次已持久化的证券；最终报告仍可拒绝全部候选并保留现金",
+    verification_focus: [
+      "逐项核对行情、财务、资金、公告、新闻与估值证据", "重大跨源冲突会阻止发布",
+    ],
+    rejected_risks: ["未完成详细取证前不形成买卖结论"],
+  }
+}
+
+///|
+fn provider_failure_reason(detail : String) -> String {
+  if detail.contains("429") ||
+    detail.contains("quota") ||
+    detail.contains("rate_limit") {
+    "provider_quota_or_rate_limit"
+  } else if detail.contains("401") ||
+    detail.contains("403") ||
+    detail.contains("credential") {
+    "provider_credential_rejected"
+  } else {
+    "provider_unavailable"
+  }
+}
+
+///|
+fn Worker::workflow_provider_suspended(
+  self : Worker,
+  request : RequestEnvelope,
+  current : @agent.AgentState,
+  detail : String,
+) -> Json raise {
+  let reason = provider_failure_reason(detail)
+  let suspended = transition_state(current, ProviderSuspended(reason))
+  self.tasks[suspended.task_id] = suspended
+  response(request, true, {
+    "accepted": true,
+    "state": state_json(suspended),
+    "checkpoint": suspended.to_json(),
+    "effects": [@agent.PersistCheckpoint].map(effect_json),
+    "report": null,
+    "verification_findings": [
+      if reason == "provider_quota_or_rate_limit" {
+        "MiniMax Plus 额度或速率限制暂不可用；已保存工具结果，额度恢复后可继续"
+      } else if reason == "provider_credential_rejected" {
+        "MiniMax Plus 凭据缺失或被拒绝；请安全更新凭据后继续"
+      } else {
+        "MiniMax Plus 暂不可用；已保存工具结果，可在服务恢复后继续"
+      },
+    ],
+    "activities": [
+      {
+        "kind": "provider_suspended",
+        "detail": "Provider暂停不会发布不完整报告；恢复时会按参数命中已验证工具缓存",
+      },
+    ],
+  })
+}
+
+///|
+fn Worker::workflow_tool_failure(
+  self : Worker,
+  request : RequestEnvelope,
+  current : @agent.AgentState,
+  result : WorkflowToolResult,
+) -> Json raise {
+  let failed = transition_state(
+    current,
+    ToolFailed(call_id=result.call_id, retryable=false),
+  )
+  self.tasks[failed.task_id] = failed
+  response(request, true, {
+    "accepted": true,
+    "state": state_json(failed),
+    "checkpoint": failed.to_json(),
+    "effects": [@agent.PersistCheckpoint, @agent.EmitTerminal].map(effect_json),
+    "report": null,
+    "verification_findings": [
+      result.error.unwrap_or("Engine research effect failed"),
+    ],
+    "activities": [
+      {
+        "kind": "execute_tool",
+        "tool": result.call_id,
+        "call_id": result.call_id,
+        "cache_hit": result.cache_hit,
+        "detail": "研究工具失败，任务已安全停止且没有发布结论",
+      },
+    ],
+  })
 }
 
 ///|
@@ -449,8 +641,8 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
         }
       }
     }
-    "agent.research" => {
-      let payload : ResearchPayload = @json.from_json(request.payload)
+    "agent.research.workflow" => {
+      let payload : ResearchWorkflowPayload = @json.from_json(request.payload)
       match self.tasks.get(payload.task_id) {
         None =>
           response(
@@ -462,67 +654,321 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
             ),
           )
         Some(current) =>
-          if current.phase != Preparing {
+          if current.phase != Preparing &&
+            current.phase != Suspended &&
+            current.phase != AwaitingTools {
             response(
               request,
               false,
               null,
               error=error_payload(
-                "task_not_ready", "研究任务尚未完成必要的边界确认",
+                "task_not_ready", "研究任务不在可启动或可恢复状态",
                 false,
               ),
             )
           } else {
+            let mut state = match current.phase {
+              Preparing => transition_state(current, Prepared)
+              Suspended => transition_state(current, Resume)
+              AwaitingTools =>
+                transition_state(current, ReconcileInterruptedWorkflow)
+              _ => current
+            }
+            let call_id = "prepare-context-" +
+              payload.task_id +
+              "-" +
+              state.accepted_seq.to_string()
+            state = transition_state(
+              state,
+              ToolRequested(call_id~, tool="research.agent_prepare_context"),
+            )
+            self.tasks[payload.task_id] = state
+            let workflow = ResearchWorkflowState::{
+              task_id: payload.task_id,
+              stage: "prepared",
+              depth: payload.depth,
+              tool_policy: payload.tool_policy,
+              preferred_symbols: payload.preferred_symbols,
+              capital: payload.capital,
+              prepare_context: None,
+              research_plan: None,
+            }
+            response(request, true, {
+              "accepted": true,
+              "state": state_json(state),
+              "checkpoint": state.to_json(),
+              "effects": [
+                @agent.PersistCheckpoint,
+                @agent.ExecuteTool(
+                  call_id~,
+                  tool="research.agent_prepare_context",
+                ),
+              ].map(effect_json),
+              "activities": [
+                {
+                  "kind": "prepare_research",
+                  "detail": "Agent已根据任务边界安排市场、宏观、资讯和候选池取证",
+                },
+              ],
+              "host_effects": [
+                host_engine_effect(
+                  payload.task_id,
+                  state.accepted_seq,
+                  call_id,
+                  "research.agent_prepare_context",
+                  {
+                    "depth": payload.depth,
+                    "capital": match payload.capital {
+                      Some(value) => value.to_json()
+                      None => null
+                    },
+                  },
+                  300000,
+                ),
+              ],
+              "continuation": {
+                "kind": "agent.research.workflow.continue",
+                "workflow": workflow.to_json(),
+              },
+            })
+          }
+      }
+    }
+    "agent.research.workflow.continue" => {
+      let payload : ResearchWorkflowContinuePayload = @json.from_json(
+        request.payload,
+      )
+      match self.tasks.get(payload.workflow.task_id) {
+        None =>
+          response(
+            request,
+            false,
+            null,
+            error=error_payload(
+              "task_not_loaded", "Agent task is not loaded during workflow continuation",
+              true,
+            ),
+          )
+        Some(current) => {
+          guard payload.tool_results is [result] else {
+            return response(
+              request,
+              false,
+              null,
+              error=error_payload(
+                "invalid_tool_result_count", "Agent workflow expected exactly one bounded Engine result",
+                false,
+              ),
+            )
+          }
+          if !result.ok {
+            return self.workflow_tool_failure(request, current, result)
+          }
+          if payload.workflow.stage == "prepared" {
+            let prepared : AgentPrepareContext = @json.from_json(result.payload)
+            let maximum = match payload.workflow.capital {
+              Some(capital) if capital <= 50000.0 => 3
+              _ => 5
+            }
+            let mut state = transition_state(
+              current,
+              ToolSucceeded(call_id=result.call_id, evidence_ids=[
+                "engine-market-context-" + current.task_id,
+              ]),
+            )
+            let mut symbols = bounded_research_symbols(
+              state,
+              payload.workflow.preferred_symbols,
+              maximum,
+            )
+            let plan = if symbols.is_empty() {
+              let key = read_minimax_key()
+              if key.trim().is_empty() {
+                return self.workflow_provider_suspended(
+                  request, state, "provider_credential_missing",
+                )
+              }
+              state = transition_state(state, MoreEvidenceRequired)
+              state = transition_state(state, ModelRoundStarted)
+              let provider = self.provider_config(key) catch {
+                error =>
+                  return self.workflow_provider_suspended(
+                    request,
+                    state,
+                    error.to_string(),
+                  )
+              }
+              let selected : ResearchPlan = generate_research_plan(
+                provider,
+                key,
+                state.spec.unwrap(),
+                prepared.candidates.items,
+                prepared.market_overview,
+              ) catch {
+                error =>
+                  return self.workflow_provider_suspended(
+                    request,
+                    state,
+                    error.to_string(),
+                  )
+              }
+              symbols = selected.symbols.copy()
+              selected
+            } else {
+              state = transition_state(state, MoreEvidenceRequired)
+              explicit_research_plan(symbols)
+            }
+            state = transition_state(state, ResearchPlanSelected(symbols))
+            let call_id = "security-context-" +
+              payload.workflow.task_id +
+              "-" +
+              state.accepted_seq.to_string()
+            state = transition_state(
+              state,
+              ToolRequested(call_id~, tool="research.agent_security_context"),
+            )
+            self.tasks[payload.workflow.task_id] = state
+            let spec = state.spec.unwrap()
+            let workflow = ResearchWorkflowState::{
+              task_id: payload.workflow.task_id,
+              stage: "security",
+              depth: payload.workflow.depth,
+              tool_policy: payload.workflow.tool_policy,
+              preferred_symbols: payload.workflow.preferred_symbols,
+              capital: payload.workflow.capital,
+              prepare_context: Some(result.payload),
+              research_plan: Some(plan),
+            }
+            response(request, true, {
+              "accepted": true,
+              "state": state_json(state),
+              "checkpoint": state.to_json(),
+              "effects": [
+                @agent.PersistCheckpoint,
+                @agent.ExecuteTool(
+                  call_id~,
+                  tool="research.agent_security_context",
+                ),
+              ].map(effect_json),
+              "activities": [
+                {
+                  "kind": "execute_tool",
+                  "tool": "市场、宏观与资讯研究包",
+                  "call_id": result.call_id,
+                  "cache_hit": result.cache_hit,
+                  "evidence_count": 16,
+                },
+                {
+                  "kind": "prepare_research",
+                  "detail": "Agent已完成候选复核并安排逐证券深度取证；此时仍未形成投资结论",
+                },
+              ],
+              "host_effects": [
+                host_engine_effect(
+                  payload.workflow.task_id,
+                  state.accepted_seq,
+                  call_id,
+                  "research.agent_security_context",
+                  {
+                    "symbols": symbols,
+                    "depth": payload.workflow.depth,
+                    "tool_policy": payload.workflow.tool_policy,
+                    "benchmark": spec.comparison_benchmark,
+                    "start": spec.research_start,
+                    "end": spec.research_end,
+                  },
+                  600000,
+                ),
+              ],
+              "continuation": {
+                "kind": "agent.research.workflow.continue",
+                "workflow": workflow.to_json(),
+              },
+            })
+          } else if payload.workflow.stage == "security" {
+            let prepared : AgentPrepareContext = @json.from_json(
+              payload.workflow.prepare_context.unwrap(),
+            )
+            let security : AgentSecurityContext = @json.from_json(
+              result.payload,
+            )
+            let plan = payload.workflow.research_plan.unwrap()
+            let mut state = transition_state(
+              current,
+              ToolSucceeded(
+                call_id=result.call_id,
+                evidence_ids=plan.symbols.map(fn(symbol) {
+                  "engine-security-context-" + symbol
+                }),
+              ),
+            )
             let key = read_minimax_key()
             if key.trim().is_empty() {
-              return response(
-                request,
-                false,
-                null,
-                error=error_payload(
-                  "provider_credential_missing", "未配置 MiniMax Plus API Key，请先在配置页保存密钥",
-                  false,
-                ),
+              return self.workflow_provider_suspended(
+                request, state, "provider_credential_missing",
               )
             }
-            let provider = self.provider_config(key)
-            let spec = current.spec.unwrap()
-            let report = generate_research_report(
-              provider,
-              key,
-              spec,
-              payload.context,
-            )
-            let call_id = "desktop-context-" + payload.task_id
-            let evidence_id = "engine-context-" + payload.task_id
-            let mut state = transition_state(current, Prepared)
+            state = transition_state(state, MoreEvidenceRequired)
             state = transition_state(state, ModelRoundStarted)
             state = transition_state(state, ModelRoundStarted)
             state = transition_state(state, ModelRoundStarted)
-            state = transition_state(
-              state,
-              ToolRequested(call_id~, tool="desktop_engine_context"),
-            )
-            state = transition_state(
-              state,
-              ToolSucceeded(call_id~, evidence_ids=[evidence_id]),
-            )
+            let provider = self.provider_config(key) catch {
+              error =>
+                return self.workflow_provider_suspended(
+                  request,
+                  state,
+                  error.to_string(),
+                )
+            }
+            let spec = state.spec.unwrap()
+            let context : Json = {
+              "source": "moonbit_agent_orchestrated_engine",
+              "retrieved_at": spec.as_of,
+              "run_options": {
+                "depth": payload.workflow.depth,
+                "tool_policy": payload.workflow.tool_policy,
+              },
+              "research_plan": plan.to_json(),
+              "market_overview": prepared.market_overview,
+              "market_context": prepared.market_context,
+              "global_context": prepared.global_context,
+              "market_news": prepared.market_news,
+              "securities": security.securities,
+              "evidence_inventory": {
+                "requested_symbols": plan.symbols,
+                "dimensions": [
+                  "quote", "kline", "technical_analysis", "fund_flow", "market_pools",
+                  "global_macro", "financial_statements", "valuation_history", "security_events",
+                  "announcements", "multi_source_news", "cross_provider_reconciliation",
+                  "optional_joinquant", "optional_tushare_iwencai_sec",
+                ],
+                "review_rounds": 3,
+              },
+            }
+            let report : String = generate_research_report(
+              provider, key, spec, context,
+            ) catch {
+              error =>
+                return self.workflow_provider_suspended(
+                  request,
+                  state,
+                  error.to_string(),
+                )
+            }
+            state = transition_state(state, EvidenceReviewCompleted)
             state = transition_state(state, ReviewReady)
             state = transition_state(state, SynthesisReady)
             let verification_errors = verify_research_report(
-              report,
-              spec,
-              payload.context,
+              report, spec, context,
             )
             state = if verification_errors.is_empty() {
               transition_state(state, VerificationPassed)
             } else {
               transition_state(state, VerificationRejected(verification_errors))
             }
-            self.tasks[payload.task_id] = state
+            self.tasks[payload.workflow.task_id] = state
             response(request, true, {
               "accepted": true,
-              "rejection": null,
               "state": state_json(state),
               "checkpoint": state.to_json(),
               "effects": if verification_errors.is_empty() {
@@ -542,94 +988,42 @@ async fn Worker::handle(self : Worker, request : RequestEnvelope) -> Json {
               "verification_findings": verification_errors,
               "activities": [
                 {
-                  "kind": "prepare_research",
-                  "detail": "研究边界已确认",
-                },
-                {
                   "kind": "execute_tool",
-                  "tool": "桌面 Engine 研究快照",
-                  "call_id": call_id,
-                  "cache_hit": false,
-                  "evidence_count": 1,
+                  "tool": "逐证券综合研究包",
+                  "call_id": result.call_id,
+                  "cache_hit": result.cache_hit,
+                  "evidence_count": plan.symbols.length() * 7,
                 },
                 {
                   "kind": "review_evidence",
-                  "detail": "第一轮已逐项检查行情、资金、财务、估值、新闻、公告与缺失值",
-                },
-                {
-                  "kind": "review_evidence",
-                  "detail": "第二轮独立反证：检查过时资讯、单一来源、不可成交与组合约束",
+                  "detail": "已复核缺失、时点、来源冲突、可成交性和组合约束",
                 },
                 {
                   "kind": "synthesize_report",
-                  "detail": "第三轮 MiniMax Plus 综合原始证据与两轮复核生成纯文本报告",
+                  "detail": "MiniMax Plus 完成证据审查、反方挑战和最终综合三轮模型工作",
                 },
                 {
                   "kind": "verify_report",
                   "detail": if verification_errors.is_empty() {
-                    "已通过结构、证据清单、人工计划要素、私有推理隔离与发布边界校验"
+                    "结构、证据清单、人工计划要素和发布边界校验通过"
                   } else {
-                    "校验未通过，报告未发布；请补齐缺失结构或证据后恢复任务"
+                    "校验失败，报告未发布"
                   },
                 },
               ],
             })
-          }
-      }
-    }
-    "agent.plan" => {
-      let payload : PlanPayload = @json.from_json(request.payload)
-      match self.tasks.get(payload.task_id) {
-        None =>
-          response(
-            request,
-            false,
-            null,
-            error=error_payload(
-              "task_not_loaded", "Agent task is not loaded", true,
-            ),
-          )
-        Some(current) =>
-          if current.phase != Preparing {
+          } else {
             response(
               request,
               false,
               null,
               error=error_payload(
-                "task_not_ready", "研究边界尚未确认", false,
+                "invalid_workflow_stage", "Unknown Agent research workflow stage",
+                false,
               ),
             )
-          } else {
-            let key = read_minimax_key()
-            if key.trim().is_empty() {
-              return response(
-                request,
-                false,
-                null,
-                error=error_payload(
-                  "provider_credential_missing", "未配置 MiniMax Plus API Key",
-                  false,
-                ),
-              )
-            }
-            let provider = self.provider_config(key)
-            let plan = generate_research_plan(
-              provider,
-              key,
-              current.spec.unwrap(),
-              payload.candidates,
-              payload.market_context,
-            )
-            response(request, true, {
-              "plan": plan.to_json(),
-              "activities": [
-                {
-                  "kind": "prepare_research",
-                  "detail": "Agent已从有真实行情且满足资金约束的候选池选择深度取证对象",
-                },
-              ],
-            })
           }
+        }
       }
     }
     "agent.task.snapshot" => {

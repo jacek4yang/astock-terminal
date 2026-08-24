@@ -94,7 +94,7 @@ failure state so the boundary remains visible.
 | Credentials/cache | MiniMax, JoinQuant, quota, cache stats/cleanup | coarse Engine services + Credential Manager | READY for exposed providers |
 | Data directory | adopt/migrate/transactional switch | `storage.data_root.migrate` with backup, manifest verification and atomic pointer switch | ENRICHED |
 | Agent task core | dynamic clarification, Agent-best choice, checkpoints, cancel/recovery | MoonBit reducer + Engine event/checkpoint store | ENRICHED |
-| Agent research | candidate plan and final answer | market/news/fundamental/security-event/reconciliation tools plus three model rounds | ENRICHED |
+| Agent research | candidate plan and final answer | `agent.research.workflow` emits durable Engine effects for `research.agent_prepare_context` then `research.agent_security_context`; candidate planning plus three report-review model rounds | ENRICHED |
 | Agent history | durable tasks/conversations, list/load/rename/soft-delete and branch-from-point | Engine SQLite event/conversation store + three-page Agent UI; renderer local storage is not a truth source | ENRICHED |
 
 ## Live audit evidence (2026-08-24)

@@ -1,3 +1,4 @@
+mod agent_context;
 mod analysis;
 mod backtest;
 mod credentials;
@@ -31,6 +32,8 @@ use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1541,6 +1544,16 @@ impl Engine {
                     "evidence_note": "东方财富数据中心市场环境包；各子集独立保留失败状态，池为空不等于接口失败"
                 }))
             }
+            "research.agent_prepare_context" => {
+                let payload: agent_context::PrepareContextPayload =
+                    decode_payload(&request.payload)?;
+                agent_context::prepare(self, payload).await
+            }
+            "research.agent_security_context" => {
+                let payload: agent_context::SecurityContextPayload =
+                    decode_payload(&request.payload)?;
+                agent_context::security(self, payload).await
+            }
             "research.market_pool" => {
                 let payload: MarketPoolPayload = decode_payload(&request.payload)?;
                 let date = payload
@@ -2226,6 +2239,25 @@ impl Engine {
                 false,
             )),
         }
+    }
+
+    /// Invoke an existing deterministic Engine service while assembling one
+    /// bounded Agent research snapshot. Boxing keeps the recursive dispatcher
+    /// future finite; the two aggregate routes never call themselves.
+    fn dispatch_internal<'a>(
+        &'a self,
+        kind: &'a str,
+        payload: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, ServiceError>> + Send + 'a>> {
+        let request = RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: format!("engine-internal-{kind}"),
+            kind: kind.to_owned(),
+            payload,
+            deadline_ms: None,
+            cancellation_id: None,
+        };
+        Box::pin(async move { self.dispatch_inner(&request).await })
     }
 }
 

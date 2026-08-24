@@ -22,6 +22,8 @@ pub(all) struct AgentState {
   clarification_answers : Array[@protocol.ClarificationAnswer]
   pending_tools : Array[PendingTool]
   completed_call_ids : Array[String]
+  reconciled_call_ids : Array[String]
+  research_symbols : Array[String]
   evidence_ids : Array[String]
   blocking_verification_errors : Array[String]
   terminal_reason : String?
@@ -44,6 +46,8 @@ pub fn initial(task_id : String) -> AgentState {
     clarification_answers: [],
     pending_tools: [],
     completed_call_ids: [],
+    reconciled_call_ids: [],
+    research_symbols: [],
     evidence_ids: [],
     blocking_verification_errors: [],
     terminal_reason: None,
@@ -166,6 +170,8 @@ fn evolve(
   clarification_answers? : Array[@protocol.ClarificationAnswer] = state.clarification_answers,
   pending_tools? : Array[PendingTool] = state.pending_tools,
   completed_call_ids? : Array[String] = state.completed_call_ids,
+  reconciled_call_ids? : Array[String] = state.reconciled_call_ids,
+  research_symbols? : Array[String] = state.research_symbols,
   evidence_ids? : Array[String] = state.evidence_ids,
   blocking_verification_errors? : Array[String] = state.blocking_verification_errors,
   terminal_reason? : String? = state.terminal_reason,
@@ -184,6 +190,8 @@ fn evolve(
     clarification_answers,
     pending_tools,
     completed_call_ids,
+    reconciled_call_ids,
+    research_symbols,
     evidence_ids,
     blocking_verification_errors,
     terminal_reason,
@@ -205,11 +213,16 @@ pub(all) enum AgentEvent {
   ToolRequested(call_id~ : String, tool~ : String)
   ToolSucceeded(call_id~ : String, evidence_ids~ : Array[String])
   ToolFailed(call_id~ : String, retryable~ : Bool)
+  ResearchPlanSelected(Array[String])
+  ReconcileInterruptedWorkflow
+  MoreEvidenceRequired
+  EvidenceReviewCompleted
   ReviewReady
   SynthesisReady
   VerificationPassed
   VerificationRejected(Array[String])
   QuotaSuspended
+  ProviderSuspended(String)
   Resume
   Cancel
   HardFailure(String)
@@ -418,6 +431,62 @@ pub fn reduce(state : AgentState, seq : Int, event : AgentEvent) -> Transition {
           [PersistCheckpoint, EmitTerminal],
         )
       }
+    ResearchPlanSelected(symbols) => {
+      let unique : Array[String] = []
+      for symbol in symbols {
+        if symbol.length() != 6 ||
+          !symbol.all(fn(char) { char >= '0' && char <= '9' }) ||
+          unique.contains(symbol) {
+          return rejected(state, "invalid_or_duplicate_research_symbol")
+        }
+        unique.push(symbol)
+      }
+      if state.phase == Reasoning && !unique.is_empty() && unique.length() <= 5 {
+        accepted(evolve(state, accepted_seq=seq, research_symbols=unique), [
+          PersistCheckpoint,
+        ])
+      } else {
+        rejected(
+          state, "research_plan_requires_reasoning_and_one_to_five_symbols",
+        )
+      }
+    }
+    ReconcileInterruptedWorkflow =>
+      if state.phase == AwaitingTools && !state.pending_tools.is_empty() {
+        accepted(
+          evolve(
+            state,
+            phase=Reasoning,
+            accepted_seq=seq,
+            pending_tools=[],
+            reconciled_call_ids=[
+              ..state.reconciled_call_ids,
+              ..state.pending_tools.map(fn(item) { item.call_id }),
+            ],
+          ),
+          [PersistCheckpoint, RequestModel],
+        )
+      } else {
+        rejected(state, "reconcile_requires_interrupted_pending_tools")
+      }
+    MoreEvidenceRequired =>
+      if state.phase == Reviewing {
+        accepted(evolve(state, phase=Reasoning, accepted_seq=seq), [
+          PersistCheckpoint,
+          RequestModel,
+        ])
+      } else {
+        rejected(state, "more_evidence_requires_reviewing")
+      }
+    EvidenceReviewCompleted =>
+      if state.phase == Reasoning {
+        accepted(evolve(state, phase=Reviewing, accepted_seq=seq), [
+          PersistCheckpoint,
+          ReviewEvidence,
+        ])
+      } else {
+        rejected(state, "evidence_review_completed_requires_reasoning")
+      }
     ReviewReady =>
       if state.phase == Reviewing {
         accepted(evolve(state, phase=Synthesizing, accepted_seq=seq), [
@@ -462,15 +531,31 @@ pub fn reduce(state : AgentState, seq : Int, event : AgentEvent) -> Transition {
         rejected(state, "publication_blocked")
       }
     QuotaSuspended =>
-      accepted(evolve(state, phase=Suspended, accepted_seq=seq), [
-        PersistCheckpoint,
-      ])
+      accepted(
+        evolve(
+          state,
+          phase=Suspended,
+          accepted_seq=seq,
+          terminal_reason=Some("provider_quota_or_rate_limit"),
+        ),
+        [PersistCheckpoint],
+      )
+    ProviderSuspended(reason) =>
+      accepted(
+        evolve(
+          state,
+          phase=Suspended,
+          accepted_seq=seq,
+          terminal_reason=Some(reason),
+        ),
+        [PersistCheckpoint],
+      )
     Resume =>
       if state.phase == Suspended {
-        accepted(evolve(state, phase=Reasoning, accepted_seq=seq), [
-          PersistCheckpoint,
-          RequestModel,
-        ])
+        accepted(
+          evolve(state, phase=Reasoning, accepted_seq=seq, terminal_reason=None),
+          [PersistCheckpoint, RequestModel],
+        )
       } else {
         rejected(state, "resume_requires_suspended")
       }

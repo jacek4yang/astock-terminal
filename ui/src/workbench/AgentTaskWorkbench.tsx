@@ -42,42 +42,8 @@ type TaskTransition = {
   clarification?: ClarificationRequest | null;
   checkpoint?: unknown;
   report?: string;
+  verification_findings?: string[];
 };
-
-type ResearchCandidate = {
-  symbol: string;
-  name: string;
-  market: string | null;
-  board: string | null;
-  industry: string | null;
-  price: number | null;
-  pct: number | null;
-  amount: number | null;
-  lot_cost: number | null;
-};
-
-type ResearchPlan = {
-  symbols: string[];
-  selection_summary: string;
-  verification_focus: string[];
-  rejected_risks: string[];
-};
-
-type ResearchNews = {
-  items: Array<{ document_id?: string; revision_id?: string; url?: string; [key: string]: unknown }>;
-  successful_sources: string[];
-  successful_channels?: string[];
-  stale_sources: string[];
-  errors: string[];
-  requested_source_count?: number;
-  evidence_note?: string;
-};
-
-const NEWS_SOURCE_GROUPS = [
-  ["cls-telegraph", "cls-depth", "cls-hot", "jin10"],
-  ["wallstreetcn-quick", "wallstreetcn-hot", "wallstreetcn-news", "mktnews-flash"],
-  ["gelonghui", "fastbull-express", "fastbull-news", "xueqiu-hotstock"],
-];
 
 type AgentSession = {
   sessionId?: string;
@@ -199,178 +165,6 @@ function capitalFromObjective(objective = ""): number | null {
   return yuan ? Number(yuan[1]) : null;
 }
 
-function validResearchSymbols(values?: string[] | null): string[] {
-  return [...new Set((values ?? []).filter((value) => /^\d{6}$/.test(value)))].slice(0, 5);
-}
-
-type JsonObject = Record<string, unknown>;
-
-function asObject(value: unknown): JsonObject | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : null;
-}
-
-function tailRows(value: unknown, limit: number): unknown {
-  return Array.isArray(value) ? value.slice(-limit) : value;
-}
-
-function compactDatasetRows(value: unknown, limit: number): unknown {
-  const dataset = asObject(value);
-  if (!dataset || !Array.isArray(dataset.rows)) return value;
-  return { ...dataset, rows: dataset.rows.slice(0, limit), model_view_rows: Math.min(dataset.rows.length, limit) };
-}
-
-function compactResearchDatasets(value: unknown, limits: Record<string, number>, fallback: number): unknown {
-  const envelope = asObject(value);
-  const datasets = asObject(envelope?.datasets);
-  if (!envelope || !datasets) return value;
-  return {
-    ...envelope,
-    datasets: Object.fromEntries(Object.entries(datasets).map(([key, dataset]) => [
-      key,
-      compactDatasetRows(dataset, limits[key] ?? fallback),
-    ])),
-  };
-}
-
-function compactMarketContext(value: unknown, exhaustive: boolean): unknown {
-  return compactResearchDatasets(value, {
-    billboard_7d: exhaustive ? 120 : 80,
-    margin_daily: exhaustive ? 40 : 30,
-    industry_boards: exhaustive ? 60 : 40,
-    concept_boards: exhaustive ? 60 : 40,
-    previous_limit_up_pool: exhaustive ? 160 : 100,
-    sub_new_pool: exhaustive ? 160 : 100,
-  }, 200);
-}
-
-/**
- * Keep the Engine/database response complete at rest while giving each model
- * round a bounded, auditable research view. Missing/error/source fields are
- * deliberately retained; only repetitive time-series rows are windowed.
- */
-export function compactSecurityEvidence(
-  bundle: { symbol: string; market: unknown; fundamentals: unknown; events: unknown; news: ResearchNews; reconciliation: unknown; joinquant: unknown; optionalSources: unknown },
-  exhaustive: boolean,
-) {
-  const market = asObject(bundle.market);
-  const kline = asObject(market?.kline);
-  const fundamentals = asObject(bundle.fundamentals);
-  const reconciliation = asObject(bundle.reconciliation);
-  return {
-    symbol: bundle.symbol,
-    market: market ? {
-      ...market,
-      kline: kline ? { ...kline, bars: tailRows(kline.bars, exhaustive ? 250 : 180) } : market.kline,
-      fund_flow_30d: tailRows(market.fund_flow_30d, 30),
-    } : bundle.market,
-    fundamentals: fundamentals ? {
-      ...fundamentals,
-      income: tailRows(fundamentals.income, 8),
-      balance: tailRows(fundamentals.balance, 8),
-      cashflow: tailRows(fundamentals.cashflow, 8),
-      indicators: tailRows(fundamentals.indicators, 8),
-      dividends: tailRows(fundamentals.dividends, 8),
-      valuation_history: tailRows(fundamentals.valuation_history, exhaustive ? 252 : 180),
-    } : bundle.fundamentals,
-    events: compactResearchDatasets(bundle.events, {
-      announcements_1y: exhaustive ? 160 : 100,
-      cninfo_disclosures_1y: exhaustive ? 50 : 40,
-      org_survey_2y: exhaustive ? 120 : 80,
-      block_trade_1y: exhaustive ? 120 : 80,
-    }, exhaustive ? 120 : 80),
-    news: { ...bundle.news, items: bundle.news.items.slice(0, exhaustive ? 30 : 20) },
-    reconciliation: reconciliation ? {
-      ...reconciliation,
-      kline_close_checks: tailRows(reconciliation.kline_close_checks, 20),
-    } : bundle.reconciliation,
-    joinquant: compactResearchDatasets(bundle.joinquant, { qfq_daily: exhaustive ? 500 : 250, benchmark_components: 500, macro_cpi: 24 }, 500),
-    optional_sources: compactResearchDatasets(bundle.optionalSources, {
-      tushare_raw_daily: exhaustive ? 500 : 250,
-      tushare_daily_basic: exhaustive ? 500 : 250,
-      tushare_adjustment_factors: exhaustive ? 500 : 250,
-      tushare_dividends: 120,
-      sec_edgar_filings: 120,
-    }, exhaustive ? 120 : 80),
-  };
-}
-
-export async function requestDurableTool<T>(
-  taskId: string,
-  causedBySeq: number,
-  callId: string,
-  kind: string,
-  payload: Record<string, unknown>,
-  deadlineMs: number,
-): Promise<T> {
-  const baseKey = `${taskId}:tool:${callId}`;
-  const effects = await requestNative<{ items: DurableEffect[] }>(
-    "engine",
-    "agent.effect.list",
-    { task_id: taskId },
-  );
-  const prior = effects.items.filter((item) => item.idempotency_key === baseKey || item.idempotency_key.startsWith(`${baseKey}:retry:`));
-  const completed = prior.find((item) => item.status === "succeeded" && item.result != null);
-  if (completed) return completed.result as T;
-  if (prior.some((item) => item.status === "pending")) {
-    throw new Error(`工具 ${kind} 的相同请求仍为 pending；已阻止重复执行。`);
-  }
-  const retry = prior.length;
-  const idempotencyKey = retry === 0 ? baseKey : `${baseKey}:retry:${retry}`;
-  const effectId = `tool:${taskId}:${callId}:${retry}`;
-  await requestNative("engine", "agent.effect.begin", {
-    effect_id: effectId,
-    task_id: taskId,
-    caused_by_seq: causedBySeq,
-    effect_kind: `engine.${kind}`,
-    effect: { target: "engine", kind, payload },
-    idempotency_key: idempotencyKey,
-  });
-  try {
-    const result = await requestNative<T>("engine", kind, payload, { deadlineMs });
-    await requestNative("engine", "agent.effect.complete", {
-      effect_id: effectId,
-      status: "succeeded",
-      result,
-    });
-    return result;
-  } catch (cause) {
-    await requestNative("engine", "agent.effect.complete", {
-      effect_id: effectId,
-      status: "failed",
-      result: { error: cause instanceof Error ? cause.message : String(cause) },
-    }).catch(() => undefined);
-    throw cause;
-  }
-}
-
-async function fetchResearchNews(
-  filters: { symbol?: string; keyword?: string },
-  limit: number,
-  minimumItems = 10,
-  durable?: { taskId: string; causedBySeq: number; callId: string },
-): Promise<ResearchNews> {
-  const payload = {
-    ...filters,
-    sources: NEWS_SOURCE_GROUPS.flat(),
-    limit,
-  };
-  const batch = durable
-    ? await requestDurableTool<ResearchNews>(durable.taskId, durable.causedBySeq, durable.callId, "research.news", payload, 120_000)
-    : await requestNative<ResearchNews>("engine", "research.news", payload, { deadlineMs: 120_000 });
-  if (batch.items.length < minimumItems) {
-    throw new Error(`有效资讯仅 ${batch.items.length} 条，低于研究发布门槛；${batch.errors.join("；")}`);
-  }
-  return {
-    ...batch,
-    successful_sources: [...new Set(batch.successful_sources ?? [])],
-    successful_channels: [...new Set(batch.successful_channels ?? [])],
-    stale_sources: [...new Set(batch.stale_sources ?? [])],
-    errors: [...new Set(batch.errors ?? [])],
-    requested_source_count: NEWS_SOURCE_GROUPS.flat().length,
-    evidence_note: "一次有界采集覆盖12类频道，频道与采集Provider分层记录并按文档修订去重；重要判断仍须回链一级来源",
-  };
-}
-
 /**
  * All stateful Agent Worker operations pass through the Engine journal. The
  * effect intent is committed before the Worker can contact a provider; the
@@ -378,7 +172,7 @@ async function fetchResearchNews(
  * before the renderer receives the reply.
  */
 export async function requestDurableAgent<T>(
-  kind: "agent.start" | "agent.event" | "agent.plan" | "agent.research",
+  kind: "agent.start" | "agent.event" | "agent.research.workflow",
   payload: Record<string, unknown>,
   taskId: string,
   acceptedSeq: number,
@@ -414,7 +208,7 @@ export async function requestDurableAgent<T>(
   const prior = effects.items.filter((item) => item.idempotency_key === baseKey || item.idempotency_key.startsWith(`${baseKey}:retry:`));
   const completed = prior.find((item) => item.status === "succeeded" && item.result != null);
   if (completed) return completed.result as T;
-  if (prior.some((item) => item.status === "pending")) {
+  if (prior.some((item) => item.status === "pending") && kind !== "agent.research.workflow") {
     throw new Error("检测到同一 Agent 操作仍为 pending；任务已保留，请先恢复或等待本地 Worker 完成，避免重复调用模型。 ");
   }
   const retry = prior.length;
@@ -559,14 +353,36 @@ export default function AgentTaskWorkbench() {
     return () => window.removeEventListener("keydown", close);
   }, [historyOpen]);
 
+  const recoverLatestCheckpoint = async (taskId: string, fallback: unknown, localSeq: number) => {
+    let recovered = fallback;
+    let recoveredSeq = localSeq;
+    try {
+      const durable = await requestNative<DurableTask>("engine", "agent.task.load", { task_id: taskId });
+      if (durable.task.checkpoint != null && durable.task.accepted_seq >= recoveredSeq) {
+        recovered = durable.task.checkpoint;
+        recoveredSeq = durable.task.accepted_seq;
+      }
+    } catch {
+      // A locally saved checkpoint is still useful when the task journal is
+      // temporarily unavailable; Agent restore remains fail-closed below.
+    }
+    if (!recovered) throw new Error("没有可恢复的 Agent 检查点");
+    await requestNative("agent", "agent.restore", { state: recovered }, { deadlineMs: 20_000 });
+    if (typeof recovered === "object" && recovered !== null && recoveredSeq >= localSeq) {
+      setCheckpoint(recovered);
+      setTask(recovered as TaskView);
+    }
+    return recovered as TaskView;
+  };
+
   useEffect(() => {
     if (!isProton() || !checkpoint || !task?.task_id || restoredTaskRef.current === task.task_id) return;
     restoredTaskRef.current = task.task_id;
-    void requestNative("agent", "agent.restore", { state: checkpoint }, { deadlineMs: 20_000 }).catch((cause) => {
+    void recoverLatestCheckpoint(task.task_id, checkpoint, task.accepted_seq ?? 0).catch((cause) => {
       restoredTaskRef.current = null;
       setError(`恢复 Agent 任务失败：${cause instanceof Error ? cause.message : String(cause)}`);
     });
-  }, [checkpoint, task?.task_id]);
+  }, [checkpoint, task?.accepted_seq, task?.task_id]);
 
   const cacheRequests = task?.cache_requests ?? 0;
   const cacheHits = task?.cache_hits ?? 0;
@@ -595,127 +411,34 @@ export default function AgentTaskWorkbench() {
     setBusy(true);
     setError(null);
     try {
-      const fetchActivities: AgentEffect[] = [];
-      const acceptedSeq = state.accepted_seq ?? 0;
-      setBusyStage("正在读取市场宽度和全部资讯频道…");
-      const [marketOverview, marketContext, globalContext, marketNews] = await Promise.all([
-        requestDurableTool<unknown>(state.task_id, acceptedSeq, "market-overview", "market.overview", {}, 120_000),
-        requestDurableTool<unknown>(state.task_id, acceptedSeq, "market-context", "research.market_context", {}, 180_000),
-        requestDurableTool<unknown>(state.task_id, acceptedSeq, "global-context", "research.global_context", {}, 180_000),
-        fetchResearchNews({}, depth === "exhaustive" ? 60 : 45, 10, {
-          taskId: state.task_id,
-          causedBySeq: acceptedSeq,
-          callId: "market-news",
-        }),
-      ]);
-      fetchActivities.push(
-        { kind: "execute_tool", tool: "市场宽度", detail: "读取涨跌家数、数据时点与行情源", evidence_count: 1 },
-        { kind: "execute_tool", tool: "市场环境", detail: "六类涨跌停情绪池、龙虎榜、两融与行业概念板块", evidence_count: 10 },
-        { kind: "execute_tool", tool: "全球与宏观背景", detail: "黄金跨市场行情/一手资讯与中美通胀、GDP、经常账户；年度数据不冒充实时信号", evidence_count: 5 },
-        { kind: "execute_tool", tool: "多源资讯", detail: "聚合全部12类财经频道；重要结论仍需回链公告或原始来源", evidence_count: 1 },
-      );
-      setEffects([...fetchActivities]);
-
-      const capital = capitalFromObjective(state.spec?.objective);
-      const maximumResearchSymbols = capital !== null && capital <= 50_000 ? 3 : 5;
-      let symbols = validResearchSymbols([
-        ...(contextSymbol ? [contextSymbol] : []),
-        ...(state.spec?.security_universe ?? []),
-      ]).slice(0, maximumResearchSymbols);
-      let researchPlan: ResearchPlan | null = null;
-      if (!symbols.length) {
-        setBusyStage("正在建立满足资金与一手约束的候选池…");
-        const candidatePool = await requestDurableTool<{ items: ResearchCandidate[]; source: string; fetched_at: string }>(
-          state.task_id,
-          acceptedSeq,
-          "market-candidates",
-          "research.market_candidates",
-          { limit: depth === "exhaustive" ? 80 : 50, ...(capital ? { max_lot_cost: capital * 0.8 } : {}) },
-          120_000,
-        );
-        fetchActivities.push({
-          kind: "execute_tool",
-          tool: "全市场候选筛选",
-          detail: `从真实行情中按流动性、风险名称和${capital ? "资金/一手" : "可成交"}约束筛出 ${candidatePool.items.length} 个候选`,
-          evidence_count: candidatePool.items.length,
-        });
-        setEffects([...fetchActivities]);
-        setBusyStage("MiniMax Plus 正在规划深度取证对象；此时尚不形成投资结论…");
-        const planned = await requestDurableAgent<{ plan: ResearchPlan; activities?: AgentEffect[] }>("agent.plan", {
-          task_id: state.task_id,
-          candidates: candidatePool.items,
-          market_context: marketOverview,
-        }, state.task_id, state.accepted_seq ?? 0, 180_000);
-        researchPlan = planned.plan;
-        symbols = validResearchSymbols(researchPlan.symbols).slice(0, maximumResearchSymbols);
-        if (!symbols.length) throw new Error("Agent 研究计划没有返回候选池内的有效证券代码");
-        fetchActivities.push(...(planned.activities ?? []));
-      }
-
-      setBusyStage(`正在并行核验 ${symbols.length} 只证券的行情、资金、财务、估值、公告与新闻…`);
-      const rawSecurities = await Promise.all(symbols.map(async (symbol) => {
-        const [market, fundamentals, events, news, reconciliation, joinquant, optionalSources] = await Promise.all([
-          requestDurableTool<unknown>(state.task_id!, acceptedSeq, `${symbol}-market`, "market.security_snapshot", { symbol, period: "day", adjust: "qfq", count: depth === "exhaustive" ? 500 : 250 }, 180_000),
-          requestDurableTool<unknown>(state.task_id!, acceptedSeq, `${symbol}-fundamentals`, "research.fundamentals", { symbol }, 240_000),
-          requestDurableTool<unknown>(state.task_id!, acceptedSeq, `${symbol}-events`, "research.security_events", { symbol }, 180_000),
-          fetchResearchNews({ symbol, keyword: symbol }, depth === "exhaustive" ? 30 : 20, 0, {
-            taskId: state.task_id!,
-            causedBySeq: acceptedSeq,
-            callId: `${symbol}-news`,
-          }),
-          requestDurableTool<unknown>(state.task_id!, acceptedSeq, `${symbol}-reconcile`, "research.data_reconcile", { symbol }, 180_000),
-          requestDurableTool<unknown>(state.task_id!, acceptedSeq, `${symbol}-joinquant`, "research.joinquant_context", {
-            symbol,
-            benchmark: state.spec?.comparison_benchmark ?? "000300",
-            start: state.spec?.research_start ?? new Date(Date.now() - 365 * 86_400_000).toISOString().slice(0, 10),
-            end: state.spec?.research_end ?? new Date().toISOString().slice(0, 10),
-          }, 180_000),
-          requestDurableTool<unknown>(state.task_id!, acceptedSeq, `${symbol}-optional-sources`, "research.optional_sources", {
-            symbol,
-            start: state.spec?.research_start ?? new Date(Date.now() - 365 * 86_400_000).toISOString().slice(0, 10),
-            end: state.spec?.research_end ?? new Date().toISOString().slice(0, 10),
-          }, 240_000),
-        ]);
-        return { symbol, market, fundamentals, events, news, reconciliation, joinquant, optionalSources };
-      }));
-      const securities = rawSecurities.map((bundle) => compactSecurityEvidence(bundle, depth === "exhaustive"));
-      for (const symbol of symbols) {
-        fetchActivities.push({
-          kind: "execute_tool",
-          tool: `${symbol} 综合研究包`,
-          detail: "行情/K线/资金流 + 财务三表/估值历史 + 调研/股东/预告/解禁/榜单/公告 + 多源新闻 + 跨源核验 + 聚宽/Tushare/问财/SEC可选研究包；缺失项原样保留",
-          evidence_count: 7,
-        });
-      }
-      setEffects([...fetchActivities]);
-      setBusyStage("MiniMax Plus 正在进行证据评估、独立反证和最终综合（共三轮）…");
-      const reply = await requestDurableAgent<TaskTransition>("agent.research", {
+      setBusyStage("MoonBit Agent 正在规划工具、核验多源资料并执行三轮审查…");
+      const reply = await requestDurableAgent<TaskTransition>("agent.research.workflow", {
         task_id: state.task_id,
-        context: {
-          source: "desktop_engine",
-          retrieved_at: new Date().toISOString(),
-          run_options: { depth, tool_policy: toolPolicy },
-          research_plan: researchPlan,
-          market_overview: marketOverview,
-          market_context: compactMarketContext(marketContext, depth === "exhaustive"),
-          global_context: globalContext,
-          market_news: { ...marketNews, items: marketNews.items.slice(0, depth === "exhaustive" ? 120 : 90) },
-          securities,
-          evidence_inventory: {
-            requested_symbols: symbols,
-            dimensions: ["quote", "kline", "technical_analysis", "fund_flow", "market_pools", "previous_limit_up", "sub_new", "billboard", "margin", "boards", "global_gold", "primary_gold_news", "macro_inflation", "macro_growth", "macro_current_account", "financial_statements", "valuation_history", "org_survey", "holder_count", "earnings_forecast", "unlocks", "suspensions", "block_trade", "announcements", "cninfo_disclosures", "multi_source_news", "cross_provider_reconciliation", "optional_joinquant_daily_valuation_benchmark_macro", "optional_tushare_raw_valuation_adjustment_dividends", "optional_iwencai_events_sectors", "optional_sec_edgar_by_cik"],
-            review_rounds: 3,
-          },
-        },
+        depth,
+        tool_policy: toolPolicy,
+        preferred_symbols: contextSymbol ? [contextSymbol] : [],
+        capital: capitalFromObjective(state.spec?.objective),
       }, state.task_id, state.accepted_seq ?? 0, 900_000);
       const next = applyTransition(reply);
-      setEffects([...fetchActivities, ...(reply.activities ?? reply.effects ?? [])]);
       if (reply.report?.trim()) append("agent", reply.report.trim());
-      else append("system", `研究执行完成，但 Worker 未返回报告正文。当前状态：${phaseLabel[next.phase ?? "idle"]}。`);
+      else if (next.phase === "suspended") {
+        const reason = reply.verification_findings?.[0] ?? "模型服务暂不可用，任务与工具结果已安全保存";
+        setError(reason);
+        append("system", `${reason}。配置或额度恢复后可从同一检查点继续，不会重复采集已命中的资料。`);
+      } else if (next.phase === "verification_failed") {
+        append("system", `报告校验未通过，未发布不完整结论：${reply.verification_findings?.join("；") || "请查看证据与诊断"}。`);
+      } else append("system", `研究执行完成，但 Worker 未返回报告正文。当前状态：${phaseLabel[next.phase ?? "idle"]}。`);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       setError(message);
       append("system", `研究暂停：${message}。任务检查点已保留，可直接重试。`);
+      try {
+        const recovered = await recoverLatestCheckpoint(state.task_id, checkpoint, state.accepted_seq ?? 0);
+        append("system", `已从持久化日志恢复到“${phaseLabel[recovered.phase ?? "idle"]}”，重试会先对账未完成工具。`);
+      } catch {
+        // Keep the original failure visible; recovery diagnostics are exposed
+        // separately and must not hide the root cause.
+      }
     } finally {
       setBusy(false);
       setBusyStage("");
@@ -1022,7 +745,7 @@ export default function AgentTaskWorkbench() {
 
     <footer className="agent-composer-wrap">
       {busyStage && <div className="agent-busy-stage"><span className="send-spinner" />{busyStage}</div>}
-      {error && <div className="agent-error"><span>{error}</span><div>{task?.phase === "preparing" && <button onClick={() => void executeResearch(task)} disabled={busy}>重试研究</button>}<button onClick={() => setError(null)}>×</button></div></div>}
+      {error && <div className="agent-error"><span>{error}</span><div>{task && ["preparing", "awaiting_tools", "suspended"].includes(task.phase ?? "") && <button onClick={() => void executeResearch(task)} disabled={busy}>{task.phase === "suspended" ? "继续研究" : "重试研究"}</button>}<button onClick={() => setError(null)}>×</button></div></div>}
       <div className="agent-composer">
         <textarea ref={composerRef} value={input} disabled={busy || status === "waiting_for_user"} onChange={(event) => setInput(event.target.value)} placeholder={status === "waiting_for_user" ? "请先回答上方模型生成的问题…" : "向 AStock Agent 描述你的研究问题…"} rows={3} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void start(); } }} />
         <div className="composer-toolbar">

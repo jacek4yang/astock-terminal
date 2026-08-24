@@ -7,7 +7,7 @@ vi.mock("../bridge", () => ({
   requestNative,
 }));
 
-import { compactSecurityEvidence, requestDurableAgent, requestDurableTool } from "./AgentTaskWorkbench";
+import { requestDurableAgent } from "./AgentTaskWorkbench";
 
 const spec = {
   objective: "分析两万元最新投资计划",
@@ -63,15 +63,15 @@ describe("durable Agent operation journal", () => {
     ]);
   });
 
-  it("does not duplicate a provider call while the same intent is pending", async () => {
+  it("reconciles a pending research workflow through a journaled retry", async () => {
     requestNative.mockImplementation(async (_target: string, kind: string) => {
       if (kind === "agent.effect.list") {
         return {
           items: [{
             effect_id: "fx-existing",
-            effect_kind: "agent.research",
+            effect_kind: "agent.research.workflow",
             status: "pending",
-            idempotency_key: "task-2:agent.research:3",
+            idempotency_key: "task-2:agent.research.workflow:3",
           }],
         };
       }
@@ -79,85 +79,17 @@ describe("durable Agent operation journal", () => {
     });
 
     await expect(requestDurableAgent(
-      "agent.research",
+      "agent.research.workflow",
       { task_id: "task-2", context: {} },
       "task-2",
       3,
       900_000,
-    )).rejects.toThrow("pending");
-    expect(requestNative.mock.calls.some((call) => call[0] === "agent")).toBe(false);
-  });
-
-  it("journals Engine tool intent and reuses its verified result", async () => {
-    const quote = { quote: { symbol: "603927", price: 18.6 }, source: "TDX" };
-    requestNative.mockImplementation(async (_target: string, kind: string) => {
-      if (kind === "agent.effect.list") return { items: [] };
-      if (kind === "market.quote") return quote;
-      return { inserted: true };
-    });
-    await expect(requestDurableTool(
-      "task-3",
-      2,
-      "603927-quote",
-      "market.quote",
-      { symbol: "603927" },
-      60_000,
-    )).resolves.toEqual(quote);
-    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
-      "agent.effect.list",
+    )).resolves.toEqual({ inserted: true });
+    expect(requestNative.mock.calls.some((call) => call[0] === "agent")).toBe(true);
+    expect(requestNative.mock.calls).toContainEqual([
+      "engine",
       "agent.effect.begin",
-      "market.quote",
-      "agent.effect.complete",
+      expect.objectContaining({ idempotency_key: "task-2:agent.research.workflow:3:retry:1" }),
     ]);
-
-    requestNative.mockReset();
-    requestNative.mockResolvedValue({
-      items: [{
-        effect_id: "tool-existing",
-        effect_kind: "engine.market.quote",
-        status: "succeeded",
-        result: quote,
-        idempotency_key: "task-3:tool:603927-quote",
-      }],
-    });
-    await expect(requestDurableTool(
-      "task-3",
-      2,
-      "603927-quote",
-      "market.quote",
-      { symbol: "603927" },
-      60_000,
-    )).resolves.toEqual(quote);
-    expect(requestNative).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("Agent optional-source evidence", () => {
-  it("keeps capability failures and bounds only repetitive provider rows", () => {
-    const rows = Array.from({ length: 300 }, (_, index) => ({ date: `day-${index}`, close: index }));
-    const compacted = compactSecurityEvidence({
-      symbol: "600519",
-      market: {},
-      fundamentals: {},
-      events: {},
-      news: { items: [], successful_sources: [], stale_sources: [], errors: [] },
-      reconciliation: {},
-      joinquant: {},
-      optionalSources: {
-        configured: { tushare: true, iwencai: false, sec_edgar: false },
-        capabilities: { tushare_raw_daily: true, tushare_pro: false },
-        datasets: {
-          tushare_raw_daily: { ok: true, rows, total_rows: 300, source: "Tushare" },
-          tushare_daily_basic: { ok: false, rows: [], error: "积分不足2000" },
-          iwencai_stock_events: { ok: false, data: null, error: "未配置" },
-        },
-      },
-    }, false) as Record<string, any>;
-
-    expect(compacted.optional_sources.datasets.tushare_raw_daily.rows).toHaveLength(250);
-    expect(compacted.optional_sources.datasets.tushare_raw_daily.total_rows).toBe(300);
-    expect(compacted.optional_sources.datasets.tushare_daily_basic.error).toContain("积分不足");
-    expect(compacted.optional_sources.datasets.iwencai_stock_events.error).toBe("未配置");
-    expect(compacted.optional_sources.capabilities.tushare_pro).toBe(false);
   });
 });
