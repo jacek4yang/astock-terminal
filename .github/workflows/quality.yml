@@ -106,25 +106,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure runner-local build root
-        run: echo "ASTOCK_BUILD_ROOT=$RUNNER_TEMP/astock-build" >> "$GITHUB_ENV"
+        run: |
+          echo "ASTOCK_BUILD_ROOT=$RUNNER_TEMP/astock-build" >> "$GITHUB_ENV"
+          echo "MOON_HOME=$RUNNER_TEMP/moonbit-0.1.20260824-dae026a" >> "$GITHUB_ENV"
       - name: Install pinned MoonBit toolchain
         shell: bash
         run: |
           set -euo pipefail
-          toolchain_root="$RUNNER_TEMP/moonbit-0.1.20260819"
-          archive="$RUNNER_TEMP/moonbit-linux-x86_64-0.1.20260819.tar.gz"
+          archive="$RUNNER_TEMP/moonbit-linux-x86_64-0.1.20260824-dae026a.tar.gz"
+          core_archive="$RUNNER_TEMP/core-0.1.20260824-dae026a.tar.gz"
           curl --proto '=https' --tlsv1.2 --fail --location --retry 5 \
             --output "$archive" \
-            'https://cli.moonbitlang.com/binaries/0.1.20260819/moonbit-linux-x86_64.tar.gz'
-          mkdir -p "$toolchain_root"
-          tar -xzf "$archive" --directory "$toolchain_root"
-          echo "$toolchain_root/bin" >> "$GITHUB_PATH"
+            'https://cli.moonbitlang.com/binaries/latest/moonbit-linux-x86_64.tar.gz'
+          echo 'b8f9273653f9af49c447775a7ecc7d20a2784849a15fe489a03afd6718c75d0d  '"$archive" | sha256sum --check
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 5 \
+            --output "$core_archive" \
+            'https://cli.moonbitlang.com/cores/core-latest.tar.gz'
+          echo '5e5a3bdb0679250979808c4f0fc5b373261ab55632f1890660bfc914543f3276  '"$core_archive" | sha256sum --check
+          mkdir -p "$MOON_HOME/lib"
+          tar -xzf "$archive" --directory "$MOON_HOME"
+          tar -xzf "$core_archive" --directory "$MOON_HOME/lib"
+          ln -sfn moon "$MOON_HOME/bin/moonx"
+          PATH="$MOON_HOME/bin:$PATH" moon -C "$MOON_HOME/lib/core" bundle --warn-list -a --all
+          PATH="$MOON_HOME/bin:$PATH" moon -C "$MOON_HOME/lib/core" bundle --warn-list -a --target wasm-gc --quiet
+          echo "$MOON_HOME/bin" >> "$GITHUB_PATH"
       - name: Verify MoonBit compiler identity
         shell: bash
         run: |
           set -euo pipefail
           moon version --all
-          moon version | grep -F 'moon 0.1.20260819'
+          moon version | grep -F 'moon 0.1.20260824 (dae026a'
+          moon version --all | grep -F 'moonc v0.10.10+f8a486b6f'
+      - name: Restore pinned module dependencies
+        working-directory: app-moon
+        run: moon update
       - name: Check formatting
         working-directory: app-moon
         run: moon fmt --check --target-dir "$ASTOCK_BUILD_ROOT/moon-target/agent"

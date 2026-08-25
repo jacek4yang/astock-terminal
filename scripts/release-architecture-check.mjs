@@ -66,6 +66,9 @@ const bootstrap = fs.readFileSync(path.join(root, "scripts", "bootstrap.ps1"), "
 const performanceEvidence = fs.readFileSync(path.join(root, "scripts", "performance-e2e.ps1"), "utf8");
 const performanceCdp = fs.readFileSync(path.join(root, "scripts", "performance-cdp.mjs"), "utf8");
 const releasePublisher = fs.readFileSync(path.join(root, "scripts", "publish-v6.ps1"), "utf8");
+const unsignedReleaseWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "release-unsigned.yml"), "utf8");
+const unsignedReleaseStage = fs.readFileSync(path.join(root, "scripts", "stage-unsigned-release.ps1"), "utf8");
+const moonbitCiBootstrap = fs.readFileSync(path.join(root, "scripts", "install-moonbit-ci.ps1"), "utf8");
 const buildCommon = fs.readFileSync(path.join(root, "scripts", "Build.Common.ps1"), "utf8");
 const moonFormalModel = fs.readFileSync(path.join(root, "app-moon", "agent_formal", "model.mbt"), "utf8");
 const tlaLifecycleModel = fs.readFileSync(path.join(root, "formal", "AgentLifecycle.tla"), "utf8");
@@ -202,8 +205,10 @@ for (const requiredWorkflowMarker of [
   "acceptance-evidence.test.mjs",
   "live-data-validation.test.mjs",
   "research-data-release-gate.test.mjs",
-  "https://cli.moonbitlang.com/binaries/0.1.20260819/moonbit-linux-x86_64.tar.gz",
-  "moon version | grep -F 'moon 0.1.20260819'",
+  "https://cli.moonbitlang.com/binaries/latest/moonbit-linux-x86_64.tar.gz",
+  "b8f9273653f9af49c447775a7ecc7d20a2784849a15fe489a03afd6718c75d0d",
+  "moon version | grep -F 'moon 0.1.20260824 (dae026a'",
+  "moon update",
   "moon test --target native",
   "cargo check --locked --workspace --all-targets --all-features",
 ]) {
@@ -646,6 +651,48 @@ for (const publicationMarker of [
   "AStock-Terminal-v6.0.0-verification-bundle.zip",
 ]) {
   if (!releasePublisher.includes(publicationMarker)) failures.push(`v6 publication guard is missing ${publicationMarker}`);
+}
+for (const unsignedPublicationMarker of [
+  "ConfirmUnsignedAttestedRelease",
+  "visibility -ne 'PUBLIC'",
+  "Required GitHub quality checks have not passed",
+  "@('tag', '-a'",
+  "release-unsigned.yml",
+]) {
+  if (!releasePublisher.includes(unsignedPublicationMarker)) failures.push(`unsigned v6 publication guard is missing ${unsignedPublicationMarker}`);
+}
+for (const unsignedWorkflowMarker of [
+  "id-token: write",
+  "attestations: write",
+  "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6",
+  "stage-unsigned-release.ps1",
+  "package.ps1 -SkipSpaceCheck",
+  "inputs.publish",
+  "Upload dry-run package for inspection",
+  "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+  "if: env.PUBLISH_RELEASE == 'true'",
+  "gh release create",
+  "Require successful quality checks for the tagged commit",
+]) {
+  if (!unsignedReleaseWorkflow.includes(unsignedWorkflowMarker)) failures.push(`unsigned release workflow is missing ${unsignedWorkflowMarker}`);
+}
+for (const unsignedStageMarker of [
+  "github-oidc-attested-unsigned",
+  "authenticode = 'NOT PROVIDED'",
+  "AStock-Terminal-v6.0.0-SHA256SUMS.txt",
+  "credentials_embedded = $false",
+  "Get-AuthenticodeSignature",
+]) {
+  if (!unsignedReleaseStage.includes(unsignedStageMarker)) failures.push(`unsigned release staging is missing ${unsignedStageMarker}`);
+}
+for (const moonbitBootstrapMarker of [
+  "0.1.20260824",
+  "dae026a",
+  "915a560cc4950a124bfedf5302ec6bf0d0f98d8ea6b2ae7978e4680641281963",
+  "ca33c246472d02ce3805f8fc96b20e1819bf530f2fca7fe6610f5c9a601ee6eb",
+  "MoonBit CI toolchain identity mismatch",
+]) {
+  if (!moonbitCiBootstrap.includes(moonbitBootstrapMarker)) failures.push(`MoonBit CI bootstrap is missing ${moonbitBootstrapMarker}`);
 }
 for (const reportIntegrityMarker of [
   "Get-ChildItem -LiteralPath $reportDirectory -Recurse -File",

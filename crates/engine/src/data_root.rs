@@ -790,7 +790,7 @@ mod tests {
         );
         assert_eq!(
             storage.settings_get("data_dir").await.unwrap().as_deref(),
-            destination.to_str()
+            outcome.data_dir.to_str()
         );
     }
 

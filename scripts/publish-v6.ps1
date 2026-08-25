@@ -1,17 +1,14 @@
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
 param(
-    [Parameter(Mandatory)][string]$VerificationReport,
-    [Parameter(Mandatory)][string]$CertificateThumbprint,
-    [switch]$ConfirmProductionRelease,
+    [Parameter(Mandatory, ParameterSetName = 'Authenticode')][string]$VerificationReport,
+    [Parameter(Mandatory, ParameterSetName = 'Authenticode')][string]$CertificateThumbprint,
+    [Parameter(ParameterSetName = 'Authenticode')][switch]$ConfirmProductionRelease,
+    [Parameter(Mandatory, ParameterSetName = 'UnsignedAttested')][switch]$ConfirmUnsignedAttestedRelease,
     [switch]$SkipSpaceCheck
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-if (-not $ConfirmProductionRelease) {
-    throw 'Production publication requires the explicit -ConfirmProductionRelease switch.'
-}
 
 . (Join-Path $PSScriptRoot 'Build.Common.ps1')
 $build = Initialize-AStockBuildEnvironment -SkipSpaceCheck:$SkipSpaceCheck
@@ -19,6 +16,78 @@ $repository = $build.RepositoryRoot
 $tag = 'v6.0.0'
 $version = '6.0.0'
 $requiredActionsDisclosure = 'GitHub Actions: NOT VERIFIED — billing/spending restriction; release gates executed locally'
+
+if ($PSCmdlet.ParameterSetName -eq 'UnsignedAttested') {
+    Push-Location $repository
+    try {
+        Assert-AStockCleanWorktree -RepositoryRoot $repository
+        $branch = (& git branch --show-current).Trim()
+        if ($LASTEXITCODE -ne 0 -or $branch -ne 'main') { throw "Unsigned release publication requires main; current=$branch" }
+        Invoke-Checked -FilePath 'git' -Arguments @('fetch', '--prune', 'origin')
+        $commit = (& git rev-parse HEAD).Trim()
+        $originCommit = (& git rev-parse origin/main).Trim()
+        if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[a-f0-9]{40}$' -or $commit -ne $originCommit) {
+            throw 'Unsigned release publication requires clean main identical to origin/main.'
+        }
+
+        Invoke-Checked -FilePath 'gh' -Arguments @('auth', 'status')
+        $repositoryInfo = (& gh repo view --json nameWithOwner,visibility,defaultBranchRef) | ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0 -or $repositoryInfo.visibility -ne 'PUBLIC' -or $repositoryInfo.defaultBranchRef.name -ne 'main') {
+            throw 'GitHub OIDC-attested unsigned publication requires a public repository with main as default.'
+        }
+
+        $notes = Join-Path $repository 'docs\releases\v6.0.0.md'
+        $notesText = Get-Content -LiteralPath $notes -Raw
+        foreach ($marker in @(
+            'Authenticode: NOT PROVIDED',
+            'GitHub OIDC/Sigstore artifact attestation',
+            'Codex in-app browser acceptance: NOT VERIFIED',
+            'MiniMax Plus and JoinQuant live flow: NOT VERIFIED'
+        )) {
+            if (-not $notesText.Contains($marker)) { throw "Unsigned Release Notes are missing: $marker" }
+        }
+        $workflow = Get-Content -LiteralPath (Join-Path $repository '.github\workflows\release-unsigned.yml') -Raw
+        foreach ($marker in @('id-token: write', 'attestations: write', 'actions/attest@', 'stage-unsigned-release.ps1')) {
+            if (-not $workflow.Contains($marker)) { throw "Unsigned release workflow is missing: $marker" }
+        }
+
+        $requiredChecks = @('architecture-contracts','security-audit','evaluation-gate','frontend','moonbit-agent','rust-windows')
+        $checkRuns = (& gh api "repos/$($repositoryInfo.nameWithOwner)/commits/$commit/check-runs?per_page=100") | ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0) { throw 'Unable to inspect quality checks for the release commit.' }
+        $missingChecks = @($requiredChecks | Where-Object {
+            $requiredName = $_
+            -not @($checkRuns.check_runs | Where-Object { $_.name -eq $requiredName -and $_.conclusion -eq 'success' }).Count
+        })
+        if ($missingChecks.Count -ne 0) {
+            throw "Required GitHub quality checks have not passed: $($missingChecks -join ', ')"
+        }
+
+        if (@(& git tag --list $tag).Count -ne 0) { throw "Local immutable tag already exists: $tag" }
+        $remoteTag = @(& git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")
+        if ($LASTEXITCODE -ne 0) { throw "Unable to inspect remote tag $tag." }
+        if ($remoteTag.Count -ne 0) { throw "Remote immutable tag already exists: $tag" }
+        & gh release view $tag --json id *> $null
+        if ($LASTEXITCODE -eq 0) { throw "GitHub Release already exists: $tag" }
+
+        if (-not $PSCmdlet.ShouldProcess(
+            "$($repositoryInfo.nameWithOwner)@$commit",
+            "create and push annotated unsigned tag $tag; GitHub Actions will build, attest, and publish"
+        )) { return }
+
+        Invoke-Checked -FilePath 'git' -Arguments @('tag', '-a', $tag, '-m', 'AStock Terminal v6.0.0 unsigned GitHub OIDC-attested release')
+        $tagCommit = (& git rev-list -n 1 $tag).Trim()
+        if ($tagCommit -ne $commit) { throw 'Unsigned annotated release tag does not point to the verified main commit.' }
+        Invoke-Checked -FilePath 'git' -Arguments @('push', 'origin', "refs/tags/$tag")
+        Invoke-Checked -FilePath 'gh' -Arguments @('run', 'list', '--workflow', 'release-unsigned.yml', '--limit', '1')
+        return
+    } finally {
+        Pop-Location
+    }
+}
+
+if (-not $ConfirmProductionRelease) {
+    throw 'Authenticode production publication requires the explicit -ConfirmProductionRelease switch.'
+}
 
 function Resolve-InBuildRoot {
     param([Parameter(Mandatory)][string]$Path)
