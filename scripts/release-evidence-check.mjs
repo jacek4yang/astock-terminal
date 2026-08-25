@@ -511,6 +511,42 @@ function validateInteractiveAcceptance(evidence, gate) {
   invariant(evidence.production_data_touched === false, `${gate}: acceptance may not touch production data`);
   invariant(evidence.runner.surface === expectedSurface && typeof evidence.runner.session_id === "string" && evidence.runner.session_id.trim(),
     `${gate}: acceptance runner surface/session is invalid`);
+  if (browser) {
+    const preflight = evidence.environment_preflight;
+    invariant(isRecord(preflight) && preflight.status === "PASSED" && preflight.loopback_exempt === true &&
+      preflight.proxy_bypass_ready === true && preflight.codex_process_ancestor === true &&
+      preflight.test_origin === "http://127.0.0.1:5173/",
+    "browser-cdp: safe Codex loopback/proxy environment preflight is missing");
+    const artifact = preflight.artifact;
+    invariant(isRecord(artifact) && artifact.kind === "browser-environment-preflight" &&
+      typeof artifact.path === "string" && path.isAbsolute(artifact.path) &&
+      HEX_SHA256.test(artifact.sha256 ?? "") && validUtc(artifact.captured_at_utc),
+    "browser-cdp: environment preflight artifact identity is invalid");
+    invariant(fs.existsSync(artifact.path) && fs.statSync(artifact.path).isFile(),
+      "browser-cdp: environment preflight artifact is missing");
+    const body = fs.readFileSync(artifact.path);
+    invariant(crypto.createHash("sha256").update(body).digest("hex") === artifact.sha256.toLowerCase(),
+      "browser-cdp: environment preflight artifact SHA-256 does not match");
+    const trace = JSON.parse(body.toString("utf8"));
+    invariant(trace.schema_version === 1 && trace.gate === "browser-environment-preflight" && trace.status === "PASSED" &&
+      trace.commit === evidence.commit && trace.session_id === evidence.runner.session_id,
+    "browser-cdp: environment preflight trace is not bound to this commit/session");
+    const proxyNames = trace.proxy_environment_variables;
+    const safeProxyBypass = Array.isArray(proxyNames) && proxyNames.every((name) =>
+      ["ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"].includes(name)) &&
+      (proxyNames.length === 0 || (trace.no_proxy_127_0_0_1 === true && trace.no_proxy_localhost === true));
+    const ancestorNames = trace.process_ancestor_names;
+    const codexAncestor = Array.isArray(ancestorNames) &&
+      ancestorNames.some((name) => name === "codex.exe" || name === "chatgpt.exe");
+    invariant(trace.surface === expectedSurface && trace.test_origin === "http://127.0.0.1:5173/" &&
+      trace.codex_process_ancestor === true && trace.loopback_exempt === true && trace.proxy_bypass_ready === true &&
+      safeProxyBypass && codexAncestor,
+    "browser-cdp: environment preflight trace does not prove safe loopback access");
+    invariant(trace.environment_preflight_only === true && trace.browser_navigation_tested === false &&
+      trace.production_data_touched === false && trace.secrets_in_evidence === false &&
+      Array.isArray(trace.remediation) && trace.remediation.length === 0,
+    "browser-cdp: environment preflight trace contains unsafe or overstated claims");
+  }
   for (const item of evidence.cases) {
     const details = item.details;
     invariant(isRecord(details) && details.recording_schema === 1 && details.surface === expectedSurface,

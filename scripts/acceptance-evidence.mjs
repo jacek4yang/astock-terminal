@@ -152,6 +152,58 @@ function assertNoSecretFields(value, scenario, parent = "root") {
   }
 }
 
+function validateBrowserEnvironmentPreflight(sessionRoot, session) {
+  const preflightPath = inside(
+    sessionRoot,
+    path.join(sessionRoot, "browser-environment-preflight.json"),
+    "browser environment preflight",
+  );
+  const { value: preflight, raw } = readJson(preflightPath, "browser environment preflight");
+  safeObservation(raw, "browser-environment-preflight");
+  assertNoSecretFields(preflight, "browser-environment-preflight");
+  invariant(preflight.schema_version === 1 && preflight.gate === "browser-environment-preflight",
+    "browser environment preflight identity is invalid");
+  invariant(preflight.status === "PASSED" && preflight.commit === session.commit && preflight.session_id === session.session_id,
+    "browser environment preflight is not PASSED for this exact session/commit");
+  invariant(preflight.surface === "codex-in-app-browser" && preflight.test_origin === "http://127.0.0.1:5173/",
+    "browser environment preflight targets the wrong surface or origin");
+  invariant(preflight.codex_process_ancestor === true && Array.isArray(preflight.process_ancestor_names) &&
+    preflight.process_ancestor_names.some((name) => name === "codex.exe" || name === "chatgpt.exe"),
+  "browser environment preflight did not run from the Codex desktop process tree");
+  invariant(Array.isArray(preflight.proxy_environment_variables) && preflight.proxy_environment_variables.every((name) =>
+    ["ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"].includes(name)),
+  "browser environment preflight retained unexpected proxy material");
+  const explicitProxyBypass = preflight.proxy_environment_variables.length === 0 ||
+    (preflight.no_proxy_127_0_0_1 === true && preflight.no_proxy_localhost === true);
+  invariant(preflight.loopback_exempt === true && preflight.proxy_bypass_ready === true && explicitProxyBypass,
+    "browser environment preflight has no safe loopback/proxy bypass");
+  invariant(preflight.environment_preflight_only === true && preflight.browser_navigation_tested === false,
+    "browser environment preflight improperly claims browser scenario coverage");
+  invariant(preflight.production_data_touched === false && preflight.secrets_in_evidence === false,
+    "browser environment preflight touched production data or retained secrets");
+  invariant(Array.isArray(preflight.remediation) && preflight.remediation.length === 0,
+    "a PASSED browser environment preflight still contains remediation actions");
+  const sessionStarted = Date.parse(session.started_at_utc);
+  const preflightStarted = Date.parse(preflight.started_at_utc);
+  const preflightCompleted = Date.parse(preflight.completed_at_utc);
+  invariant(Number.isFinite(sessionStarted) && preflightStarted === sessionStarted &&
+    Number.isFinite(preflightCompleted) && preflightCompleted >= preflightStarted,
+  "browser environment preflight timestamps are invalid");
+  return {
+    status: "PASSED",
+    loopback_exempt: true,
+    proxy_bypass_ready: true,
+    codex_process_ancestor: true,
+    test_origin: preflight.test_origin,
+    artifact: {
+      kind: "browser-environment-preflight",
+      path: preflightPath,
+      sha256: sha256(preflightPath),
+      captured_at_utc: new Date(preflightCompleted).toISOString(),
+    },
+  };
+}
+
 function normalizedUrl(value, mode, scenario) {
   invariant(typeof value === "string" && value.length > 0, `${scenario}: app_url is required`);
   const url = new URL(value);
@@ -274,6 +326,18 @@ export function initializeAcceptanceSession({ mode, sessionDirectory, commit, bu
     production_data_touched: false,
   };
   fs.writeFileSync(path.join(sessionRoot, "session.json"), `${JSON.stringify(session, null, 2)}\n`, "utf8");
+  if (mode === "browser") {
+    fs.writeFileSync(path.join(sessionRoot, "browser-environment-preflight.template.json"), `${JSON.stringify({
+      schema_version: 1,
+      gate: "browser-environment-preflight",
+      status: "NOT_RUN",
+      commit,
+      session_id: session.session_id,
+      surface: policy.surface,
+      test_origin: "http://127.0.0.1:5173/",
+      instruction: "Run scripts/browser-acceptance-preflight.ps1 from this Codex desktop task before recording cases.",
+    }, null, 2)}\n`, "utf8");
+  }
   const observationTemplate = {
     schema_version: 1,
     scenario: "replace-with-catalog-case-id",
@@ -338,6 +402,9 @@ export function finalizeAcceptanceSession({ sessionDirectory, outputPath, expect
   invariant(COMMIT.test(expectedCommit ?? "") && session.commit === expectedCommit, "acceptance session commit does not match the expected commit");
   invariant(typeof session.session_id === "string" && /^[0-9a-f-]{36}$/i.test(session.session_id), "acceptance session id is invalid");
   invariant(session.production_data_touched === false, "acceptance session touched production data");
+  const environmentPreflight = session.mode === "browser"
+    ? validateBrowserEnvironmentPreflight(sessionRoot, session)
+    : undefined;
   const cases = policy.scenarios.map((scenario) => validateObservation({
     mode: session.mode,
     scenario,
@@ -356,6 +423,7 @@ export function finalizeAcceptanceSession({ sessionDirectory, outputPath, expect
     runner: { os: `${os.platform()} ${os.release()}`, arch: os.arch(), surface: policy.surface, session_id: session.session_id },
     secrets_in_evidence: false,
     production_data_touched: false,
+    environment_preflight: environmentPreflight,
     cases,
   };
   fs.mkdirSync(path.dirname(output), { recursive: true });

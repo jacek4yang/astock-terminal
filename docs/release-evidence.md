@@ -44,6 +44,24 @@ endpoint, binds the package metadata to the full source commit and places all
 profile/data state under `ASTOCK_BUILD_ROOT`. These variables are release-test
 capabilities and are never set by the installed production shortcut.
 
+Before recording any browser case, run the create-once environment preflight
+from the same Codex desktop task that will control the in-app browser:
+
+```powershell
+.\scripts\browser-acceptance-preflight.ps1 `
+  -SessionDirectory $env:ASTOCK_BROWSER_ACCEPTANCE_SESSION `
+  -ExpectedCommit (git rev-parse HEAD)
+```
+
+The preflight never changes Windows or proxy settings. It requires the Codex
+process tree, the explicit AppContainer loopback exemption and a proxy bypass
+for both `127.0.0.1` and `localhost` whenever proxy variables are configured.
+Only variable names and booleans are retained; proxy URLs and Bridge tokens are
+never written. A blocked preflight cannot be converted into browser evidence,
+and finalization independently reopens and hashes the exact preflight record.
+Operator approval is required before adding the loopback exemption or changing
+the process proxy bypass, followed by a Codex restart.
+
 Each of the 12 browser cases has a versioned procedure containing its exact
 viewport, at least two operator actions and canonical expected text for every
 assertion anchor. Session initialization writes these instructions and an
@@ -90,12 +108,13 @@ completed; earlier sessions are rejected.
 
 The executable local gate also runs `scripts/research-data-release-gate.mjs`
 against an isolated D-drive data root. It never calls credentialed providers.
-The current Shanghai/Shenzhen sample must have two-source quote and K-line
-agreement, `920001` must resolve to the canonical BSE name and remain visibly
-blocking whenever only one source is available, and legacy `430002` must not
-receive fabricated live data. Candidate names and current news-channel breadth
-are checked in the same run. A degraded but non-blocking provider is preserved
-in the report instead of being converted to a false all-green result.
+The current Shanghai/Shenzhen sample must have a strict live-quote majority
+(2/2, 2/3 or 3/4) and at least two agreeing K-line sources. A single lagging
+quote source is quarantined and displayed as degraded; a 2-2 split remains
+blocking. `920001` must resolve to the canonical BSE name and remain visibly
+blocking whenever dual-source coverage is unavailable, and legacy `430002`
+must not receive fabricated live data. Candidate names, liquidity completeness
+and current news-channel breadth are checked in the same run.
 
 Every release-gate invocation uses fresh, commit/run-bound MoonBit/Why3 target
 directories. The Z3 and cvc5 session counts must each equal the current proof

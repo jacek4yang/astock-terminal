@@ -21,12 +21,37 @@ const artifactRoot = fs.mkdtempSync(path.join(os.tmpdir(), "astock-release-evide
 const artifactPath = path.join(artifactRoot, "trace.json");
 fs.writeFileSync(artifactPath, '{"ok":true}\n', "utf8");
 const artifactHash = crypto.createHash("sha256").update(fs.readFileSync(artifactPath)).digest("hex");
+const browserPreflightPath = path.join(artifactRoot, "browser-environment-preflight.json");
+fs.writeFileSync(browserPreflightPath, `${JSON.stringify({
+  schema_version: 1,
+  gate: "browser-environment-preflight",
+  status: "PASSED",
+  commit,
+  session_id: "browser-session",
+  started_at_utc: "2026-08-24T00:00:00.000Z",
+  completed_at_utc: "2026-08-24T00:00:01.000Z",
+  surface: "codex-in-app-browser",
+  test_origin: "http://127.0.0.1:5173/",
+  codex_process_ancestor: true,
+  process_ancestor_names: ["pwsh.exe", "codex.exe", "chatgpt.exe"],
+  loopback_exempt: true,
+  proxy_environment_variables: [],
+  no_proxy_127_0_0_1: false,
+  no_proxy_localhost: false,
+  proxy_bypass_ready: true,
+  browser_navigation_tested: false,
+  environment_preflight_only: true,
+  production_data_touched: false,
+  secrets_in_evidence: false,
+  remediation: [],
+}, null, 2)}\n`, "utf8");
+const browserPreflightHash = crypto.createHash("sha256").update(fs.readFileSync(browserPreflightPath)).digest("hex");
 after(() => {
   fs.rmSync(artifactRoot, { recursive: true, force: true });
 });
 
 function base(gate, caseIds) {
-  return {
+  const evidence = {
     schema_version: 1,
     gate,
     status: "PASSED",
@@ -36,6 +61,26 @@ function base(gate, caseIds) {
     runner: { os: "Windows 11", arch: "x64" },
     cases: caseIds.map((id) => ({ id, status: "PASSED", duration_ms: 1 })),
   };
+  if (gate === "browser-cdp") {
+    evidence.secrets_in_evidence = false;
+    evidence.production_data_touched = false;
+    evidence.runner.surface = "codex-in-app-browser";
+    evidence.runner.session_id = "browser-session";
+    evidence.environment_preflight = {
+      status: "PASSED",
+      loopback_exempt: true,
+      proxy_bypass_ready: true,
+      codex_process_ancestor: true,
+      test_origin: "http://127.0.0.1:5173/",
+      artifact: {
+        kind: "browser-environment-preflight",
+        path: browserPreflightPath,
+        sha256: browserPreflightHash,
+        captured_at_utc: "2026-08-24T00:00:01.000Z",
+      },
+    };
+  }
+  return evidence;
 }
 
 function evidencedCases(caseIds) {
@@ -407,6 +452,18 @@ test("requires all named browser scenarios", () => {
   const evidence = base("browser-cdp", ["market-overview"]);
   evidence.cases = evidencedCases(["market-overview"]);
   assert.throws(() => validateEvidence(evidence, "browser-cdp", commit), /stock-detail/);
+});
+
+test("requires a safe Codex loopback and proxy preflight for browser evidence", () => {
+  const evidence = base("browser-cdp", BROWSER_CDP_SCENARIOS);
+  evidence.cases = interactiveCases(BROWSER_CDP_SCENARIOS, "codex-in-app-browser");
+  delete evidence.environment_preflight;
+  assert.throws(() => validateEvidence(evidence, "browser-cdp", commit), /environment preflight is missing/);
+
+  const unsafe = base("browser-cdp", BROWSER_CDP_SCENARIOS);
+  unsafe.cases = interactiveCases(BROWSER_CDP_SCENARIOS, "codex-in-app-browser");
+  unsafe.environment_preflight.loopback_exempt = false;
+  assert.throws(() => validateEvidence(unsafe, "browser-cdp", commit), /environment preflight is missing/);
 });
 
 test("pins exactly the approved v6 browser and desktop scenario catalogs", () => {

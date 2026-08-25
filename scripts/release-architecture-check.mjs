@@ -45,6 +45,7 @@ const agentSchema = JSON.parse(fs.readFileSync(path.join(root, "protocol", "sche
 const hostSchema = JSON.parse(fs.readFileSync(path.join(root, "protocol", "schema", "host.schema.json"), "utf8"));
 const browserBridge = fs.readFileSync(path.join(root, "scripts", "browser-dev-bridge.mjs"), "utf8");
 const browserBridgeAuthSmoke = fs.readFileSync(path.join(root, "scripts", "browser-bridge-auth-smoke.ps1"), "utf8");
+const browserAcceptancePreflight = fs.readFileSync(path.join(root, "scripts", "browser-acceptance-preflight.ps1"), "utf8");
 const handshakeContract = fs.readFileSync(path.join(root, "scripts", "lib", "handshake-contract.mjs"), "utf8");
 const rendererBridge = fs.readFileSync(path.join(root, "ui", "src", "bridge", "index.ts"), "utf8");
 const acceptanceEvidence = fs.readFileSync(path.join(root, "scripts", "acceptance-evidence.mjs"), "utf8");
@@ -293,6 +294,28 @@ for (const rendererBootstrapMarker of ["initializeBrowserTestConfig", "cleanUrl.
 }
 for (const browserAuthMarker of ["replayStatus -ne 401", "healthStatus -ne 200", "wrongOriginStatus -ne 401", "UseProxy = $false"]) {
   if (!browserBridgeAuthSmoke.includes(browserAuthMarker)) failures.push(`browser Bridge authorization smoke is missing ${browserAuthMarker}`);
+}
+for (const preflightMarker of [
+  "CheckNetIsolation LoopbackExempt -s",
+  "proxy_bypass_ready",
+  "codex_process_ancestor",
+  "browser_navigation_tested = $false",
+  "secrets_in_evidence = $false",
+  "browser-environment-preflight.json",
+]) {
+  if (!browserAcceptancePreflight.includes(preflightMarker)) {
+    failures.push(`Codex browser environment preflight is missing ${preflightMarker}`);
+  }
+}
+for (const preflightEvidenceMarker of [
+  "validateBrowserEnvironmentPreflight",
+  "browser-environment-preflight",
+  "proxy_bypass_ready",
+  "codex_process_ancestor",
+]) {
+  if (!acceptanceEvidence.includes(preflightEvidenceMarker)) {
+    failures.push(`browser acceptance evidence is not bound to environment preflight: ${preflightEvidenceMarker}`);
+  }
 }
 if (!releaseGate.includes("Invoke-ReleaseGateStep 'browser-bridge-auth' 'security' 'INTEGRATION TESTED'") ||
     !releaseGate.includes("'browser-bridge-auth',")) {

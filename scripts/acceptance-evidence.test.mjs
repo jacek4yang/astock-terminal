@@ -56,7 +56,37 @@ function fakePng(file, width, height) {
   ]));
 }
 
+function ensureBrowserPreflight(session) {
+  const file = path.join(session, "browser-environment-preflight.json");
+  if (fs.existsSync(file)) return;
+  const metadata = JSON.parse(fs.readFileSync(path.join(session, "session.json"), "utf8"));
+  fs.writeFileSync(file, `${JSON.stringify({
+    schema_version: 1,
+    gate: "browser-environment-preflight",
+    status: "PASSED",
+    commit,
+    session_id: metadata.session_id,
+    started_at_utc: metadata.started_at_utc,
+    completed_at_utc: new Date(Date.parse(metadata.started_at_utc) + 1).toISOString(),
+    surface: "codex-in-app-browser",
+    test_origin: "http://127.0.0.1:5173/",
+    codex_process_ancestor: true,
+    process_ancestor_names: ["pwsh.exe", "codex.exe", "chatgpt.exe"],
+    loopback_exempt: true,
+    proxy_environment_variables: [],
+    no_proxy_127_0_0_1: false,
+    no_proxy_localhost: false,
+    proxy_bypass_ready: true,
+    browser_navigation_tested: false,
+    environment_preflight_only: true,
+    production_data_touched: false,
+    secrets_in_evidence: false,
+    remediation: [],
+  }, null, 2)}\n`, "utf8");
+}
+
 function writeBrowserObservation(session, scenario, mutate = (value) => value) {
+  ensureBrowserPreflight(session);
   const width = scenario === "responsive-1200" ? 1199 : scenario === "responsive-900" ? 899 : 1440;
   const directory = path.join(session, scenario);
   fakePng(path.join(directory, "screenshot.png"), width, 900);
@@ -120,6 +150,8 @@ test("finalizes all browser cases only from detailed commit-bound observations",
 test("initializes scenario-specific browser procedures without pre-filling observations", () => {
   const session = path.join(root, "browser-procedures");
   initializeAcceptanceSession({ mode: "browser", sessionDirectory: session, commit, buildRoot: root });
+  const preflightTemplate = JSON.parse(fs.readFileSync(path.join(session, "browser-environment-preflight.template.json"), "utf8"));
+  assert.equal(preflightTemplate.status, "NOT_RUN");
   for (const scenario of BROWSER_CDP_SCENARIOS) {
     const procedure = JSON.parse(fs.readFileSync(path.join(session, scenario, "procedure.json"), "utf8"));
     const template = JSON.parse(fs.readFileSync(path.join(session, scenario, "observation.template.json"), "utf8"));
@@ -128,6 +160,19 @@ test("initializes scenario-specific browser procedures without pre-filling obser
     assert.equal(template.status, "NOT_RUN");
     assert.equal(template.assertions.every((item) => item.passed === false && item.observed === null), true);
   }
+});
+
+test("rejects browser observations without a passed commit-bound environment preflight", () => {
+  const session = path.join(root, "browser-preflight-missing");
+  initializeAcceptanceSession({ mode: "browser", sessionDirectory: session, commit, buildRoot: root });
+  for (const scenario of BROWSER_CDP_SCENARIOS) writeBrowserObservation(session, scenario);
+  fs.rmSync(path.join(session, "browser-environment-preflight.json"));
+  assert.throws(() => finalizeAcceptanceSession({
+    sessionDirectory: session,
+    outputPath: path.join(root, "browser-preflight-missing.json"),
+    expectedCommit: commit,
+    buildRoot: root,
+  }), /browser environment preflight is missing/);
 });
 
 test("rejects an operator-modified browser expected value", () => {
