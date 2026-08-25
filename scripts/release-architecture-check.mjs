@@ -64,6 +64,10 @@ const liveDataValidator = fs.readFileSync(path.join(root, "scripts", "lib", "liv
 const credentialEvidence = fs.readFileSync(path.join(root, "scripts", "record-credential-rotation.ps1"), "utf8");
 const bootstrap = fs.readFileSync(path.join(root, "scripts", "bootstrap.ps1"), "utf8");
 const pinnedCefInstaller = fs.readFileSync(path.join(root, "scripts", "install-pinned-cef-runtime.ps1"), "utf8");
+const gitAttributes = fs.readFileSync(path.join(root, ".gitattributes"), "utf8");
+const protonPatches = fs.readdirSync(path.join(root, "patches"), { withFileTypes: true })
+  .filter((entry) => entry.isFile() && entry.name.endsWith(".patch"))
+  .map((entry) => ({ name: entry.name, content: fs.readFileSync(path.join(root, "patches", entry.name), "utf8") }));
 const performanceEvidence = fs.readFileSync(path.join(root, "scripts", "performance-e2e.ps1"), "utf8");
 const performanceCdp = fs.readFileSync(path.join(root, "scripts", "performance-cdp.mjs"), "utf8");
 const releasePublisher = fs.readFileSync(path.join(root, "scripts", "publish-v6.ps1"), "utf8");
@@ -690,6 +694,12 @@ for (const cefInstallerMarker of [
 ]) {
   const source = cefInstallerMarker === "install-pinned-cef-runtime.ps1" ? bootstrap : pinnedCefInstaller;
   if (!source.includes(cefInstallerMarker)) failures.push(`bounded Windows CEF installer is missing ${cefInstallerMarker}`);
+}
+for (const patch of protonPatches) {
+  if (patch.content.includes("\r")) failures.push(`Proton patch must use LF line endings for clean MoonBit dependencies: ${patch.name}`);
+}
+if (!gitAttributes.split(/\r?\n/u).some((line) => line.trim() === "*.patch text eol=lf")) {
+  failures.push(".gitattributes must force LF line endings for audited Proton patches");
 }
 for (const unsignedStageMarker of [
   "github-oidc-attested-unsigned",
