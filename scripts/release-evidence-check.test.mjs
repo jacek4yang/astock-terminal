@@ -11,6 +11,7 @@ import {
   BROWSER_CDP_PROCEDURES,
   BROWSER_CDP_SCENARIOS,
   DESKTOP_E2E_ASSERTION_ANCHORS,
+  DESKTOP_E2E_PROCEDURES,
   DESKTOP_E2E_SCENARIOS,
   NATIVE_WINDOW_SCENARIOS,
 } from "./release-scenarios.mjs";
@@ -69,14 +70,17 @@ function interactiveCases(caseIds, surface) {
     details: {
       recording_schema: 1,
       surface,
-      viewport: { width: id === "responsive-1200" ? 1199 : id === "responsive-900" ? 899 : 1440, height: 900 },
+      viewport: {
+        ...(surface === "codex-in-app-browser" ? BROWSER_CDP_PROCEDURES : DESKTOP_E2E_PROCEDURES)[id].viewport,
+        device_scale_factor: (surface === "codex-in-app-browser" ? BROWSER_CDP_PROCEDURES : DESKTOP_E2E_PROCEDURES)[id].viewport.device_scale_factor ?? 1,
+      },
       console: { error_count: 0, warning_count: 0 },
       assertions: (surface === "codex-in-app-browser"
         ? BROWSER_CDP_ASSERTION_ANCHORS[id]
         : DESKTOP_E2E_ASSERTION_ANCHORS[id]).map((anchor) => ({
         id: anchor,
         passed: true,
-        expected: surface === "codex-in-app-browser" ? BROWSER_CDP_PROCEDURES[id].expected[anchor] : true,
+        expected: (surface === "codex-in-app-browser" ? BROWSER_CDP_PROCEDURES : DESKTOP_E2E_PROCEDURES)[id].expected[anchor],
         observed: true,
       })),
       ...(surface === "codex-in-app-browser"
@@ -292,6 +296,28 @@ test("rejects a browser recording that rewrites the versioned expected result", 
   evidence.cases = interactiveCases(BROWSER_CDP_SCENARIOS, "codex-in-app-browser");
   evidence.cases.find((item) => item.id === "stock-detail").details.assertions[0].expected = "任意名称都可以";
   assert.throws(() => validateEvidence(evidence, "browser-cdp", commit), /changed the versioned expected value/);
+});
+
+test("rejects a desktop recording that rewrites the versioned expected result", () => {
+  const evidence = base("desktop-e2e-40", DESKTOP_E2E_SCENARIOS);
+  evidence.secrets_in_evidence = false;
+  evidence.production_data_touched = false;
+  evidence.runner.surface = "packaged-proton-cef";
+  evidence.runner.session_id = "desktop-session";
+  evidence.cases = interactiveCases(DESKTOP_E2E_SCENARIOS, "packaged-proton-cef");
+  evidence.cases.find((item) => item.id === "window-drag").details.assertions[0].expected = "窗口看起来移动了";
+  assert.throws(() => validateEvidence(evidence, "desktop-e2e-40", commit), /changed the versioned expected value/);
+});
+
+test("rejects an interactive recording that changes its versioned viewport", () => {
+  const evidence = base("desktop-e2e-40", DESKTOP_E2E_SCENARIOS);
+  evidence.secrets_in_evidence = false;
+  evidence.production_data_touched = false;
+  evidence.runner.surface = "packaged-proton-cef";
+  evidence.runner.session_id = "desktop-session";
+  evidence.cases = interactiveCases(DESKTOP_E2E_SCENARIOS, "packaged-proton-cef");
+  evidence.cases.find((item) => item.id === "taskbar-icon-high-dpi").details.viewport.device_scale_factor = 1;
+  assert.throws(() => validateEvidence(evidence, "desktop-e2e-40", commit), /viewport changed from the versioned procedure/);
 });
 
 test("rejects duplicate interactive assertion ids", () => {

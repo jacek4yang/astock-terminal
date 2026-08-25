@@ -51,6 +51,12 @@ unpassed observation template into each case directory. Both finalization and
 the independent release validator reject an operator who weakens or rewrites a
 canonical expected value.
 
+The same rule applies to all 40 packaged Proton/CEF desktop cases. Their
+procedures include data, Agent, persistence, fault recovery, native-window,
+responsive-layout and production-isolation operations. Desktop initialization
+also writes a case-local procedure and `NOT_RUN` template; a generic pass label
+or modified expectation cannot satisfy the release gate.
+
 The development Bridge binds only to `127.0.0.1` on a random port. Its
 per-process bootstrap token is single-use and travels in the URL fragment, so
 it is never sent to Vite or an HTTP access log. React removes the fragment

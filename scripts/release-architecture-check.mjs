@@ -661,7 +661,7 @@ for (const liveDataMarker of ["invalid, duplicate or unordered date", "violates 
 for (const liveDataMarker of ["primary-source citations are insufficient", "snapshot is not bound to this live run", "audited security identity is invalid", "latest qfq bar is stale", "audited row digest is missing", "durable Effect ledger is incomplete", "durable verifier Effect is missing"]) {
   if (!releaseEvidenceValidator.includes(liveDataMarker)) failures.push(`external Provider evidence validator is missing ${liveDataMarker}`);
 }
-for (const browserProcedureMarker of ["BROWSER_CDP_PROCEDURES", "versioned procedure", "procedure.json", "changed the versioned expected value"]) {
+for (const browserProcedureMarker of ["BROWSER_CDP_PROCEDURES", "DESKTOP_E2E_PROCEDURES", "versioned procedure", "procedure.json", "changed the versioned expected value"]) {
   if (!`${releaseScenarios}\n${acceptanceEvidence}\n${releaseEvidenceValidator}`.includes(browserProcedureMarker)) {
     failures.push(`browser acceptance procedures are missing ${browserProcedureMarker}`);
   }

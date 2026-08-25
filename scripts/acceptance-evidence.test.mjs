@@ -11,6 +11,8 @@ import {
   BROWSER_CDP_ASSERTION_ANCHORS,
   BROWSER_CDP_PROCEDURES,
   BROWSER_CDP_SCENARIOS,
+  DESKTOP_E2E_ASSERTION_ANCHORS,
+  DESKTOP_E2E_PROCEDURES,
   DESKTOP_E2E_SCENARIOS,
 } from "./release-scenarios.mjs";
 
@@ -79,6 +81,31 @@ function writeBrowserObservation(session, scenario, mutate = (value) => value) {
   fs.writeFileSync(path.join(directory, "observation.json"), `${JSON.stringify(value, null, 2)}\n`);
 }
 
+function writeDesktopObservation(session, scenario, mutate = (value) => value) {
+  const procedure = DESKTOP_E2E_PROCEDURES[scenario];
+  const directory = path.join(session, scenario);
+  fakePng(path.join(directory, "screenshot.png"), procedure.viewport.width, procedure.viewport.height);
+  const value = mutate({
+    schema_version: 1,
+    scenario,
+    status: "PASSED",
+    commit,
+    surface: "packaged-proton-cef",
+    production_data_touched: false,
+    started_at_utc: "2026-08-24T00:00:00.000Z",
+    completed_at_utc: "2026-08-24T00:00:01.000Z",
+    app_url: "app://astock/",
+    viewport: { ...procedure.viewport, device_scale_factor: procedure.viewport.device_scale_factor ?? 1 },
+    package: { application_version: "6.0.0", commit, isolated_data_root: true },
+    console: { errors: [], warnings: [] },
+    assertions: DESKTOP_E2E_ASSERTION_ANCHORS[scenario].map((id) => ({
+      id, passed: true, expected: procedure.expected[id], observed: true,
+    })),
+    screenshot: "screenshot.png",
+  });
+  fs.writeFileSync(path.join(directory, "observation.json"), `${JSON.stringify(value, null, 2)}\n`);
+}
+
 test("finalizes all browser cases only from detailed commit-bound observations", () => {
   const session = path.join(root, "browser-good");
   initializeAcceptanceSession({ mode: "browser", sessionDirectory: session, commit, buildRoot: root });
@@ -134,6 +161,15 @@ test("rejects pass-only observations and Bridge-token leakage", () => {
   writeBrowserObservation(leaked, "market-overview", (value) => ({ ...value, diagnostic: "bridgeToken must never be retained" }));
   assert.throws(() => finalizeAcceptanceSession({
     sessionDirectory: leaked, outputPath: path.join(root, "leaked.json"), expectedCommit: commit, buildRoot: root,
+  }), /Bridge-token material/);
+
+  const providerLeaked = path.join(root, "browser-provider-leaked");
+  initializeAcceptanceSession({ mode: "browser", sessionDirectory: providerLeaked, commit, buildRoot: root });
+  for (const scenario of BROWSER_CDP_SCENARIOS) writeBrowserObservation(providerLeaked, scenario);
+  const syntheticProviderKey = ["sk", "cp", "A".repeat(20)].join("-");
+  writeBrowserObservation(providerLeaked, "market-overview", (value) => ({ ...value, diagnostic: syntheticProviderKey }));
+  assert.throws(() => finalizeAcceptanceSession({
+    sessionDirectory: providerLeaked, outputPath: path.join(root, "provider-leaked.json"), expectedCommit: commit, buildRoot: root,
   }), /Bridge-token material/);
 });
 
@@ -193,5 +229,24 @@ test("initializes the exact 40-case packaged desktop catalog without claiming a 
   assert.deepEqual(result.scenarios, DESKTOP_E2E_SCENARIOS);
   assert.equal(fs.readdirSync(session, { withFileTypes: true }).filter((entry) => entry.isDirectory()).length, 40);
   assert.equal(JSON.parse(fs.readFileSync(path.join(session, "observation.template.json"), "utf8")).status, "NOT_RUN");
+  for (const scenario of DESKTOP_E2E_SCENARIOS) {
+    const procedure = JSON.parse(fs.readFileSync(path.join(session, scenario, "procedure.json"), "utf8"));
+    const template = JSON.parse(fs.readFileSync(path.join(session, scenario, "observation.template.json"), "utf8"));
+    assert.deepEqual(procedure.actions, DESKTOP_E2E_PROCEDURES[scenario].actions);
+    assert.deepEqual(procedure.expected, DESKTOP_E2E_PROCEDURES[scenario].expected);
+    assert.deepEqual(template.assertions.map((item) => item.id), DESKTOP_E2E_ASSERTION_ANCHORS[scenario]);
+    assert.equal(template.assertions.every((item) => item.passed === false && item.observed === null), true);
+  }
   assert.equal(fs.existsSync(path.join(root, "desktop-e2e.json")), false);
+});
+
+test("finalizes all desktop cases only from the versioned packaged procedures", () => {
+  const session = path.join(root, "desktop-good");
+  initializeAcceptanceSession({ mode: "desktop", sessionDirectory: session, commit, buildRoot: root });
+  for (const scenario of DESKTOP_E2E_SCENARIOS) writeDesktopObservation(session, scenario);
+  const output = path.join(root, "desktop-good.json");
+  const result = finalizeAcceptanceSession({ sessionDirectory: session, outputPath: output, expectedCommit: commit, buildRoot: root });
+  assert.equal(result.cases, 40);
+  const evidence = JSON.parse(fs.readFileSync(output, "utf8"));
+  assert.doesNotThrow(() => validateEvidence(evidence, "desktop-e2e-40", commit));
 });

@@ -7,6 +7,7 @@ import {
   BROWSER_CDP_PROCEDURES,
   BROWSER_CDP_SCENARIOS,
   DESKTOP_E2E_ASSERTION_ANCHORS,
+  DESKTOP_E2E_PROCEDURES,
   DESKTOP_E2E_SCENARIOS,
   NATIVE_WINDOW_SCENARIOS,
 } from "./release-scenarios.mjs";
@@ -363,14 +364,17 @@ function validateInteractiveAcceptance(evidence, gate) {
     invariant(assertionIds.size === details.assertions.length, `${gate}: case ${item.id} contains duplicate assertion ids`);
     for (const anchor of requiredAnchors) {
       invariant(assertionIds.has(anchor), `${gate}: case ${item.id} is missing required assertion anchor ${anchor}`);
-      if (browser) {
-        const assertion = details.assertions.find((candidate) => candidate.id === anchor);
-        invariant(assertion.expected === BROWSER_CDP_PROCEDURES[item.id].expected[anchor],
-          `${gate}: case ${item.id} assertion ${anchor} changed the versioned expected value`);
-      }
+      const procedureCatalog = browser ? BROWSER_CDP_PROCEDURES : DESKTOP_E2E_PROCEDURES;
+      const assertion = details.assertions.find((candidate) => candidate.id === anchor);
+      invariant(assertion.expected === procedureCatalog[item.id].expected[anchor],
+        `${gate}: case ${item.id} assertion ${anchor} changed the versioned expected value`);
     }
     invariant(isRecord(details.viewport) && Number.isInteger(details.viewport.width) && Number.isInteger(details.viewport.height),
       `${gate}: case ${item.id} has no viewport recording`);
+    const procedure = (browser ? BROWSER_CDP_PROCEDURES : DESKTOP_E2E_PROCEDURES)[item.id];
+    invariant(details.viewport.width === procedure.viewport.width && details.viewport.height === procedure.viewport.height &&
+      details.viewport.device_scale_factor === (procedure.viewport.device_scale_factor ?? 1),
+    `${gate}: case ${item.id} viewport changed from the versioned procedure`);
     invariant(details.console?.error_count === 0 && details.console?.warning_count === 0,
       `${gate}: case ${item.id} contains console errors or warnings`);
     const artifactKinds = new Set(item.artifacts.map((artifact) => artifact.kind));
@@ -379,8 +383,6 @@ function validateInteractiveAcceptance(evidence, gate) {
     if (browser) {
       invariant(details.bridge?.real_engine === true && details.bridge?.real_agent === true,
         `${gate}: case ${item.id} did not use the real Engine and Agent Workers`);
-      if (item.id === "responsive-1200") invariant(details.viewport.width === 1199, `${gate}: responsive-1200 must exercise 1199px`);
-      if (item.id === "responsive-900") invariant(details.viewport.width === 899, `${gate}: responsive-900 must exercise 899px`);
     } else {
       invariant(details.package?.application_version === "6.0.0" && details.package?.commit === evidence.commit &&
         details.package?.isolated_data_root === true, `${gate}: case ${item.id} is not bound to the isolated packaged application`);

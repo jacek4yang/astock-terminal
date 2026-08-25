@@ -10,6 +10,7 @@ import {
   BROWSER_CDP_PROCEDURES,
   BROWSER_CDP_SCENARIOS,
   DESKTOP_E2E_ASSERTION_ANCHORS,
+  DESKTOP_E2E_PROCEDURES,
   DESKTOP_E2E_SCENARIOS,
 } from "./release-scenarios.mjs";
 
@@ -27,7 +28,7 @@ const CRC32_TABLE = Array.from({ length: 256 }, (_, value) => {
 const SECRET_PATTERNS = [
   /bridgeToken/i,
   /x-astock-test-token/i,
-  /sk-(?:cp-)?[A-Za-z0-9_-]{16,}/,
+  /(?<![A-Za-z0-9_-])sk-(?:cp-)?[A-Za-z0-9_-]{16,}/,
 ];
 
 function invariant(condition, message) {
@@ -200,11 +201,13 @@ function validateObservation({ mode, scenario, caseDirectory, commit, surface })
   const completed = Date.parse(observation.completed_at_utc);
   invariant(Number.isFinite(started) && Number.isFinite(completed) && completed >= started, `${scenario}: observation timestamps are invalid`);
   const assertionCatalog = mode === "browser" ? BROWSER_CDP_ASSERTION_ANCHORS : DESKTOP_E2E_ASSERTION_ANCHORS;
+  const procedureCatalog = mode === "browser" ? BROWSER_CDP_PROCEDURES : DESKTOP_E2E_PROCEDURES;
+  const procedure = procedureCatalog[scenario];
   const assertions = validateAssertions(
     observation.assertions,
     scenario,
     assertionCatalog[scenario],
-    mode === "browser" ? BROWSER_CDP_PROCEDURES[scenario].expected : undefined,
+    procedure.expected,
   );
   invariant(observation.console && Array.isArray(observation.console.errors) && Array.isArray(observation.console.warnings),
     `${scenario}: console capture is required`);
@@ -213,8 +216,9 @@ function validateObservation({ mode, scenario, caseDirectory, commit, surface })
   invariant(observation.viewport && Number.isInteger(observation.viewport.width) && Number.isInteger(observation.viewport.height) &&
     observation.viewport.width >= 320 && observation.viewport.height >= 240 && Number.isFinite(observation.viewport.device_scale_factor) &&
     observation.viewport.device_scale_factor > 0, `${scenario}: viewport evidence is invalid`);
-  if (scenario === "responsive-1200") invariant(observation.viewport.width === 1199, `${scenario}: viewport width must exercise <1200px`);
-  if (scenario === "responsive-900") invariant(observation.viewport.width === 899, `${scenario}: viewport width must exercise <900px`);
+  invariant(observation.viewport.width === procedure.viewport.width && observation.viewport.height === procedure.viewport.height &&
+    observation.viewport.device_scale_factor === (procedure.viewport.device_scale_factor ?? 1),
+  `${scenario}: viewport does not match the versioned procedure`);
   if (mode === "browser") {
     invariant(observation.bridge?.real_engine === true && observation.bridge?.real_agent === true,
       `${scenario}: browser acceptance did not use the real Engine and Agent Workers`);
@@ -292,31 +296,31 @@ export function initializeAcceptanceSession({ mode, sessionDirectory, commit, bu
     screenshot: "screenshot.png",
   };
   fs.writeFileSync(path.join(sessionRoot, "observation.template.json"), `${JSON.stringify(observationTemplate, null, 2)}\n`, "utf8");
-  if (mode === "browser") {
-    for (const scenario of policy.scenarios) {
-      const procedure = BROWSER_CDP_PROCEDURES[scenario];
-      const directory = path.join(sessionRoot, scenario);
-      fs.writeFileSync(path.join(directory, "procedure.json"), `${JSON.stringify({
-        schema_version: 1,
-        scenario,
-        commit,
-        surface: policy.surface,
-        viewport: procedure.viewport,
-        actions: procedure.actions,
-        expected: procedure.expected,
-      }, null, 2)}\n`, "utf8");
-      fs.writeFileSync(path.join(directory, "observation.template.json"), `${JSON.stringify({
-        ...observationTemplate,
-        scenario,
-        viewport: { ...procedure.viewport, device_scale_factor: 1 },
-        assertions: BROWSER_CDP_ASSERTION_ANCHORS[scenario].map((id) => ({
-          id,
-          passed: false,
-          expected: procedure.expected[id],
-          observed: null,
-        })),
-      }, null, 2)}\n`, "utf8");
-    }
+  const procedureCatalog = mode === "browser" ? BROWSER_CDP_PROCEDURES : DESKTOP_E2E_PROCEDURES;
+  const assertionCatalog = mode === "browser" ? BROWSER_CDP_ASSERTION_ANCHORS : DESKTOP_E2E_ASSERTION_ANCHORS;
+  for (const scenario of policy.scenarios) {
+    const procedure = procedureCatalog[scenario];
+    const directory = path.join(sessionRoot, scenario);
+    fs.writeFileSync(path.join(directory, "procedure.json"), `${JSON.stringify({
+      schema_version: 1,
+      scenario,
+      commit,
+      surface: policy.surface,
+      viewport: procedure.viewport,
+      actions: procedure.actions,
+      expected: procedure.expected,
+    }, null, 2)}\n`, "utf8");
+    fs.writeFileSync(path.join(directory, "observation.template.json"), `${JSON.stringify({
+      ...observationTemplate,
+      scenario,
+      viewport: { ...procedure.viewport, device_scale_factor: procedure.viewport.device_scale_factor ?? 1 },
+      assertions: assertionCatalog[scenario].map((id) => ({
+        id,
+        passed: false,
+        expected: procedure.expected[id],
+        observed: null,
+      })),
+    }, null, 2)}\n`, "utf8");
   }
   return { session_directory: sessionRoot, scenarios: policy.scenarios };
 }
