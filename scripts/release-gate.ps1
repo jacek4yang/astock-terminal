@@ -281,7 +281,8 @@ try {
     }
 
     Invoke-ReleaseGateStep 'moonbit-agent-proofs' 'formal' 'FORMALLY PROVED' {
-        $proofTarget = Join-Path $build.Paths.Root 'moon-target\agent-prove-release-bootstrap'
+        $proofRunId = "$($commit.Substring(0, 12))-$($started.ToUnixTimeMilliseconds())-$PID"
+        $proofTarget = Join-Path $build.Paths.Root "moon-target\agent-prove-release-bootstrap-$proofRunId"
         Invoke-Checked -FilePath 'moon' -WorkingDirectory (Join-Path $repository 'app-moon') -Arguments @('prove', 'agent_formal', '--target-dir', $proofTarget)
         $baseConfig = Join-Path $proofTarget 'verif\why3.conf'
         if (-not (Test-Path -LiteralPath $baseConfig -PathType Leaf)) { throw 'Why3 configuration was not generated.' }
@@ -305,7 +306,7 @@ name = "AStock_$($prover.Name)"
 shortcut = "4"
 "@
             [System.IO.File]::WriteAllText($config, $configPrefix + $strategy, [System.Text.UTF8Encoding]::new($false))
-            $solverTarget = Join-Path $build.Paths.Root "moon-target\agent-prove-$($prover.Slug)-release"
+            $solverTarget = Join-Path $build.Paths.Root "moon-target\agent-prove-$($prover.Slug)-release-$proofRunId"
             Invoke-Checked -FilePath 'moon' -WorkingDirectory (Join-Path $repository 'app-moon') -Arguments @('prove', 'agent_formal', '--why3-config', $config, '--target-dir', $solverTarget)
             $proofJson = Join-Path $solverTarget 'verif\agent_formal\agent_formal.proof.json'
             if (-not (Test-Path -LiteralPath $proofJson -PathType Leaf)) {
@@ -321,7 +322,9 @@ shortcut = "4"
             if (-not $proverMatch.Success) { throw "$($prover.Name) is absent from its Why3 proof session." }
             $escapedId = [regex]::Escape($proverMatch.Groups[1].Value)
             $validCount = ([regex]::Matches($sessionText, "<proof prover=`"$escapedId`"><result status=`"valid`"")).Count
-            if ($validCount -le 0) { throw "$($prover.Name) did not discharge an obligation in its Why3 session." }
+            if ($validCount -ne [int]$proof.summary.valid) {
+                throw "$($prover.Name) Why3 session is incomplete or contaminated: expected $($proof.summary.valid), found $validCount."
+            }
             $proved[$prover.Name] = $validCount
         }
         "z3_valid=$($proved.Z3); cvc5_valid=$($proved.CVC5)"

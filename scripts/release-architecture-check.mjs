@@ -296,6 +296,9 @@ if (!releaseGate.includes("Invoke-ReleaseGateStep 'browser-bridge-auth' 'securit
     !releaseGate.includes("'browser-bridge-auth',")) {
   failures.push("one-time browser Bridge authorization is not a mandatory signing prerequisite");
 }
+for (const proofIsolationMarker of ["proofRunId", 'validCount -ne [int]$proof.summary.valid', "incomplete or contaminated"]) {
+  if (!releaseGate.includes(proofIsolationMarker)) failures.push(`formal release proof isolation is missing ${proofIsolationMarker}`);
+}
 if (!engineEventStore.includes('format!("sha256:{:x}", Sha256::digest(value.as_bytes()))') ||
     !moonHost.includes("durable_operation_effect_matches") ||
     !moonHost.includes("identity.payload == Some(payload)") ||

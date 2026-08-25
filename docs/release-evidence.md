@@ -61,6 +61,11 @@ receive fabricated live data. Candidate names and current news-channel breadth
 are checked in the same run. A degraded but non-blocking provider is preserved
 in the report instead of being converted to a false all-green result.
 
+Every release-gate invocation uses fresh, commit/run-bound MoonBit/Why3 target
+directories. The Z3 and cvc5 session counts must each equal the current proof
+JSON's valid-goal count; accumulated or partially stale solver sessions are
+rejected instead of being reported as additional proof coverage.
+
 Performance evidence carries the raw samples, aggregation, unit, fixed budget
 and comparison for every release metric. The validator independently recomputes
 p95/p05/max values and p95 regressions instead of trusting the reported value.
