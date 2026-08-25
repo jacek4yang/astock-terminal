@@ -57,6 +57,13 @@ responsive-layout and production-isolation operations. Desktop initialization
 also writes a case-local procedure and `NOT_RUN` template; a generic pass label
 or modified expectation cannot satisfy the release gate.
 
+The separate native-window harness controls only the exact packaged process and
+records Win32 snapshots before and after every bounded interaction. Validation
+recomputes the package and trace hashes, checks the isolated data root and
+cursor-restoration guarantees, then proves the expected movement, maximize,
+restore, edge-resize, minimize, icon/DPI and context-menu state transitions from
+the trace values. A correctly hashed but semantically empty trace is rejected.
+
 The development Bridge binds only to `127.0.0.1` on a random port. Its
 per-process bootstrap token is single-use and travels in the URL fragment, so
 it is never sent to Vite or an HTTP access log. React removes the fragment

@@ -22,11 +22,7 @@ const artifactPath = path.join(artifactRoot, "trace.json");
 fs.writeFileSync(artifactPath, '{"ok":true}\n', "utf8");
 const artifactHash = crypto.createHash("sha256").update(fs.readFileSync(artifactPath)).digest("hex");
 after(() => {
-  fs.unlinkSync(artifactPath);
-  for (let index = 0; index < 4; index += 1) {
-    fs.unlinkSync(path.join(artifactRoot, `pe-${index}.exe`));
-  }
-  fs.rmdirSync(artifactRoot);
+  fs.rmSync(artifactRoot, { recursive: true, force: true });
 });
 
 function base(gate, caseIds) {
@@ -88,6 +84,87 @@ function interactiveCases(caseIds, surface) {
         : { package: { application_version: "6.0.0", commit, isolated_data_root: true } }),
     },
   }));
+}
+
+function nativeWindowEvidence() {
+  fs.mkdirSync(path.join(artifactRoot, "isolated-data"), { recursive: true });
+  const snapshot = (overrides = {}) => ({
+    ProcessId: 42,
+    WindowHandle: "0x1234",
+    ClassName: "ProtonWindow",
+    Title: "AStock Terminal",
+    X: 120,
+    Y: 100,
+    Width: 1100,
+    Height: 680,
+    Dpi: 96,
+    Visible: true,
+    Maximized: false,
+    Minimized: false,
+    Resizable: true,
+    HasMinimizeBox: true,
+    HasMaximizeBox: true,
+    TaskbarEligible: true,
+    HasLargeIcon: true,
+    HasSmallIcon: true,
+    ...overrides,
+  });
+  const traces = {
+    "packaged-launch": { initial: snapshot() },
+    "taskbar-icon-high-dpi": { initial: snapshot({ Dpi: 192 }) },
+    "window-drag": { before: snapshot(), after: snapshot({ X: 230, Y: 165 }) },
+    "window-double-click-maximize": { before: snapshot(), after: snapshot({ Maximized: true }) },
+    "window-restore": { before: snapshot({ Maximized: true }), after: snapshot() },
+    "window-edge-resize": { before: snapshot(), after: snapshot({ Width: 1180, Height: 720 }) },
+    "window-minimize": { before: snapshot(), after: snapshot({ Minimized: true }) },
+    "native-context-menu": { before: snapshot(), after: snapshot(), process_alive: true },
+  };
+  const minimumAssertions = {
+    "packaged-launch": 3,
+    "window-drag": 3,
+    "window-double-click-maximize": 2,
+    "window-restore": 3,
+    "window-edge-resize": 3,
+    "window-minimize": 2,
+    "taskbar-icon-high-dpi": 6,
+    "native-context-menu": 3,
+  };
+  const evidence = base("desktop-window-native", NATIVE_WINDOW_SCENARIOS);
+  evidence.package_executable = artifactPath;
+  evidence.package_sha256 = artifactHash;
+  evidence.isolation = {
+    build_root: artifactRoot,
+    data_root: path.join(artifactRoot, "isolated-data"),
+    production_data_touched: false,
+    interactive_input_bounded: true,
+    cursor_position_restored: true,
+  };
+  evidence.stderr = [];
+  evidence.cases = NATIVE_WINDOW_SCENARIOS.map((id) => {
+    const tracePath = path.join(artifactRoot, `native-${id}.json`);
+    fs.writeFileSync(tracePath, `${JSON.stringify({
+      schema_version: 1,
+      commit,
+      case_id: id,
+      status: "PASSED",
+      started_at_utc: "2026-08-24T00:00:00.000Z",
+      completed_at_utc: "2026-08-24T00:00:01.000Z",
+      trace: traces[id],
+    })}\n`, "utf8");
+    return {
+      id,
+      status: "PASSED",
+      duration_ms: 1000,
+      assertion_count: minimumAssertions[id],
+      artifacts: [{
+        kind: "win32-window-trace",
+        path: tracePath,
+        sha256: crypto.createHash("sha256").update(fs.readFileSync(tracePath)).digest("hex"),
+        captured_at_utc: "2026-08-24T00:00:01.000Z",
+      }],
+    };
+  });
+  return evidence;
 }
 
 function completePerformance() {
@@ -237,11 +314,18 @@ test("pins exactly the approved v6 browser and desktop scenario catalogs", () =>
   assert.ok(DESKTOP_E2E_SCENARIOS.includes("release-no-debug-leakage-local-gate-disclosure"));
 });
 
-test("requires every native window case to carry a hashed trace", () => {
+test("requires every native window case to carry a semantically valid Win32 trace", () => {
   const evidence = base("desktop-window-native", NATIVE_WINDOW_SCENARIOS);
   assert.throws(() => validateEvidence(evidence, "desktop-window-native", commit), /no assertions/);
-  evidence.cases = evidencedCases(NATIVE_WINDOW_SCENARIOS);
-  assert.doesNotThrow(() => validateEvidence(evidence, "desktop-window-native", commit));
+  const complete = nativeWindowEvidence();
+  assert.doesNotThrow(() => validateEvidence(complete, "desktop-window-native", commit));
+  const drag = complete.cases.find((item) => item.id === "window-drag");
+  const tracePath = drag.artifacts[0].path;
+  const trace = JSON.parse(fs.readFileSync(tracePath, "utf8"));
+  trace.trace.after.X = trace.trace.before.X;
+  fs.writeFileSync(tracePath, `${JSON.stringify(trace)}\n`, "utf8");
+  drag.artifacts[0].sha256 = crypto.createHash("sha256").update(fs.readFileSync(tracePath)).digest("hex");
+  assert.throws(() => validateEvidence(complete, "desktop-window-native", commit), /does not prove a bounded move/);
 });
 
 test("rejects desktop cases padded with unnamed placeholders", () => {

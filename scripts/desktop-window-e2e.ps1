@@ -199,7 +199,11 @@ try {
     $menuClosed = Invoke-WindowProbe -Operation interactive-context-menu -Arguments @{ StartX = $brandX; StartY = $brandY; AllowInteractiveInput = $true }
     Assert-WindowCondition ($menuClosed.Visible -eq $true -and -not $menuClosed.Minimized) 'Titlebar system-menu interaction left the window unusable.'
     Assert-WindowCondition (-not $process.HasExited) 'Titlebar system-menu interaction terminated the packaged application.'
-    $cases.Add((Write-WindowCase -Id 'native-context-menu' -Started $started -AssertionCount 3 -Trace @{ before = $stable; after = $menuClosed }))
+    $cases.Add((Write-WindowCase -Id 'native-context-menu' -Started $started -AssertionCount 3 -Trace @{
+        before = $stable
+        after = $menuClosed
+        process_alive = (-not $process.HasExited)
+    }))
 } finally {
     try {
         if (-not $process.HasExited) {

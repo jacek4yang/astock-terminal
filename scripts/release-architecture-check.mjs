@@ -714,6 +714,11 @@ for (const probeMarker of ["ExpectedExecutablePath", "Refusing to control an unr
 for (const windowMarker of ["window-drag", "window-double-click-maximize", "window-edge-resize", "native-context-menu", "production_data_touched = $false", "desktop-window-native.json"]) {
   if (!desktopWindowEvidence.includes(windowMarker)) failures.push(`native desktop window evidence harness is missing ${windowMarker}`);
 }
+for (const nativeEvidenceMarker of ["validateNativeWindowEvidence", "win32-window-trace", "does not prove a bounded move", "process_alive"]) {
+  if (!`${releaseEvidenceValidator}\n${desktopWindowEvidence}`.includes(nativeEvidenceMarker)) {
+    failures.push(`native desktop window semantic evidence is missing ${nativeEvidenceMarker}`);
+  }
+}
 if (releaseGate.indexOf("browser-cdp-evidence") > releaseGate.indexOf("package-proton-cef")) {
   failures.push("release gate can launch the packaged desktop before Codex browser evidence passes");
 }

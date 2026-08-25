@@ -132,6 +132,102 @@ function validateCaseArtifact(artifact, gate, caseId) {
   invariant(actualHash.toLowerCase() === artifact.sha256.toLowerCase(), `${gate}: case ${caseId} artifact SHA-256 does not match`);
 }
 
+const NATIVE_WINDOW_MIN_ASSERTIONS = Object.freeze({
+  "packaged-launch": 3,
+  "window-drag": 3,
+  "window-double-click-maximize": 2,
+  "window-restore": 3,
+  "window-edge-resize": 3,
+  "window-minimize": 2,
+  "taskbar-icon-high-dpi": 6,
+  "native-context-menu": 3,
+});
+
+function nativeSnapshot(trace, property, caseId) {
+  const snapshot = trace[property];
+  invariant(isRecord(snapshot), `desktop-window-native: case ${caseId} trace.${property} is missing`);
+  for (const dimension of ["X", "Y", "Width", "Height", "Dpi"]) {
+    invariant(Number.isFinite(snapshot[dimension]), `desktop-window-native: case ${caseId} trace.${property}.${dimension} is invalid`);
+  }
+  return snapshot;
+}
+
+function isWithinAbsoluteRoot(root, candidate) {
+  const pathApi = path.win32.isAbsolute(root) ? path.win32 : path.posix;
+  if (!pathApi.isAbsolute(root) || !pathApi.isAbsolute(candidate)) return false;
+  const relative = pathApi.relative(pathApi.resolve(root), pathApi.resolve(candidate));
+  return relative !== "" && relative !== ".." && !relative.startsWith(`..${pathApi.sep}`) && !pathApi.isAbsolute(relative);
+}
+
+function validateNativeWindowEvidence(evidence) {
+  invariant(typeof evidence.package_executable === "string" &&
+    (path.win32.isAbsolute(evidence.package_executable) || path.posix.isAbsolute(evidence.package_executable)),
+  "desktop-window-native: package executable must be an absolute path");
+  invariant(HEX_SHA256.test(evidence.package_sha256 ?? "") && fs.existsSync(evidence.package_executable),
+    "desktop-window-native: packaged executable identity is missing");
+  const packageHash = crypto.createHash("sha256").update(fs.readFileSync(evidence.package_executable)).digest("hex");
+  invariant(packageHash.toLowerCase() === evidence.package_sha256.toLowerCase(),
+    "desktop-window-native: packaged executable SHA-256 does not match");
+  invariant(typeof evidence.isolation?.build_root === "string" && typeof evidence.isolation?.data_root === "string" &&
+    isWithinAbsoluteRoot(evidence.isolation.build_root, evidence.package_executable) &&
+    isWithinAbsoluteRoot(evidence.isolation.build_root, evidence.isolation.data_root) &&
+    fs.existsSync(evidence.isolation.build_root) && fs.statSync(evidence.isolation.build_root).isDirectory() &&
+    fs.existsSync(evidence.isolation.data_root) && fs.statSync(evidence.isolation.data_root).isDirectory() &&
+    evidence.isolation.production_data_touched === false && evidence.isolation.interactive_input_bounded === true &&
+    evidence.isolation?.cursor_position_restored === true,
+  "desktop-window-native: isolation or bounded-input guarantees are missing");
+  invariant(Array.isArray(evidence.stderr) && evidence.stderr.every((line) => typeof line === "string" && !/(?:panic|fatal|unhandled)/i.test(line)),
+    "desktop-window-native: stderr contains an invalid or fatal entry");
+
+  for (const item of evidence.cases) {
+    invariant(item.assertion_count >= NATIVE_WINDOW_MIN_ASSERTIONS[item.id],
+      `desktop-window-native: case ${item.id} does not contain the required semantic assertions`);
+    const traceArtifact = item.artifacts.find((artifact) => artifact.kind === "win32-window-trace");
+    invariant(traceArtifact && item.artifacts.length === 1,
+      `desktop-window-native: case ${item.id} must contain exactly one Win32 trace`);
+    const record = JSON.parse(fs.readFileSync(traceArtifact.path, "utf8"));
+    invariant(record.schema_version === 1 && record.commit === evidence.commit && record.case_id === item.id && record.status === STATUS,
+      `desktop-window-native: case ${item.id} trace identity is invalid`);
+    invariant(validUtc(record.started_at_utc) && validUtc(record.completed_at_utc) &&
+      Date.parse(record.completed_at_utc) >= Date.parse(record.started_at_utc) && isRecord(record.trace),
+    `desktop-window-native: case ${item.id} trace timestamps or payload are invalid`);
+
+    if (item.id === "packaged-launch") {
+      const initial = nativeSnapshot(record.trace, "initial", item.id);
+      invariant(initial.Visible === true && typeof initial.ClassName === "string" && /proton/i.test(initial.ClassName) && initial.Title === "AStock Terminal",
+        "desktop-window-native: packaged Proton window identity is invalid");
+    } else if (item.id === "taskbar-icon-high-dpi") {
+      const initial = nativeSnapshot(record.trace, "initial", item.id);
+      invariant(initial.Resizable === true && initial.HasMinimizeBox === true && initial.HasMaximizeBox === true &&
+        initial.TaskbarEligible === true && initial.HasLargeIcon === true && initial.HasSmallIcon === true && initial.Dpi >= 96,
+      "desktop-window-native: taskbar, icon, resize, or DPI capabilities are invalid");
+    } else {
+      const before = nativeSnapshot(record.trace, "before", item.id);
+      const after = nativeSnapshot(record.trace, "after", item.id);
+      if (item.id === "window-drag") {
+        invariant(Math.abs(after.X - before.X) >= 40 && Math.abs(after.Y - before.Y) >= 20 &&
+          Math.abs(after.Width - before.Width) <= 4 && Math.abs(after.Height - before.Height) <= 4,
+        "desktop-window-native: drag trace does not prove a bounded move without resize");
+      } else if (item.id === "window-double-click-maximize") {
+        invariant(before.Maximized === false && after.Maximized === true && after.Minimized === false,
+          "desktop-window-native: double-click trace does not prove maximize");
+      } else if (item.id === "window-restore") {
+        invariant(before.Maximized === true && after.Maximized === false && after.Minimized === false && after.Width >= 1000 && after.Height >= 600,
+          "desktop-window-native: restore trace does not prove usable restored bounds");
+      } else if (item.id === "window-edge-resize") {
+        invariant(after.Width >= before.Width + 20 && after.Height >= before.Height + 10 && after.Resizable === true,
+          "desktop-window-native: edge-resize trace does not prove a usable resize");
+      } else if (item.id === "window-minimize") {
+        invariant(after.Minimized === true && after.Maximized === false,
+          "desktop-window-native: minimize trace does not prove taskbar iconification");
+      } else if (item.id === "native-context-menu") {
+        invariant(after.Visible === true && after.Minimized === false && record.trace.process_alive === true,
+          "desktop-window-native: context-menu trace does not prove a live usable window");
+      }
+    }
+  }
+}
+
 function validatePerformance(evidence) {
   invariant(isRecord(evidence.environment), "performance-budgets: measurement environment is required");
   invariant(evidence.environment.mode === "packaged-proton-cef", "performance-budgets: measurements must use the packaged Proton/CEF application");
@@ -409,6 +505,7 @@ export function validateEvidence(evidence, expectedGate, expectedCommit) {
   if (expectedGate === "minimax-plus-joinquant-live") validateExternalServices(evidence);
   if (expectedGate === "credential-rotation") validateCredentialRotation(evidence);
   if (expectedGate === "authenticode-valid-all-pe") validateSignedArtifacts(evidence);
+  if (expectedGate === "desktop-window-native") validateNativeWindowEvidence(evidence);
   if (expectedGate === "browser-cdp" || expectedGate === "desktop-e2e-40") validateInteractiveAcceptance(evidence, expectedGate);
   return { gate: expectedGate, cases: evidence.cases.length, completed_at_utc: evidence.completed_at_utc };
 }
