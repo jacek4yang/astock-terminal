@@ -44,6 +44,13 @@ endpoint, binds the package metadata to the full source commit and places all
 profile/data state under `ASTOCK_BUILD_ROOT`. These variables are release-test
 capabilities and are never set by the installed production shortcut.
 
+Each of the 12 browser cases has a versioned procedure containing its exact
+viewport, at least two operator actions and canonical expected text for every
+assertion anchor. Session initialization writes these instructions and an
+unpassed observation template into each case directory. Both finalization and
+the independent release validator reject an operator who weakens or rewrites a
+canonical expected value.
+
 The development Bridge binds only to `127.0.0.1` on a random port. Its
 per-process bootstrap token is single-use and travels in the URL fragment, so
 it is never sent to Vite or an HTTP access log. React removes the fragment

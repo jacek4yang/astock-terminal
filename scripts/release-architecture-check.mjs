@@ -661,6 +661,11 @@ for (const liveDataMarker of ["invalid, duplicate or unordered date", "violates 
 for (const liveDataMarker of ["primary-source citations are insufficient", "snapshot is not bound to this live run", "audited security identity is invalid", "latest qfq bar is stale", "audited row digest is missing", "durable Effect ledger is incomplete", "durable verifier Effect is missing"]) {
   if (!releaseEvidenceValidator.includes(liveDataMarker)) failures.push(`external Provider evidence validator is missing ${liveDataMarker}`);
 }
+for (const browserProcedureMarker of ["BROWSER_CDP_PROCEDURES", "versioned procedure", "procedure.json", "changed the versioned expected value"]) {
+  if (!`${releaseScenarios}\n${acceptanceEvidence}\n${releaseEvidenceValidator}`.includes(browserProcedureMarker)) {
+    failures.push(`browser acceptance procedures are missing ${browserProcedureMarker}`);
+  }
+}
 for (const credentialMarker of ["ConfirmOldCredentialsRevoked", "credential-readback-smoke.mjs", "credential_manager_readback_verified = $true", "secrets_in_evidence = $false"]) {
   if (!credentialEvidence.includes(credentialMarker)) failures.push(`credential rotation evidence harness is missing ${credentialMarker}`);
 }

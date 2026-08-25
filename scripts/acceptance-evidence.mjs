@@ -7,6 +7,7 @@ import zlib from "node:zlib";
 
 import {
   BROWSER_CDP_ASSERTION_ANCHORS,
+  BROWSER_CDP_PROCEDURES,
   BROWSER_CDP_SCENARIOS,
   DESKTOP_E2E_ASSERTION_ANCHORS,
   DESKTOP_E2E_SCENARIOS,
@@ -161,7 +162,7 @@ function normalizedUrl(value, mode, scenario) {
   return url.toString();
 }
 
-function validateAssertions(assertions, scenario, requiredAnchors) {
+function validateAssertions(assertions, scenario, requiredAnchors, canonicalExpected) {
   invariant(Array.isArray(assertions) && assertions.length >= 2, `${scenario}: at least two concrete assertions are required`);
   const ids = new Set();
   for (const assertion of assertions) {
@@ -175,6 +176,10 @@ function validateAssertions(assertions, scenario, requiredAnchors) {
     invariant(assertion.expected !== null && assertion.expected !== undefined &&
       assertion.observed !== null && assertion.observed !== undefined,
     `${scenario}: assertion ${assertion.id} expected/observed values must be concrete`);
+    if (canonicalExpected && Object.hasOwn(canonicalExpected, assertion.id)) {
+      invariant(assertion.expected === canonicalExpected[assertion.id],
+        `${scenario}: assertion ${assertion.id} expected value does not match the versioned procedure`);
+    }
   }
   for (const anchor of requiredAnchors) {
     invariant(ids.has(anchor), `${scenario}: required assertion anchor is missing: ${anchor}`);
@@ -195,7 +200,12 @@ function validateObservation({ mode, scenario, caseDirectory, commit, surface })
   const completed = Date.parse(observation.completed_at_utc);
   invariant(Number.isFinite(started) && Number.isFinite(completed) && completed >= started, `${scenario}: observation timestamps are invalid`);
   const assertionCatalog = mode === "browser" ? BROWSER_CDP_ASSERTION_ANCHORS : DESKTOP_E2E_ASSERTION_ANCHORS;
-  const assertions = validateAssertions(observation.assertions, scenario, assertionCatalog[scenario]);
+  const assertions = validateAssertions(
+    observation.assertions,
+    scenario,
+    assertionCatalog[scenario],
+    mode === "browser" ? BROWSER_CDP_PROCEDURES[scenario].expected : undefined,
+  );
   invariant(observation.console && Array.isArray(observation.console.errors) && Array.isArray(observation.console.warnings),
     `${scenario}: console capture is required`);
   invariant(observation.console.errors.length === 0 && observation.console.warnings.length === 0,
@@ -282,6 +292,32 @@ export function initializeAcceptanceSession({ mode, sessionDirectory, commit, bu
     screenshot: "screenshot.png",
   };
   fs.writeFileSync(path.join(sessionRoot, "observation.template.json"), `${JSON.stringify(observationTemplate, null, 2)}\n`, "utf8");
+  if (mode === "browser") {
+    for (const scenario of policy.scenarios) {
+      const procedure = BROWSER_CDP_PROCEDURES[scenario];
+      const directory = path.join(sessionRoot, scenario);
+      fs.writeFileSync(path.join(directory, "procedure.json"), `${JSON.stringify({
+        schema_version: 1,
+        scenario,
+        commit,
+        surface: policy.surface,
+        viewport: procedure.viewport,
+        actions: procedure.actions,
+        expected: procedure.expected,
+      }, null, 2)}\n`, "utf8");
+      fs.writeFileSync(path.join(directory, "observation.template.json"), `${JSON.stringify({
+        ...observationTemplate,
+        scenario,
+        viewport: { ...procedure.viewport, device_scale_factor: 1 },
+        assertions: BROWSER_CDP_ASSERTION_ANCHORS[scenario].map((id) => ({
+          id,
+          passed: false,
+          expected: procedure.expected[id],
+          observed: null,
+        })),
+      }, null, 2)}\n`, "utf8");
+    }
+  }
   return { session_directory: sessionRoot, scenarios: policy.scenarios };
 }
 

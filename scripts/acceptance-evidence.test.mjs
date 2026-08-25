@@ -9,6 +9,7 @@ import { initializeAcceptanceSession, finalizeAcceptanceSession } from "./accept
 import { validateEvidence } from "./release-evidence-check.mjs";
 import {
   BROWSER_CDP_ASSERTION_ANCHORS,
+  BROWSER_CDP_PROCEDURES,
   BROWSER_CDP_SCENARIOS,
   DESKTOP_E2E_SCENARIOS,
 } from "./release-scenarios.mjs";
@@ -71,7 +72,7 @@ function writeBrowserObservation(session, scenario, mutate = (value) => value) {
     bridge: { real_engine: true, real_agent: true },
     console: { errors: [], warnings: [] },
     assertions: BROWSER_CDP_ASSERTION_ANCHORS[scenario].map((id) => ({
-      id, passed: true, expected: true, observed: true,
+      id, passed: true, expected: BROWSER_CDP_PROCEDURES[scenario].expected[id], observed: true,
     })),
     screenshot: "screenshot.png",
   });
@@ -87,6 +88,35 @@ test("finalizes all browser cases only from detailed commit-bound observations",
   assert.equal(result.cases, 12);
   const evidence = JSON.parse(fs.readFileSync(output, "utf8"));
   assert.doesNotThrow(() => validateEvidence(evidence, "browser-cdp", commit));
+});
+
+test("initializes scenario-specific browser procedures without pre-filling observations", () => {
+  const session = path.join(root, "browser-procedures");
+  initializeAcceptanceSession({ mode: "browser", sessionDirectory: session, commit, buildRoot: root });
+  for (const scenario of BROWSER_CDP_SCENARIOS) {
+    const procedure = JSON.parse(fs.readFileSync(path.join(session, scenario, "procedure.json"), "utf8"));
+    const template = JSON.parse(fs.readFileSync(path.join(session, scenario, "observation.template.json"), "utf8"));
+    assert.deepEqual(procedure.actions, BROWSER_CDP_PROCEDURES[scenario].actions);
+    assert.deepEqual(procedure.expected, BROWSER_CDP_PROCEDURES[scenario].expected);
+    assert.equal(template.status, "NOT_RUN");
+    assert.equal(template.assertions.every((item) => item.passed === false && item.observed === null), true);
+  }
+});
+
+test("rejects an operator-modified browser expected value", () => {
+  const session = path.join(root, "browser-modified-expected");
+  initializeAcceptanceSession({ mode: "browser", sessionDirectory: session, commit, buildRoot: root });
+  for (const scenario of BROWSER_CDP_SCENARIOS) writeBrowserObservation(session, scenario);
+  writeBrowserObservation(session, "stock-detail", (value) => ({
+    ...value,
+    assertions: value.assertions.map((item, index) => index === 0 ? { ...item, expected: "看到一个名称即可" } : item),
+  }));
+  assert.throws(() => finalizeAcceptanceSession({
+    sessionDirectory: session,
+    outputPath: path.join(root, "modified-expected.json"),
+    expectedCommit: commit,
+    buildRoot: root,
+  }), /versioned procedure/);
 });
 
 test("rejects pass-only observations and Bridge-token leakage", () => {

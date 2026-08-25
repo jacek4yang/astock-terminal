@@ -222,7 +222,7 @@ try {
         }
         $historyFindings = @(Get-Content -LiteralPath $historyReport -Raw | ConvertFrom-Json)
         if ($historyFindings.Count -ne 0) { throw 'Gitleaks retained findings despite a successful exit.' }
-        "gitleaks_version=$gitleaksVersion; commits_scanned=$(git rev-list --all --count); findings=0"
+        "gitleaks_version=$gitleaksVersion; reachable_commits=$(git rev-list --all --count); scan_scope=all_refs; findings=0"
     }
     Invoke-ReleaseGateStep 'rustsec' 'security' 'INTEGRATION TESTED' {
         $database = Join-Path $build.Paths.FormalCache 'rustsec-advisory-db'

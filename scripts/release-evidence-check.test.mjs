@@ -8,6 +8,7 @@ import path from "node:path";
 import { validateEvidence } from "./release-evidence-check.mjs";
 import {
   BROWSER_CDP_ASSERTION_ANCHORS,
+  BROWSER_CDP_PROCEDURES,
   BROWSER_CDP_SCENARIOS,
   DESKTOP_E2E_ASSERTION_ANCHORS,
   DESKTOP_E2E_SCENARIOS,
@@ -73,7 +74,10 @@ function interactiveCases(caseIds, surface) {
       assertions: (surface === "codex-in-app-browser"
         ? BROWSER_CDP_ASSERTION_ANCHORS[id]
         : DESKTOP_E2E_ASSERTION_ANCHORS[id]).map((anchor) => ({
-        id: anchor, passed: true, expected: true, observed: true,
+        id: anchor,
+        passed: true,
+        expected: surface === "codex-in-app-browser" ? BROWSER_CDP_PROCEDURES[id].expected[anchor] : true,
+        observed: true,
       })),
       ...(surface === "codex-in-app-browser"
         ? { bridge: { real_engine: true, real_agent: true } }
@@ -277,6 +281,17 @@ test("rejects complete interactive catalogs whose assertions prove the wrong beh
     { id: "market-quality-state-visible", passed: true, expected: true, observed: true },
   ];
   assert.throws(() => validateEvidence(evidence, "browser-cdp", commit), /canonical-security-identity/);
+});
+
+test("rejects a browser recording that rewrites the versioned expected result", () => {
+  const evidence = base("browser-cdp", BROWSER_CDP_SCENARIOS);
+  evidence.secrets_in_evidence = false;
+  evidence.production_data_touched = false;
+  evidence.runner.surface = "codex-in-app-browser";
+  evidence.runner.session_id = "browser-session";
+  evidence.cases = interactiveCases(BROWSER_CDP_SCENARIOS, "codex-in-app-browser");
+  evidence.cases.find((item) => item.id === "stock-detail").details.assertions[0].expected = "任意名称都可以";
+  assert.throws(() => validateEvidence(evidence, "browser-cdp", commit), /changed the versioned expected value/);
 });
 
 test("rejects duplicate interactive assertion ids", () => {

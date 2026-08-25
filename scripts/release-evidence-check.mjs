@@ -4,6 +4,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   BROWSER_CDP_ASSERTION_ANCHORS,
+  BROWSER_CDP_PROCEDURES,
   BROWSER_CDP_SCENARIOS,
   DESKTOP_E2E_ASSERTION_ANCHORS,
   DESKTOP_E2E_SCENARIOS,
@@ -362,6 +363,11 @@ function validateInteractiveAcceptance(evidence, gate) {
     invariant(assertionIds.size === details.assertions.length, `${gate}: case ${item.id} contains duplicate assertion ids`);
     for (const anchor of requiredAnchors) {
       invariant(assertionIds.has(anchor), `${gate}: case ${item.id} is missing required assertion anchor ${anchor}`);
+      if (browser) {
+        const assertion = details.assertions.find((candidate) => candidate.id === anchor);
+        invariant(assertion.expected === BROWSER_CDP_PROCEDURES[item.id].expected[anchor],
+          `${gate}: case ${item.id} assertion ${anchor} changed the versioned expected value`);
+      }
     }
     invariant(isRecord(details.viewport) && Number.isInteger(details.viewport.width) && Number.isInteger(details.viewport.height),
       `${gate}: case ${item.id} has no viewport recording`);
