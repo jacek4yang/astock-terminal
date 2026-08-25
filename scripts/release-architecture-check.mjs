@@ -207,6 +207,7 @@ for (const requiredWorkflowMarker of [
   "research-data-release-gate.test.mjs",
   "https://cli.moonbitlang.com/binaries/latest/moonbit-linux-x86_64.tar.gz",
   "b8f9273653f9af49c447775a7ecc7d20a2784849a15fe489a03afd6718c75d0d",
+  "find \"$MOON_HOME/bin\" -maxdepth 1 -type f -exec chmod 0755 {} +",
   "moon version | grep -F 'moon 0.1.20260824 (dae026a'",
   "moon update",
   "moon test --target native",

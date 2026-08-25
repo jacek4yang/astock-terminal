@@ -126,6 +126,7 @@ jobs:
           mkdir -p "$MOON_HOME/lib"
           tar -xzf "$archive" --directory "$MOON_HOME"
           tar -xzf "$core_archive" --directory "$MOON_HOME/lib"
+          find "$MOON_HOME/bin" -maxdepth 1 -type f -exec chmod 0755 {} +
           ln -sfn moon "$MOON_HOME/bin/moonx"
           PATH="$MOON_HOME/bin:$PATH" moon -C "$MOON_HOME/lib/core" bundle --warn-list -a --all
           PATH="$MOON_HOME/bin:$PATH" moon -C "$MOON_HOME/lib/core" bundle --warn-list -a --target wasm-gc --quiet
