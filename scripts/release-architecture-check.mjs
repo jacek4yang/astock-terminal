@@ -63,6 +63,7 @@ const liveProviderRunner = fs.readFileSync(path.join(root, "scripts", "research-
 const liveDataValidator = fs.readFileSync(path.join(root, "scripts", "lib", "live-data-validation.mjs"), "utf8");
 const credentialEvidence = fs.readFileSync(path.join(root, "scripts", "record-credential-rotation.ps1"), "utf8");
 const bootstrap = fs.readFileSync(path.join(root, "scripts", "bootstrap.ps1"), "utf8");
+const pinnedCefInstaller = fs.readFileSync(path.join(root, "scripts", "install-pinned-cef-runtime.ps1"), "utf8");
 const performanceEvidence = fs.readFileSync(path.join(root, "scripts", "performance-e2e.ps1"), "utf8");
 const performanceCdp = fs.readFileSync(path.join(root, "scripts", "performance-cdp.mjs"), "utf8");
 const releasePublisher = fs.readFileSync(path.join(root, "scripts", "publish-v6.ps1"), "utf8");
@@ -674,8 +675,21 @@ for (const unsignedWorkflowMarker of [
   "if: env.PUBLISH_RELEASE == 'true'",
   "gh release create",
   "Require successful quality checks for the tagged commit",
+  "choco install nsis 7zip --yes --no-progress",
 ]) {
   if (!unsignedReleaseWorkflow.includes(unsignedWorkflowMarker)) failures.push(`unsigned release workflow is missing ${unsignedWorkflowMarker}`);
+}
+for (const cefInstallerMarker of [
+  "install-pinned-cef-runtime.ps1",
+  "cef_binary_147.0.14+g76d2442+chromium-147.0.7727.138_windows64_minimal",
+  "c105f69c0d4dc14331be12cee967eeb73fa4897a6ecde244051318491cd381c7",
+  "Get-FileHash -Algorithm SHA256",
+  "7z.exe",
+  "Test-PinnedRuntime",
+  "cef-$cefSha256-layout-$layoutVersion",
+]) {
+  const source = cefInstallerMarker === "install-pinned-cef-runtime.ps1" ? bootstrap : pinnedCefInstaller;
+  if (!source.includes(cefInstallerMarker)) failures.push(`bounded Windows CEF installer is missing ${cefInstallerMarker}`);
 }
 for (const unsignedStageMarker of [
   "github-oidc-attested-unsigned",

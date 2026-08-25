@@ -27,6 +27,11 @@ if (-not $SkipProtonCli) {
 }
 
 if (-not $SkipCef) {
+    if ($env:OS -eq 'Windows_NT') {
+        & (Join-Path $PSScriptRoot 'install-pinned-cef-runtime.ps1') `
+            -RuntimeStore $build.Paths.ProtonRuntime `
+            -TempRoot $build.Paths.Temp
+    }
     $protonCli = Get-ProtonCliPath -Environment $build
     Invoke-Checked -FilePath $protonCli -WorkingDirectory (Join-Path $build.RepositoryRoot 'desktop-moon') -PreserveProxy -Arguments @(
         'cef', 'setup'
