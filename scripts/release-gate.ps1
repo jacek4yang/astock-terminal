@@ -199,6 +199,31 @@ try {
     Invoke-ReleaseGateStep 'rust-clippy' 'rust' 'INTEGRATION TESTED' {
         Invoke-Checked -FilePath 'cargo' -Arguments @('clippy', '--locked', '--workspace', '--all-targets', '--all-features', '--', '-D', 'warnings')
     }
+    Invoke-ReleaseGateStep 'secret-history-scan' 'security' 'INTEGRATION TESTED' {
+        $gitleaks = Join-Path $build.Paths.Tools 'gitleaks.exe'
+        if (-not (Test-Path -LiteralPath $gitleaks -PathType Leaf)) {
+            throw 'Pinned D-drive Gitleaks is missing. Run scripts/bootstrap.ps1.'
+        }
+        $gitleaksHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $gitleaks).Hash.ToLowerInvariant()
+        if ($gitleaksHash -ne '17157e2ee8b76fc8b1d8bee607a250e34b8a8023c8bc81822d4b5ee4d78fcb7c') {
+            throw "Pinned Gitleaks executable digest mismatch: $gitleaksHash"
+        }
+        $gitleaksVersion = (& $gitleaks version).Trim()
+        if ($LASTEXITCODE -ne 0 -or $gitleaksVersion -ne '8.30.1') {
+            throw "Pinned Gitleaks version mismatch: $gitleaksVersion"
+        }
+        $historyReport = Join-Path $reportDirectory 'gitleaks-history.json'
+        Invoke-Checked -FilePath $gitleaks -Arguments @(
+            'git', '--no-banner', '--no-color', '--redact=100', '--timeout=120',
+            '--log-opts=--all', '--report-format=json', "--report-path=$historyReport", '.'
+        )
+        if (-not (Test-Path -LiteralPath $historyReport -PathType Leaf)) {
+            throw 'Gitleaks did not create the Git-history report.'
+        }
+        $historyFindings = @(Get-Content -LiteralPath $historyReport -Raw | ConvertFrom-Json)
+        if ($historyFindings.Count -ne 0) { throw 'Gitleaks retained findings despite a successful exit.' }
+        "gitleaks_version=$gitleaksVersion; commits_scanned=$(git rev-list --all --count); findings=0"
+    }
     Invoke-ReleaseGateStep 'rustsec' 'security' 'INTEGRATION TESTED' {
         $database = Join-Path $build.Paths.FormalCache 'rustsec-advisory-db'
         if (-not (Test-Path -LiteralPath (Join-Path $database '.git'))) {
@@ -404,6 +429,7 @@ shortcut = "4"
         'rust-format',
         'rust-workspace-tests',
         'rust-clippy',
+        'secret-history-scan',
         'rustsec',
         'dependency-policy',
         'public-research-data',

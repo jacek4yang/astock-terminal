@@ -60,6 +60,7 @@ const externalEvidence = fs.readFileSync(path.join(root, "scripts", "external-se
 const liveProviderRunner = fs.readFileSync(path.join(root, "scripts", "research-live-smoke.mjs"), "utf8");
 const liveDataValidator = fs.readFileSync(path.join(root, "scripts", "lib", "live-data-validation.mjs"), "utf8");
 const credentialEvidence = fs.readFileSync(path.join(root, "scripts", "record-credential-rotation.ps1"), "utf8");
+const bootstrap = fs.readFileSync(path.join(root, "scripts", "bootstrap.ps1"), "utf8");
 const performanceEvidence = fs.readFileSync(path.join(root, "scripts", "performance-e2e.ps1"), "utf8");
 const performanceCdp = fs.readFileSync(path.join(root, "scripts", "performance-cdp.mjs"), "utf8");
 const releasePublisher = fs.readFileSync(path.join(root, "scripts", "publish-v6.ps1"), "utf8");
@@ -298,6 +299,15 @@ if (!releaseGate.includes("Invoke-ReleaseGateStep 'browser-bridge-auth' 'securit
 }
 for (const proofIsolationMarker of ["proofRunId", 'validCount -ne [int]$proof.summary.valid', "incomplete or contaminated"]) {
   if (!releaseGate.includes(proofIsolationMarker)) failures.push(`formal release proof isolation is missing ${proofIsolationMarker}`);
+}
+for (const secretScanMarker of ["secret-history-scan", "gitleaks-history.json", "--log-opts=--all", "17157e2ee8b76fc8b1d8bee607a250e34b8a8023c8bc81822d4b5ee4d78fcb7c"]) {
+  if (!releaseGate.includes(secretScanMarker)) failures.push(`local release secret-history scan is missing ${secretScanMarker}`);
+}
+for (const bootstrapSecretScanMarker of ['gitleaks_${version}_windows_x64.zip', "d29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e", "gitleaks.exe"]) {
+  if (!bootstrap.includes(bootstrapSecretScanMarker)) failures.push(`D-drive Gitleaks bootstrap is missing ${bootstrapSecretScanMarker}`);
+}
+for (const workflowSecretScanMarker of ["fetch-depth: 0", "gitleaks_${version}_linux_x64.tar.gz", "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb", "--log-opts=--all"]) {
+  if (!qualityWorkflow.includes(workflowSecretScanMarker)) failures.push(`quality workflow secret-history scan is missing ${workflowSecretScanMarker}`);
 }
 if (!engineEventStore.includes('format!("sha256:{:x}", Sha256::digest(value.as_bytes()))') ||
     !moonHost.includes("durable_operation_effect_matches") ||

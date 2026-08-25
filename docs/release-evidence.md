@@ -66,6 +66,12 @@ directories. The Z3 and cvc5 session counts must each equal the current proof
 JSON's valid-goal count; accumulated or partially stale solver sessions are
 rejected instead of being reported as additional proof coverage.
 
+The security gate uses Gitleaks 8.30.1 from the D-drive tool store. Bootstrap
+verifies both the official Windows x64 archive digest and the extracted
+executable digest; the release gate then scans every reachable Git commit with
+full redaction and retains an immutable empty JSON report. CI performs the same
+full-history scan from an unshallowed checkout using the pinned Linux archive.
+
 Performance evidence carries the raw samples, aggregation, unit, fixed budget
 and comparison for every release metric. The validator independently recomputes
 p95/p05/max values and p95 regressions instead of trusting the reported value.
