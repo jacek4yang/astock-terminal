@@ -64,6 +64,15 @@ cursor-restoration guarantees, then proves the expected movement, maximize,
 restore, edge-resize, minimize, icon/DPI and context-menu state transitions from
 the trace values. A correctly hashed but semantically empty trace is rejected.
 
+Migration evidence is likewise case-local and semantic. Clean install is bound
+to the installer hash, application version and source commit; the v5 schema
+upgrade retains its exact locked Cargo test output. Real framed Engine calls
+record source/destination retention, SQLite and manifest digests, Parquet byte
+counts and hashes, rollback of the active pointer while retaining both copies,
+legacy conversation reload, and uninstall preservation of a re-hashed research
+marker. All paths must stay below the isolated build/test root, and re-hashing a
+false trace cannot make its claims pass validation.
+
 The development Bridge binds only to `127.0.0.1` on a random port. Its
 per-process bootstrap token is single-use and travels in the URL fragment, so
 it is never sent to Vite or an HTTP access log. React removes the fragment

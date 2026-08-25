@@ -102,7 +102,8 @@ function validateCases(evidence, gate) {
     ids.add(item.id);
     invariant(item.status === STATUS, `${gate}: case ${item.id} is not PASSED`);
     invariant(Number.isFinite(item.duration_ms) && item.duration_ms >= 0, `${gate}: case ${item.id} has invalid duration_ms`);
-    const requiresArtifacts = gate === "browser-cdp" || gate === "desktop-window-native" || gate === "desktop-e2e-40" || gate === "performance-budgets" ||
+    const requiresArtifacts = gate === "browser-cdp" || gate === "desktop-window-native" || gate === "desktop-e2e-40" ||
+      gate === "migration-install-upgrade-uninstall" || gate === "performance-budgets" ||
       (gate === "fault-injection" && (item.id === "renderer-kill" || item.id === "gpu-failure"));
     if (requiresArtifacts) {
       invariant(Number.isInteger(item.assertion_count) && item.assertion_count > 0, `${gate}: case ${item.id} has no assertions`);
@@ -226,6 +227,72 @@ function validateNativeWindowEvidence(evidence) {
       }
     }
   }
+}
+
+function validateMigrationEvidence(evidence) {
+  const isolation = evidence.isolation;
+  invariant(typeof isolation?.build_root === "string" && typeof isolation?.test_root === "string" &&
+    isWithinAbsoluteRoot(isolation.build_root, isolation.test_root) && fs.existsSync(isolation.test_root) &&
+    fs.statSync(isolation.test_root).isDirectory() && isolation.release_test_mode === true &&
+    isolation.touched_production_registry === false && isolation.touched_production_data === false,
+  "migration-install-upgrade-uninstall: isolated release-test guarantees are missing");
+
+  const traces = new Map();
+  for (const item of evidence.cases) {
+    invariant(item.assertion_count >= 2 && item.artifacts.length === 1 && item.artifacts[0].kind === "migration-trace",
+      `migration-install-upgrade-uninstall: case ${item.id} must contain one semantic migration trace`);
+    const trace = JSON.parse(fs.readFileSync(item.artifacts[0].path, "utf8"));
+    invariant(trace.schema_version === 1 && trace.commit === evidence.commit && trace.case_id === item.id && trace.status === STATUS &&
+      validUtc(trace.captured_at_utc) && isRecord(trace.details),
+    `migration-install-upgrade-uninstall: case ${item.id} trace identity is invalid`);
+    traces.set(item.id, trace.details);
+  }
+
+  const clean = traces.get("clean-install");
+  invariant(isWithinAbsoluteRoot(isolation.test_root, clean.install_root) && isWithinAbsoluteRoot(isolation.build_root, clean.installer_path) &&
+    fs.existsSync(clean.installer_path) && HEX_SHA256.test(clean.installer_sha256 ?? "") &&
+    crypto.createHash("sha256").update(fs.readFileSync(clean.installer_path)).digest("hex") === clean.installer_sha256.toLowerCase() &&
+    HEX_SHA256.test(clean.installed_host_sha256 ?? "") && clean.application_version === "6.0.0" && clean.installed_commit === evidence.commit,
+  "migration-install-upgrade-uninstall: clean-install trace is incomplete or not commit-bound");
+
+  const upgrade = traces.get("legacy-upgrade");
+  invariant(upgrade.test_name === "db::tests::migration_v5_adds_kv_fetched_at_on_upgrade" && upgrade.cargo_exit_code === 0 &&
+    Array.isArray(upgrade.output) && upgrade.output.length > 0 && upgrade.transactional_upgrade === true && upgrade.backup_integrity_checked === true,
+  "migration-install-upgrade-uninstall: legacy-upgrade trace is incomplete");
+
+  const moved = traces.get("d-drive-migration");
+  invariant(isWithinAbsoluteRoot(isolation.test_root, moved.source) && isWithinAbsoluteRoot(isolation.test_root, moved.destination) &&
+    moved.source !== moved.destination && moved.sqlite_integrity === "ok" && moved.source_retained === true && moved.restart_required === true,
+  "migration-install-upgrade-uninstall: D-drive migration did not prove atomic retained-source activation");
+
+  const sqlite = traces.get("sqlite-integrity");
+  invariant(sqlite.sqlite_integrity === "ok" && sqlite.source_retained === true &&
+    [sqlite.manifest_sha256, sqlite.source_meta_sha256, sqlite.destination_meta_sha256].every((value) => HEX_SHA256.test(value ?? "")),
+  "migration-install-upgrade-uninstall: SQLite integrity trace is incomplete");
+
+  const parquet = traces.get("parquet-manifest");
+  invariant(typeof parquet.relative_path === "string" && parquet.relative_path.endsWith(".parquet") &&
+    Number.isInteger(parquet.manifest_bytes) && parquet.manifest_bytes > 0 && parquet.manifest_bytes === parquet.copied_bytes &&
+    HEX_SHA256.test(parquet.manifest_sha256 ?? "") && parquet.manifest_sha256 === parquet.copied_sha256 && parquet.payload_matches === true,
+  "migration-install-upgrade-uninstall: Parquet manifest trace is incomplete or inconsistent");
+
+  const rollback = traces.get("rollback");
+  invariant(rollback.active_before_rollback === rollback.destination && rollback.source !== rollback.destination &&
+    rollback.source_sqlite_integrity === "ok" && rollback.source_retained === true && rollback.migrated_copy_retained === true &&
+    rollback.restart_required === true,
+  "migration-install-upgrade-uninstall: rollback trace did not retain both verified copies");
+
+  const legacy = traces.get("legacy-data-adoption");
+  invariant(legacy.origin === "legacy_adopted" && legacy.adopted_path === legacy.expected_path &&
+    isWithinAbsoluteRoot(isolation.test_root, legacy.adopted_path) && legacy.conversation_reloaded === true,
+  "migration-install-upgrade-uninstall: legacy data adoption trace is incomplete");
+
+  const uninstall = traces.get("uninstall-preserves-data");
+  invariant(isWithinAbsoluteRoot(isolation.test_root, uninstall.retained_marker) && fs.existsSync(uninstall.retained_marker) &&
+    HEX_SHA256.test(uninstall.marker_sha256_before ?? "") && uninstall.marker_sha256_before === uninstall.marker_sha256_after &&
+    crypto.createHash("sha256").update(fs.readFileSync(uninstall.retained_marker)).digest("hex") === uninstall.marker_sha256_after &&
+    uninstall.installed_host_removed === true,
+  "migration-install-upgrade-uninstall: uninstall did not prove application removal with research-data retention");
 }
 
 function validatePerformance(evidence) {
@@ -506,6 +573,7 @@ export function validateEvidence(evidence, expectedGate, expectedCommit) {
   if (expectedGate === "credential-rotation") validateCredentialRotation(evidence);
   if (expectedGate === "authenticode-valid-all-pe") validateSignedArtifacts(evidence);
   if (expectedGate === "desktop-window-native") validateNativeWindowEvidence(evidence);
+  if (expectedGate === "migration-install-upgrade-uninstall") validateMigrationEvidence(evidence);
   if (expectedGate === "browser-cdp" || expectedGate === "desktop-e2e-40") validateInteractiveAcceptance(evidence, expectedGate);
   return { gate: expectedGate, cases: evidence.cases.length, completed_at_utc: evidence.completed_at_utc };
 }

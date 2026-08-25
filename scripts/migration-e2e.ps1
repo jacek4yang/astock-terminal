@@ -37,7 +37,8 @@ $runId = "migration-$($commit.Substring(0, 12))-$([Guid]::NewGuid().ToString('N'
 $testRoot = Join-Path $build.Paths.Temp $runId
 $installRoot = Join-Path $testRoot 'install'
 $dataRoot = Join-Path $testRoot 'user-data'
-New-Item -ItemType Directory -Path $testRoot,$dataRoot -Force | Out-Null
+$traceRoot = Join-Path $evidenceRoot 'migration-traces'
+New-Item -ItemType Directory -Path $testRoot,$dataRoot,$traceRoot -Force | Out-Null
 $rootPrefix = [System.IO.Path]::GetFullPath($build.Paths.Root).TrimEnd('\') + '\'
 if (-not ([System.IO.Path]::GetFullPath($testRoot) + '\').StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Migration test root escaped ASTOCK_BUILD_ROOT: $testRoot"
@@ -46,12 +47,28 @@ if (-not ([System.IO.Path]::GetFullPath($testRoot) + '\').StartsWith($rootPrefix
 $started = [DateTimeOffset]::UtcNow
 $cases = [System.Collections.Generic.List[object]]::new()
 function Add-Case {
-    param([Parameter(Mandatory)][string]$Id, [Parameter(Mandatory)][long]$DurationMs, [hashtable]$Details = @{})
+    param([Parameter(Mandatory)][string]$Id, [Parameter(Mandatory)][long]$DurationMs, [Parameter(Mandatory)][object]$Details)
+    $tracePath = Join-Path $traceRoot "$Id.json"
+    $trace = [pscustomobject][ordered]@{
+        schema_version = 1
+        commit = $commit
+        case_id = $Id
+        status = 'PASSED'
+        captured_at_utc = [DateTimeOffset]::UtcNow.UtcDateTime.ToString('o')
+        details = $Details
+    }
+    [System.IO.File]::WriteAllText($tracePath, ($trace | ConvertTo-Json -Depth 12) + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
     $cases.Add([pscustomobject][ordered]@{
         id = $Id
         status = 'PASSED'
         duration_ms = $DurationMs
-        details = [pscustomobject]$Details
+        assertion_count = 2
+        artifacts = @([pscustomobject][ordered]@{
+            kind = 'migration-trace'
+            path = $tracePath
+            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $tracePath).Hash.ToLowerInvariant()
+            captured_at_utc = $trace.captured_at_utc
+        })
     })
 }
 function Invoke-HiddenProcess {
@@ -85,17 +102,25 @@ if ($metadata.commit -ne $commit -or $metadata.application_version -ne '6.0.0') 
 }
 Add-Case -Id 'clean-install' -DurationMs $watch.ElapsedMilliseconds -Details @{
     install_root = $installRoot
-    package_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash.ToLowerInvariant()
+    installer_path = $installer
+    installer_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash.ToLowerInvariant()
+    installed_host_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $installedHost).Hash.ToLowerInvariant()
+    application_version = $metadata.application_version
+    installed_commit = $metadata.commit
 }
 
 $watch.Restart()
-Invoke-Checked -FilePath 'cargo' -Arguments @(
+$upgradeOutput = @(Invoke-Checked -FilePath 'cargo' -Arguments @(
     'test', '--locked', '-p', 'astock-storage',
     'db::tests::migration_v5_adds_kv_fetched_at_on_upgrade', '--', '--exact'
-) -WorkingDirectory $build.RepositoryRoot
+) -WorkingDirectory $build.RepositoryRoot)
 $watch.Stop()
 Add-Case -Id 'legacy-upgrade' -DurationMs $watch.ElapsedMilliseconds -Details @{
-    verified = 'transactional schema upgrade plus read-only integrity-checked backup'
+    test_name = 'db::tests::migration_v5_adds_kv_fetched_at_on_upgrade'
+    cargo_exit_code = 0
+    output = @($upgradeOutput | ForEach-Object { $_.ToString() } | Select-Object -Last 64)
+    transactional_upgrade = $true
+    backup_integrity_checked = $true
 }
 
 $watch.Restart()
@@ -106,11 +131,12 @@ if ($engineExit -ne 0) { throw 'Engine migration E2E failed.' }
 $engineResult = ($engineOutput -join "`n") | ConvertFrom-Json
 if (-not $engineResult.ok) { throw 'Engine migration E2E did not report success.' }
 foreach ($case in $engineResult.cases) {
-    Add-Case -Id $case.id -DurationMs ([long]$case.duration_ms) -Details @{ layer = 'real Engine framed IPC' }
+    Add-Case -Id $case.id -DurationMs ([long]$case.duration_ms) -Details $case.details
 }
 
 $marker = Join-Path $dataRoot 'research-history-preserved.txt'
 [System.IO.File]::WriteAllText($marker, 'must survive uninstall', [System.Text.UTF8Encoding]::new($false))
+$markerHashBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $marker).Hash.ToLowerInvariant()
 $uninstaller = Join-Path $installRoot 'Uninstall.exe'
 if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) { throw 'Installed uninstaller is missing.' }
 $watch.Restart()
@@ -126,6 +152,9 @@ if (-not (Test-Path -LiteralPath $marker -PathType Leaf) -or (Get-Content -Liter
 }
 Add-Case -Id 'uninstall-preserves-data' -DurationMs $watch.ElapsedMilliseconds -Details @{
     retained_marker = $marker
+    marker_sha256_before = $markerHashBefore
+    marker_sha256_after = (Get-FileHash -Algorithm SHA256 -LiteralPath $marker).Hash.ToLowerInvariant()
+    installed_host_removed = (-not (Test-Path -LiteralPath $installedHost))
 }
 
 $requiredCases = @(

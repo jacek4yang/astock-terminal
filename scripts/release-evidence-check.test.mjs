@@ -167,6 +167,113 @@ function nativeWindowEvidence() {
   return evidence;
 }
 
+function migrationEvidence() {
+  const testRoot = path.join(artifactRoot, "migration-root");
+  const source = path.join(testRoot, "source");
+  const destination = path.join(testRoot, "destination");
+  const legacyRoot = path.join(testRoot, "legacy-profile", "Roaming", "astock-terminal");
+  const marker = path.join(testRoot, "user-data", "research-history-preserved.txt");
+  const installer = path.join(artifactRoot, "astock-terminal-setup.exe");
+  for (const directory of [source, destination, legacyRoot, path.dirname(marker)]) fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(installer, "installer-fixture", "utf8");
+  fs.writeFileSync(marker, "must survive uninstall", "utf8");
+  const hash = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  const fixtureHash = "f".repeat(64);
+  const details = {
+    "clean-install": {
+      install_root: path.join(testRoot, "install"),
+      installer_path: installer,
+      installer_sha256: hash(installer),
+      installed_host_sha256: fixtureHash,
+      application_version: "6.0.0",
+      installed_commit: commit,
+    },
+    "legacy-upgrade": {
+      test_name: "db::tests::migration_v5_adds_kv_fetched_at_on_upgrade",
+      cargo_exit_code: 0,
+      output: ["test result: ok. 1 passed"],
+      transactional_upgrade: true,
+      backup_integrity_checked: true,
+    },
+    "legacy-data-adoption": {
+      origin: "legacy_adopted",
+      adopted_path: legacyRoot,
+      expected_path: legacyRoot,
+      conversation_reloaded: true,
+    },
+    "d-drive-migration": {
+      source,
+      destination,
+      sqlite_integrity: "ok",
+      source_retained: true,
+      restart_required: true,
+    },
+    "sqlite-integrity": {
+      manifest_sha256: fixtureHash,
+      sqlite_integrity: "ok",
+      source_retained: true,
+      source_meta_sha256: fixtureHash,
+      destination_meta_sha256: fixtureHash,
+    },
+    "parquet-manifest": {
+      relative_path: "timeseries/600519/day/qfq.parquet",
+      manifest_bytes: 42,
+      copied_bytes: 42,
+      manifest_sha256: fixtureHash,
+      copied_sha256: fixtureHash,
+      payload_matches: true,
+    },
+    rollback: {
+      active_before_rollback: destination,
+      source,
+      destination,
+      source_sqlite_integrity: "ok",
+      source_retained: true,
+      migrated_copy_retained: true,
+      restart_required: true,
+    },
+    "uninstall-preserves-data": {
+      retained_marker: marker,
+      marker_sha256_before: hash(marker),
+      marker_sha256_after: hash(marker),
+      installed_host_removed: true,
+    },
+  };
+  const ids = Object.keys(details);
+  const evidence = base("migration-install-upgrade-uninstall", ids);
+  evidence.isolation = {
+    build_root: artifactRoot,
+    test_root: testRoot,
+    release_test_mode: true,
+    touched_production_registry: false,
+    touched_production_data: false,
+  };
+  evidence.cases = ids.map((id) => {
+    const tracePath = path.join(artifactRoot, `migration-${id}.json`);
+    fs.writeFileSync(tracePath, `${JSON.stringify({
+      schema_version: 1,
+      commit,
+      case_id: id,
+      status: "PASSED",
+      captured_at_utc: "2026-08-24T00:00:30.000Z",
+      details: details[id],
+    })}\n`, "utf8");
+    return {
+      id,
+      status: "PASSED",
+      duration_ms: 1,
+      assertion_count: 2,
+      artifacts: [{
+        kind: "migration-trace",
+        path: tracePath,
+        sha256: hash(tracePath),
+        captured_at_utc: "2026-08-24T00:00:30.000Z",
+      }],
+    };
+  });
+  return evidence;
+}
+
 function completePerformance() {
   const metric = (id, value, comparison, budget, aggregation, unit, count) => ({
     id, value, comparison, budget, aggregation, unit, status: "PASSED", samples: Array(count).fill(value),
@@ -326,6 +433,23 @@ test("requires every native window case to carry a semantically valid Win32 trac
   fs.writeFileSync(tracePath, `${JSON.stringify(trace)}\n`, "utf8");
   drag.artifacts[0].sha256 = crypto.createHash("sha256").update(fs.readFileSync(tracePath)).digest("hex");
   assert.throws(() => validateEvidence(complete, "desktop-window-native", commit), /does not prove a bounded move/);
+});
+
+test("requires every migration case to carry consistent retained-copy evidence", () => {
+  const weak = base("migration-install-upgrade-uninstall", [
+    "clean-install", "legacy-upgrade", "legacy-data-adoption", "d-drive-migration",
+    "sqlite-integrity", "parquet-manifest", "rollback", "uninstall-preserves-data",
+  ]);
+  assert.throws(() => validateEvidence(weak, "migration-install-upgrade-uninstall", commit), /no assertions/);
+  const complete = migrationEvidence();
+  assert.doesNotThrow(() => validateEvidence(complete, "migration-install-upgrade-uninstall", commit));
+  const parquet = complete.cases.find((item) => item.id === "parquet-manifest");
+  const tracePath = parquet.artifacts[0].path;
+  const trace = JSON.parse(fs.readFileSync(tracePath, "utf8"));
+  trace.details.copied_sha256 = "e".repeat(64);
+  fs.writeFileSync(tracePath, `${JSON.stringify(trace)}\n`, "utf8");
+  parquet.artifacts[0].sha256 = crypto.createHash("sha256").update(fs.readFileSync(tracePath)).digest("hex");
+  assert.throws(() => validateEvidence(complete, "migration-install-upgrade-uninstall", commit), /Parquet manifest trace/);
 });
 
 test("rejects desktop cases padded with unnamed placeholders", () => {

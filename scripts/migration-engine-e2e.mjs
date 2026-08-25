@@ -18,8 +18,8 @@ const parquetBody = Buffer.from("AStock migration release evidence parquet fixtu
 const conversationId = "migration-evidence-conversation";
 const cases = [];
 
-function record(id, started) {
-  cases.push({ id, status: "PASSED", duration_ms: Date.now() - started });
+function record(id, started, details) {
+  cases.push({ id, status: "PASSED", duration_ms: Date.now() - started, details });
 }
 
 function worker(options = {}) {
@@ -70,7 +70,13 @@ try {
   assert(outcome.sqlite_integrity === "ok", "migration did not verify SQLite");
   assert(outcome.source_retained === true, "migration did not retain its source");
   assert(outcome.restart_required === true, "migration must activate only after restart");
-  record("d-drive-migration", started);
+  record("d-drive-migration", started, {
+    source,
+    destination,
+    sqlite_integrity: outcome.sqlite_integrity,
+    source_retained: outcome.source_retained,
+    restart_required: outcome.restart_required,
+  });
 } finally {
   await engine.shutdown();
 }
@@ -83,7 +89,13 @@ try {
   assert(manifest.source_retained === true, "manifest does not attest source retention");
   assert(fs.existsSync(path.join(source, "meta.db")), "source database was removed");
   assert(fs.existsSync(path.join(destination, "meta.db")), "destination database is missing");
-  record("sqlite-integrity", started);
+  record("sqlite-integrity", started, {
+    manifest_sha256: crypto.createHash("sha256").update(fs.readFileSync(manifestPath)).digest("hex"),
+    sqlite_integrity: manifest.sqlite_integrity,
+    source_retained: manifest.source_retained,
+    source_meta_sha256: crypto.createHash("sha256").update(fs.readFileSync(path.join(source, "meta.db"))).digest("hex"),
+    destination_meta_sha256: crypto.createHash("sha256").update(fs.readFileSync(path.join(destination, "meta.db"))).digest("hex"),
+  });
 
   const parquet = manifest.files.find((entry) => entry.relative_path === parquetRelative);
   assert(parquet, "Parquet file is missing from the migration manifest");
@@ -91,7 +103,14 @@ try {
   assert(parquet.bytes === copied.length, "Parquet manifest byte count differs");
   assert(parquet.sha256 === crypto.createHash("sha256").update(copied).digest("hex"), "Parquet hash differs");
   assert(copied.equals(parquetBody), "Parquet payload differs after migration");
-  record("parquet-manifest", started);
+  record("parquet-manifest", started, {
+    relative_path: parquetRelative,
+    manifest_bytes: parquet.bytes,
+    copied_bytes: copied.length,
+    manifest_sha256: parquet.sha256,
+    copied_sha256: crypto.createHash("sha256").update(copied).digest("hex"),
+    payload_matches: copied.equals(parquetBody),
+  });
 }
 
 engine = worker({ unsetEnv: ["ASTOCK_DATA_DIR"] });
@@ -106,7 +125,15 @@ try {
   assert(outcome.source_sqlite_integrity === "ok", "rollback did not verify the retained source database");
   assert(outcome.source_retained && outcome.migrated_copy_retained, "rollback deleted a data copy");
   assert(outcome.restart_required, "rollback must activate after restart");
-  record("rollback", started);
+  record("rollback", started, {
+    active_before_rollback: path.resolve(status.data_root?.path),
+    source,
+    destination,
+    source_sqlite_integrity: outcome.source_sqlite_integrity,
+    source_retained: outcome.source_retained,
+    migrated_copy_retained: outcome.migrated_copy_retained,
+    restart_required: outcome.restart_required,
+  });
 } finally {
   await engine.shutdown();
 }
@@ -154,7 +181,12 @@ try {
     const status = await engine.request("diagnostics.status");
     assert(status.data_root?.origin === "legacy_adopted", `legacy origin was ${status.data_root?.origin}`);
     await loadConversation(engine, "legacy-evidence-conversation", "legacy-adopted");
-    record("legacy-data-adoption", started);
+    record("legacy-data-adoption", started, {
+      origin: status.data_root?.origin,
+      adopted_path: path.resolve(status.data_root?.path),
+      expected_path: path.resolve(legacyRoot),
+      conversation_reloaded: true,
+    });
   } finally {
     await engine.shutdown();
   }

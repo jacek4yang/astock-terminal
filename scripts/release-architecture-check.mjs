@@ -55,6 +55,7 @@ const releaseSigner = fs.readFileSync(path.join(root, "scripts", "sign-release.p
 const releaseEvidenceValidator = fs.readFileSync(path.join(root, "scripts", "release-evidence-check.mjs"), "utf8");
 const packageHardener = fs.readFileSync(path.join(root, "scripts", "harden-package.ps1"), "utf8");
 const migrationEvidence = fs.readFileSync(path.join(root, "scripts", "migration-e2e.ps1"), "utf8");
+const migrationEngineEvidence = fs.readFileSync(path.join(root, "scripts", "migration-engine-e2e.mjs"), "utf8");
 const faultEvidence = fs.readFileSync(path.join(root, "scripts", "fault-injection-e2e.ps1"), "utf8");
 const externalEvidence = fs.readFileSync(path.join(root, "scripts", "external-services-e2e.ps1"), "utf8");
 const liveProviderRunner = fs.readFileSync(path.join(root, "scripts", "research-live-smoke.mjs"), "utf8");
@@ -641,6 +642,11 @@ for (const packageMarker of ["RequestExecutionLevel user", "$LOCALAPPDATA\\Progr
 }
 for (const migrationMarker of ["migration-engine-e2e.mjs", "uninstall-preserves-data", "release-evidence-check.mjs"]) {
   if (!migrationEvidence.includes(migrationMarker)) failures.push(`migration release harness is missing ${migrationMarker}`);
+}
+for (const migrationSemanticMarker of ["validateMigrationEvidence", "migration-trace", "payload_matches", "marker_sha256_before", "touched_production_data = $false"]) {
+  if (!`${releaseEvidenceValidator}\n${migrationEvidence}\n${migrationEngineEvidence}`.includes(migrationSemanticMarker)) {
+    failures.push(`migration semantic evidence is missing ${migrationSemanticMarker}`);
+  }
 }
 if (!releaseGate.includes("migration-e2e.ps1")) failures.push("release gate does not execute isolated migration E2E");
 for (const faultMarker of ["fault-injection-core.mjs", "provider-stream-break", "sqlite-lock"]) {
