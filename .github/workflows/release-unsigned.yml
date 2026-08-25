@@ -113,9 +113,9 @@ jobs:
         shell: pwsh
         run: npm --prefix ui ci
 
-      - name: Install NSIS
+      - name: Install NSIS and 7-Zip
         shell: pwsh
-        run: choco install nsis --yes --no-progress
+        run: choco install nsis 7zip --yes --no-progress
 
       - name: Bootstrap Proton 0.2.1 and pinned CEF
         shell: pwsh
