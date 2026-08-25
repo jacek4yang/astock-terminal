@@ -368,11 +368,22 @@ shortcut = "4"
         Invoke-Checked -FilePath $java -Arguments @('-XX:+UseParallelGC', '-cp', $tla, 'tlc2.TLC', '-workers', 'auto', '-metadir', $tlcStateDirectory, '-config', 'formal\AgentLifecycle.cfg', 'formal\AgentLifecycle.tla')
     }
 
+    # Browser Agent scenarios call the real Provider. Require explicit proof
+    # that all credentials exposed before v6 were revoked and replaced first.
+    Invoke-ReleaseGateStep 'credential-rotation-evidence' 'security' 'ASSUMED/TRUSTED BOUNDARY' {
+        Assert-ReleaseEvidence -FileName 'credential-rotation.json' -Gate 'credential-rotation'
+    }
+
     # The user requires the non-invasive Codex in-app browser acceptance to
     # pass before any packaged desktop process is started.
-    Invoke-ReleaseGateStep 'browser-cdp-evidence' 'renderer' 'INTEGRATION TESTED' {
+    Invoke-ReleaseGateStep 'browser-cdp-evidence' 'renderer' 'INTEGRATION TESTED' -Requires @('credential-rotation-evidence') -Action {
         Complete-InteractiveEvidence -SessionDirectory $BrowserAcceptanceSession -FileName 'browser-cdp.json'
         Assert-ReleaseEvidence -FileName 'browser-cdp.json' -Gate 'browser-cdp'
+        $rotation = Get-Content -LiteralPath (Join-Path $EvidenceDirectory 'credential-rotation.json') -Raw | ConvertFrom-Json
+        $browser = Get-Content -LiteralPath (Join-Path $EvidenceDirectory 'browser-cdp.json') -Raw | ConvertFrom-Json
+        if ([DateTimeOffset]::Parse($browser.started_at_utc) -lt [DateTimeOffset]::Parse($rotation.completed_at_utc)) {
+            throw 'Browser acceptance predates credential rotation and may have consumed compromised Provider credentials.'
+        }
     }
 
     Invoke-ReleaseGateStep 'package-proton-cef' 'package' 'INTEGRATION TESTED' -Requires @('browser-cdp-evidence') -Action {
@@ -408,11 +419,8 @@ shortcut = "4"
         if ($LASTEXITCODE -ne 0) { throw 'Packaged Proton/CEF performance execution failed.' }
         Assert-ReleaseEvidence -FileName 'performance.json' -Gate 'performance-budgets'
     }
-    Invoke-ReleaseGateStep 'external-services-evidence' 'providers' 'ASSUMED/TRUSTED BOUNDARY' {
+    Invoke-ReleaseGateStep 'external-services-evidence' 'providers' 'ASSUMED/TRUSTED BOUNDARY' -Requires @('credential-rotation-evidence') -Action {
         Assert-ReleaseEvidence -FileName 'external-services.json' -Gate 'minimax-plus-joinquant-live'
-    }
-    Invoke-ReleaseGateStep 'credential-rotation-evidence' 'security' 'ASSUMED/TRUSTED BOUNDARY' {
-        Assert-ReleaseEvidence -FileName 'credential-rotation.json' -Gate 'credential-rotation'
     }
 
     Invoke-ReleaseGateStep 'sbom' 'security' 'INTEGRATION TESTED' {

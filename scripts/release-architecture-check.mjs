@@ -712,8 +712,14 @@ for (const windowMarker of ["window-drag", "window-double-click-maximize", "wind
 if (releaseGate.indexOf("browser-cdp-evidence") > releaseGate.indexOf("package-proton-cef")) {
   failures.push("release gate can launch the packaged desktop before Codex browser evidence passes");
 }
+if (releaseGate.indexOf("credential-rotation-evidence") > releaseGate.indexOf("browser-cdp-evidence") ||
+    !releaseGate.includes("'browser-cdp-evidence' 'renderer' 'INTEGRATION TESTED' -Requires @('credential-rotation-evidence') -Action") ||
+    !releaseGate.includes("Browser acceptance predates credential rotation")) {
+  failures.push("real-Provider browser acceptance is not bound to post-rotation credentials");
+}
 for (const dependencyMarker of [
   "'package-proton-cef' 'package' 'INTEGRATION TESTED' -Requires @('browser-cdp-evidence') -Action",
+  "'external-services-evidence' 'providers' 'ASSUMED/TRUSTED BOUNDARY' -Requires @('credential-rotation-evidence') -Action",
   "'fault-injection-desktop-evidence' 'reliability' 'FAULT-INJECTION TESTED' -Requires @('browser-cdp-evidence','package-proton-cef','fault-injection-core') -Action",
   "'desktop-window-native-evidence' 'desktop' 'INTEGRATION TESTED' -Requires @('browser-cdp-evidence','package-proton-cef') -Action",
   "'desktop-e2e-evidence' 'desktop' 'INTEGRATION TESTED' -Requires @('browser-cdp-evidence','package-proton-cef','desktop-window-native-evidence') -Action",

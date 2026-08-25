@@ -52,6 +52,13 @@ retains that session only in `sessionStorage` plus the current history entry.
 The Bridge also rejects non-allowlisted origins. None of this path is present in
 the production Proton package.
 
+Browser scenarios that exercise dynamic clarification, tools and evidence use
+the real Agent Provider. The release gate therefore requires operator evidence
+that the previously exposed MiniMax/JoinQuant credentials were revoked,
+replaced in Credential Manager and read back successfully before it accepts a
+browser session. The browser session must also start after that rotation record
+completed; earlier sessions are rejected.
+
 The executable local gate also runs `scripts/research-data-release-gate.mjs`
 against an isolated D-drive data root. It never calls credentialed providers.
 The current Shanghai/Shenzhen sample must have two-source quote and K-line
