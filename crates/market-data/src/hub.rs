@@ -1084,8 +1084,7 @@ impl DataProvider for MarketData {
     async fn quote(&self, symbol: &Symbol) -> Result<Fetched<Quote>, DataError> {
         // Single-flight coalescing only — no TTL cache, quote freshness
         // semantics are unchanged from the legacy pass-through. The fetch
-        // itself fails over through the breaker-gated chain (tdx → eastmoney;
-        // tencent/sina answer NoProvider and are skipped).
+        // itself fails over through the breaker-gated public provider chain.
         let inner = self.inner.clone();
         let eastmoney = self.eastmoney.clone();
         let symbol = symbol.clone();
@@ -1198,9 +1197,32 @@ impl DataProvider for MarketData {
         // sequence used to prevent the second/third host from ever running.
         let fetched = match self.eastmoney.all_a_shares().await {
             Ok(fetched) => fetched,
-            Err(error) => {
-                debug!(%error, "EastMoney A-share list retries exhausted; using TDX security list");
-                self.tdx.all_a_shares().await?
+            Err(eastmoney_error) => {
+                debug!(%eastmoney_error, "EastMoney A-share snapshot unavailable or contains placeholder fields; using public quote fallback");
+                let identities = self
+                    .tdx
+                    .all_a_shares()
+                    .await
+                    .map_err(|tdx_identity_error| DataError::AllFailed {
+                        op: "all_a_shares",
+                        details: format!(
+                            "eastmoney: {eastmoney_error}; tdx identity: {tdx_identity_error}"
+                        ),
+                    })?;
+                match self.tencent.market_snapshot(&identities.data).await {
+                    Ok(fetched) => fetched,
+                    Err(tencent_error) => {
+                        debug!(%tencent_error, "Tencent market snapshot unavailable; trying TDX batch snapshot");
+                        self.tdx.market_snapshot().await.map_err(|tdx_quote_error| {
+                            DataError::AllFailed {
+                                op: "all_a_shares",
+                                details: format!(
+                                    "eastmoney: {eastmoney_error}; tencent: {tencent_error}; tdx quote: {tdx_quote_error}"
+                                ),
+                            }
+                        })?
+                    }
+                }
             }
         };
         self.security_master

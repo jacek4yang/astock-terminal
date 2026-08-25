@@ -384,12 +384,40 @@ impl EastMoney {
                 Some(StockListItem {
                     code: code.to_string(),
                     name,
-                    price: row.get("f2").and_then(json_f64),
+                    price: row
+                        .get("f2")
+                        .and_then(json_f64)
+                        .filter(|value| value.is_finite() && *value > 0.0),
                     pct: row.get("f3").and_then(json_f64),
-                    amount: row.get("f6").and_then(json_f64),
+                    amount: row
+                        .get("f6")
+                        .and_then(json_f64)
+                        .filter(|value| value.is_finite() && *value > 0.0),
                 })
             })
             .collect()
+    }
+
+    fn validate_snapshot_trade_fields(
+        items: &[StockListItem],
+        minimum_rows: usize,
+    ) -> Result<(), DataError> {
+        if items.len() < minimum_rows {
+            return Err(DataError::Empty(format!(
+                "market snapshot incomplete: only {} A-share rows",
+                items.len()
+            )));
+        }
+        let price_present = items.iter().filter(|item| item.price.is_some()).count();
+        let amount_present = items.iter().filter(|item| item.amount.is_some()).count();
+        if price_present * 10 < items.len() * 9 || amount_present * 5 < items.len() * 4 {
+            return Err(DataError::Empty(format!(
+                "market snapshot contains placeholder trade fields: price {price_present}/{}, amount {amount_present}/{}",
+                items.len(),
+                items.len()
+            )));
+        }
+        Ok(())
     }
 
     fn breadth_from_items(items: &[StockListItem]) -> Result<MarketBreadth, DataError> {
@@ -427,6 +455,7 @@ impl EastMoney {
         }
         let rows = self.fetch_market_snapshot_rows("f2,f3,f6,f12,f14").await?;
         let items = Self::stock_items_from_rows(rows);
+        Self::validate_snapshot_trade_fields(&items, MIN_COMPLETE_A_SHARE_ROWS)?;
         let breadth = Self::breadth_from_items(&items)?;
         let fetched = Fetched::now(items, Source::EastMoney);
         let breadth_fetched = Fetched {
@@ -467,27 +496,68 @@ impl EastMoney {
                 "eastmoney {cache_namespace} {secid}"
             )));
         }
-        let get = |field: &str| d.get(field).and_then(json_f64).unwrap_or(0.0);
+        let number = |field: &str| {
+            d.get(field)
+                .and_then(json_f64)
+                .filter(|value| value.is_finite())
+        };
+        let positive_number = |field: &str| number(field).filter(|value| *value > 0.0);
+        let (name, price, pre_close) = parse_quote_identity(&d, code, secid, cache_namespace)?;
         let timestamp = astock_core::time::utc_now();
         let mut field_provenance = std::collections::BTreeMap::new();
-        for field in [
-            "name",
-            "price",
-            "high",
-            "low",
-            "open",
-            "volume",
-            "amount",
-            "pre_close",
-            "change",
-            "pct",
-        ] {
+        field_provenance.insert(
+            "name".to_string(),
+            if name.is_empty() {
+                astock_core::FieldProvenance::missing("eastmoney", "上游未返回标准证券名称")
+            } else {
+                astock_core::FieldProvenance::reported("eastmoney", timestamp)
+            },
+        );
+        for field in ["price", "pre_close"] {
             field_provenance.insert(
                 field.to_string(),
                 astock_core::FieldProvenance::reported("eastmoney", timestamp),
             );
         }
-        let turnover = d.get("f168").and_then(json_f64);
+        for (field, upstream) in [("high", "f44"), ("low", "f45"), ("open", "f46")] {
+            field_provenance.insert(
+                field.to_string(),
+                positive_number(upstream).map_or_else(
+                    || {
+                        astock_core::FieldProvenance::missing(
+                            "eastmoney",
+                            format!("上游未返回{field}"),
+                        )
+                    },
+                    |_| astock_core::FieldProvenance::reported("eastmoney", timestamp),
+                ),
+            );
+        }
+        for (field, upstream) in [("volume", "f47"), ("amount", "f48")] {
+            field_provenance.insert(
+                field.to_string(),
+                number(upstream).map_or_else(
+                    || {
+                        astock_core::FieldProvenance::missing(
+                            "eastmoney",
+                            format!("上游未返回{field}"),
+                        )
+                    },
+                    |_| astock_core::FieldProvenance::reported("eastmoney", timestamp),
+                ),
+            );
+        }
+        let reported_change = number("f169");
+        let reported_pct = number("f170");
+        for (field, reported) in [("change", reported_change), ("pct", reported_pct)] {
+            let mut provenance = astock_core::FieldProvenance::reported("eastmoney", timestamp);
+            if reported.is_none() {
+                provenance.quality = astock_core::DataQuality::Derived;
+                provenance.source = "eastmoney:price/pre_close".to_string();
+            }
+            field_provenance.insert(field.to_string(), provenance);
+        }
+        let turnover = number("f168");
         field_provenance.insert(
             "turnover".to_string(),
             turnover.map_or_else(
@@ -497,20 +567,16 @@ impl EastMoney {
         );
         let quote = Quote {
             symbol: code.to_string(),
-            name: normalize_security_name(
-                d.get("f58")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default(),
-            ),
-            price: get("f43"),
-            high: get("f44"),
-            low: get("f45"),
-            open: get("f46"),
-            volume: get("f47"),
-            amount: get("f48"),
-            pre_close: get("f60"),
-            change: get("f169"),
-            pct: get("f170"),
+            name,
+            price,
+            high: positive_number("f44").unwrap_or(0.0),
+            low: positive_number("f45").unwrap_or(0.0),
+            open: positive_number("f46").unwrap_or(0.0),
+            volume: number("f47").unwrap_or(0.0),
+            amount: number("f48").unwrap_or(0.0),
+            pre_close,
+            change: reported_change.unwrap_or(price - pre_close),
+            pct: reported_pct.unwrap_or((price - pre_close) / pre_close * 100.0),
             turnover,
             timestamp,
             field_provenance,
@@ -920,6 +986,46 @@ fn clist_diff_rows(data: &serde_json::Value) -> Vec<serde_json::Value> {
     }
 }
 
+fn parse_quote_identity(
+    data: &serde_json::Value,
+    expected_code: &str,
+    secid: &str,
+    cache_namespace: &str,
+) -> Result<(String, f64, f64), DataError> {
+    let upstream_code = data
+        .get("f57")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if upstream_code != expected_code {
+        return Err(DataError::Parse {
+            upstream: format!("eastmoney {cache_namespace} {secid}"),
+            message: format!(
+                "security identity mismatch: expected {expected_code}, received {upstream_code}"
+            ),
+        });
+    }
+    let name = normalize_security_name(
+        data.get("f58")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default(),
+    );
+    let required_positive = |field: &str, label: &str| {
+        data.get(field)
+            .and_then(json_f64)
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .ok_or_else(|| {
+                DataError::Empty(format!(
+                    "eastmoney {cache_namespace} {secid}: missing or non-positive {label}"
+                ))
+            })
+    };
+    Ok((
+        name,
+        required_positive("f43", "price")?,
+        required_positive("f60", "pre-close")?,
+    ))
+}
+
 fn count_breadth(pcts: impl IntoIterator<Item = Option<f64>>) -> MarketBreadth {
     let mut up = 0_u32;
     let mut down = 0_u32;
@@ -982,6 +1088,23 @@ mod tests {
         assert_eq!(bars[0].amount, Some(9.177e9));
         assert_eq!(bars[0].turnover, Some(0.52));
         assert!(bars[1].pct.is_some());
+    }
+
+    #[test]
+    fn quote_identity_rejects_zero_placeholder_prices() {
+        let zero =
+            serde_json::json!({"f57": "300308", "f58": "中 际 旭 创", "f43": 0, "f60": 870.22});
+        assert!(matches!(
+            parse_quote_identity(&zero, "300308", "0.300308", "quote"),
+            Err(DataError::Empty(message)) if message.contains("non-positive price")
+        ));
+        let valid =
+            serde_json::json!({"f57": "300308", "f58": "中 际 旭 创", "f43": 870.22, "f60": 943.0});
+        let (name, price, pre_close) =
+            parse_quote_identity(&valid, "300308", "0.300308", "quote").unwrap();
+        assert_eq!(name, "中际旭创");
+        assert_eq!(price, 870.22);
+        assert_eq!(pre_close, 943.0);
     }
 
     #[test]
@@ -1052,6 +1175,23 @@ mod tests {
         assert_eq!(items[0].name, "中科软");
         assert_eq!(items[1].code, "920001");
         assert_eq!(items[1].name, "纬达光电");
+    }
+
+    #[test]
+    fn market_snapshot_rejects_placeholder_trade_fields() {
+        let rows = (0..10)
+            .map(|index| StockListItem {
+                code: format!("600{index:03}"),
+                name: format!("样本{index}"),
+                price: (index == 0).then_some(10.0),
+                pct: Some(0.0),
+                amount: (index == 0).then_some(1_000_000.0),
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            EastMoney::validate_snapshot_trade_fields(&rows, 10),
+            Err(DataError::Empty(message)) if message.contains("placeholder trade fields")
+        ));
     }
 
     #[test]

@@ -172,6 +172,8 @@ try {
       count: candidates.items?.length ?? 0,
       source: candidates.source,
       industry_enrichment: candidates.industry_enrichment,
+      liquidity_available_count: candidates.liquidity_available_count,
+      liquidity_incomplete: candidates.liquidity_incomplete,
       standardized_name_count: (candidates.items ?? []).filter((item) => typeof item.name === "string" && item.name.length > 0 && !/\s/.test(item.name)).length,
       industry_count: (candidates.items ?? []).filter((item) => typeof item.industry === "string" && item.industry.length > 0).length,
       board_count: new Set((candidates.items ?? []).map((item) => item.board).filter(Boolean)).size,

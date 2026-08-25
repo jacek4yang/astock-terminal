@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -410,30 +410,23 @@ impl Engine {
                 let max_lot_cost = payload
                     .max_lot_cost
                     .filter(|value| value.is_finite() && *value > 0.0);
-                let mut rows = fetched
+                let rows = fetched
                     .data
                     .into_iter()
                     .filter(|row| {
                         let price = row.price.unwrap_or_default();
-                        let amount = row.amount.unwrap_or_default();
                         let name = row.name.trim().to_ascii_uppercase();
                         price > 0.0
-                            && amount > 0.0
                             && !name.contains("ST")
                             && !name.contains('退')
                             && max_lot_cost.is_none_or(|budget| price * 100.0 <= budget)
                     })
                     .collect::<Vec<_>>();
-                rows.sort_by(|left, right| {
-                    right
-                        .amount
-                        .unwrap_or_default()
-                        .total_cmp(&left.amount.unwrap_or_default())
-                });
                 let limit = payload.limit.unwrap_or(40).clamp(5, 100);
-                let items = rows
+                let (selected, selection_rule) =
+                    select_research_candidates(rows, &self.market.security_master, limit);
+                let items = selected
                     .into_iter()
-                    .take(limit)
                     .map(|row| {
                         let identity = self.market.security_master.get(&row.code);
                         let industry = industries
@@ -449,13 +442,21 @@ impl Engine {
                             "price": row.price,
                             "pct": row.pct,
                             "amount": row.amount,
+                            "liquidity_available": row.amount.is_some(),
                             "lot_cost": row.price.map(|price| (price * 10_000.0).round() / 100.0),
                         })
                     })
                     .collect::<Vec<_>>();
+                let liquidity_available_count = items
+                    .iter()
+                    .filter(|item| item["liquidity_available"] == Value::Bool(true))
+                    .count();
+                let returned_count = items.len();
                 Ok(json!({
                     "items": items,
-                    "selection_rule": "active_a_share_sorted_by_turnover_amount_then_agent_review",
+                    "selection_rule": selection_rule,
+                    "liquidity_available_count": liquidity_available_count,
+                    "liquidity_incomplete": liquidity_available_count < returned_count,
                     "source": fetched.source,
                     "fetched_at": fetched.fetched_at,
                     "industry_enrichment": industry_enrichment,
@@ -1148,9 +1149,20 @@ impl Engine {
             "research.data_reconcile" => {
                 let payload: SymbolPayload = decode_payload(&request.payload)?;
                 let symbol = parse_live_symbol(&payload.symbol)?;
-                let (tdx_quote, eastmoney_quote, tdx_bars, eastmoney_bars, tencent_bars, sina_bars) = tokio::join!(
+                let (
+                    tdx_quote,
+                    eastmoney_quote,
+                    tencent_quote,
+                    sina_quote,
+                    tdx_bars,
+                    eastmoney_bars,
+                    tencent_bars,
+                    sina_bars,
+                ) = tokio::join!(
                     self.market.tdx.quote(&symbol),
                     self.market.eastmoney.quote(&symbol),
+                    self.market.tencent.quote(&symbol),
+                    self.market.sina.quote(&symbol),
                     self.market
                         .tdx
                         .kline(&symbol, KlinePeriod::Day, Adjust::None, 120),
@@ -1166,12 +1178,18 @@ impl Engine {
                 );
                 Ok(reconcile_market_sources(
                     symbol.code(),
-                    tdx_quote,
-                    eastmoney_quote,
-                    tdx_bars,
-                    eastmoney_bars,
-                    tencent_bars,
-                    sina_bars,
+                    [
+                        ("tdx", tdx_quote),
+                        ("eastmoney", eastmoney_quote),
+                        ("tencent", tencent_quote),
+                        ("sina", sina_quote),
+                    ],
+                    [
+                        ("tdx", tdx_bars),
+                        ("eastmoney", eastmoney_bars),
+                        ("tencent", tencent_bars),
+                        ("sina", sina_bars),
+                    ],
                 ))
             }
             "research.quote_reconcile" => {
@@ -2656,6 +2674,59 @@ struct ResearchCandidatesPayload {
     max_lot_cost: Option<f64>,
 }
 
+fn select_research_candidates(
+    mut rows: Vec<StockListItem>,
+    master: &SecurityMaster,
+    limit: usize,
+) -> (Vec<StockListItem>, &'static str) {
+    rows.sort_by(|left, right| {
+        compare_optional_number(left.amount, right.amount, false)
+            .then_with(|| left.code.cmp(&right.code))
+    });
+    if rows.iter().filter(|row| row.amount.is_some()).count() >= limit {
+        rows.truncate(limit);
+        return (
+            rows,
+            "reported_turnover_descending_then_agent_liquidity_review",
+        );
+    }
+
+    // Before continuous trading, otherwise healthy quote feeds legitimately
+    // report no current-day amount. Returning the first N exchange codes would
+    // silently collapse discovery into Shanghai main-board names, so select a
+    // deterministic round-robin across board buckets and keep the
+    // missing-liquidity flag visible for the Agent's next verification step.
+    let mut buckets = BTreeMap::<String, VecDeque<StockListItem>>::new();
+    for row in rows {
+        let identity = master.get(&row.code);
+        let board = identity
+            .as_ref()
+            .map(|value| board_label(value.board))
+            .unwrap_or("unknown");
+        buckets.entry(board.to_string()).or_default().push_back(row);
+    }
+    let mut selected = Vec::with_capacity(limit);
+    while selected.len() < limit {
+        let mut progressed = false;
+        for bucket in buckets.values_mut() {
+            if let Some(row) = bucket.pop_front() {
+                selected.push(row);
+                progressed = true;
+                if selected.len() == limit {
+                    break;
+                }
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    (
+        selected,
+        "premarket_board_round_robin_then_agent_liquidity_review",
+    )
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResearchNewsPayload {
@@ -3537,66 +3608,129 @@ fn fundamental_research_payload(
     })
 }
 
-fn numeric_check(field: &str, left: f64, right: f64, absolute: f64, relative: f64) -> Value {
+fn numeric_check(
+    field: &str,
+    reference_provider: &str,
+    provider: &str,
+    left: f64,
+    right: f64,
+    absolute: f64,
+    relative: f64,
+) -> Value {
     let difference = (left - right).abs();
     let tolerance = absolute.max(left.abs().max(right.abs()) * relative);
     json!({
         "field": field,
-        "tdx": left,
-        "eastmoney": right,
+        "reference_provider": reference_provider,
+        "provider": provider,
+        "reference_value": left,
+        "provider_value": right,
         "absolute_difference": difference,
         "tolerance": tolerance,
         "consistent": difference <= tolerance,
     })
 }
 
+type QuoteSourceResult = (
+    &'static str,
+    Result<astock_core::Fetched<astock_core::Quote>, astock_core::DataError>,
+);
+type KlineSourceResult = (
+    &'static str,
+    Result<astock_core::Fetched<Vec<astock_core::Bar>>, astock_core::DataError>,
+);
+
 fn reconcile_market_sources(
     symbol: &str,
-    tdx_quote: Result<astock_core::Fetched<astock_core::Quote>, astock_core::DataError>,
-    eastmoney_quote: Result<astock_core::Fetched<astock_core::Quote>, astock_core::DataError>,
-    tdx_bars: Result<astock_core::Fetched<Vec<astock_core::Bar>>, astock_core::DataError>,
-    eastmoney_bars: Result<astock_core::Fetched<Vec<astock_core::Bar>>, astock_core::DataError>,
-    tencent_bars: Result<astock_core::Fetched<Vec<astock_core::Bar>>, astock_core::DataError>,
-    sina_bars: Result<astock_core::Fetched<Vec<astock_core::Bar>>, astock_core::DataError>,
+    quote_providers: [QuoteSourceResult; 4],
+    kline_providers: [KlineSourceResult; 4],
 ) -> Value {
     let mut quote_checks = Vec::new();
-    if let (Ok(left), Ok(right)) = (&tdx_quote, &eastmoney_quote) {
-        for (field, lv, rv, absolute, relative) in [
-            ("price", left.data.price, right.data.price, 0.01, 0.002),
-            ("open", left.data.open, right.data.open, 0.01, 0.002),
-            ("high", left.data.high, right.data.high, 0.01, 0.002),
-            ("low", left.data.low, right.data.low, 0.01, 0.002),
-            (
-                "pre_close",
-                left.data.pre_close,
-                right.data.pre_close,
-                0.01,
-                0.002,
-            ),
-            ("volume", left.data.volume, right.data.volume, 1.0, 0.02),
-            ("amount", left.data.amount, right.data.amount, 1.0, 0.02),
-            // One A-share price tick can move the displayed percentage by
-            // ~0.17 percentage points on a 6 CNY stock. Providers are sampled
-            // a few seconds apart, so a 0.25pp absolute tolerance represents
-            // one live tick instead of a data conflict; price/pre-close still
-            // have their own strict checks above.
-            ("pct", left.data.pct, right.data.pct, 0.25, 0.02),
-        ] {
-            quote_checks.push(numeric_check(field, lv, rv, absolute, relative));
+    let quote_reference = quote_providers
+        .iter()
+        .find_map(|(provider, result)| result.as_ref().ok().map(|value| (*provider, value)));
+    if let Some((reference_provider, reference)) = quote_reference {
+        for (provider, result) in quote_providers
+            .iter()
+            .filter(|(provider, _)| *provider != reference_provider)
+        {
+            let Ok(candidate) = result else { continue };
+            for (field, lv, rv, absolute, relative) in [
+                (
+                    "price",
+                    reference.data.price,
+                    candidate.data.price,
+                    0.01,
+                    0.002,
+                ),
+                (
+                    "open",
+                    reference.data.open,
+                    candidate.data.open,
+                    0.01,
+                    0.002,
+                ),
+                (
+                    "high",
+                    reference.data.high,
+                    candidate.data.high,
+                    0.01,
+                    0.002,
+                ),
+                ("low", reference.data.low, candidate.data.low, 0.01, 0.002),
+                (
+                    "pre_close",
+                    reference.data.pre_close,
+                    candidate.data.pre_close,
+                    0.01,
+                    0.002,
+                ),
+                (
+                    "volume",
+                    reference.data.volume,
+                    candidate.data.volume,
+                    1.0,
+                    0.02,
+                ),
+                (
+                    "amount",
+                    reference.data.amount,
+                    candidate.data.amount,
+                    1.0,
+                    0.02,
+                ),
+                // One A-share price tick can move the displayed percentage by
+                // ~0.17 percentage points on a 6 CNY stock. Providers are sampled
+                // a few seconds apart, so a 0.25pp absolute tolerance represents
+                // one live tick instead of a data conflict; price/pre-close still
+                // have their own strict checks above.
+                ("pct", reference.data.pct, candidate.data.pct, 0.25, 0.02),
+            ] {
+                let available = |quote: &astock_core::Quote| {
+                    quote.field_provenance.get(field).is_none_or(|provenance| {
+                        provenance.quality != astock_core::DataQuality::Missing
+                    })
+                };
+                if available(&reference.data) && available(&candidate.data) {
+                    quote_checks.push(numeric_check(
+                        field,
+                        reference_provider,
+                        provider,
+                        lv,
+                        rv,
+                        absolute,
+                        relative,
+                    ));
+                }
+            }
         }
     }
-    let providers = [
-        ("tdx", &tdx_bars),
-        ("eastmoney", &eastmoney_bars),
-        ("tencent", &tencent_bars),
-        ("sina", &sina_bars),
-    ];
-    let reference = providers
+    let reference = kline_providers
         .iter()
         .find_map(|(provider, result)| result.as_ref().ok().map(|value| (*provider, value)));
     let mut kline_checks = Vec::new();
     if let Some((reference_provider, reference_rows)) = reference {
-        for (provider, result) in providers
+        for (provider, result) in kline_providers
             .iter()
             .filter(|(provider, _)| *provider != reference_provider)
         {
@@ -3635,16 +3769,10 @@ fn reconcile_market_sources(
         .iter()
         .filter(|row| row.get("consistent") == Some(&Value::Bool(false)))
         .count();
-    let quote_sources = [
-        provider_result("tdx", &tdx_quote),
-        provider_result("eastmoney", &eastmoney_quote),
-    ];
-    let kline_sources = [
-        bar_provider_result("tdx", &tdx_bars),
-        bar_provider_result("eastmoney", &eastmoney_bars),
-        bar_provider_result("tencent", &tencent_bars),
-        bar_provider_result("sina", &sina_bars),
-    ];
+    let quote_sources =
+        quote_providers.map(|(provider, result)| provider_result(provider, &result));
+    let kline_sources =
+        kline_providers.map(|(provider, result)| bar_provider_result(provider, &result));
     let quote_successes = quote_sources
         .iter()
         .filter(|row| row.get("ok") == Some(&Value::Bool(true)))
@@ -3656,6 +3784,7 @@ fn reconcile_market_sources(
     json!({
         "symbol": symbol,
         "quote_sources": quote_sources,
+        "quote_successful_sources": quote_successes,
         "quote_checks": quote_checks,
         "quote_conflicts": quote_conflicts,
         "kline_sources": kline_sources,
@@ -3664,7 +3793,7 @@ fn reconcile_market_sources(
         "kline_close_checks": kline_checks,
         "kline_conflicts": kline_conflicts,
         "blocking": quote_successes < 2 || kline_successes < 2 || quote_conflicts > 0 || kline_conflicts > 0,
-        "policy": "报价要求TDX与东方财富双源；K线从TDX/东方财富/腾讯/新浪至少取得两个独立源；价格容差max(0.01元,0.2%)，量额容差2%；冲突不得用于高置信度结论",
+        "policy": "报价从TDX/东方财富/腾讯/新浪至少取得两个有效独立源；缺失或非正价格不得以0冒充成功；K线从TDX/东方财富/腾讯/新浪至少取得两个独立源；价格容差max(0.01元,0.2%)，量额容差2%；冲突不得用于高置信度结论",
     })
 }
 
@@ -3849,6 +3978,92 @@ fn now_secs() -> i64 {
 mod tests {
     use super::*;
 
+    fn reconciliation_quote(
+        source: astock_core::Source,
+    ) -> astock_core::Fetched<astock_core::Quote> {
+        let timestamp = astock_core::time::utc_now();
+        astock_core::Fetched {
+            data: astock_core::Quote {
+                symbol: "300308".into(),
+                name: "中际旭创".into(),
+                price: 870.22,
+                open: 945.0,
+                high: 949.73,
+                low: 850.0,
+                pre_close: 943.0,
+                volume: 389_093.0,
+                amount: 34_491_670_420.0,
+                change: -72.78,
+                pct: -7.72,
+                turnover: Some(3.51),
+                timestamp,
+                field_provenance: BTreeMap::new(),
+            },
+            source,
+            fetched_at: timestamp,
+        }
+    }
+
+    fn reconciliation_bars(
+        source: astock_core::Source,
+    ) -> astock_core::Fetched<Vec<astock_core::Bar>> {
+        astock_core::Fetched::now(
+            vec![astock_core::Bar::new(
+                NaiveDate::from_ymd_opt(2026, 8, 24).unwrap(),
+                945.0,
+                870.22,
+                949.73,
+                850.0,
+                389_093.0,
+                astock_core::VolumeUnit::Lots,
+            )],
+            source,
+        )
+    }
+
+    #[test]
+    fn reconciliation_accepts_two_valid_quotes_when_third_source_is_explicitly_unavailable() {
+        let result = reconcile_market_sources(
+            "300308",
+            [
+                ("tdx", Ok(reconciliation_quote(astock_core::Source::Tdx))),
+                (
+                    "eastmoney",
+                    Err(astock_core::DataError::Empty(
+                        "eastmoney zero placeholder rejected".into(),
+                    )),
+                ),
+                (
+                    "tencent",
+                    Ok(reconciliation_quote(astock_core::Source::Tencent)),
+                ),
+                (
+                    "sina",
+                    Err(astock_core::DataError::Timeout("sina quote".into())),
+                ),
+            ],
+            [
+                ("tdx", Ok(reconciliation_bars(astock_core::Source::Tdx))),
+                (
+                    "eastmoney",
+                    Err(astock_core::DataError::Timeout("eastmoney".into())),
+                ),
+                (
+                    "tencent",
+                    Ok(reconciliation_bars(astock_core::Source::Tencent)),
+                ),
+                ("sina", Err(astock_core::DataError::Timeout("sina".into()))),
+            ],
+        );
+        assert_eq!(result["quote_successful_sources"], 2);
+        assert_eq!(result["kline_successful_sources"], 2);
+        assert_eq!(result["quote_conflicts"], 0);
+        assert_eq!(result["kline_conflicts"], 0);
+        assert_eq!(result["blocking"], false);
+        assert_eq!(result["quote_sources"][1]["provider"], "eastmoney");
+        assert_eq!(result["quote_sources"][1]["ok"], false);
+    }
+
     #[test]
     fn period_and_adjust_are_strict() {
         assert_eq!(parse_period("day").unwrap(), KlinePeriod::Day);
@@ -3951,6 +4166,67 @@ mod tests {
             shares_query_id(&invalid).unwrap_err().code,
             "invalid_payload"
         );
+    }
+
+    #[test]
+    fn candidate_selection_is_liquidity_ranked_or_explicitly_stratified() {
+        let master = SecurityMaster::default();
+        let premarket = vec![
+            StockListItem {
+                code: "600001".into(),
+                name: "沪市样本".into(),
+                price: Some(10.0),
+                pct: Some(0.0),
+                amount: None,
+            },
+            StockListItem {
+                code: "300001".into(),
+                name: "创业样本".into(),
+                price: Some(20.0),
+                pct: Some(0.0),
+                amount: None,
+            },
+            StockListItem {
+                code: "688001".into(),
+                name: "科创样本".into(),
+                price: Some(30.0),
+                pct: Some(0.0),
+                amount: None,
+            },
+            StockListItem {
+                code: "600002".into(),
+                name: "沪市样本二".into(),
+                price: Some(12.0),
+                pct: Some(0.0),
+                amount: None,
+            },
+        ];
+        master.merge_stock_list(&premarket, "test");
+        let (selected, rule) = select_research_candidates(premarket.clone(), &master, 3);
+        assert_eq!(selected.len(), 3);
+        assert!(rule.starts_with("premarket_"));
+        assert_eq!(
+            selected
+                .iter()
+                .filter_map(|row| master.get(&row.code).map(|value| board_label(value.board)))
+                .collect::<HashSet<_>>()
+                .len(),
+            3
+        );
+
+        let mut liquid = premarket;
+        for (index, row) in liquid.iter_mut().enumerate() {
+            row.amount = Some((index + 1) as f64 * 1_000_000.0);
+        }
+        let (selected, rule) = select_research_candidates(liquid, &master, 2);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|row| row.code.as_str())
+                .collect::<Vec<_>>(),
+            ["600002", "688001"]
+        );
+        assert!(rule.starts_with("reported_turnover_"));
     }
 
     #[test]

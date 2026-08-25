@@ -532,6 +532,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dashmap",
+ "encoding_rs",
  "futures",
  "governor",
  "lru",

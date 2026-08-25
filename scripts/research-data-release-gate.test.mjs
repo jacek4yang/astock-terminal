@@ -10,7 +10,12 @@ function base(symbol, name, { blocking = false, ok = true } = {}) {
       degraded: blocking,
       identity_search: { items: name ? [{ code: symbol, name }] : [] },
       joinquant: { tested: false },
-      candidates: { count: 60, standardized_name_count: 60 },
+      candidates: {
+        count: 60,
+        standardized_name_count: 60,
+        liquidity_available_count: 60,
+        liquidity_incomplete: false,
+      },
       news: [{ item_count: 40, successful_channels: ["official-a", "independent-b"] }],
       request_failures: [],
       reconciliation: {

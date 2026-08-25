@@ -26,8 +26,8 @@ use astock_tdx::{
 };
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
-use std::time::Duration;
-use tokio::sync::OnceCell;
+use std::time::{Duration, Instant};
+use tokio::sync::{Mutex, OnceCell};
 use tracing::debug;
 
 /// tdx 协议市场号：上海。
@@ -37,12 +37,14 @@ const MARKET_SZ: u8 = 0;
 const TDX_QUOTE_BATCH: usize = 60;
 const TDX_BREADTH_CONCURRENCY: usize = 6;
 const TDX_BREADTH_ATTEMPTS: usize = 3;
+const TDX_MARKET_SNAPSHOT_TTL: Duration = Duration::from_secs(2);
 
 /// TDX adapter. Constructing it is free (no network); the server probe runs
 /// lazily on the first data request.
 pub struct TdxProvider {
     client: OnceCell<TdxClient>,
     securities: OnceCell<Vec<StockListItem>>,
+    market_snapshot: Mutex<Option<(Instant, Fetched<Vec<StockListItem>>)>>,
 }
 
 impl Default for TdxProvider {
@@ -57,6 +59,7 @@ impl TdxProvider {
         TdxProvider {
             client: OnceCell::new(),
             securities: OnceCell::new(),
+            market_snapshot: Mutex::new(None),
         }
     }
 
@@ -93,14 +96,17 @@ impl TdxProvider {
         let code = symbol.code();
         let market = astock_tdx::protocol::types::auto_market(code)
             .ok_or(DataError::NoProvider("tdx (不支持该市场)"))?;
-        self.client()
+        let quote = self
+            .client()
             .await?
             .quotes(&[(market, code)])
             .await
             .map_err(map_err)?
             .into_iter()
             .find(|quote| quote.code == code)
-            .ok_or_else(|| DataError::Empty(format!("tdx order book {symbol}")))
+            .ok_or_else(|| DataError::Empty(format!("tdx order book {symbol}")))?;
+        validate_tdx_quote(&quote, symbol)?;
+        Ok(quote)
     }
 
     async fn quote_batch_with_retry(
@@ -124,6 +130,116 @@ impl TdxProvider {
         }
         Err(failures.join(", "))
     }
+
+    async fn fetch_market_quotes(
+        &self,
+        securities: &[StockListItem],
+    ) -> Result<Vec<TdxQuote>, DataError> {
+        let batches: Vec<Vec<(u8, String)>> = securities
+            .chunks(TDX_QUOTE_BATCH)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .filter_map(|item| {
+                        astock_tdx::protocol::types::auto_market(&item.code)
+                            .map(|market| (market, item.code.clone()))
+                    })
+                    .collect()
+            })
+            .filter(|batch: &Vec<_>| !batch.is_empty())
+            .collect();
+        let client = self.client().await?;
+        let results: Vec<_> = stream::iter(batches)
+            .map(|batch| async move {
+                let requested = batch.len();
+                (
+                    requested,
+                    Self::quote_batch_with_retry(client, &batch).await,
+                )
+            })
+            .buffer_unordered(TDX_BREADTH_CONCURRENCY)
+            .collect()
+            .await;
+        let requested: usize = results.iter().map(|(count, _)| *count).sum();
+        let mut quotes = Vec::with_capacity(requested);
+        let mut failures = Vec::new();
+        for (count, result) in results {
+            match result {
+                Ok(mut batch) => quotes.append(&mut batch),
+                Err(error) => failures.push(format!("{count}-stock batch: {error}")),
+            }
+        }
+        let required = requested.saturating_mul(95).div_ceil(100);
+        if quotes.len() < required || quotes.len() < 4_000 {
+            return Err(DataError::AllFailed {
+                op: "tdx market snapshot",
+                details: format!(
+                    "coverage {}/{requested}, required {required}; {}",
+                    quotes.len(),
+                    failures.join("; ")
+                ),
+            });
+        }
+        Ok(quotes)
+    }
+
+    /// Complete Shanghai/Shenzhen snapshot with real price, percentage and
+    /// amount fields. The 2-second cache single-flights concurrent breadth and
+    /// Agent candidate requests without turning a process-lifetime security
+    /// list cache into stale market data.
+    pub async fn market_snapshot(&self) -> Result<Fetched<Vec<StockListItem>>, DataError> {
+        let mut cache = self.market_snapshot.lock().await;
+        if let Some((stored_at, fetched)) = cache.as_ref() {
+            if stored_at.elapsed() <= TDX_MARKET_SNAPSHOT_TTL {
+                return Ok(fetched.clone());
+            }
+        }
+        let securities = self.all_a_shares().await?.data;
+        let quotes = self.fetch_market_quotes(&securities).await?;
+        let rows = snapshot_items(securities, quotes);
+        if rows.len() < 4_000 {
+            return Err(DataError::Empty(format!(
+                "tdx market snapshot identity coverage is only {} rows",
+                rows.len()
+            )));
+        }
+        let price_present = rows.iter().filter(|row| row.price.is_some()).count();
+        let amount_present = rows.iter().filter(|row| row.amount.is_some()).count();
+        if price_present * 10 < rows.len() * 9 || amount_present * 5 < rows.len() * 4 {
+            return Err(DataError::Empty(format!(
+                "tdx market snapshot contains placeholder trade fields: price {price_present}/{}, amount {amount_present}/{}",
+                rows.len(),
+                rows.len()
+            )));
+        }
+        let fetched = Fetched::now(rows, Source::Tdx);
+        *cache = Some((Instant::now(), fetched.clone()));
+        Ok(fetched)
+    }
+}
+
+fn snapshot_items(securities: Vec<StockListItem>, quotes: Vec<TdxQuote>) -> Vec<StockListItem> {
+    let names = securities
+        .into_iter()
+        .map(|item| (item.code, item.name))
+        .collect::<std::collections::HashMap<_, _>>();
+    quotes
+        .into_iter()
+        .filter_map(|quote| {
+            let name = names.get(&quote.code)?.clone();
+            let price = (quote.price > 0.0).then_some(quote.price);
+            let pct = (quote.price > 0.0 && quote.last_close > 0.0)
+                .then_some((quote.price - quote.last_close) / quote.last_close * 100.0);
+            let amount = (quote.amount > 0.0).then_some(quote.amount);
+            Some(StockListItem {
+                code: quote.code,
+                name,
+                price,
+                pct,
+                amount,
+            })
+        })
+        .collect()
 }
 
 /// Map a tdx error onto [`DataError`]: transport failures count toward the
@@ -223,6 +339,33 @@ fn quote_from_tdx(raw: &TdxQuote) -> Quote {
     }
 }
 
+fn validate_tdx_quote(raw: &TdxQuote, symbol: &Symbol) -> Result<(), DataError> {
+    if raw.code != symbol.code() {
+        return Err(DataError::Parse {
+            upstream: format!("tdx quote {symbol}"),
+            message: format!(
+                "security identity mismatch: expected {}, received {}",
+                symbol.code(),
+                raw.code
+            ),
+        });
+    }
+    for (label, value) in [
+        ("price", raw.price),
+        ("pre-close", raw.last_close),
+        ("open", raw.open),
+        ("high", raw.high),
+        ("low", raw.low),
+    ] {
+        if !value.is_finite() || value <= 0.0 {
+            return Err(DataError::Empty(format!(
+                "tdx quote {symbol}: missing or non-positive {label}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// 号段过滤：是否沪深 A 股（剔除指数/基金/债券/B 股，北交所不在 tdx 覆盖内）。
 /// SH: 60xxxx/68xxxx（主板+科创）；SZ: 00xxxx/30xxxx（主板+创业）。
 fn is_a_share(market: u8, code: &str) -> bool {
@@ -316,66 +459,15 @@ impl DataProvider for TdxProvider {
     /// per quote request, so batches are bounded, retried independently and
     /// checked for coverage before the result is accepted.
     async fn market_breadth(&self) -> Result<Fetched<MarketBreadth>, DataError> {
-        let securities = self.all_a_shares().await?.data;
-        let batches: Vec<Vec<(u8, String)>> = securities
-            .chunks(TDX_QUOTE_BATCH)
-            .map(|chunk| {
-                chunk
-                    .iter()
-                    .filter_map(|item| {
-                        astock_tdx::protocol::types::auto_market(&item.code)
-                            .map(|market| (market, item.code.clone()))
-                    })
-                    .collect()
-            })
-            .filter(|batch: &Vec<_>| !batch.is_empty())
-            .collect();
-        let client = self.client().await?;
-        let results: Vec<_> = stream::iter(batches)
-            .map(|batch| async move {
-                let requested = batch.len();
-                (
-                    requested,
-                    Self::quote_batch_with_retry(client, &batch).await,
-                )
-            })
-            .buffer_unordered(TDX_BREADTH_CONCURRENCY)
-            .collect()
-            .await;
-
-        let requested: usize = results.iter().map(|(count, _)| *count).sum();
-        let mut quotes = Vec::with_capacity(requested);
-        let mut failures = Vec::new();
-        for (count, result) in results {
-            match result {
-                Ok(mut batch) => quotes.append(&mut batch),
-                Err(error) => failures.push(format!("{count}-stock batch: {error}")),
-            }
-        }
-        let required = requested.saturating_mul(95).div_ceil(100);
-        if quotes.len() < required || quotes.len() < 4_000 {
-            return Err(DataError::AllFailed {
-                op: "tdx market breadth",
-                details: format!(
-                    "coverage {}/{requested}, required {required}; {}",
-                    quotes.len(),
-                    failures.join("; ")
-                ),
-            });
-        }
-
+        let snapshot = self.market_snapshot().await?;
         let mut up = 0_u32;
         let mut down = 0_u32;
         let mut flat = 0_u32;
-        for quote in quotes {
-            if quote.price <= 0.0 || quote.last_close <= 0.0 {
-                flat += 1;
-            } else if quote.price > quote.last_close {
-                up += 1;
-            } else if quote.price < quote.last_close {
-                down += 1;
-            } else {
-                flat += 1;
+        for row in snapshot.data {
+            match row.pct {
+                Some(pct) if pct > 0.0 => up += 1,
+                Some(pct) if pct < 0.0 => down += 1,
+                _ => flat += 1,
             }
         }
         Ok(Fetched::now(
@@ -516,6 +608,45 @@ mod tests {
         };
         let q = quote_from_tdx(&raw);
         assert_eq!(q.pct, 0.0);
+        assert!(matches!(
+            validate_tdx_quote(&raw, &Symbol::new("000001").unwrap()),
+            Err(DataError::Empty(message)) if message.contains("non-positive pre-close")
+        ));
+    }
+
+    #[test]
+    fn market_snapshot_keeps_identity_and_real_quote_fields() {
+        let securities = vec![StockListItem {
+            code: "300308".to_string(),
+            name: "中际旭创".to_string(),
+            price: None,
+            pct: None,
+            amount: None,
+        }];
+        let quotes = vec![TdxQuote {
+            market: MARKET_SZ,
+            code: "300308".to_string(),
+            price: 870.22,
+            last_close: 943.0,
+            open: 945.0,
+            high: 949.73,
+            low: 850.0,
+            servertime: "15:00:00".to_string(),
+            vol: 389_093.0,
+            cur_vol: 0.0,
+            amount: 34_491_670_420.0,
+            s_vol: 0.0,
+            b_vol: 0.0,
+            bid: [(0.0, 0.0); 5],
+            ask: [(0.0, 0.0); 5],
+        }];
+        let rows = snapshot_items(securities, quotes);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].code, "300308");
+        assert_eq!(rows[0].name, "中际旭创");
+        assert_eq!(rows[0].price, Some(870.22));
+        assert_eq!(rows[0].amount, Some(34_491_670_420.0));
+        assert!((rows[0].pct.unwrap() - (-7.717_921_527_041_355)).abs() < 1e-9);
     }
 
     #[test]

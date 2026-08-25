@@ -41,6 +41,14 @@ export function validateAuditResults({ standard, beijing, legacy }) {
     "300308: candidate universe is too small");
   invariant(standard.data.candidates?.standardized_name_count === standard.data.candidates?.count,
     "300308: candidate universe contains missing or non-standard names");
+  invariant(typeof standard.data.candidates?.liquidity_incomplete === "boolean",
+    "300308: candidate liquidity completeness is not explicit");
+  const candidateLiquidity = standard.data.candidates?.liquidity_available_count ?? 0;
+  invariant(candidateLiquidity >= 0 && candidateLiquidity <= standard.data.candidates.count,
+    "300308: candidate liquidity coverage is invalid");
+  invariant(standard.data.candidates.liquidity_incomplete ===
+    (candidateLiquidity < standard.data.candidates.count),
+  "300308: candidate liquidity completeness contradicts coverage");
   const standardNews = standard.data.news?.[0];
   invariant((standardNews?.item_count ?? 0) >= 20, "300308: fewer than 20 current news items were available");
   invariant(new Set(standardNews?.successful_channels ?? []).size >= 2,
@@ -83,6 +91,8 @@ export function validateAuditResults({ standard, beijing, legacy }) {
       news_items: standardNews.item_count,
       news_channels: [...new Set(standardNews.successful_channels)],
       candidate_count: standard.data.candidates.count,
+      candidate_liquidity_count: candidateLiquidity,
+      candidate_liquidity_incomplete: standard.data.candidates.liquidity_incomplete,
       degraded: standard.data.degraded,
     },
     beijing: {
@@ -138,7 +148,20 @@ function runAudit(engineExecutable, symbol, testRoot) {
       try {
         const text = stdout.toString("utf8").trim();
         invariant(text.length > 0, `${symbol}: audit returned no JSON; ${stderr.toString("utf8").slice(0, 500)}`);
-        resolve({ exitCode: exitCode ?? -1, data: JSON.parse(text) });
+        const data = JSON.parse(text);
+        const result = { exitCode: exitCode ?? -1, data };
+        fs.writeFileSync(
+          path.join(symbolRoot, "audit-result.json"),
+          `${JSON.stringify({
+            schema_version: 1,
+            symbol,
+            exit_code: result.exitCode,
+            credentialed_providers_tested: false,
+            data,
+          }, null, 2)}\n`,
+          "utf8",
+        );
+        resolve(result);
       } catch (error) {
         reject(error);
       }

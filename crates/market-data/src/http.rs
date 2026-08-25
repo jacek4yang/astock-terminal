@@ -55,6 +55,9 @@ impl Default for HostState {
 pub struct TextResponse {
     /// Response body, decoded as UTF-8 (lossy).
     pub body: String,
+    /// Original response bytes for explicitly non-UTF-8 providers such as
+    /// Tencent's GBK quote endpoint.
+    pub body_bytes: Vec<u8>,
     /// Raw Content-Type header value, if present.
     pub content_type: Option<String>,
     /// Successful HTTP status retained for ingestion provenance.
@@ -62,6 +65,31 @@ pub struct TextResponse {
     /// Cache validators retained for incremental document archives.
     pub etag: Option<String>,
     pub last_modified: Option<String>,
+}
+
+fn compatible_get_url(
+    url: &str,
+    params: &[(String, String)],
+    upstream: &str,
+) -> Result<String, DataError> {
+    let mut request_url = reqwest::Url::parse(url).map_err(|error| DataError::Parse {
+        upstream: upstream.to_string(),
+        message: error.to_string(),
+    })?;
+    // Calling `query_pairs_mut()` on a URL without query parameters adds a
+    // trailing `?`. Some quote endpoints treat that character as part of the
+    // path-level symbol (for example `sz300308?`) and return an empty response
+    // under the wrong identity.
+    if !params.is_empty() {
+        request_url.query_pairs_mut().extend_pairs(
+            params
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        );
+    }
+    // EastMoney's historical endpoint aborts the response when commas in its
+    // fields grammar arrive as `%2C`. Comma is a legal query sub-delimiter.
+    Ok(request_url.as_str().replace("%2C", ","))
 }
 
 /// Shared HTTP client with adaptive throttling and host failover.
@@ -273,20 +301,7 @@ impl HttpClient {
         let host = Self::host_key(url);
         self.throttle(&host).await;
 
-        let mut request_url = reqwest::Url::parse(url).map_err(|error| DataError::Parse {
-            upstream: host.clone(),
-            message: error.to_string(),
-        })?;
-        request_url.query_pairs_mut().extend_pairs(
-            params
-                .iter()
-                .map(|(key, value)| (key.as_str(), value.as_str())),
-        );
-        // EastMoney's historical endpoint aborts the response when commas in
-        // its `fields1/fields2` grammar arrive as `%2C`. Comma is a legal
-        // query sub-delimiter; preserve it while all other values remain
-        // encoded by `Url::query_pairs_mut`.
-        let compatible_url = request_url.as_str().replace("%2C", ",");
+        let compatible_url = compatible_get_url(url, params, &host)?;
         let mut request = self.client_for(url).get(compatible_url);
         // The EastMoney history cluster currently aborts responses carrying
         // a browser UA on some system-proxy paths. Other market endpoints do
@@ -360,6 +375,7 @@ impl HttpClient {
                 self.on_success(&host);
                 Ok(TextResponse {
                     body: String::from_utf8_lossy(&bytes).into_owned(),
+                    body_bytes: bytes.to_vec(),
                     content_type,
                     status: status.as_u16(),
                     etag,
@@ -612,6 +628,23 @@ mod tests {
         assert!(payload_usable(&serde_json::json!({"data": {"klines": []}})).is_err());
         assert!(payload_usable(&serde_json::json!({"data": null})).is_err());
         assert!(payload_usable(&serde_json::json!({"rc": 0})).is_err());
+    }
+
+    #[test]
+    fn empty_params_do_not_mutate_path_level_quote_identity() {
+        assert_eq!(
+            compatible_get_url("https://hq.sinajs.cn/list=sz300308", &[], "sina").unwrap(),
+            "https://hq.sinajs.cn/list=sz300308"
+        );
+        assert_eq!(
+            compatible_get_url(
+                "https://example.com/kline",
+                &[("fields".to_string(), "f1,f2".to_string())],
+                "example"
+            )
+            .unwrap(),
+            "https://example.com/kline?fields=f1,f2"
+        );
     }
 
     #[test]
