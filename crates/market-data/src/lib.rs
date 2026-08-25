@@ -2,8 +2,8 @@
 //!
 //! Ports the legacy Python `kline_fetcher.py`: Tencent/Sina/EastMoney kline
 //! failover, EastMoney quote/fund-flow/minute/search/clist endpoints, host
-//! pools with failover, UA rotation, a per-client DNS override for the
-//! push2his/push2 hosts, adaptive per-host rate limiting, a bounded TTL
+//! pools with failover, UA rotation, direct domestic routing, adaptive
+//! per-host rate limiting, a bounded TTL
 //! cache, per-provider circuit breakers, and single-flight request
 //! coalescing.
 //!
@@ -18,12 +18,12 @@
 //! qfq/hfq against provider series lives in `tests/adjust_live.rs`.
 //!
 //! Optional token-gated providers (always on the health panel, unavailable
-//! without credentials): [`TushareProvider`] (`TUSHARE_TOKEN`; raw daily,
+//! without credentials): [`TushareProvider`] (Credential Manager token; raw daily,
 //! trade calendar, and — at the 2000-point tier — `adj_factor` golden
 //! cross-checks via [`providers::tushare::compare_qfq_golden`], dividends,
-//! daily basics), [`IwencaiOpenApi`] (`IWENCAI_KEY`; 龙虎榜 / 公告新闻
+//! daily basics), [`IwencaiOpenApi`] (Credential Manager key; 龙虎榜 / 公告新闻
 //! 事件 / 板块归属 over the official Bearer-key gateway), and
-//! [`JoinQuantProvider`] (`JQ_USER`/`JQ_PWD`; 前复权 daily / 指数成分 /
+//! [`JoinQuantProvider`] (Credential Manager account; 前复权 daily / 指数成分 /
 //! 估值 / 宏观 CPI, strictly low-frequency, explicit-call only).
 //!
 //! [`TdxProvider`] is the always-available TCP quote-protocol fallback:
@@ -32,8 +32,8 @@
 //! pool is probed lazily on first use and cached in-process.
 //!
 //! Outbound routing: domestic platforms always connect directly; only
-//! configured `foreign_hosts` use the optional SOCKS5 proxy from
-//! `ASTOCK_SOCKS5` (see [`proxy`]).
+//! configured `foreign_hosts` use the optional SOCKS5 proxy injected by Engine
+//! from Windows Credential Manager (see [`proxy`]).
 
 pub mod breaker;
 pub mod cache;
@@ -48,18 +48,18 @@ pub mod validate;
 pub use breaker::{BreakerConfig, CircuitBreaker, CircuitState, ProviderHealth};
 pub use cache::TtlCache;
 pub use http::HttpClient;
-pub use hub::MarketData;
+pub use hub::{MarketData, MarketDataCredentials};
 pub use provider::{DataProvider, Failover};
 pub use providers::{
     normalize_finance_news_sources, CninfoAnnouncement, CninfoDisclosureProvider, CninfoPage,
-    EastMoney, EastMoneyF10, EmDataCenter, F10Report, FinanceNewsBatch, FinanceNewsItem,
-    FinanceNewsProvider, FinanceNewsSourceSelection, GlobalAssetPoint, GlobalAssetProvider,
-    GlobalAssetQuote, GoldMarketSnapshot, GoldPrimaryNewsBatch, GoldPrimaryNewsItem,
-    GoldTrendSummary, IndustryClassified, IwencaiOpenApi, JoinQuantProvider, NewsCapabilities,
-    NewsDeliveryMode, NewsErrorKind, NewsIngestProgress, NewsIngestProgressReporter,
-    NewsIngestWorkItem, NewsProviderHealth, NewsTrustTier, SecEdgarProvider, SecFiling, SinaKline,
-    TdxProvider, TencentKline, TushareProvider, WorldBankObservation, WorldBankProvider,
-    DEFAULT_FINANCE_NEWS_SOURCES, FINANCE_NEWS_SOURCES,
+    CninfoStockIdentity, EastMoney, EastMoneyF10, EmDataCenter, F10Report, FinanceNewsBatch,
+    FinanceNewsItem, FinanceNewsProvider, FinanceNewsSourceSelection, GlobalAssetPoint,
+    GlobalAssetProvider, GlobalAssetQuote, GoldMarketSnapshot, GoldPrimaryNewsBatch,
+    GoldPrimaryNewsItem, GoldTrendSummary, IndustryClassified, IwencaiOpenApi, JoinQuantProvider,
+    NewsCapabilities, NewsDeliveryMode, NewsErrorKind, NewsIngestProgress,
+    NewsIngestProgressReporter, NewsIngestWorkItem, NewsProviderHealth, NewsTrustTier,
+    SecEdgarProvider, SecFiling, SinaKline, TdxProvider, TencentKline, TushareProvider,
+    WorldBankObservation, WorldBankProvider, DEFAULT_FINANCE_NEWS_SOURCES, FINANCE_NEWS_SOURCES,
 };
 pub use proxy::{ProxyConfig, ProxyRoute};
 pub use security_master::SecurityMaster;

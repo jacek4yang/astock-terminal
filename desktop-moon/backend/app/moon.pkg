@@ -1,0 +1,10 @@
+import {
+  "astock/desktop_backend/host",
+  "moonbitlang/core/env",
+  "moonbitlang/async",
+  "moonbit-community/proton",
+}
+
+supported_targets = "native"
+
+pkgtype(kind: "executable")

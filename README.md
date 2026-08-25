@@ -16,29 +16,57 @@
 - 全市场分页筛选表、后台扫描、可恢复后台回测和持久化可调整桌面布局。
 - 独立专业资讯中心，支持多源增量更新、修订追踪、事件折叠、丰富筛选、分页与十万条虚拟浏览。
 - 资讯按统一 A 股日历和 15:00 边界归入盘前/盘中/下一交易日，实时 Agent 与事件回测共享 Point-in-Time 口径。
-- MiniMax M3 工具调用、Token Plan 额度查看、自动上下文压缩、中断恢复、证据清单和策略迭代。
+- MiniMax Plus 工具调用、Token Plan 额度查看、动态澄清、自动上下文压缩、中断恢复、证据清单和多轮反方复核。
 - Agent Runtime 提供 SSE 空闲看门狗、pre-commit 安全重建、持久化检查点恢复、工具 single-flight、缓存参数规范化和防死锁预算（见 [运行时加固](docs/agent-runtime-hardening.md)）。
 - 基于 ATR、结构位、交易规则与时段配置生成的 `ManualTradingPlan`。
 
-## 开发环境
+## 开发与构建
 
-- Windows 10/11、Rust 1.88+、Node.js 20+、WebView2
-- Tauri v2 所需的 MSVC Build Tools
-
-```powershell
-npm --prefix ui ci
-npm --prefix ui run build
-cargo test --workspace
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-npm --prefix ui test
-.\ui\node_modules\.bin\tauri.cmd dev
-```
-
-生产包：
+首版仅支持 Windows x64，需要 MSVC Build Tools、Rust 1.88+、Node.js
+20+、MoonBit、Proton 0.2.1 和固定 CEF 147 runtime。构建脚本强制把
+Cargo、MoonBit、CEF、Vite、npm 与打包中间产物写入
+`D:\astock-build\astock-terminal`；D 盘不可用或剩余空间少于 60 GiB
+时不会回退到 C 盘。
 
 ```powershell
-.\ui\node_modules\.bin\tauri.cmd build
+.\scripts\bootstrap.ps1
+.\scripts\dev.ps1
+.\scripts\test.ps1
+.\scripts\package.ps1
 ```
+
+The NSIS package is a per-user installation under
+`%LOCALAPPDATA%\Programs\AStock Terminal` and does not request administrator
+rights. Automated migration verification uses an isolated
+`/RELEASETEST=1` path under `ASTOCK_BUILD_ROOT`; that mode skips process,
+registry and shortcut changes while exercising the exact packaged payload and
+uninstaller.
+
+生产发布必须从干净、与 `origin/main` 完全一致的提交执行：
+
+```powershell
+$env:ASTOCK_SIGNING_CERT_THUMBPRINT = '<CurrentUser\\My certificate thumbprint>'
+.\scripts\release-gate.ps1
+```
+
+门禁在 D 盘生成 JSON/HTML 报告；能力迁移、数据、Agent、恢复、形式
+验证、浏览器、桌面 40 场景、迁移、性能、真实 Provider、凭据轮换、
+签名或安装任一项缺失都会失败。GitHub Actions 因计费限制未执行时，
+Release 必须明确写明 `GitHub Actions: NOT VERIFIED — billing/spending
+restriction; release gates executed locally`。
+
+生产签名还必须设置 `ASTOCK_SIGNING_CERT_THUMBPRINT` 与
+`ASTOCK_RFC3161_TIMESTAMP_URL`。门禁会签署 App 中所有未签名 PE，保留并
+验证已有有效的 CEF 签名，借助 NSIS `!uninstfinalize` 签署卸载器，重建
+签名后的 ZIP/NSIS，并生成 `SHA256SUMS` 与 `signed-artifacts.json`；任一
+PE 的 Authenticode 状态不是 `Valid` 都会中止发布。
+
+聊天、工单或日志中出现过的 Provider 凭据一律视为已泄露。正式门禁前应先在
+MiniMax 和聚宽侧创建新凭据/密码、撤销旧值，再通过桌面配置页写入 Windows
+Credential Manager。随后使用 `record-credential-rotation.ps1` 做显式操作员
+确认和只读回读，再运行 `external-services-e2e.ps1`；后者才会执行真实模型目录、
+额度、SSE 两万元研究计划和聚宽最小数据验收。两个脚本都不接受凭据参数，也不
+把报告正文、账号或密钥写入证据。
 
 ## 配置与凭证
 

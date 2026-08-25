@@ -5,6 +5,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Market, Symbol};
 
+/// Canonical display form for exchange security abbreviations.  Upstream
+/// test/legacy feeds sometimes insert spaces between every Chinese character;
+/// exchange abbreviations themselves do not use whitespace as identity.
+pub fn normalize_security_name(raw: &str) -> String {
+    raw.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
 /// Broad instrument type in the security master.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -67,7 +74,7 @@ impl SecurityMasterRecord {
         let board = board_for(&code, market);
         Self {
             code,
-            canonical_name: name.into(),
+            canonical_name: normalize_security_name(&name.into()),
             market,
             board,
             asset_type: if symbol.is_etf() {
@@ -117,5 +124,11 @@ mod tests {
         assert_eq!(board_for("600519", Market::SH), Board::Main);
         assert_eq!(board_for("688981", Market::SH), Board::Star);
         assert_eq!(board_for("920001", Market::BJ), Board::Beijing);
+    }
+
+    #[test]
+    fn canonical_name_removes_upstream_spacing_noise() {
+        assert_eq!(normalize_security_name(" 中 科 软 "), "中科软");
+        assert_eq!(normalize_security_name("*ST  测试"), "*ST测试");
     }
 }

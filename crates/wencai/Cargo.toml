@@ -3,7 +3,8 @@ name = "astock-wencai"
 description = "Optional iwencai (同花顺问财) natural-language stock screening provider: hexin-v signing via embedded QuickJS + slider-captcha solving via ddddocr-tract"
 version.workspace = true
 edition.workspace = true
-
+license.workspace = true
+publish.workspace = true
 [features]
 default = []
 # Slider-captcha auto-solving (getPreHandle/getImg/getTicket protocol on
@@ -13,7 +14,7 @@ default = []
 captcha = ["dep:image"]
 
 [dependencies]
-astock-core = { path = "../core" }
+astock-core = { version = "6.0.0", path = "../core" }
 reqwest.workspace = true
 tokio.workspace = true
 serde.workspace = true

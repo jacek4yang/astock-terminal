@@ -1,0 +1,44 @@
+[package]
+name = "astock-engine"
+description = "GUI-independent deterministic financial and persistence worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+[dependencies]
+astock-core = { version = "6.0.0", path = "../core" }
+astock-chanlun = { version = "6.0.0", path = "../chanlun" }
+astock-backtest = { version = "6.0.0", path = "../backtest" }
+astock-disclosure = { version = "6.0.0", path = "../disclosure" }
+astock-entity-linking = { version = "6.0.0", path = "../entity-linking" }
+astock-event-intelligence = { version = "6.0.0", path = "../event-intelligence" }
+astock-fundamental = { version = "6.0.0", path = "../fundamental" }
+astock-global-intelligence = { version = "6.0.0", path = "../global-intelligence" }
+astock-graph = { version = "6.0.0", path = "../graph" }
+astock-market-data = { version = "6.0.0", path = "../market-data" }
+astock-minimax = { version = "6.0.0", path = "../minimax" }
+astock-news-intelligence = { version = "6.0.0", path = "../news-intelligence" }
+astock-protocol = { version = "6.0.0", path = "../protocol" }
+astock-quant = { version = "6.0.0", path = "../quant" }
+astock-relation-extraction = { version = "6.0.0", path = "../relation-extraction" }
+astock-source-verification = { version = "6.0.0", path = "../source-verification" }
+astock-storage = { version = "6.0.0", path = "../storage" }
+astock-technical = { version = "6.0.0", path = "../technical" }
+astock-trading-rules = { version = "6.0.0", path = "../trading-rules" }
+base64 = "0.22"
+chrono.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+rusqlite.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util = "0.7"
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

@@ -8,17 +8,28 @@
 
 use astock_core::{Bar, Symbol, VolumeUnit};
 use astock_market_data::providers::tushare::{compare_qfq_golden, TushareTier};
-use astock_market_data::{IwencaiOpenApi, MarketData, TushareProvider};
+use astock_market_data::{IwencaiOpenApi, MarketData, MarketDataCredentials, TushareProvider};
 use chrono::NaiveDate;
 
 fn tushare(md: &MarketData) -> Option<&TushareProvider> {
     md.tushare.available().then_some(&md.tushare)
 }
 
+fn live_market_data() -> MarketData {
+    // Test-only adapter: production never reads provider secrets from process
+    // environment and instead receives them from Windows Credential Manager.
+    MarketData::with_credentials(MarketDataCredentials::new(
+        std::env::var("TUSHARE_TOKEN").ok(),
+        std::env::var("IWENCAI_KEY").ok(),
+        None,
+        None,
+    ))
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live network test"]
 async fn tushare_daily_raw_bars() {
-    let md = MarketData::new();
+    let md = live_market_data();
     let Some(p) = tushare(&md) else {
         eprintln!("TUSHARE_TOKEN unset; skipping");
         return;
@@ -53,7 +64,7 @@ async fn tushare_daily_raw_bars() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live network test"]
 async fn tushare_tier_probe_and_pro_apis() {
-    let md = MarketData::new();
+    let md = live_market_data();
     let Some(p) = tushare(&md) else {
         eprintln!("TUSHARE_TOKEN unset; skipping");
         return;
@@ -101,7 +112,7 @@ async fn tushare_tier_probe_and_pro_apis() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live network test"]
 async fn iwencai_dragon_tiger_and_events() {
-    let md = MarketData::new();
+    let md = live_market_data();
     let p: &IwencaiOpenApi = &md.iwencai;
     if !p.available() {
         eprintln!("IWENCAI_KEY unset; skipping");

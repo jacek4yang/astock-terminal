@@ -7,7 +7,7 @@ use futures::{Stream, StreamExt};
 
 use crate::chat::{ChatChunk, ChatRequest, ChatResponse, ChatStream};
 use crate::error::MinimaxError;
-use crate::http::{map_base_resp, map_http_error, Http, ReqwestHttp};
+use crate::http::{map_base_resp, map_http_error, Http};
 use crate::key::SecretKey;
 use crate::models::{AvailableModel, AvailableModelsResponse, ModelCatalog};
 use crate::quota::QuotaStatus;
@@ -39,11 +39,6 @@ pub struct MinimaxClient {
 }
 
 impl MinimaxClient {
-    /// Client over the production services with default catalog and gate.
-    pub fn new(key: SecretKey) -> Self {
-        Self::with_http(key, Arc::new(ReqwestHttp::new()))
-    }
-
     /// Client over a custom transport (tests, proxies).
     pub fn with_http(key: SecretKey, http: Arc<dyn Http>) -> Self {
         Self {

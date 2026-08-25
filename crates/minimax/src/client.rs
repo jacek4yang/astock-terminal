@@ -231,9 +231,9 @@ impl MinimaxClient {
                             return Some((Ok(chunk), state));
                         }
 
-                        state.buffered_bytes = state
-                            .buffered_bytes
-                            .saturating_add(serde_json::to_vec(&chunk).map_or(0, |value| value.len()));
+                        state.buffered_bytes = state.buffered_bytes.saturating_add(
+                            serde_json::to_vec(&chunk).map_or(0, |value| value.len()),
+                        );
                         let commits_protocol = chunk_commits_protocol(&chunk)
                             || state.buffered_bytes >= state.policy.max_buffered_bytes;
                         state.buffered.push_back(chunk);
@@ -266,7 +266,6 @@ impl MinimaxClient {
                             continue;
                         }
                         if state.committed && state.terminal_seen {
-                            state.done = true;
                             return None;
                         }
                         state.done = true;
@@ -334,9 +333,7 @@ impl ResilientStreamState {
 }
 
 fn chunk_commits_protocol(chunk: &ChatChunk) -> bool {
-    chunk
-        .raw_delta()
-        .is_some_and(|text| !text.is_empty())
+    chunk.raw_delta().is_some_and(|text| !text.is_empty())
         || !chunk.tool_calls().is_empty()
         || chunk.finish_reason().is_some()
 }

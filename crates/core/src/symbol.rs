@@ -136,6 +136,29 @@ impl Symbol {
         self.0 == "000300" || self.0.starts_with("399")
     }
 
+    /// Whether this is a currently usable Shanghai/Shenzhen/Beijing listed
+    /// common-equity code.  Beijing Stock Exchange legacy 43/83/87 prefixes
+    /// are deliberately excluded: since 2025-10-09 live quote queries use
+    /// the unified 920xxx codes.  Historical identifiers remain valid
+    /// [`Symbol`] values for archives, but must not enter the live terminal.
+    pub fn is_current_a_share(&self) -> bool {
+        let code = self.code();
+        ["600", "601", "603", "605", "688", "689"]
+            .iter()
+            .any(|prefix| code.starts_with(prefix))
+            || ["000", "001", "002", "003", "300", "301"]
+                .iter()
+                .any(|prefix| code.starts_with(prefix))
+            || code.starts_with("920")
+    }
+
+    /// Instruments accepted by the live stock surfaces.  This keeps listed
+    /// equities and exchange-listed funds while excluding stale NEEQ/test
+    /// identifiers that merely happen to contain six digits.
+    pub fn is_supported_market_instrument(&self) -> bool {
+        self.is_current_a_share() || self.is_etf()
+    }
+
     /// EastMoney secid for an index code: `399xxx` → `0.`, else `1.`.
     pub fn index_secid(index_code: &str) -> String {
         if index_code.starts_with("399") {
@@ -221,6 +244,18 @@ mod tests {
         assert_eq!(sym("510300").market(), Market::SH);
         assert_eq!(sym("000001").market(), Market::SZ);
         assert_eq!(sym("920001").market(), Market::BJ);
+    }
+
+    #[test]
+    fn current_a_share_codes_exclude_legacy_neeq_identifiers() {
+        for code in ["600519", "688981", "000001", "300750", "920001"] {
+            assert!(sym(code).is_current_a_share(), "{code}");
+        }
+        for code in ["430002", "832317", "900901", "200001", "810011"] {
+            assert!(!sym(code).is_current_a_share(), "{code}");
+        }
+        assert!(sym("510300").is_supported_market_instrument());
+        assert!(!sym("430002").is_supported_market_instrument());
     }
 
     #[test]

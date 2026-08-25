@@ -1,9 +1,10 @@
 //! JoinQuant (聚宽) provider adapter over `astock-joinquant` (optional,
 //! credential-gated).
 //!
-//! Credentials come from the `JQ_USER` / `JQ_PWD` env vars; without them the
-//! provider is `available() == false` — listed on the health panel but every
-//! call returns [`DataError::NoProvider`]. **Not** part of the automatic
+//! Credentials are injected in memory by Engine after reading Windows
+//! Credential Manager; without them the provider is `available() == false` —
+//! listed on the health panel but every call returns [`DataError::NoProvider`].
+//! **Not** part of the automatic
 //! failover chain: it is an explicit-call source only (daily bars, index
 //! components, valuation snapshots, macro CPI), like [`super::tushare`].
 //!
@@ -19,14 +20,10 @@ use astock_core::time::parse_date;
 use astock_core::{Bar, DataError, Fetched, Source, Symbol, VolumeUnit};
 use astock_joinquant::{Credentials, DailyBar, JoinQuantClient, JoinQuantError, ValuationSnapshot};
 use chrono::NaiveDate;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::{Mutex, MutexGuard};
 use tokio::time::Instant;
-
-/// Env var carrying the JoinQuant login name.
-pub const USER_ENV: &str = "JQ_USER";
-/// Env var carrying the JoinQuant password.
-pub const PWD_ENV: &str = "JQ_PWD";
 
 /// Minimum spacing between upstream calls (strict low-frequency policy).
 pub const MIN_INTERVAL: Duration = Duration::from_secs(2);
@@ -34,7 +31,7 @@ pub const MIN_INTERVAL: Duration = Duration::from_secs(2);
 /// JoinQuant adapter. All methods return [`DataError::NoProvider`] when no
 /// credentials are configured.
 pub struct JoinQuantProvider {
-    client: Option<JoinQuantClient>,
+    client: RwLock<Option<Arc<JoinQuantClient>>>,
     /// Last upstream-call timestamp; the guard is held for the whole call so
     /// requests are serialized process-wide on top of the 2s spacing.
     gate: Mutex<Option<Instant>>,
@@ -44,32 +41,43 @@ impl JoinQuantProvider {
     /// Wrap an optional client. `None` marks the provider unavailable.
     pub fn new(client: Option<JoinQuantClient>) -> Self {
         JoinQuantProvider {
-            client,
+            client: RwLock::new(client.map(Arc::new)),
             gate: Mutex::new(None),
         }
     }
 
-    /// Build from the `JQ_USER` / `JQ_PWD` env vars (unavailable when either
-    /// is missing or blank).
-    pub fn from_env() -> Self {
-        let client = match (std::env::var(USER_ENV), std::env::var(PWD_ENV)) {
-            (Ok(u), Ok(p)) if !u.trim().is_empty() && !p.is_empty() => {
-                JoinQuantClient::new(Credentials::new(u, p)).ok()
-            }
-            _ => None,
-        };
-        Self::new(client)
-    }
-
     /// Whether credentials are configured.
     pub fn available(&self) -> bool {
-        self.client.is_some()
+        self.client.read().is_ok_and(|client| client.is_some())
     }
 
-    fn client(&self) -> Result<&JoinQuantClient, DataError> {
+    /// Replace credentials without restarting the desktop Engine. Credentials
+    /// remain inside the provider and are never exposed through diagnostics.
+    pub fn configure(&self, username: String, password: String) -> Result<(), DataError> {
+        let client = JoinQuantClient::new(Credentials::new(username, password)).map_err(map_err)?;
+        *self.client.write().map_err(|_| DataError::Parse {
+            upstream: "joinquant credentials".to_string(),
+            message: "credential lock poisoned".to_string(),
+        })? = Some(Arc::new(client));
+        Ok(())
+    }
+
+    /// Remove the active client immediately after credentials are deleted.
+    pub fn clear_credentials(&self) {
+        if let Ok(mut client) = self.client.write() {
+            *client = None;
+        }
+    }
+
+    fn client(&self) -> Result<Arc<JoinQuantClient>, DataError> {
         self.client
-            .as_ref()
-            .ok_or(DataError::NoProvider("joinquant (no JQ_USER/JQ_PWD)"))
+            .read()
+            .map_err(|_| DataError::Parse {
+                upstream: "joinquant credentials".to_string(),
+                message: "credential lock poisoned".to_string(),
+            })?
+            .clone()
+            .ok_or(DataError::NoProvider("joinquant (not configured)"))
     }
 
     /// Serialize calls and enforce [`MIN_INTERVAL`] spacing; the returned

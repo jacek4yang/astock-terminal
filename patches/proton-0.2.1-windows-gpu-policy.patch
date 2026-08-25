@@ -1,0 +1,32 @@
+diff --git a/internal/native/ffi/src/engine/cef_win/proton_engine_cef_win.c b/internal/native/ffi/src/engine/cef_win/proton_engine_cef_win.c
+--- a/internal/native/ffi/src/engine/cef_win/proton_engine_cef_win.c
++++ b/internal/native/ffi/src/engine/cef_win/proton_engine_cef_win.c
+@@ -1456,16 +1456,18 @@ static void proton_engine_on_before_command_line_processing(
+   if (command_line == NULL) {
+     return;
+   }
+-  proton_engine_append_switch(command_line, "disable-gpu");
+-  // A bare --disable-gpu still launches a GPU process for SwiftShader, and
+-  // that process dies on display-limited CI runners (no usable D3D device),
+-  // which FATALs the browser. Disabling GPU compositing keeps presentation
+-  // on the CPU in the browser process, so no GPU process is needed for
+-  // window display.
+-  proton_engine_append_switch(command_line, "disable-gpu-compositing");
+-  // Keep the GPU service out of the browser process. With CEF 147,
+-  // --in-process-gpu can intermittently block cef_shutdown; CI selects
+-  // SwiftShader through ANGLE_DEFAULT_PLATFORM when hardware GPU is absent.
++  char *disable_gpu = NULL;
++  size_t disable_gpu_length = 0;
++  if (_dupenv_s(&disable_gpu, &disable_gpu_length, "PROTON_DISABLE_GPU") == 0 &&
++      disable_gpu != NULL && disable_gpu[0] != '\0' && strcmp(disable_gpu, "0") != 0 &&
++      _stricmp(disable_gpu, "false") != 0) {
++    /* AStock production GPU policy: normal desktop windows keep hardware
++       acceleration. Isolated headless and fault tests explicitly exercise
++       Chromium's software-compositing fallback. */
++    proton_engine_append_switch(command_line, "disable-gpu");
++    proton_engine_append_switch(command_line, "disable-gpu-compositing");
++  }
++  free(disable_gpu);
+   proton_engine_append_switch(command_line, "disable-background-networking");
+   proton_engine_append_switch(command_line, "disable-component-update");
+   proton_engine_append_switch(command_line, "disable-domain-reliability");

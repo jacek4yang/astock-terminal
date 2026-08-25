@@ -1,12 +1,12 @@
-//! Resilient HTTP layer: one shared `reqwest` client, UA rotation, per-client
-//! DNS override, adaptive per-host rate limiting, and host-pool failover.
+//! Resilient HTTP layer: one shared `reqwest` client, UA rotation, adaptive
+//! per-host rate limiting, and host-pool failover.
 
 use crate::proxy::{ProxyConfig, ProxyRoute};
 use astock_core::DataError;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use reqwest::header::{HeaderMap, HeaderValue};
-use std::net::SocketAddr;
+use std::net::ToSocketAddrs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,9 +21,6 @@ pub const UA_POOL: [&str; 3] = [
 
 /// EastMoney public API token, attached to every EM endpoint.
 pub const EM_TOKEN: &str = "fa5fd1943c7b386f172d6893dbfba10b";
-
-/// CDN IP that answers for `push2his`/`push2` (legacy DNS monkey-patch target).
-pub const PUSH2DELAY_IP: &str = "117.184.45.167";
 
 /// Request timeout, matching the legacy 8s budget.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
@@ -58,6 +55,9 @@ impl Default for HostState {
 pub struct TextResponse {
     /// Response body, decoded as UTF-8 (lossy).
     pub body: String,
+    /// Original response bytes for explicitly non-UTF-8 providers such as
+    /// Tencent's GBK quote endpoint.
+    pub body_bytes: Vec<u8>,
     /// Raw Content-Type header value, if present.
     pub content_type: Option<String>,
     /// Successful HTTP status retained for ingestion provenance.
@@ -65,6 +65,31 @@ pub struct TextResponse {
     /// Cache validators retained for incremental document archives.
     pub etag: Option<String>,
     pub last_modified: Option<String>,
+}
+
+fn compatible_get_url(
+    url: &str,
+    params: &[(String, String)],
+    upstream: &str,
+) -> Result<String, DataError> {
+    let mut request_url = reqwest::Url::parse(url).map_err(|error| DataError::Parse {
+        upstream: upstream.to_string(),
+        message: error.to_string(),
+    })?;
+    // Calling `query_pairs_mut()` on a URL without query parameters adds a
+    // trailing `?`. Some quote endpoints treat that character as part of the
+    // path-level symbol (for example `sz300308?`) and return an empty response
+    // under the wrong identity.
+    if !params.is_empty() {
+        request_url.query_pairs_mut().extend_pairs(
+            params
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        );
+    }
+    // EastMoney's historical endpoint aborts the response when commas in its
+    // fields grammar arrive as `%2C`. Comma is a legal query sub-delimiter.
+    Ok(request_url.as_str().replace("%2C", ","))
 }
 
 /// Shared HTTP client with adaptive throttling and host failover.
@@ -87,28 +112,33 @@ impl Default for HttpClient {
 }
 
 impl HttpClient {
-    /// Build the shared client with proxy routing from `ASTOCK_SOCKS5`.
+    /// Build a direct shared client with no credential-bearing proxy.
     pub fn new() -> Self {
-        Self::with_proxy(ProxyConfig::from_env())
+        Self::with_proxy(ProxyConfig::direct())
     }
 
     /// Build the shared client with an explicit proxy policy.
     ///
-    /// `push2his.eastmoney.com` and `push2.eastmoney.com` are pinned to the
-    /// push2delay CDN IP — the per-client equivalent of the legacy
-    /// `getaddrinfo` monkey-patch (SNI/Host headers stay on the original
-    /// domain). Domestic hosts always use the direct client; only
-    /// `foreign_hosts` URLs use the proxied one (see [`crate::proxy`]).
+    /// EastMoney hosts use current system DNS. The legacy fixed-CDN override
+    /// became harmful when that delay node stopped serving historical K
+    /// lines; host pools now provide failover without changing TLS identity.
+    /// Domestic hosts always use the direct client; only `foreign_hosts` URLs
+    /// use the proxied one (see [`crate::proxy`]).
     pub fn with_proxy(proxy: ProxyConfig) -> Self {
-        let client = Self::build_client(None);
+        // Several domestic market-data CDNs publish an IPv6 address whose
+        // TLS edge closes before sending an HTTP response, while the IPv4
+        // edge is healthy. The first release is Windows-only, so bind the
+        // direct market-data client to IPv4 and keep proxy-routed foreign
+        // traffic on the system default address family.
+        let client = Self::build_client(None, cfg!(windows));
         let proxied = match proxy.proxy_url() {
             Some(url) => match reqwest::Proxy::all(&url) {
                 Ok(p) => {
-                    debug!(proxy = %url, "socks5 proxy configured for foreign hosts");
-                    Some(Self::build_client(Some(p)))
+                    debug!("credential-backed socks5 proxy configured for foreign hosts");
+                    Some(Self::build_client(Some(p), false))
                 }
-                Err(e) => {
-                    warn!(proxy = %url, error = %e, "invalid socks5 proxy URL; all traffic direct");
+                Err(_) => {
+                    warn!("invalid credential-backed socks5 proxy URL; all traffic direct");
                     None
                 }
             },
@@ -123,7 +153,7 @@ impl HttpClient {
         }
     }
 
-    fn build_client(proxy: Option<reqwest::Proxy>) -> reqwest::Client {
+    fn build_client(proxy: Option<reqwest::Proxy>, force_ipv4: bool) -> reqwest::Client {
         let mut headers = HeaderMap::new();
         headers.insert(reqwest::header::ACCEPT, HeaderValue::from_static("*/*"));
         headers.insert(
@@ -134,23 +164,42 @@ impl HttpClient {
             reqwest::header::REFERER,
             HeaderValue::from_static("https://quote.eastmoney.com/"),
         );
-        headers.insert(
-            reqwest::header::CONNECTION,
-            HeaderValue::from_static("keep-alive"),
-        );
-
-        let dns: SocketAddr = format!("{PUSH2DELAY_IP}:443")
-            .parse()
-            .expect("static IP parses");
         let mut builder = reqwest::Client::builder()
             .default_headers(headers)
             .connect_timeout(REQUEST_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
-            .pool_max_idle_per_host(8)
-            .resolve("push2his.eastmoney.com", dns)
-            .resolve("push2.eastmoney.com", dns);
+            .pool_max_idle_per_host(8);
+        #[cfg(windows)]
+        {
+            builder = builder.use_native_tls();
+        }
+        if force_ipv4 {
+            builder = builder.local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+            // Binding 0.0.0.0 does not remove IPv6 DNS candidates from
+            // reqwest on Windows. Resolve the affected CDN names at process
+            // start and keep only the current A records. This is deliberately
+            // not a fixed IP override: every Engine restart re-resolves DNS.
+            for domain in [
+                "push2his.eastmoney.com",
+                "90.push2his.eastmoney.com",
+                "82.push2his.eastmoney.com",
+            ] {
+                let addresses = (domain, 443)
+                    .to_socket_addrs()
+                    .map(|rows| rows.filter(|address| address.is_ipv4()).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                if !addresses.is_empty() {
+                    builder = builder.resolve_to_addrs(domain, &addresses);
+                }
+            }
+        }
         if let Some(p) = proxy {
             builder = builder.proxy(p);
+        } else {
+            // `reqwest` otherwise inherits HTTP(S)_PROXY from the desktop
+            // process and silently routes domestic providers through it,
+            // contradicting ProxyConfig's deny-by-default policy.
+            builder = builder.no_proxy();
         }
         builder.build().expect("reqwest client builds")
     }
@@ -163,9 +212,10 @@ impl HttpClient {
         }
     }
 
-    /// The active proxy policy (for diagnostics / the settings page).
-    pub fn proxy_config(&self) -> &ProxyConfig {
-        &self.proxy
+    /// Whether a credential-backed proxy was accepted at startup. The proxy
+    /// address itself is deliberately not exposed to diagnostics or IPC.
+    pub fn proxy_configured(&self) -> bool {
+        self.proxied.is_some()
     }
 
     fn current_ua(&self) -> &'static str {
@@ -251,11 +301,14 @@ impl HttpClient {
         let host = Self::host_key(url);
         self.throttle(&host).await;
 
-        let mut request = self
-            .client_for(url)
-            .get(url)
-            .header(reqwest::header::USER_AGENT, self.current_ua())
-            .query(params);
+        let compatible_url = compatible_get_url(url, params, &host)?;
+        let mut request = self.client_for(url).get(compatible_url);
+        // The EastMoney history cluster currently aborts responses carrying
+        // a browser UA on some system-proxy paths. Other market endpoints do
+        // need a realistic UA, so keep this compatibility exception narrow.
+        if !host.ends_with("push2his.eastmoney.com") {
+            request = request.header(reqwest::header::USER_AGENT, self.current_ua());
+        }
         for (key, value) in headers {
             request = request.header(key, value);
         }
@@ -322,6 +375,7 @@ impl HttpClient {
                 self.on_success(&host);
                 Ok(TextResponse {
                     body: String::from_utf8_lossy(&bytes).into_owned(),
+                    body_bytes: bytes.to_vec(),
                     content_type,
                     status: status.as_u16(),
                     etag,
@@ -574,6 +628,23 @@ mod tests {
         assert!(payload_usable(&serde_json::json!({"data": {"klines": []}})).is_err());
         assert!(payload_usable(&serde_json::json!({"data": null})).is_err());
         assert!(payload_usable(&serde_json::json!({"rc": 0})).is_err());
+    }
+
+    #[test]
+    fn empty_params_do_not_mutate_path_level_quote_identity() {
+        assert_eq!(
+            compatible_get_url("https://hq.sinajs.cn/list=sz300308", &[], "sina").unwrap(),
+            "https://hq.sinajs.cn/list=sz300308"
+        );
+        assert_eq!(
+            compatible_get_url(
+                "https://example.com/kline",
+                &[("fields".to_string(), "f1,f2".to_string())],
+                "example"
+            )
+            .unwrap(),
+            "https://example.com/kline?fields=f1,f2"
+        );
     }
 
     #[test]

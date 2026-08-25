@@ -167,9 +167,14 @@ export default function StockPage() {
   const [chanlunErr, setChanlunErr] = useState<string | null>(null);
   const [showChanlun, setShowChanlun] = useState(false);
   const [sideOpen, setSideOpen] = useState(true);
+  const [analysisWidth, setAnalysisWidth] = useState(() => {
+    const saved = Number(localStorage.getItem("astock.stock.analysis-width"));
+    return Number.isFinite(saved) && saved >= 300 && saved <= 680 ? saved : 420;
+  });
 
   const [watchMsg, setWatchMsg] = useState<string | null>(null);
   const quoteRef = useRef<Quote | null>(null);
+  const detailMainRef = useRef<HTMLDivElement | null>(null);
   quoteRef.current = quote;
 
   useEffect(() => {
@@ -306,8 +311,33 @@ export default function StockPage() {
 
   const q = quote;
 
+  const beginAnalysisResize = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0 || !detailMainRef.current) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = analysisWidth;
+    const containerWidth = detailMainRef.current.getBoundingClientRect().width;
+    const maxWidth = Math.min(680, Math.max(360, containerWidth * 0.48));
+    document.body.classList.add("stock-panel-resizing");
+    const move = (moveEvent: PointerEvent) => {
+      setAnalysisWidth(Math.round(Math.min(maxWidth, Math.max(300, startWidth + startX - moveEvent.clientX))));
+    };
+    const finish = (upEvent: PointerEvent) => {
+      const width = Math.round(Math.min(maxWidth, Math.max(300, startWidth + startX - upEvent.clientX)));
+      setAnalysisWidth(width);
+      localStorage.setItem("astock.stock.analysis-width", String(width));
+      document.body.classList.remove("stock-panel-resizing");
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  };
+
   return (
-    <div className="flex h-full flex-col gap-3 overflow-hidden p-3">
+    <div className="stock-detail-page flex h-full flex-col gap-3 overflow-hidden p-3">
       {/* 顶部报价条(固定) */}
       <div className="card shrink-0 px-4 py-3">
         {quoteErr && !q ? (
@@ -396,9 +426,13 @@ export default function StockPage() {
       </div>
 
       {/* 中部:图表列(自适应填满)+ 右侧信息栏(可折叠) */}
-      <div className="relative flex min-h-0 flex-1 gap-3">
+      <div
+        ref={detailMainRef}
+        className={`stock-detail-main ${sideOpen ? "analysis-open" : "analysis-closed"}`}
+        style={{ "--analysis-width": `${analysisWidth}px` } as React.CSSProperties}
+      >
         {/* 图表列 */}
-        <div className="card flex min-w-0 flex-1 flex-col overflow-hidden">
+        <div className="stock-chart-panel card flex min-w-0 flex-1 flex-col overflow-hidden">
           <div className="card-title shrink-0 flex-wrap gap-y-2">
             <Seg
               options={[
@@ -513,7 +547,15 @@ export default function StockPage() {
 
         {/* 右侧信息栏:可折叠;<xl 窄窗口时为覆盖式抽屉,不挤压图表 */}
         {sideOpen ? (
-          <aside className="card anim-drawer-in absolute inset-y-0 right-0 z-20 flex w-[380px] max-w-[85%] flex-col overflow-hidden shadow-xl xl:static xl:z-auto xl:max-w-none xl:shrink-0 xl:shadow-none">
+          <>
+          <button
+            className="stock-analysis-resizer"
+            aria-label="调整图表与分析面板宽度"
+            title="拖动调整比例，双击恢复默认宽度"
+            onPointerDown={beginAnalysisResize}
+            onDoubleClick={() => { setAnalysisWidth(420); localStorage.setItem("astock.stock.analysis-width", "420"); }}
+          />
+          <aside className="stock-analysis-panel card anim-drawer-in flex min-w-0 flex-col overflow-hidden">
             <div className="card-title shrink-0 justify-between">
               分析面板
               <button
@@ -524,7 +566,7 @@ export default function StockPage() {
                 收起 »
               </button>
             </div>
-            <div className="stagger min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+            <div className="stock-analysis-scroll stagger min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
               {mode === "pro" && (
                 orderBook ? <OrderBookPanel data={orderBook} /> : orderBookErr ? (
                   <div className="card"><div className="card-title">五档盘口</div><DegradeBox text={orderBookErr} /></div>
@@ -583,8 +625,9 @@ export default function StockPage() {
               )}
             </div>
           </aside>
+          </>
         ) : (
-          <div className="card flex w-10 shrink-0 flex-col items-center gap-2 py-3">
+          <div className="stock-analysis-collapsed card flex w-10 shrink-0 flex-col items-center gap-2 py-3">
             <button
               className="btn !px-1.5"
               title="展开分析面板"

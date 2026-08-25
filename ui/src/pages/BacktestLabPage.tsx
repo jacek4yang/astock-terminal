@@ -1,7 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import type * as echarts from "echarts";
-import { errMsg, searchStocks, type SearchResult } from "../lib/api";
+import {
+  backtestCancel,
+  backtestStart,
+  backtestStatus,
+  errMsg,
+  listStrategies,
+  searchStocks,
+  type BacktestJobSnapshot as ApiBacktestJobSnapshot,
+  type SearchResult,
+} from "../lib/api";
 import Chart from "../components/Chart";
 import { ErrorBox, LoadBar, Term } from "../components/ui";
 
@@ -58,16 +66,7 @@ interface BacktestJson {
   note?: string;
 }
 
-interface BacktestJobSnapshot {
-  job_id: string | null;
-  status: "idle" | "running" | "completed" | "failed" | "cancelled" | string;
-  phase: string;
-  progress: number | null;
-  started_at: number | null;
-  updated_at: number;
-  result: BacktestJson | null;
-  error: string | null;
-}
+type BacktestJobSnapshot = ApiBacktestJobSnapshot<BacktestJson>;
 
 // ==================== 策略清单与参数定义 ====================
 
@@ -308,22 +307,20 @@ export default function BacktestLabPage() {
 
   // 回测运行于后端；离开页面再回来时恢复任务、阶段和结果。
   useEffect(() => {
-    invoke<BacktestJobSnapshot>("backtest_status").then(applyJobSnapshot).catch(() => {});
+    backtestStatus<BacktestJson>().then(applyJobSnapshot).catch(() => {});
   }, []);
 
   useEffect(() => {
     if (!running) return;
     const timer = setInterval(() => {
-      invoke<BacktestJobSnapshot>("backtest_status")
-        .then(applyJobSnapshot)
-        .catch(() => {});
+      backtestStatus<BacktestJson>().then(applyJobSnapshot).catch(() => {});
     }, 750);
     return () => clearInterval(timer);
   }, [running]);
 
   // list_strategies:契约补齐后优先后端清单;失败则保持内置清单降级
   useEffect(() => {
-    invoke<Array<{ name: string; description?: string; multi_symbol?: boolean }>>("list_strategies")
+    listStrategies()
       .then((list) => {
         if (!Array.isArray(list) || list.length === 0) return;
         setStrategies(
@@ -415,9 +412,9 @@ export default function BacktestLabPage() {
         params,
         pool: meta.multi_symbol ? poolList : undefined,
       };
-      const started = await invoke<{ job_id: string; started: boolean }>("backtest_start", args);
+      const started = await backtestStart(args);
       setJobId(started.job_id);
-      const snapshot = await invoke<BacktestJobSnapshot>("backtest_status");
+      const snapshot = await backtestStatus<BacktestJson>();
       applyJobSnapshot(snapshot);
     } catch (e) {
       setErr(errMsg(e));
@@ -429,8 +426,8 @@ export default function BacktestLabPage() {
   const cancel = async () => {
     setErr(null);
     try {
-      await invoke<{ cancelled: boolean }>("backtest_cancel");
-      const snapshot = await invoke<BacktestJobSnapshot>("backtest_status");
+      await backtestCancel();
+      const snapshot = await backtestStatus<BacktestJson>();
       applyJobSnapshot(snapshot);
     } catch (e) {
       setErr(errMsg(e));

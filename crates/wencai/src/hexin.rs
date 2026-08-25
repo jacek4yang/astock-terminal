@@ -44,9 +44,7 @@ pub fn hexin_v() -> Result<String, WencaiError> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn generates_plausible_token() {
-        let token = hexin_v().expect("hexin_v should succeed");
+    fn assert_plausible_token(token: &str) {
         // Observed tokens (node + QuickJS) are ~48 chars from a URL-safe
         // base64-ish alphabet; accept a generous band to avoid brittle tests.
         assert!(
@@ -63,8 +61,19 @@ mod tests {
     }
 
     #[test]
-    fn tokens_vary_between_calls() {
-        // v() embeds current-time jitter; two calls should differ.
-        assert_ne!(hexin_v().unwrap(), hexin_v().unwrap());
+    fn generates_plausible_token() {
+        let token = hexin_v().expect("hexin_v should succeed");
+        assert_plausible_token(&token);
+    }
+
+    #[test]
+    fn back_to_back_tokens_remain_valid() {
+        // The vendored signer includes wall-clock state, but two executions
+        // within the same timer tick are allowed to return the same token.
+        // Equality is not part of the protocol contract; validity is.
+        let first = hexin_v().expect("first hexin_v should succeed");
+        let second = hexin_v().expect("second hexin_v should succeed");
+        assert_plausible_token(&first);
+        assert_plausible_token(&second);
     }
 }

@@ -1,0 +1,230 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://astock.local/schema/agent-v1.json",
+  "title": "AStock Agent task contract v1",
+  "type": "object",
+  "properties": {
+    "service_version": { "const": "6.0.0" },
+    "startup_required_capabilities": {
+      "type": "array",
+      "prefixItems": [
+        { "const": "pure_reducer" },
+        { "const": "replay" },
+        { "const": "evidence_gate" },
+        { "const": "advanced_tool_planning" },
+        { "const": "closed_engine_effects" },
+        { "const": "deterministic_report_verification" },
+        { "const": "sse_stream_recovery" }
+      ]
+    },
+    "request_kinds": {
+      "type": "array",
+      "prefixItems": [
+        { "const": "system.handshake" },
+        { "const": "diagnostics.status" },
+        { "const": "agent.provider.test" },
+        { "const": "agent.provider.configure" },
+        { "const": "agent.start" },
+        { "const": "agent.restore" },
+        { "const": "agent.event" },
+        { "const": "agent.research.workflow" },
+        { "const": "agent.research.workflow.continue" },
+        { "const": "agent.task.snapshot" }
+      ]
+    },
+    "renderer_request_kinds": {
+      "type": "array",
+      "prefixItems": [
+        { "const": "diagnostics.status" },
+        { "const": "agent.provider.test" },
+        { "const": "agent.provider.configure" },
+        { "const": "agent.start" },
+        { "const": "agent.event" },
+        { "const": "agent.research.workflow" }
+      ]
+    },
+    "service_methods": {
+      "type": "array",
+      "prefixItems": [
+        { "const": "task.create" },
+        { "const": "task.list" },
+        { "const": "task.get" },
+        { "const": "task.branch" },
+        { "const": "task.resume" },
+        { "const": "task.cancel" },
+        { "const": "task.answer" }
+      ]
+    }
+  },
+  "$defs": {
+    "agent_phase": {
+      "type": "string",
+      "enum": [
+        "idle", "preparing", "waiting_for_user", "reasoning",
+        "awaiting_tools", "reviewing", "synthesizing", "verifying",
+        "suspended", "completed", "verification_failed", "cancelled", "hard_failed"
+      ]
+    },
+    "clarification_option": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "recommended"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "description": { "type": ["string", "null"], "maxLength": 240 },
+        "recommended": { "type": "boolean" }
+      }
+    },
+    "clarification_question": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "question", "kind", "options", "allow_other"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "header": { "type": ["string", "null"], "maxLength": 32 },
+        "question": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "kind": { "type": "string", "enum": ["single", "multiple"] },
+        "options": { "type": "array", "minItems": 2, "maxItems": 6, "items": { "$ref": "#/$defs/clarification_option" } },
+        "allow_other": { "type": "boolean" },
+        "target_fields": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+      }
+    },
+    "clarification_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "questions"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "description": { "type": ["string", "null"], "maxLength": 300 },
+        "questions": { "type": "array", "minItems": 1, "maxItems": 3, "items": { "$ref": "#/$defs/clarification_question" } }
+      }
+    },
+    "clarification_answer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["question_id", "option_ids", "decision_mode"],
+      "properties": {
+        "question_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "option_ids": { "type": "array", "items": { "type": "string" } },
+        "answer": { "type": ["string", "null"], "maxLength": 500 },
+        "decision_mode": { "type": "string", "enum": ["user_selected", "agent_best_with_evidence"] }
+      }
+    },
+    "task_spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "objective", "security_universe", "as_of", "research_start",
+        "research_end", "investment_horizon", "comparison_benchmark",
+        "output_type", "evidence_requirement"
+      ],
+      "properties": {
+        "objective": { "type": "string", "minLength": 1 },
+        "security_universe": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "as_of": { "type": "string", "format": "date-time" },
+        "research_start": { "type": "string", "format": "date" },
+        "research_end": { "type": "string", "format": "date" },
+        "investment_horizon": { "type": "string", "minLength": 1 },
+        "comparison_benchmark": { "type": "string", "minLength": 1 },
+        "output_type": { "type": "string", "enum": ["research_report", "manual_plan", "evidence_review"] },
+        "evidence_requirement": { "type": "string", "enum": ["standard", "strict", "primary_sources"] }
+      }
+    },
+    "agent_question": {
+      "$ref": "#/$defs/clarification_question",
+      "description": "Stable public name for one model-generated Agent clarification question."
+    },
+    "conversation_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conversation_id", "title", "phase", "message_count", "evidence_count", "created_at", "updated_at"],
+      "properties": {
+        "conversation_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "phase": { "$ref": "#/$defs/agent_phase" },
+        "message_count": { "type": "integer", "minimum": 0 },
+        "evidence_count": { "type": "integer", "minimum": 0 },
+        "parent_conversation_id": { "type": ["string", "null"], "maxLength": 128 },
+        "branch_from_message_id": { "type": ["string", "null"], "maxLength": 128 },
+        "branch_from_checkpoint_task_id": { "type": ["string", "null"], "maxLength": 128 },
+        "branch_from_checkpoint_seq": { "type": ["integer", "null"], "minimum": 1 },
+        "created_at": { "type": "integer", "minimum": 0 },
+        "updated_at": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "task_checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_id", "phase", "accepted_seq", "pending_tool_ids", "completed_tool_ids", "evidence_ids", "state_version"],
+      "properties": {
+        "task_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "phase": { "$ref": "#/$defs/agent_phase" },
+        "accepted_seq": { "type": "integer", "minimum": 0 },
+        "pending_tool_ids": { "type": "array", "items": { "type": "string", "maxLength": 128 }, "maxItems": 256 },
+        "completed_tool_ids": { "type": "array", "items": { "type": "string", "maxLength": 128 }, "maxItems": 2048 },
+        "evidence_ids": { "type": "array", "items": { "type": "string", "maxLength": 128 }, "maxItems": 4096 },
+        "state_version": { "type": "string", "minLength": 1, "maxLength": 80 }
+      }
+    },
+    "tool_activity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["call_id", "kind", "title", "detail", "status", "cache_hit", "evidence_count"],
+      "properties": {
+        "call_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "detail": { "type": "string", "maxLength": 1000 },
+        "status": { "type": "string", "enum": ["pending", "running", "succeeded", "failed", "skipped"] },
+        "cache_hit": { "type": "boolean" },
+        "evidence_count": { "type": "integer", "minimum": 0 },
+        "started_at_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "finished_at_ms": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "evidence_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence_id", "source", "quality_status"],
+      "properties": {
+        "evidence_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "source": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "source_version_id": { "type": ["string", "null"], "maxLength": 160 },
+        "as_of": { "type": ["string", "null"], "format": "date-time" },
+        "fetched_at": { "type": ["string", "null"], "format": "date-time" },
+        "quality_status": { "type": "string", "enum": ["verified", "single_source", "stale", "conflicting", "missing", "blocked"] },
+        "original_url": { "type": ["string", "null"], "format": "uri", "maxLength": 2048 }
+      }
+    },
+    "verification_finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message", "evidence_ids", "blocking"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "severity": { "type": "string", "enum": ["info", "warning", "error"] },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "evidence_ids": { "type": "array", "items": { "type": "string", "maxLength": 128 }, "maxItems": 256 },
+        "blocking": { "type": "boolean" }
+      }
+    },
+    "provider_quota": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "model_name"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "model_name": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "interval_used": { "type": ["integer", "null"], "minimum": 0 },
+        "interval_total": { "type": ["integer", "null"], "minimum": 0 },
+        "interval_remaining_percent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+        "interval_reset_at_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "weekly_used": { "type": ["integer", "null"], "minimum": 0 },
+        "weekly_total": { "type": ["integer", "null"], "minimum": 0 },
+        "weekly_remaining_percent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+        "weekly_reset_at_ms": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    }
+  }
+}

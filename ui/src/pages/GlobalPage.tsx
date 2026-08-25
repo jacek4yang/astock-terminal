@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useAgentSession } from "../agentSession";
 import { ErrorBox, Loading } from "../components/ui";
 import {
   errMsg,
@@ -16,6 +15,8 @@ import {
   type GlobalProviderRuntime,
   type GlobalSyncSnapshot,
 } from "../lib/api";
+import { queueAgentDraft } from "../workbench/agentDraft";
+import { useWorkspaceStore } from "../workbench/store";
 
 const EMPTY_PAGE: GlobalDocumentPage = { items: [], total: 0, page: 1, page_size: 50, total_pages: 0 };
 
@@ -100,7 +101,7 @@ function ProviderPanel({ providers, onClose }: { providers: GlobalProviderRuntim
     <div className="min-h-0 flex-1 space-y-2 overflow-auto p-3">{providers.map((provider) => <article key={provider.provider_id} className="rounded border border-slate-200 p-3 text-xs dark:border-slate-800">
       <div className="flex items-start justify-between gap-3"><div><b>{provider.provider_name}</b><div className="muted mt-0.5">{provider.region} · {CATEGORY_LABELS[provider.category] ?? provider.category} · 原时区 {provider.original_timezone}</div></div><span className={`rounded px-2 py-0.5 ${provider.enabled && !provider.consecutive_failures ? "bg-emerald-500/10 text-emerald-600" : "bg-amber-500/10 text-amber-600"}`}>{!provider.enabled ? "等待凭据" : provider.consecutive_failures ? `连续失败 ${provider.consecutive_failures} 次` : "就绪"}</span></div>
       <div className="mt-2 grid grid-cols-2 gap-2"><div>目标发现延迟：≤ {durationText(provider.target_latency_secs)}</div><div>访问上限：{provider.rate_limit_per_minute} 次/分钟</div><div>最近成功：{timeText(provider.last_success_at)}</div><div>下次重试：{timeText(provider.retry_after)}</div></div>
-      {provider.credential_env && <div className="mt-2 rounded bg-slate-100 p-2 dark:bg-slate-900">配置项：{provider.credential_env}（凭据内容不会显示）</div>}
+      {provider.credential_env && <div className="mt-2 rounded bg-slate-100 p-2 dark:bg-slate-900">Credential Manager 槽：{provider.credential_env}（凭据内容不会显示）</div>}
       <p className="muted mt-2 leading-5">许可策略：{provider.license_policy}</p>{provider.last_error && <div className="mt-2 rounded bg-red-500/10 p-2 text-red-600 dark:text-red-300">{provider.last_error}</div>}
       <button type="button" className="mt-2 text-blue-600 underline" onClick={() => window.open(provider.official_url, "_blank")}>打开官方入口</button>
     </article>)}</div>
@@ -153,7 +154,11 @@ export default function GlobalPage() {
   useEffect(() => { if (!sync?.running && sync?.status.startsWith("completed")) { void load(); void getGlobalProviderHealth().then(setProviders); } }, [sync?.running, sync?.status, load]);
 
   const startSync = async () => { setError(null); try { await globalSyncStart({ sec_cik: cik || undefined, include_world_bank: true, max_sec_filings: 20 }); setSyncExpanded(true); setSync(await globalSyncStatus()); } catch (reason) { setError(errMsg(reason)); } };
-  const askAgent = (item: GlobalDocumentListItem) => { useAgentSession.getState().setInput(`请核验海外一级来源文档 ${item.document_id}（${item.provider_name}，证据版本 ${item.source_version_id ?? "尚未归档"}），先保留原始时区、数字、单位和币种，再分析它可能通过哪些有证据的客户/供应商/产品/商品路径影响 A 股。逐边给出 source_version_id、原文位置、置信度和失效条件；没有双侧正式证据的路径不得补全。`); navigate("/agent"); };
+  const askAgent = (item: GlobalDocumentListItem) => {
+    queueAgentDraft(`请核验海外一级来源文档 ${item.document_id}（${item.provider_name}，证据版本 ${item.source_version_id ?? "尚未归档"}），先保留原始时区、数字、单位和币种，再分析它可能通过哪些有证据的客户/供应商/产品/商品路径影响 A 股。逐边给出 source_version_id、原文位置、置信度和失效条件；没有双侧正式证据的路径不得补全。`);
+    useWorkspaceStore.getState().setPreset("agent");
+    navigate("/");
+  };
   const ready = useMemo(() => providers.filter((provider) => provider.enabled).length, [providers]);
 
   return <div className="relative flex h-full min-w-0 flex-col gap-3 overflow-hidden p-3">

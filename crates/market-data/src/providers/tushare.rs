@@ -33,9 +33,6 @@ use tracing::{debug, warn};
 /// The single tushare pro endpoint.
 pub const TUSHARE_URL: &str = "https://api.tushare.pro";
 
-/// Env var carrying the user's tushare token.
-pub const TOKEN_ENV: &str = "TUSHARE_TOKEN";
-
 /// Business error codes (doc §1.2): 2002 = 权限不足 (never retried),
 /// 40203 = rate limited (back off via the shared adaptive limiter).
 const CODE_NO_PERMISSION: i64 = 2002;
@@ -145,11 +142,6 @@ impl TushareProvider {
             token: token.filter(|t| !t.trim().is_empty()),
             tier: Mutex::new(TushareTier::Unknown),
         }
-    }
-
-    /// Build from the `TUSHARE_TOKEN` env var (`None` when unset).
-    pub fn from_env(http: Arc<HttpClient>, cache: Arc<TtlCache>) -> Self {
-        Self::new(http, cache, std::env::var(TOKEN_ENV).ok())
     }
 
     /// Whether a token is configured.

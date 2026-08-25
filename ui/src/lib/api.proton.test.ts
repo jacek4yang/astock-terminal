@@ -1,0 +1,485 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const { requestNative } = vi.hoisted(() => ({ requestNative: vi.fn() }));
+
+vi.mock("../bridge", () => ({
+  isProton: () => true,
+  requestNative,
+}));
+
+import {
+  backtestCancel,
+  backtestStart,
+  backtestStatus,
+  chanlunMinute,
+  disclosureSyncCancel,
+  disclosureSyncStart,
+  disclosureSyncStatus,
+  checkNewsArchiveIntegrity,
+  cancelEventAnalysis,
+  cancelRelationExtraction,
+  getBoardConstituents,
+  getASharesPage,
+  getDisclosureDetail,
+  getDisclosureProviderHealth,
+  getEntityLinkReviews,
+  getGlobalGoldenChains,
+  getGlobalProviderHealth,
+  getGlobalTransmissionPaths,
+  getMarketRegime,
+  graphAsOf,
+  graphEdgeTimeline,
+  graphHistoryBounds,
+  graphSnapshotDiff,
+  graphSnapshotGet,
+  graphSubgraph,
+  getNewsArchiveRecent,
+  getNewsArchiveRevisions,
+  getNewsEventClusterDetail,
+  getNewsEventClusters,
+  getNewsIngestObservations,
+  getNewsEntityLinks,
+  getPendingNewsEvidenceReviews,
+  getNewsProviderHealth,
+  getEventAnalysisStatus,
+  getPool,
+  getRelationExtractionStatus,
+  globalSyncCancel,
+  globalSyncStart,
+  globalSyncStatus,
+  queryGlobalDocuments,
+  quantResearchCancel,
+  quantResearchSnapshotGet,
+  quantResearchSnapshotList,
+  quantResearchStart,
+  quantResearchStatus,
+  listStrategies,
+  queryDisclosures,
+  queryRelationReviews,
+  queryNewsCenter,
+  relationshipGraph,
+  refreshNewsCenter,
+  mergeNewsEventClusters,
+  resolveNewsEvidenceReview,
+  resolveEntityLinkReview,
+  retractRelationCandidate,
+  reviewRelationCandidate,
+  setNewsItemState,
+  setNewsProviderEnabled,
+  splitNewsEventRevision,
+  startEventAnalysis,
+  startRelationExtraction,
+  supplyChainShock,
+} from "./api";
+
+describe("Proton global research bridge", () => {
+  beforeEach(() => requestNative.mockReset().mockResolvedValue({}));
+
+  it("routes every global read and job command to the coarse Engine service", async () => {
+    await globalSyncStart({ sec_cik: "0000320193", include_world_bank: true, max_sec_filings: 20 });
+    await globalSyncStatus();
+    await globalSyncCancel();
+    await getGlobalProviderHealth();
+    await queryGlobalDocuments({ provider_id: "sec_edgar", keyword: "10-Q", primary_only: true, page: 2, page_size: 50 });
+    await getGlobalGoldenChains();
+    await getGlobalTransmissionPaths("global:sec:0000320193", 1234, 4);
+
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "research.global.sync.start",
+      "research.global.sync.status",
+      "research.global.sync.cancel",
+      "research.global.providers",
+      "research.global.documents",
+      "research.global.chains",
+      "research.global.transmission",
+    ]);
+    expect(requestNative.mock.calls[0][2]).toEqual({
+      sec_cik: "0000320193",
+      include_world_bank: true,
+      max_sec_filings: 20,
+    });
+    expect(requestNative.mock.calls[4][2]).toMatchObject({ page: 2, page_size: 50 });
+    expect(requestNative.mock.calls[6][2]).toEqual({
+      root_entity_id: "global:sec:0000320193",
+      as_of: 1234,
+      max_depth: 4,
+    });
+  });
+
+  it("routes intraday analysis and datacenter views without legacy Tauri", async () => {
+    await chanlunMinute("300308");
+    await getPool("strong", "2026-08-24");
+    await getBoardConstituents("bk0447");
+
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "analysis.chanlun.minute",
+      "research.market_pool",
+      "research.board.constituents",
+    ]);
+    expect(requestNative.mock.calls[0][2]).toEqual({ symbol: "300308" });
+    expect(requestNative.mock.calls[1][2]).toEqual({ pool: "strong", date: "2026-08-24" });
+    expect(requestNative.mock.calls[2][2]).toEqual({ board_code: "bk0447" });
+  });
+
+  it("keeps all-market filtering, sorting and snapshot paging inside the Engine", async () => {
+    await getASharesPage({
+      cursor: 100,
+      limit: 50,
+      snapshot_id: "market-shares:eastmoney:1780000000000:query",
+      keyword: "中际旭创",
+      market: "SZ",
+      board: "chi_next",
+      pct_filter: "up",
+      min_price: 10,
+      max_price: 200,
+      min_amount: 100_000_000,
+      available_only: true,
+      sort_by: "amount",
+      sort_asc: false,
+    });
+
+    expect(requestNative).toHaveBeenCalledWith("engine", "market.shares.page", {
+      cursor: 100,
+      limit: 50,
+      snapshot_id: "market-shares:eastmoney:1780000000000:query",
+      keyword: "中际旭创",
+      market: "SZ",
+      board: "chi_next",
+      pct_filter: "up",
+      min_price: 10,
+      max_price: 200,
+      min_amount: 100_000_000,
+      available_only: true,
+      sort_by: "amount",
+      sort_asc: false,
+    }, { deadlineMs: 60_000 });
+  });
+
+  it("routes the complete disclosure workflow through the Engine", async () => {
+    await queryDisclosures({
+      security_code: "300308",
+      keyword: null,
+      category: null,
+      status: null,
+      primary_only: true,
+      page: 1,
+      page_size: 50,
+    });
+    await getDisclosureDetail("disc:verified");
+    await getDisclosureProviderHealth();
+    await disclosureSyncStart({ security_code: "300308", days: 90, max_pages: 2 });
+    await disclosureSyncStatus();
+    await disclosureSyncCancel();
+
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "research.disclosures.list",
+      "research.disclosures.detail",
+      "research.disclosures.providers",
+      "research.disclosures.sync.start",
+      "research.disclosures.sync.status",
+      "research.disclosures.sync.cancel",
+    ]);
+    expect(requestNative.mock.calls[0][2]).toMatchObject({
+      security_code: "300308",
+      primary_only: true,
+      page_size: 50,
+    });
+    expect(requestNative.mock.calls[1][2]).toEqual({ disclosure_id: "disc:verified" });
+    expect(requestNative.mock.calls[3][2]).toEqual({
+      security_code: "300308",
+      days: 90,
+      max_pages: 2,
+    });
+  });
+
+  it("routes news provider diagnostics and immutable archive reads", async () => {
+    await getNewsProviderHealth();
+    await setNewsProviderEnabled("cninfo-announcements", false);
+    await getNewsArchiveRecent(75);
+    await getNewsArchiveRevisions("document:abc");
+    await checkNewsArchiveIntegrity();
+    await getNewsIngestObservations("cninfo-announcements", 25);
+
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "research.news.providers",
+      "research.news.provider.set",
+      "research.news.archive.recent",
+      "research.news.archive.revisions",
+      "research.news.archive.integrity",
+      "research.news.archive.observations",
+    ]);
+    expect(requestNative.mock.calls[1][2]).toEqual({
+      provider_id: "cninfo-announcements",
+      enabled: false,
+    });
+    expect(requestNative.mock.calls[2][2]).toEqual({ limit: 75 });
+    expect(requestNative.mock.calls[3][2]).toEqual({ document_id: "document:abc" });
+    expect(requestNative.mock.calls[5][2]).toEqual({
+      provider_id: "cninfo-announcements",
+      limit: 25,
+    });
+  });
+
+  it("routes news clustering, review and user state through durable Engine services", async () => {
+    await queryNewsCenter({
+      keyword: "业绩",
+      category: "important",
+      source_id: "",
+      importance: "important",
+      entity_keywords: ["300308"],
+      event_type: "earnings",
+      language: "zh-CN",
+      verification: "primary",
+      user_state: "",
+      from_utc: null,
+      to_utc: null,
+      page: 1,
+      page_size: 50,
+    });
+    await refreshNewsCenter(["cninfo-announcements"], "业绩", "300308", 100);
+    await setNewsItemState("document:abc", "favorite", true);
+    await getNewsEventClusters(80);
+    await getNewsEventClusterDetail("cluster:one");
+    await mergeNewsEventClusters("cluster:one", "cluster:two", "同一公司同一事项");
+    await splitNewsEventRevision("revision:three", "发布日期与主体均不同");
+    await getPendingNewsEvidenceReviews(40);
+    await resolveNewsEvidenceReview("task:1", "growth", "revision:three");
+
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "research.news.center",
+      "research.news",
+      "research.news.user_state",
+      "research.news.clusters.list",
+      "research.news.clusters.detail",
+      "research.news.clusters.merge",
+      "research.news.clusters.split",
+      "research.news.reviews.list",
+      "research.news.reviews.resolve",
+    ]);
+    expect(requestNative.mock.calls[0][2]).toMatchObject({
+      keyword: "业绩",
+      category: "important",
+      page_size: 50,
+    });
+    expect(requestNative.mock.calls[1][2]).toEqual({
+      sources: ["cninfo-announcements"],
+      keyword: "业绩",
+      symbol: "300308",
+      limit: 100,
+    });
+    expect(requestNative.mock.calls[2][2]).toEqual({
+      document_id: "document:abc",
+      action: "favorite",
+      value: true,
+    });
+    expect(requestNative.mock.calls[5][2]).toMatchObject({
+      from_cluster_id: "cluster:one",
+      to_cluster_id: "cluster:two",
+    });
+    expect(requestNative.mock.calls[8][2]).toEqual({
+      task_id: "task:1",
+      conclusion_key: "growth",
+      triggering_revision: "revision:three",
+    });
+  });
+
+  it("routes entity linking and human review without renderer-side truth", async () => {
+    await getNewsEntityLinks(["revision:one", "revision:two"]);
+    await getEntityLinkReviews(60);
+    await resolveEntityLinkReview("link:one", "entity:listed:300308", true, "证券代码与法定名称一致");
+
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "research.entities.links",
+      "research.entities.reviews",
+      "research.entities.resolve",
+    ]);
+    expect(requestNative.mock.calls[0][2]).toEqual({
+      revision_ids: ["revision:one", "revision:two"],
+    });
+    expect(requestNative.mock.calls[2][2]).toEqual({
+      link_id: "link:one",
+      entity_id: "entity:listed:300308",
+      accept: true,
+      reason: "证券代码与法定名称一致",
+    });
+  });
+
+  it("routes background event price-in analysis with resumable job ids", async () => {
+    await startEventAnalysis("revision:event", "300308", 800, 500);
+    await getEventAnalysisStatus("event-job");
+    await cancelEventAnalysis("event-job");
+
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "research.events.analysis.start",
+      "research.events.analysis.status",
+      "research.events.analysis.cancel",
+    ]);
+    expect(requestNative.mock.calls[0][2]).toEqual({
+      revision_id: "revision:event",
+      security_code: "300308",
+      structured_impact_bps: 800,
+      consensus_impact_bps: 500,
+    });
+    expect(requestNative.mock.calls[1][2]).toEqual({ job_id: "event-job" });
+    expect(requestNative.mock.calls[2][2]).toEqual({ job_id: "event-job" });
+  });
+
+  it("routes relation extraction, human review and retraction through the Engine", async () => {
+    await startRelationExtraction("source-version:annual", "annual_report");
+    await getRelationExtractionStatus("relation-job");
+    await cancelRelationExtraction("relation-job");
+    await queryRelationReviews("pending_review", "annual_report", 8_500, 1, 50);
+    await reviewRelationCandidate({
+      candidate_id: "candidate:one",
+      decision: "accepted",
+      reviewer: "researcher",
+      reason: "原文、实体和报告期均已复核",
+      subject_text: null,
+      object_text: null,
+      relation: null,
+      product_text: null,
+      merged_entity_id: null,
+      confidential: false,
+      non_inferable: false,
+      publish: true,
+      dataset_split: "dev",
+      training_eligible: true,
+    });
+    await retractRelationCandidate("candidate:one", "来源后续公告已否定该关系");
+
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "research.relations.extraction.start",
+      "research.relations.extraction.status",
+      "research.relations.extraction.cancel",
+      "research.relations.reviews",
+      "research.relations.review",
+      "research.relations.retract",
+    ]);
+    expect(requestNative.mock.calls[0][2]).toEqual({
+      source_version_id: "source-version:annual",
+      document_kind: "annual_report",
+      model_id: null,
+      model_version: null,
+      model_candidates: [],
+    });
+    expect(requestNative.mock.calls[3][2]).toMatchObject({
+      status: "pending_review",
+      min_confidence_bps: 8_500,
+      page_size: 50,
+    });
+    expect(requestNative.mock.calls[4][2]).toMatchObject({
+      candidate_id: "candidate:one",
+      decision: "accepted",
+      publish: true,
+    });
+    expect(requestNative.mock.calls[5][2]).toEqual({
+      candidate_id: "candidate:one",
+      reason: "来源后续公告已否定该关系",
+    });
+  });
+
+  it("routes bitemporal graph, shock and market relationships without the Rust Agent", async () => {
+    await graphSubgraph("300308", 3);
+    await graphAsOf(1_787_500_000, 1_787_500_100, "300308", 2);
+    await graphHistoryBounds();
+    await graphEdgeTimeline("edge-identity:one");
+    await graphSnapshotGet("graph-snapshot:one");
+    await graphSnapshotDiff(1_787_500_000, 1_787_500_100, 1_787_600_000, 1_787_600_100);
+    await supplyChainShock("铜", "up", 10);
+    await relationshipGraph(["300308", "000300"], 250);
+
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "research.graph.subgraph",
+      "research.graph.as_of",
+      "research.graph.history_bounds",
+      "research.graph.edge_timeline",
+      "research.graph.snapshot.get",
+      "research.graph.snapshot.diff",
+      "research.graph.shock",
+      "research.market.relationship",
+    ]);
+    expect(requestNative.mock.calls[1][2]).toEqual({
+      business_time: 1_787_500_000,
+      knowledge_time: 1_787_500_100,
+      symbol_or_node: "300308",
+      hops: 2,
+    });
+    expect(requestNative.mock.calls[5][2]).toMatchObject({
+      left_business_time: 1_787_500_000,
+      right_knowledge_time: 1_787_600_100,
+    });
+    expect(requestNative.mock.calls[7][2]).toEqual({
+      symbols: ["300308", "000300"],
+      window_days: 250,
+    });
+  });
+
+  it("routes persistent Quant Lab jobs and immutable snapshots through the Engine", async () => {
+    const config = {
+      symbols: ["300308", "000300"],
+      metric: "pearson" as const,
+      value_mode: "log_return" as const,
+      frequency: "daily" as const,
+      start_date: null,
+      end_date: null,
+      adjust: "qfq" as const,
+      lookback_bars: 750,
+      missing_policy: "drop" as const,
+      rolling_window: 60,
+      max_lag: 5,
+      controls: [],
+      bootstrap_reps: 199,
+      permutation_reps: 199,
+      alpha: 0.05,
+      fdr_method: "benjamini_hochberg" as const,
+      max_pairs: 2_000,
+      max_observations_per_pair: 500,
+      seed: 42,
+      oos_ratio: 0.3,
+    };
+    await quantResearchStart(config);
+    await quantResearchStatus("quant-job");
+    await quantResearchCancel("quant-job");
+    await quantResearchSnapshotGet("quant-snapshot:one");
+    await quantResearchSnapshotList(25);
+
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "research.quant.start",
+      "research.quant.status",
+      "research.quant.cancel",
+      "research.quant.snapshots.get",
+      "research.quant.snapshots.list",
+    ]);
+    expect(requestNative.mock.calls[0][2]).toEqual(config);
+    expect(requestNative.mock.calls[1][2]).toEqual({ job_id: "quant-job" });
+    expect(requestNative.mock.calls[3][2]).toEqual({ snapshot_id: "quant-snapshot:one" });
+    expect(requestNative.mock.calls[4][2]).toEqual({ limit: 25 });
+  });
+
+  it("routes versioned backtests and market regime through the Engine", async () => {
+    await listStrategies();
+    await backtestStart({
+      symbol: "300308",
+      strategy: "ma_cross",
+      params: { fast: 5, slow: 60 },
+      bars: 750,
+    });
+    await backtestStatus();
+    await backtestCancel();
+    await getMarketRegime();
+
+    expect(requestNative.mock.calls.map((call) => call[1])).toEqual([
+      "research.backtest.strategies",
+      "research.backtest.start",
+      "research.backtest.status",
+      "research.backtest.cancel",
+      "research.market.regime",
+    ]);
+    expect(requestNative.mock.calls[1][2]).toEqual({
+      symbol: "300308",
+      strategy: "ma_cross",
+      params: { fast: 5, slow: 60 },
+      bars: 750,
+    });
+  });
+});

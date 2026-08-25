@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/protocol",
+    "crates/engine",
     "crates/core",
     "crates/trading-rules",
     "crates/market-data",
@@ -8,7 +10,6 @@ members = [
     "crates/technical",
     "crates/chanlun",
     "crates/minimax",
-    "crates/agent",
     "crates/fundamental",
     "crates/graph",
     "crates/quant",
@@ -16,7 +17,6 @@ members = [
     "crates/wencai",
     "crates/captcha",
     "crates/tdx",
-    "src-tauri",
     "crates/joinquant",
     "crates/security",
     "crates/evaluation",
@@ -30,15 +30,16 @@ members = [
 ]
 
 [workspace.package]
-version = "5.0.3"
+version = "6.0.0"
 edition = "2021"
-license = "Proprietary"
-rust-version = "1.88"
+license = "LicenseRef-Proprietary"
+publish = false
+rust-version = "1.89"
 
 [workspace.dependencies]
 # async runtime & http
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip", "stream", "socks"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "gzip", "stream", "socks"] }
 futures = "0.3"
 async-trait = "0.1"
 # serialization
@@ -49,14 +50,14 @@ schemars = "0.8"
 thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # time
 chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
 chrono-tz = "0.10"
 # storage
-rusqlite = { version = "0.32", features = ["bundled"] }
-arrow = { version = "54", features = ["prettyprint"] }
-parquet = { version = "54", features = ["arrow"] }
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+arrow = { version = "59.2", features = ["prettyprint"] }
+parquet = { version = "59.2", features = ["arrow"] }
 # utils
 lru = "0.18.2"
 parking_lot = "0.12"

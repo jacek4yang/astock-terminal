@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  getAllAShares,
+  getASharesPage,
   getIndexKline,
   getMarketBreadth,
   errMsg,
-  type AllShare,
+  type AllSharePage,
+  type AllSharePageQuery,
   type Bar,
   type MarketBreadth,
 } from "../lib/api";
@@ -97,7 +98,8 @@ export function pageTokens(page: number, total: number): Array<number | "ellipsi
 
 export default function MarketPage() {
   const [breadth, setBreadth] = useState<MarketBreadth | null>(null);
-  const [shares, setShares] = useState<AllShare[] | null>(null);
+  const [sharePage, setSharePage] = useState<AllSharePage | null>(null);
+  const [shareLoading, setShareLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("amount");
   const [sortAsc, setSortAsc] = useState(false);
@@ -112,58 +114,98 @@ export default function MarketPage() {
   const [filtersOpen, setFiltersOpen] = useState(true);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
+  const [refreshToken, setRefreshToken] = useState(0);
+  const snapshotRef = useRef<{ queryKey: string; snapshotId?: string }>({ queryKey: "" });
   const navigate = useNavigate();
 
-  const load = () => {
-    setError(null);
-    void getMarketBreadth().then(setBreadth).catch((reason) => setError(errMsg(reason)));
-    void getAllAShares().then(setShares).catch((reason) => setError(errMsg(reason)));
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedKeyword(keyword.trim()), 180);
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
+
+  const finiteNumber = (value: string, multiplier = 1) => {
+    if (!value.trim()) return undefined;
+    const number = Number(value) * multiplier;
+    return Number.isFinite(number) && number >= 0 ? number : undefined;
   };
+  const pageQuery = useMemo<Omit<AllSharePageQuery, "cursor" | "limit" | "snapshot_id">>(() => ({
+    keyword: debouncedKeyword || undefined,
+    market: market as AllSharePageQuery["market"],
+    board: board as AllSharePageQuery["board"],
+    pct_filter: pctFilter,
+    min_price: finiteNumber(minPrice),
+    max_price: finiteNumber(maxPrice),
+    min_amount: finiteNumber(minAmountYi, 1e8),
+    available_only: availableOnly,
+    sort_by: sortKey,
+    sort_asc: sortAsc,
+  }), [debouncedKeyword, market, board, pctFilter, minPrice, maxPrice, minAmountYi, availableOnly, sortKey, sortAsc]);
+  const queryKey = JSON.stringify(pageQuery);
 
-  useEffect(load, []);
+  useEffect(() => {
+    let live = true;
+    if (snapshotRef.current.queryKey !== queryKey) {
+      snapshotRef.current = { queryKey };
+      if (page !== 1) {
+        setPage(1);
+        return () => { live = false; };
+      }
+    }
+    setShareLoading(true);
+    setError(null);
+    const request = async (useSnapshot: boolean) => {
+      const result = await getASharesPage({
+        ...pageQuery,
+        cursor: (page - 1) * pageSize,
+        limit: pageSize,
+        ...(useSnapshot && snapshotRef.current.snapshotId
+          ? { snapshot_id: snapshotRef.current.snapshotId }
+          : {}),
+      });
+      if (live) {
+        snapshotRef.current = { queryKey, snapshotId: result.snapshot_id };
+        setSharePage(result);
+      }
+    };
+    void request(true).catch(async (reason) => {
+      const message = errMsg(reason);
+      if (/snapshot/i.test(message)) {
+        snapshotRef.current = { queryKey };
+        try {
+          await request(false);
+          return;
+        } catch (retryReason) {
+          if (live) setError(errMsg(retryReason));
+          return;
+        }
+      }
+      if (/cursor/i.test(message) && page !== 1) {
+        snapshotRef.current = { queryKey };
+        if (live) setPage(1);
+      } else if (live) {
+        setError(message);
+      }
+    }).finally(() => { if (live) setShareLoading(false); });
+    return () => { live = false; };
+  }, [page, pageSize, pageQuery, queryKey, refreshToken]);
 
-  const filtered = useMemo(() => {
-    if (!shares) return [];
-    const query = keyword.trim().toLowerCase();
-    const minP = minPrice === "" ? null : Number(minPrice);
-    const maxP = maxPrice === "" ? null : Number(maxPrice);
-    const minAmount = minAmountYi === "" ? null : Number(minAmountYi) * 1e8;
-    return shares.filter((row) => {
-      if (query && !row.code.includes(query) && !row.name.toLowerCase().includes(query)) return false;
-      if (market !== "all" && row.market !== market) return false;
-      if (board !== "all" && row.board !== board) return false;
-      if (availableOnly && (row.price == null || row.pct == null)) return false;
-      if (minP != null && (row.price == null || row.price < minP)) return false;
-      if (maxP != null && (row.price == null || row.price > maxP)) return false;
-      if (minAmount != null && (row.amount == null || row.amount < minAmount)) return false;
-      if (pctFilter === "up" && (row.pct == null || row.pct <= 0)) return false;
-      if (pctFilter === "down" && (row.pct == null || row.pct >= 0)) return false;
-      if (pctFilter === "flat" && row.pct !== 0) return false;
-      if (pctFilter === "limit_up" && (row.pct == null || row.pct < 9.8)) return false;
-      if (pctFilter === "limit_down" && (row.pct == null || row.pct > -9.8)) return false;
-      return true;
-    });
-  }, [shares, keyword, market, board, pctFilter, minPrice, maxPrice, minAmountYi, availableOnly]);
+  useEffect(() => {
+    let live = true;
+    void getMarketBreadth()
+      .then((result) => { if (live) setBreadth(result); })
+      .catch((reason) => { if (live) setError(errMsg(reason)); });
+    return () => { live = false; };
+  }, [refreshToken]);
 
-  const sorted = useMemo(() => {
-    return [...filtered].sort((a, b) => {
-      const left = a[sortKey];
-      const right = b[sortKey];
-      if (left == null && right == null) return 0;
-      if (left == null) return 1;
-      if (right == null) return -1;
-      const order = typeof left === "string"
-        ? left.localeCompare(String(right), "zh-CN")
-        : left - Number(right);
-      return sortAsc ? order : -order;
-    });
-  }, [filtered, sortKey, sortAsc]);
-
-  const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
+  const load = () => {
+    snapshotRef.current = { queryKey };
+    setRefreshToken((value) => value + 1);
+  };
+  const rows = sharePage?.items ?? [];
+  const total = sharePage?.total ?? 0;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const currentPage = Math.min(page, pageCount);
-  const rows = sorted.slice((currentPage - 1) * pageSize, currentPage * pageSize);
-
-  useEffect(() => setPage(1), [keyword, market, board, pctFilter, minPrice, maxPrice, minAmountYi, availableOnly, pageSize]);
 
   const resetFilters = () => {
     setKeyword("");
@@ -198,7 +240,7 @@ export default function MarketPage() {
           <h1 className="text-base font-semibold text-slate-800 dark:text-slate-100">A股全景行情</h1>
           <p className="muted mt-0.5 text-[11px]">字段级来源合并 · 红涨绿跌 · 缺失值不以 0 代替</p>
         </div>
-        <button className="btn" onClick={load}>刷新行情</button>
+        <button className="btn" onClick={load} disabled={shareLoading}>{shareLoading ? "刷新中…" : "刷新行情"}</button>
       </div>
 
       <div className="grid shrink-0 grid-cols-3 gap-3">
@@ -211,8 +253,8 @@ export default function MarketPage() {
         <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-3 py-2 dark:border-slate-800">
           <div className="flex items-center gap-3">
             <span className="text-sm font-semibold">全市场证券</span>
-            <span className="muted num text-xs">命中 {sorted.length} / {shares?.length ?? 0}</span>
-            {shares?.[0] && <span className="muted text-[10px]">数据来源：{sourceDisplayName(shares[0].source)}</span>}
+            <span className="muted num text-xs">命中 {total} / {sharePage?.universe_total ?? 0}</span>
+            {sharePage?.source && <span className="muted text-[10px]">数据来源：{sourceDisplayName(sharePage.source)}</span>}
           </div>
           <button className="btn !py-1 text-xs" onClick={() => setFiltersOpen((value) => !value)}>
             {filtersOpen ? "收起筛选" : "展开筛选"}
@@ -252,7 +294,7 @@ export default function MarketPage() {
           </div>
         )}
 
-        {!shares ? <Loading text="同步全市场行情与证券主数据…" /> : (
+        {!sharePage ? <Loading text="同步全市场行情与证券主数据…" /> : (
           <>
             <div className="min-h-0 flex-1 overflow-auto">
               <table className="w-full border-collapse text-xs">
@@ -281,7 +323,7 @@ export default function MarketPage() {
 
             <div className="flex shrink-0 items-center justify-between border-t border-slate-200 px-3 py-2 dark:border-slate-800">
               <div className="muted text-[11px]">
-                第 {(currentPage - 1) * pageSize + (rows.length ? 1 : 0)}–{(currentPage - 1) * pageSize + rows.length} 条，共 {sorted.length} 条
+                第 {(currentPage - 1) * pageSize + (rows.length ? 1 : 0)}–{(currentPage - 1) * pageSize + rows.length} 条，共 {total} 条
               </div>
               <div className="flex items-center gap-1">
                 <button className="btn !px-2 !py-1 text-xs" disabled={currentPage === 1} onClick={() => setPage(currentPage - 1)}>上一页</button>

@@ -3,7 +3,8 @@ name = "astock-captcha"
 description = "Captcha solving toolkit: slider gap detection (pure-Rust image processing) + human-like trajectory generation; optional OCR glue"
 version.workspace = true
 edition.workspace = true
-
+license.workspace = true
+publish.workspace = true
 [dependencies]
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 thiserror.workspace = true

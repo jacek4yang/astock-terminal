@@ -583,6 +583,27 @@ impl DisclosureStore {
             .await
             .map_err(Into::into)
     }
+
+    /// Record a successful provider request even when the upstream returned
+    /// an empty (but valid) page. Without this, an empty trading-day result
+    /// would leave an old failure visible and could incorrectly block Agent
+    /// evidence publication.
+    pub async fn record_provider_success(&self, provider_id: &str) -> Result<()> {
+        let provider_id = provider_id.to_string();
+        self.storage
+            .run(move |conn| {
+                let now = now_secs();
+                conn.execute(
+                    "UPDATE disclosure_provider_state SET last_attempt_at=?1,last_success_at=?1,
+                     consecutive_failures=0,retry_after=NULL,last_error=NULL,updated_at=?1
+                     WHERE provider_id=?2",
+                    params![now, provider_id],
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(Into::into)
+    }
 }
 
 #[derive(Debug)]
@@ -1076,6 +1097,44 @@ mod tests {
         assert_eq!(page.total, 25);
         assert_eq!(page.items.len(), 10);
         assert_eq!(page.total_pages, 3);
+    }
+
+    #[tokio::test]
+    async fn successful_empty_provider_page_clears_stale_failure_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(StorageConfig::with_base_dir(dir.path())).unwrap();
+        let store = DisclosureStore::new(storage.clone());
+        store.seed_provider_catalog().await.unwrap();
+        store
+            .record_provider_failure("cninfo", "temporary outage")
+            .await
+            .unwrap();
+        store.record_provider_success("cninfo").await.unwrap();
+
+        let state = storage
+            .run(|connection| {
+                connection
+                    .query_row(
+                        "SELECT consecutive_failures,retry_after,last_error,last_success_at
+                         FROM disclosure_provider_state WHERE provider_id='cninfo'",
+                        [],
+                        |row| {
+                            Ok((
+                                row.get::<_, u32>(0)?,
+                                row.get::<_, Option<i64>>(1)?,
+                                row.get::<_, Option<String>>(2)?,
+                                row.get::<_, Option<i64>>(3)?,
+                            ))
+                        },
+                    )
+                    .map_err(astock_storage::Error::from)
+            })
+            .await
+            .unwrap();
+        assert_eq!(state.0, 0);
+        assert_eq!(state.1, None);
+        assert_eq!(state.2, None);
+        assert!(state.3.is_some());
     }
 
     #[test]

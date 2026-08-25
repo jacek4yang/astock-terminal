@@ -10,35 +10,35 @@ use crate::provider::DataProvider;
 use crate::providers::{fill_pct, json_f64, strip_jsonp};
 use astock_core::time::{parse_date, parse_datetime_flexible};
 use astock_core::{
-    Adjust, Bar, DataError, Fetched, FundFlowPoint, KlinePeriod, MarketBreadth, MinuteData,
-    MinutePoint, Quote, SearchResult, Source, StockListItem, Symbol, VolumeUnit,
+    normalize_security_name, Adjust, Bar, DataError, Fetched, FundFlowPoint, KlinePeriod,
+    MarketBreadth, MinuteData, MinutePoint, Quote, SearchResult, Source, StockListItem, Symbol,
+    VolumeUnit,
 };
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
 use std::sync::Arc;
 
 /// Quote/minute/clist host pool.
-pub const QUOTE_HOSTS: [&str; 3] = [
+pub const QUOTE_HOSTS: [&str; 4] = [
     "https://push2delay.eastmoney.com",
-    "https://push2test.eastmoney.com",
     "https://push2.eastmoney.com",
+    "https://82.push2.eastmoney.com",
+    "https://90.push2.eastmoney.com",
 ];
 
 /// History (fund-flow daily) host pool.
-pub const HIS_HOSTS: [&str; 5] = [
+pub const HIS_HOSTS: [&str; 4] = [
     "https://push2his.eastmoney.com",
-    "https://push2test.eastmoney.com",
     "https://82.push2his.eastmoney.com",
     "https://90.push2his.eastmoney.com",
     "https://push2delay.eastmoney.com",
 ];
 
 /// Kline host pool.
-pub const EM_KLINE_HOSTS: [&str; 4] = [
+pub const EM_KLINE_HOSTS: [&str; 3] = [
     "https://push2his.eastmoney.com",
+    "https://90.push2his.eastmoney.com",
     "https://82.push2his.eastmoney.com",
-    "https://push2delay.eastmoney.com",
-    "https://push2test.eastmoney.com",
 ];
 
 /// Realtime fund-flow host pool. push2test is deliberately excluded:
@@ -58,12 +58,12 @@ const FFLOW_FIELDS2: &str = "f51,f52,f53,f54,f55,f56,f57";
 const CLIST_FS: &str = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048";
 const CLIST_PAGE_SIZE: u32 = 100;
 const CLIST_CONCURRENCY: usize = 10;
-/// `push2test` accepts a whole-market page while `push2delay` silently caps
-/// the same request at 100 rows.  Prefer the former for the shared snapshot,
-/// then validate `diff.len() == data.total` before accepting it.
+/// Production nodes may cap a whole-market request at 100 rows.  We probe the
+/// production pool, validate `diff.len() == data.total`, then use the complete
+/// paginated path.  A `push2test` response must never enter production: it
+/// contains stale NEEQ/test instruments and non-production prices.
 const MARKET_SNAPSHOT_PAGE_SIZE: u32 = 6_000;
-const MARKET_SNAPSHOT_HOSTS: [&str; 3] = [
-    "https://push2test.eastmoney.com",
+const MARKET_SNAPSHOT_HOSTS: [&str; 2] = [
     "https://push2delay.eastmoney.com",
     "https://push2.eastmoney.com",
 ];
@@ -372,20 +372,52 @@ impl EastMoney {
                 if code.len() != 6 {
                     return None;
                 }
+                let symbol = Symbol::new(code).ok()?;
+                if !symbol.is_current_a_share() {
+                    return None;
+                }
+                let name =
+                    normalize_security_name(row.get("f14").and_then(|v| v.as_str()).unwrap_or(""));
+                if name.is_empty() {
+                    return None;
+                }
                 Some(StockListItem {
                     code: code.to_string(),
-                    name: row
-                        .get("f14")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .trim()
-                        .to_string(),
-                    price: row.get("f2").and_then(json_f64),
+                    name,
+                    price: row
+                        .get("f2")
+                        .and_then(json_f64)
+                        .filter(|value| value.is_finite() && *value > 0.0),
                     pct: row.get("f3").and_then(json_f64),
-                    amount: row.get("f6").and_then(json_f64),
+                    amount: row
+                        .get("f6")
+                        .and_then(json_f64)
+                        .filter(|value| value.is_finite() && *value > 0.0),
                 })
             })
             .collect()
+    }
+
+    fn validate_snapshot_trade_fields(
+        items: &[StockListItem],
+        minimum_rows: usize,
+    ) -> Result<(), DataError> {
+        if items.len() < minimum_rows {
+            return Err(DataError::Empty(format!(
+                "market snapshot incomplete: only {} A-share rows",
+                items.len()
+            )));
+        }
+        let price_present = items.iter().filter(|item| item.price.is_some()).count();
+        let amount_present = items.iter().filter(|item| item.amount.is_some()).count();
+        if price_present * 10 < items.len() * 9 || amount_present * 5 < items.len() * 4 {
+            return Err(DataError::Empty(format!(
+                "market snapshot contains placeholder trade fields: price {price_present}/{}, amount {amount_present}/{}",
+                items.len(),
+                items.len()
+            )));
+        }
+        Ok(())
     }
 
     fn breadth_from_items(items: &[StockListItem]) -> Result<MarketBreadth, DataError> {
@@ -423,6 +455,7 @@ impl EastMoney {
         }
         let rows = self.fetch_market_snapshot_rows("f2,f3,f6,f12,f14").await?;
         let items = Self::stock_items_from_rows(rows);
+        Self::validate_snapshot_trade_fields(&items, MIN_COMPLETE_A_SHARE_ROWS)?;
         let breadth = Self::breadth_from_items(&items)?;
         let fetched = Fetched::now(items, Source::EastMoney);
         let breadth_fetched = Fetched {
@@ -463,27 +496,68 @@ impl EastMoney {
                 "eastmoney {cache_namespace} {secid}"
             )));
         }
-        let get = |field: &str| d.get(field).and_then(json_f64).unwrap_or(0.0);
+        let number = |field: &str| {
+            d.get(field)
+                .and_then(json_f64)
+                .filter(|value| value.is_finite())
+        };
+        let positive_number = |field: &str| number(field).filter(|value| *value > 0.0);
+        let (name, price, pre_close) = parse_quote_identity(&d, code, secid, cache_namespace)?;
         let timestamp = astock_core::time::utc_now();
         let mut field_provenance = std::collections::BTreeMap::new();
-        for field in [
-            "name",
-            "price",
-            "high",
-            "low",
-            "open",
-            "volume",
-            "amount",
-            "pre_close",
-            "change",
-            "pct",
-        ] {
+        field_provenance.insert(
+            "name".to_string(),
+            if name.is_empty() {
+                astock_core::FieldProvenance::missing("eastmoney", "上游未返回标准证券名称")
+            } else {
+                astock_core::FieldProvenance::reported("eastmoney", timestamp)
+            },
+        );
+        for field in ["price", "pre_close"] {
             field_provenance.insert(
                 field.to_string(),
                 astock_core::FieldProvenance::reported("eastmoney", timestamp),
             );
         }
-        let turnover = d.get("f168").and_then(json_f64);
+        for (field, upstream) in [("high", "f44"), ("low", "f45"), ("open", "f46")] {
+            field_provenance.insert(
+                field.to_string(),
+                positive_number(upstream).map_or_else(
+                    || {
+                        astock_core::FieldProvenance::missing(
+                            "eastmoney",
+                            format!("上游未返回{field}"),
+                        )
+                    },
+                    |_| astock_core::FieldProvenance::reported("eastmoney", timestamp),
+                ),
+            );
+        }
+        for (field, upstream) in [("volume", "f47"), ("amount", "f48")] {
+            field_provenance.insert(
+                field.to_string(),
+                number(upstream).map_or_else(
+                    || {
+                        astock_core::FieldProvenance::missing(
+                            "eastmoney",
+                            format!("上游未返回{field}"),
+                        )
+                    },
+                    |_| astock_core::FieldProvenance::reported("eastmoney", timestamp),
+                ),
+            );
+        }
+        let reported_change = number("f169");
+        let reported_pct = number("f170");
+        for (field, reported) in [("change", reported_change), ("pct", reported_pct)] {
+            let mut provenance = astock_core::FieldProvenance::reported("eastmoney", timestamp);
+            if reported.is_none() {
+                provenance.quality = astock_core::DataQuality::Derived;
+                provenance.source = "eastmoney:price/pre_close".to_string();
+            }
+            field_provenance.insert(field.to_string(), provenance);
+        }
+        let turnover = number("f168");
         field_provenance.insert(
             "turnover".to_string(),
             turnover.map_or_else(
@@ -493,20 +567,16 @@ impl EastMoney {
         );
         let quote = Quote {
             symbol: code.to_string(),
-            name: d
-                .get("f58")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            price: get("f43"),
-            high: get("f44"),
-            low: get("f45"),
-            open: get("f46"),
-            volume: get("f47"),
-            amount: get("f48"),
-            pre_close: get("f60"),
-            change: get("f169"),
-            pct: get("f170"),
+            name,
+            price,
+            high: positive_number("f44").unwrap_or(0.0),
+            low: positive_number("f45").unwrap_or(0.0),
+            open: positive_number("f46").unwrap_or(0.0),
+            volume: number("f47").unwrap_or(0.0),
+            amount: number("f48").unwrap_or(0.0),
+            pre_close,
+            change: reported_change.unwrap_or(price - pre_close),
+            pct: reported_pct.unwrap_or((price - pre_close) / pre_close * 100.0),
             turnover,
             timestamp,
             field_provenance,
@@ -641,6 +711,9 @@ impl DataProvider for EastMoney {
         // Pure 6-digit numeric input short-circuits without a network call.
         if keyword.len() == 6 && keyword.bytes().all(|b| b.is_ascii_digit()) {
             let sym = Symbol::new(keyword)?;
+            if !sym.is_supported_market_instrument() {
+                return Ok(Fetched::now(Vec::new(), Source::EastMoney));
+            }
             let out = Fetched::now(
                 vec![SearchResult {
                     code: sym.code().to_string(),
@@ -683,19 +756,13 @@ impl DataProvider for EastMoney {
         let mut results = Vec::new();
         for item in items {
             let code = item.get("Code").and_then(|v| v.as_str()).unwrap_or("");
-            let name = item
-                .get("Name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let name =
+                normalize_security_name(item.get("Name").and_then(|v| v.as_str()).unwrap_or(""));
             let classify = item.get("Classify").and_then(|v| v.as_str()).unwrap_or("");
-            // AStock + Fund + BJ, or any plausible 6-digit A-share/fund code.
-            let plausible = classify == "AStock"
-                || classify == "Fund"
-                || (code.len() == 6 && code.starts_with(['0', '3', '6']))
-                || code.starts_with("920")
-                || (code.len() == 6 && code.starts_with('5'));
-            if plausible && code.len() == 6 {
+            let supported =
+                Symbol::new(code).is_ok_and(|symbol| symbol.is_supported_market_instrument());
+            let plausible = classify == "AStock" || classify == "Fund" || supported;
+            if plausible && supported && !name.is_empty() {
                 results.push(SearchResult {
                     code: code.to_string(),
                     name,
@@ -919,6 +986,46 @@ fn clist_diff_rows(data: &serde_json::Value) -> Vec<serde_json::Value> {
     }
 }
 
+fn parse_quote_identity(
+    data: &serde_json::Value,
+    expected_code: &str,
+    secid: &str,
+    cache_namespace: &str,
+) -> Result<(String, f64, f64), DataError> {
+    let upstream_code = data
+        .get("f57")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if upstream_code != expected_code {
+        return Err(DataError::Parse {
+            upstream: format!("eastmoney {cache_namespace} {secid}"),
+            message: format!(
+                "security identity mismatch: expected {expected_code}, received {upstream_code}"
+            ),
+        });
+    }
+    let name = normalize_security_name(
+        data.get("f58")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default(),
+    );
+    let required_positive = |field: &str, label: &str| {
+        data.get(field)
+            .and_then(json_f64)
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .ok_or_else(|| {
+                DataError::Empty(format!(
+                    "eastmoney {cache_namespace} {secid}: missing or non-positive {label}"
+                ))
+            })
+    };
+    Ok((
+        name,
+        required_positive("f43", "price")?,
+        required_positive("f60", "pre-close")?,
+    ))
+}
+
 fn count_breadth(pcts: impl IntoIterator<Item = Option<f64>>) -> MarketBreadth {
     let mut up = 0_u32;
     let mut down = 0_u32;
@@ -984,6 +1091,23 @@ mod tests {
     }
 
     #[test]
+    fn quote_identity_rejects_zero_placeholder_prices() {
+        let zero =
+            serde_json::json!({"f57": "300308", "f58": "中 际 旭 创", "f43": 0, "f60": 870.22});
+        assert!(matches!(
+            parse_quote_identity(&zero, "300308", "0.300308", "quote"),
+            Err(DataError::Empty(message)) if message.contains("non-positive price")
+        ));
+        let valid =
+            serde_json::json!({"f57": "300308", "f58": "中 际 旭 创", "f43": 870.22, "f60": 943.0});
+        let (name, price, pre_close) =
+            parse_quote_identity(&valid, "300308", "0.300308", "quote").unwrap();
+        assert_eq!(name, "中际旭创");
+        assert_eq!(price, 870.22);
+        assert_eq!(pre_close, 943.0);
+    }
+
+    #[test]
     fn flow_csv_column_order_small_before_medium() {
         // date, main, SMALL, MEDIUM, large, super_large, main_pct
         let p = parse_flow_csv("2025-08-21,-1000.0,800.0,200.0,-600.0,-400.0,-1.23", true).unwrap();
@@ -1035,5 +1159,50 @@ mod tests {
         let object = serde_json::json!({"diff": {"0": {"f12": "600000"}}});
         assert_eq!(clist_diff_rows(&array).len(), 1);
         assert_eq!(clist_diff_rows(&object).len(), 1);
+    }
+
+    #[test]
+    fn market_snapshot_filters_test_and_legacy_rows_and_normalizes_names() {
+        let rows = vec![
+            serde_json::json!({"f12":"430002","f14":"中 科 软","f2":988,"f3":22.28,"f6":26880400}),
+            serde_json::json!({"f12":"810011","f14":"优机定转","f2":0,"f3":0,"f6":0}),
+            serde_json::json!({"f12":"603927","f14":"中 科 软","f2":13.15,"f3":-0.68,"f6":63128588}),
+            serde_json::json!({"f12":"920001","f14":"纬 达 光 电","f2":11.06,"f3":0.5,"f6":1000}),
+        ];
+        let items = EastMoney::stock_items_from_rows(rows);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].code, "603927");
+        assert_eq!(items[0].name, "中科软");
+        assert_eq!(items[1].code, "920001");
+        assert_eq!(items[1].name, "纬达光电");
+    }
+
+    #[test]
+    fn market_snapshot_rejects_placeholder_trade_fields() {
+        let rows = (0..10)
+            .map(|index| StockListItem {
+                code: format!("600{index:03}"),
+                name: format!("样本{index}"),
+                price: (index == 0).then_some(10.0),
+                pct: Some(0.0),
+                amount: (index == 0).then_some(1_000_000.0),
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            EastMoney::validate_snapshot_trade_fields(&rows, 10),
+            Err(DataError::Empty(message)) if message.contains("placeholder trade fields")
+        ));
+    }
+
+    #[test]
+    fn production_host_pools_never_include_test_endpoints() {
+        for host in QUOTE_HOSTS
+            .iter()
+            .chain(HIS_HOSTS.iter())
+            .chain(EM_KLINE_HOSTS.iter())
+            .chain(MARKET_SNAPSHOT_HOSTS.iter())
+        {
+            assert!(!host.contains("test"), "test endpoint leaked: {host}");
+        }
     }
 }

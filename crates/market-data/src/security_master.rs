@@ -1,6 +1,8 @@
 //! In-memory canonical security master populated from exchange-wide lists.
 
-use astock_core::{SearchResult, SecurityMasterRecord, StockListItem};
+use astock_core::{
+    normalize_security_name, SearchResult, SecurityMasterRecord, StockListItem, Symbol,
+};
 use dashmap::DashMap;
 
 /// Thread-safe security identity index shared by quote, search, graph and UI.
@@ -35,7 +37,9 @@ impl Default for SecurityMaster {
 impl SecurityMaster {
     /// Insert or replace a canonical record.
     pub fn upsert(&self, record: SecurityMasterRecord) {
-        if record.code.len() == 6 && !record.canonical_name.trim().is_empty() {
+        let mut record = record;
+        record.canonical_name = normalize_security_name(&record.canonical_name);
+        if record.code.len() == 6 && !record.canonical_name.is_empty() {
             self.records.insert(record.code.clone(), record);
         }
     }
@@ -75,12 +79,15 @@ impl SecurityMaster {
             .records
             .iter()
             .filter(|entry| {
-                entry.code.contains(&query)
-                    || entry.canonical_name.to_lowercase().contains(&query)
-                    || entry
-                        .aliases
-                        .iter()
-                        .any(|alias| alias.to_lowercase().contains(&query))
+                Symbol::new(entry.code.as_str())
+                    .is_ok_and(|symbol| symbol.is_supported_market_instrument())
+                    && entry.valid_to.is_none()
+                    && (entry.code.contains(&query)
+                        || entry.canonical_name.to_lowercase().contains(&query)
+                        || entry
+                            .aliases
+                            .iter()
+                            .any(|alias| alias.to_lowercase().contains(&query)))
             })
             .map(|entry| SearchResult {
                 code: entry.code.clone(),
@@ -115,5 +122,24 @@ mod tests {
         let master = SecurityMaster::default();
         assert_eq!(master.get("300308").unwrap().canonical_name, "中际旭创");
         assert_eq!(master.search("平安", 10)[0].code, "000001");
+    }
+
+    #[test]
+    fn active_search_hides_legacy_codes_and_normalizes_names() {
+        let master = SecurityMaster::default();
+        master.upsert(SecurityMasterRecord::listed_stock(
+            "430002",
+            "中 科 软",
+            "legacy_test_feed",
+        ));
+        master.upsert(SecurityMasterRecord::listed_stock(
+            "603927",
+            "中 科 软",
+            "production_feed",
+        ));
+        let hits = master.search("中科软", 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].code, "603927");
+        assert_eq!(hits[0].name, "中科软");
     }
 }

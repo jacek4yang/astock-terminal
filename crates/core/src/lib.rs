@@ -34,5 +34,5 @@ pub use quality::{
 };
 pub use quote::{MinuteData, MinutePoint, Quote};
 pub use search::{MarketBreadth, SearchResult, StockListItem};
-pub use security::{board_for, AssetType, Board, SecurityMasterRecord};
+pub use security::{board_for, normalize_security_name, AssetType, Board, SecurityMasterRecord};
 pub use symbol::{Market, Symbol};

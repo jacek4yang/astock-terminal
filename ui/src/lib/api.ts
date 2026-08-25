@@ -1,13 +1,12 @@
 /**
- * Tauri 命令层类型化封装。
- * 契约见 ../docs/command-contract.md;所有命令返回 JSON(snake_case),
- * 错误统一 { error: string, kind: string }。
+ * Proton typed bridge 的领域 API 封装。
+ * 公共协议来自 protocol/schema；所有载荷使用 snake_case，错误保持结构化。
  */
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { isProton, requestNative } from "../bridge";
 
-/** 是否在 Tauri 桌面环境(纯浏览器 dev 时为 false) */
-export function isTauri(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+/** 是否连接到当前 Proton/CEF 桌面宿主。 */
+export function isDesktop(): boolean {
+  return isProton();
 }
 
 export const NOT_TAURI_MSG = "需在桌面应用中运行(纯浏览器模式无行情数据)";
@@ -20,7 +19,7 @@ export interface ApiError {
 
 /** 规范化 invoke 抛出的错误为可读中文文案 */
 export function errMsg(e: unknown): string {
-  if (!isTauri()) return NOT_TAURI_MSG;
+  if (!isDesktop()) return NOT_TAURI_MSG;
   if (e && typeof e === "object") {
     const obj = e as Record<string, unknown>;
     if (typeof obj.error === "string") return obj.error;
@@ -29,9 +28,329 @@ export function errMsg(e: unknown): string {
   return String(e);
 }
 
+interface NativePage<T> {
+  items: T[];
+  next_cursor: number | null;
+  snapshot_id: string;
+}
+
+async function readAllSharePages<T>(): Promise<T> {
+  const items: unknown[] = [];
+  let cursor: number | null = 0;
+  let snapshotId: string | undefined;
+  while (cursor != null) {
+    const page: NativePage<unknown> = await requestNative<NativePage<unknown>>(
+      "engine",
+      "market.shares.page",
+      { cursor, limit: 500, ...(snapshotId ? { snapshot_id: snapshotId } : {}) },
+      { deadlineMs: 60_000 },
+    );
+    items.push(...page.items);
+    snapshotId = page.snapshot_id;
+    cursor = page.next_cursor;
+  }
+  return items as T;
+}
+
+async function protonCommand<T>(name: string, args: Record<string, unknown> = {}): Promise<T> {
+  switch (name) {
+    case "search_stocks": {
+      const result = await requestNative<{ items: unknown[] }>("engine", "market.search", args);
+      return result.items as T;
+    }
+    case "get_quote": {
+      const result = await requestNative<{ quote: unknown }>("engine", "market.quote", args);
+      return result.quote as T;
+    }
+    case "get_kline":
+      return requestNative<T>("engine", "market.kline", args);
+    case "get_index_kline": {
+      const result = await requestNative<{ bars: unknown[] }>("engine", "market.index_kline", args);
+      return result.bars as T;
+    }
+    case "get_order_book":
+      return requestNative<T>("engine", "market.order_book", args);
+    case "get_minute":
+      return requestNative<T>("engine", "market.minute", args);
+    case "get_fund_flow":
+      return requestNative<T>("engine", "market.fund_flow.daily", args);
+    case "get_realtime_flow":
+      return requestNative<T>("engine", "market.fund_flow.realtime", args);
+    case "chanlun_minute":
+      return requestNative<T>("engine", "analysis.chanlun.minute", args, { deadlineMs: 60_000 });
+    case "get_pool":
+      return requestNative<T>("engine", "research.market_pool", args, { deadlineMs: 60_000 });
+    case "get_board_cons":
+      return requestNative<T>(
+        "engine",
+        "research.board.constituents",
+        { board_code: args.bk_code },
+        { deadlineMs: 60_000 },
+      );
+    case "query_disclosures":
+      return requestNative<T>(
+        "engine",
+        "research.disclosures.list",
+        (args.query ?? {}) as Record<string, unknown>,
+      );
+    case "get_disclosure_detail":
+      return requestNative<T>("engine", "research.disclosures.detail", args);
+    case "get_disclosure_provider_health":
+      return requestNative<T>("engine", "research.disclosures.providers", {});
+    case "disclosure_sync_start":
+      return requestNative<T>(
+        "engine",
+        "research.disclosures.sync.start",
+        (args.request ?? {}) as Record<string, unknown>,
+        { deadlineMs: 60_000 },
+      );
+    case "disclosure_sync_status":
+      return requestNative<T>("engine", "research.disclosures.sync.status", {});
+    case "disclosure_sync_cancel":
+      return requestNative<T>("engine", "research.disclosures.sync.cancel", {});
+    case "get_news_provider_health":
+      return requestNative<T>("engine", "research.news.providers", {});
+    case "query_news_center":
+      return requestNative<T>(
+        "engine",
+        "research.news.center",
+        (args.query ?? {}) as Record<string, unknown>,
+      );
+    case "refresh_news_center":
+      return requestNative<T>("engine", "research.news", args, { deadlineMs: 90_000 });
+    case "set_news_provider_enabled":
+      return requestNative<T>("engine", "research.news.provider.set", args);
+    case "get_news_archive_recent":
+      return requestNative<T>("engine", "research.news.archive.recent", args);
+    case "get_news_archive_revisions":
+      return requestNative<T>("engine", "research.news.archive.revisions", args);
+    case "check_news_archive_integrity":
+      return requestNative<T>("engine", "research.news.archive.integrity", {});
+    case "get_news_ingest_observations":
+      return requestNative<T>("engine", "research.news.archive.observations", args);
+    case "set_news_item_state":
+      return requestNative<T>("engine", "research.news.user_state", args);
+    case "get_news_event_clusters":
+      return requestNative<T>("engine", "research.news.clusters.list", args);
+    case "get_news_event_cluster_detail":
+      return requestNative<T>("engine", "research.news.clusters.detail", args);
+    case "merge_news_event_clusters":
+      return requestNative<T>("engine", "research.news.clusters.merge", args);
+    case "split_news_event_revision":
+      return requestNative<T>("engine", "research.news.clusters.split", args);
+    case "get_pending_news_evidence_reviews":
+      return requestNative<T>("engine", "research.news.reviews.list", args);
+    case "resolve_news_evidence_review":
+      return requestNative<T>("engine", "research.news.reviews.resolve", args);
+    case "get_news_entity_links":
+      return requestNative<T>("engine", "research.entities.links", args, { deadlineMs: 60_000 });
+    case "get_entity_link_reviews":
+      return requestNative<T>("engine", "research.entities.reviews", args);
+    case "resolve_entity_link_review":
+      return requestNative<T>("engine", "research.entities.resolve", args);
+    case "event_analysis_start":
+      return requestNative<T>(
+        "engine",
+        "research.events.analysis.start",
+        (args.request ?? {}) as Record<string, unknown>,
+        { deadlineMs: 60_000 },
+      );
+    case "event_analysis_status":
+      return requestNative<T>("engine", "research.events.analysis.status", args);
+    case "event_analysis_cancel":
+      return requestNative<T>("engine", "research.events.analysis.cancel", args);
+    case "relation_extraction_start":
+      return requestNative<T>(
+        "engine",
+        "research.relations.extraction.start",
+        (args.request ?? {}) as Record<string, unknown>,
+        { deadlineMs: 60_000 },
+      );
+    case "relation_extraction_status":
+      return requestNative<T>("engine", "research.relations.extraction.status", args);
+    case "relation_extraction_cancel": {
+      const result = await requestNative<{ cancelled: boolean }>(
+        "engine",
+        "research.relations.extraction.cancel",
+        args,
+      );
+      return result.cancelled as T;
+    }
+    case "query_relation_reviews":
+      return requestNative<T>("engine", "research.relations.reviews", args);
+    case "review_relation_candidate":
+      return requestNative<T>(
+        "engine",
+        "research.relations.review",
+        (args.request ?? {}) as Record<string, unknown>,
+      );
+    case "retract_relation_candidate":
+      return requestNative<T>("engine", "research.relations.retract", args);
+    case "graph_subgraph":
+      return requestNative<T>("engine", "research.graph.subgraph", args);
+    case "graph_as_of":
+      return requestNative<T>("engine", "research.graph.as_of", args);
+    case "graph_history_bounds":
+      return requestNative<T>("engine", "research.graph.history_bounds", {});
+    case "graph_edge_timeline":
+      return requestNative<T>("engine", "research.graph.edge_timeline", args);
+    case "graph_snapshot_get":
+      return requestNative<T>("engine", "research.graph.snapshot.get", args);
+    case "graph_snapshot_diff":
+      return requestNative<T>("engine", "research.graph.snapshot.diff", args);
+    case "supply_chain_shock":
+      return requestNative<T>("engine", "research.graph.shock", args);
+    case "relationship_graph":
+      return requestNative<T>("engine", "research.market.relationship", args, {
+        deadlineMs: 120_000,
+      });
+    case "quant_research_start":
+      return requestNative<T>(
+        "engine",
+        "research.quant.start",
+        (args.config ?? {}) as Record<string, unknown>,
+        { deadlineMs: 60_000 },
+      );
+    case "quant_research_status":
+      return requestNative<T>("engine", "research.quant.status", args);
+    case "quant_research_cancel":
+      return requestNative<T>("engine", "research.quant.cancel", args);
+    case "quant_research_snapshot_get":
+      return requestNative<T>("engine", "research.quant.snapshots.get", args);
+    case "quant_research_snapshot_list":
+      return requestNative<T>("engine", "research.quant.snapshots.list", args);
+    case "list_strategies":
+      return requestNative<T>("engine", "research.backtest.strategies", {});
+    case "run_backtest":
+      return requestNative<T>("engine", "research.backtest.run", args, { deadlineMs: 120_000 });
+    case "backtest_start":
+      return requestNative<T>("engine", "research.backtest.start", args, { deadlineMs: 60_000 });
+    case "backtest_status":
+      return requestNative<T>("engine", "research.backtest.status", {});
+    case "backtest_cancel":
+      return requestNative<T>("engine", "research.backtest.cancel", {});
+    case "get_market_regime":
+      return requestNative<T>("engine", "research.market.regime", {}, { deadlineMs: 60_000 });
+    case "get_market_breadth": {
+      const result = await requestNative<{ breadth: unknown }>("engine", "market.overview", {});
+      return result.breadth as T;
+    }
+    case "get_provider_health": {
+      const result = await requestNative<{ provider_health: unknown }>("engine", "market.overview", {});
+      return result.provider_health as T;
+    }
+    case "get_data_quality_slo":
+      return requestNative<T>("engine", "diagnostics.data_quality", {
+        action: "slo",
+        window_secs: args.window_secs,
+      });
+    case "get_data_quality_observations":
+      return requestNative<T>("engine", "diagnostics.data_quality", {
+        action: "observations",
+        dataset: args.dataset,
+        provider: args.provider,
+        limit: args.limit,
+      });
+    case "get_field_lineage":
+      return requestNative<T>("engine", "diagnostics.data_quality", {
+        action: "lineage",
+        dataset: args.dataset,
+        entity_key: args.entity_key,
+        limit: args.limit,
+      });
+    case "get_data_reconciliations":
+      return requestNative<T>("engine", "diagnostics.data_quality", {
+        action: "reconciliations",
+        dataset: args.dataset,
+        entity_key: args.entity_key,
+        limit: args.limit,
+      });
+    case "get_data_health_report":
+      return requestNative<T>("engine", "diagnostics.data_quality", {
+        action: "health",
+        window_secs: args.window_secs,
+      });
+    case "reconcile_quote_sources":
+      return requestNative<T>("engine", "research.quote_reconcile", args, { deadlineMs: 90_000 });
+    case "reconcile_valuation_sources":
+      return requestNative<T>("engine", "research.valuation_reconcile", args, { deadlineMs: 90_000 });
+    case "scan_start":
+      return requestNative<T>("engine", "quant.scan.start", {});
+    case "scan_status":
+      return requestNative<T>("engine", "quant.scan.status", {});
+    case "scan_cancel":
+      return requestNative<T>("engine", "quant.scan.cancel", {});
+    case "settings_get_agent_model_routing":
+      return requestNative<T>("engine", "settings.agent_models.get", {});
+    case "settings_set_agent_model_routing": {
+      const settings = args.settings as AgentModelRoutingSettings;
+      const saved = await requestNative<T>("engine", "settings.agent_models.set", settings);
+      await requestNative("agent", "agent.provider.configure", { routing: settings, validate: false });
+      return saved;
+    }
+    case "get_all_a_shares":
+      return readAllSharePages<T>();
+    case "get_stock_bundle": {
+      return requestNative<T>("engine", "market.security_snapshot", args, { deadlineMs: 60_000 });
+    }
+    case "get_earnings_driver_tree":
+      return requestNative<T>("engine", "research.earnings_driver.tree", args, {
+        deadlineMs: 60_000,
+      });
+    case "run_earnings_driver_shock":
+      return requestNative<T>("engine", "research.earnings_driver.shock", args, {
+        deadlineMs: 60_000,
+      });
+    case "get_earnings_driver_snapshot":
+      return requestNative<T>("engine", "research.earnings_driver.snapshot", args);
+    case "get_source_documents":
+      return requestNative<T>("engine", "research.sources.list", args);
+    case "get_source_document":
+      return requestNative<T>("engine", "research.sources.get", args);
+    case "fetch_source_document":
+      return requestNative<T>("engine", "research.sources.fetch", args, { deadlineMs: 60_000 });
+    case "compare_source_evidence":
+      return requestNative<T>("engine", "research.sources.compare", args);
+    case "global_sync_start":
+      return requestNative<T>("engine", "research.global.sync.start", (args.request ?? {}) as Record<string, unknown>, { deadlineMs: 60_000 });
+    case "global_sync_status":
+      return requestNative<T>("engine", "research.global.sync.status", {});
+    case "global_sync_cancel":
+      return requestNative<T>("engine", "research.global.sync.cancel", {});
+    case "get_global_provider_health":
+      return requestNative<T>("engine", "research.global.providers", {});
+    case "query_global_documents":
+      return requestNative<T>("engine", "research.global.documents", (args.query ?? {}) as Record<string, unknown>);
+    case "get_global_golden_chains":
+      return requestNative<T>("engine", "research.global.chains", {});
+    case "get_global_transmission_paths":
+      return requestNative<T>("engine", "research.global.transmission", args);
+    case "watchlist_list":
+      return requestNative<T>("engine", "workspace.watchlist.list", { group: args.group ?? "默认" });
+    case "watchlist_add":
+      return requestNative<T>("engine", "workspace.watchlist.add", {
+        symbol: args.code,
+        group: args.group ?? "默认",
+      });
+    case "watchlist_remove":
+      return requestNative<T>("engine", "workspace.watchlist.remove", {
+        symbol: args.code,
+        group: args.group ?? "默认",
+      });
+    case "watchlist_pin":
+      return requestNative<T>("engine", "workspace.watchlist.pin", {
+        symbol: args.code,
+        group: args.group ?? "默认",
+        pinned: args.pinned,
+      });
+    default:
+      throw new Error(`该功能尚未迁移到新的本地 Engine：${name}`);
+  }
+}
+
 function cmd<T>(name: string, args?: Record<string, unknown>): Promise<T> {
-  if (!isTauri()) return Promise.reject(new Error(NOT_TAURI_MSG));
-  return invoke<T>(name, args);
+  if (isProton()) return protonCommand<T>(name, args);
+  return Promise.reject(new Error(NOT_TAURI_MSG));
 }
 
 // ==================== 行情数据 ====================
@@ -120,6 +439,38 @@ export interface AllShare {
   source: string;
   fetched_at: string;
 }
+
+export interface AllSharePageQuery {
+  cursor: number;
+  limit: number;
+  snapshot_id?: string;
+  keyword?: string;
+  market?: "all" | "SH" | "SZ" | "BJ";
+  board?: "all" | "main" | "chi_next" | "star" | "beijing" | "fund" | "other";
+  pct_filter?: "all" | "up" | "down" | "flat" | "limit_up" | "limit_down";
+  min_price?: number;
+  max_price?: number;
+  min_amount?: number;
+  available_only?: boolean;
+  sort_by?: "code" | "name" | "market" | "board" | "price" | "pct" | "amount";
+  sort_asc?: boolean;
+}
+
+export interface AllSharePage {
+  items: AllShare[];
+  cursor: number;
+  next_cursor: number | null;
+  total: number;
+  universe_total: number;
+  limit: number;
+  snapshot_id: string;
+  source_version_id: string;
+  source: string;
+  fetched_at: string;
+}
+
+export const getASharesPage = (query: AllSharePageQuery) =>
+  requestNative<AllSharePage>("engine", "market.shares.page", query, { deadlineMs: 60_000 });
 
 export interface FundFlow {
   date: string;
@@ -1846,40 +2197,10 @@ export const settingsSetAgentModelRouting = (settings: AgentModelRoutingSettings
   cmd<AgentModelRoutingSettings>("settings_set_agent_model_routing", { settings });
 export const cacheStats = () => cmd<CacheStats>("cache_stats");
 export const cacheCleanup = (targetMb: number) =>
-  // backend uses #[tauri::command(rename_all = "snake_case")] — keys must be snake_case
+  // The versioned Engine protocol uses snake_case payload keys.
   cmd<CacheCleanupResult>("cache_cleanup", { target_mb: targetMb });
 export const getDataDir = () => cmd<string>("get_data_dir");
 export const setDataDir = (path: string) => cmd<unknown>("set_data_dir", { path });
-
-// ---- 数据源凭证与代理(可选 provider;状态只回布尔,凭证本体绝不回显) ----
-
-/** settings_get_provider_status 返回:各项是否已配置 */
-export interface ProviderStatus {
-  tushare_token: boolean;
-  iwencai_key: boolean;
-  jq_user: boolean;
-  jq_pwd: boolean;
-  socks5: boolean;
-}
-
-/** settings_set_provider_credentials 入参;空串/不传 = 清除该项 */
-export interface ProviderCredentials {
-  tushare_token?: string;
-  iwencai_key?: string;
-  jq_user?: string;
-  jq_pwd?: string;
-  socks5?: string;
-}
-
-export interface SetProviderCredentialsResult {
-  status: ProviderStatus;
-  message: string;
-}
-
-export const settingsGetProviderStatus = () =>
-  cmd<ProviderStatus>("settings_get_provider_status");
-export const settingsSetProviderCredentials = (creds: ProviderCredentials) =>
-  cmd<SetProviderCredentialsResult>("settings_set_provider_credentials", { ...creds });
 
 // ==================== AI Agent ====================
 
@@ -2132,9 +2453,7 @@ export interface AgentRunOptions {
 }
 
 function agentChannel(handler: (message: AgentStreamEnvelope) => void) {
-  const channel = new Channel<AgentStreamEnvelope>();
-  channel.onmessage = handler;
-  return channel;
+  return handler;
 }
 
 export const agentAsk = (
@@ -2329,7 +2648,8 @@ export interface RelationshipGraph {
   period: { start: string | null; end: string | null };
   nodes: { symbol: string }[];
   edges: RelationshipEdge[];
-  matrix: { labels: string[]; pearson: number[][] };
+  matrix: { labels: string[]; pearson: (number | null)[][] };
+  sources: { symbol: string; source: string }[];
   method: string;
   note: string;
   errors: string[];
@@ -2502,6 +2822,68 @@ export const quantResearchSnapshotGet = (snapshotId: string) =>
 export const quantResearchSnapshotList = (limit = 20) =>
   cmd<QuantSnapshotListItem[]>("quant_research_snapshot_list", { limit });
 
+// ==================== 回测与市场环境 ====================
+
+export interface BacktestStrategyMeta {
+  name: string;
+  kind?: "single" | "rotation" | string;
+  label?: string;
+  description: string;
+  multi_symbol: boolean;
+  params?: Array<{
+    name: string;
+    ty: "int" | "number" | string;
+    default: unknown;
+    description: string;
+  }>;
+}
+
+export interface BacktestRequest {
+  symbol?: string;
+  strategy?: string;
+  params?: Record<string, unknown>;
+  pool?: string[];
+  fast?: number;
+  slow?: number;
+  entry_n?: number;
+  exit_n?: number;
+  bars?: number;
+}
+
+export interface BacktestJobSnapshot<T = unknown> {
+  job_id: string | null;
+  status: "idle" | "running" | "completed" | "failed" | "cancelled" | "suspended" | string;
+  phase: string;
+  progress: number | null;
+  started_at: number | null;
+  updated_at: number;
+  result: T | null;
+  error: string | null;
+}
+
+export interface MarketRegime {
+  regime: "进攻" | "中性" | "防守";
+  score: number;
+  available_signals: number;
+  expected_signals: number;
+  verification_status: "complete" | "partial";
+  breadth: Record<string, number> | null;
+  breadth_error: string | null;
+  source: string;
+  fetched_at: string;
+  source_version_id: string;
+}
+
+export const listStrategies = () => cmd<BacktestStrategyMeta[]>("list_strategies");
+export const runBacktest = <T = unknown>(request: BacktestRequest) =>
+  cmd<T>("run_backtest", { ...request });
+export const backtestStart = (request: BacktestRequest) =>
+  cmd<{ job_id: string; started: boolean }>("backtest_start", { ...request });
+export const backtestStatus = <T = unknown>() =>
+  cmd<BacktestJobSnapshot<T>>("backtest_status");
+export const backtestCancel = () => cmd<{ cancelled: boolean }>("backtest_cancel");
+export const getMarketRegime = () => cmd<MarketRegime>("get_market_regime");
+
 // ==================== 东财数据中心 ====================
 
 /** 数据中心统一返回:{rows, count, source, fetched_at(RFC3339)} */
@@ -2664,6 +3046,17 @@ export type PoolKind = "zt" | "prev" | "strong" | "sub_new" | "broken" | "dt";
 export type PoolRow = Record<string, unknown>;
 export const getPool = (pool: PoolKind, date?: string) =>
   cmd<DcResult<PoolRow>>("get_pool", date ? { pool, date } : { pool });
+export interface BoardConsRow {
+  code: string;
+  name: string;
+  price: number | null;
+  pct: number | null;
+  pe: number | null;
+  total_market_cap: number | null;
+  float_market_cap: number | null;
+}
+export const getBoardConstituents = (boardCode: string) =>
+  cmd<DcResult<BoardConsRow>>("get_board_cons", { bk_code: boardCode });
 export const getBillboard = (days?: number) =>
   cmd<DcResult<BillboardRow>>("get_billboard", days != null ? { days } : {});
 export const getMarginDaily = () => cmd<DcResult<MarginDailyRow>>("get_margin_daily");

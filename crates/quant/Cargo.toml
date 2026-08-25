@@ -3,14 +3,15 @@ name = "astock-quant"
 description = "Quant Lab: returns, volatility, correlations, lead-lag, cointegration, GARCH, Kalman, HMM, change-point, PCA, Monte Carlo"
 version.workspace = true
 edition.workspace = true
-
+license.workspace = true
+publish.workspace = true
 [dependencies]
-astock-core = { path = "../core" }
+astock-core = { version = "6.0.0", path = "../core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-nalgebra = "0.33"
-statrs = "0.18"
+nalgebra = "0.35"
+statrs = "0.19"
 rand.workspace = true
 sha2.workspace = true
 chrono.workspace = true

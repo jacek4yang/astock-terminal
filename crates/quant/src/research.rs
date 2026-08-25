@@ -88,7 +88,7 @@ pub enum FdrMethod {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ResearchConfig {
     pub symbols: Vec<String>,
     pub metric: ResearchMetric,

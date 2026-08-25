@@ -1,14 +1,12 @@
 //! SOCKS5 proxy routing for the HTTP layer.
 //!
-//! Policy: domestic market-data platforms (Tencent/Sina/EastMoney/Xueqiu/
-//! THS/Tushare/iwencai) always connect directly — proxying them adds latency
-//! and can trip geo/IP-based risk control. Only hosts on `foreign_hosts`
-//! (default: GitHub & friends, for future use such as fetching research
-//! assets) go through the SOCKS5 proxy, and only when one is configured.
-//!
-//! Configuration comes from the `ASTOCK_SOCKS5` environment variable
-//! (e.g. `socks5h://127.0.0.1:1080` or a bare `127.0.0.1:1080`); the
-//! settings page will write the same value through [`ProxyConfig`] later.
+//! Policy: the application-configured SOCKS5 route never selects domestic
+//! market-data platforms (Tencent/Sina/EastMoney/Xueqiu/THS/Tushare/iwencai).
+//! The underlying HTTP stack may still honor an OS/process HTTP proxy chosen
+//! by the user or managed environment. Only `foreign_hosts` can use the
+//! explicit application SOCKS5 route. Production configuration is injected
+//! from Windows Credential Manager by the Engine; it is never read from a
+//! process environment variable.
 
 /// Domestic platforms that must never be proxied (suffix match).
 pub const DOMESTIC_HOSTS: &[&str] = &[
@@ -31,13 +29,11 @@ pub const DEFAULT_FOREIGN_HOSTS: &[&str] = &[
     "huggingface.co",
 ];
 
-/// Environment variable carrying the SOCKS5 proxy address.
-pub const SOCKS5_ENV: &str = "ASTOCK_SOCKS5";
-
 /// Where a request to a given URL should go.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProxyRoute {
-    /// Connect directly (the default, and always for domestic hosts).
+    /// Do not use the application-configured SOCKS5 route. System HTTP proxy
+    /// behavior remains a trusted environment boundary.
     Direct,
     /// Route through the configured SOCKS5 proxy.
     Socks5,
@@ -45,15 +41,15 @@ pub enum ProxyRoute {
 
 /// Proxy routing configuration.
 ///
-/// Cheap to clone; the settings page will construct it from persisted
-/// config, [`ProxyConfig::from_env`] covers the interim env-var path.
-#[derive(Debug, Clone, Default)]
+/// Cheap to clone; Engine constructs it only from a Credential Manager value
+/// held in memory for the lifetime of the process.
+#[derive(Clone, Default)]
 pub struct ProxyConfig {
     /// SOCKS5 proxy address (`socks5h://host:port`, `socks5://…`, or a bare
     /// `host:port`). `None` = everything direct.
-    pub socks5: Option<String>,
+    socks5: Option<String>,
     /// Hosts eligible for proxying (suffix match); empty = proxy nothing.
-    pub foreign_hosts: Vec<String>,
+    foreign_hosts: Vec<String>,
 }
 
 impl ProxyConfig {
@@ -62,17 +58,18 @@ impl ProxyConfig {
         ProxyConfig::default()
     }
 
-    /// Build from the `ASTOCK_SOCKS5` env var with the default foreign list.
-    pub fn from_env() -> Self {
-        match std::env::var(SOCKS5_ENV) {
-            Ok(v) if !v.trim().is_empty() => ProxyConfig {
-                socks5: Some(v.trim().to_string()),
-                foreign_hosts: DEFAULT_FOREIGN_HOSTS
-                    .iter()
-                    .map(|s| (*s).to_string())
-                    .collect(),
-            },
-            _ => ProxyConfig::direct(),
+    /// Build from a Credential-Manager value supplied in memory by Engine.
+    pub fn with_socks5(socks5: Option<String>) -> Self {
+        let socks5 = socks5.filter(|value| !value.trim().is_empty());
+        if socks5.is_none() {
+            return ProxyConfig::direct();
+        }
+        ProxyConfig {
+            socks5,
+            foreign_hosts: DEFAULT_FOREIGN_HOSTS
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
         }
     }
 

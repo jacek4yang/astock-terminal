@@ -1,0 +1,33 @@
+diff --git a/internal/native/ffi/src/engine/cef_win/proton_engine_cef_win.c b/internal/native/ffi/src/engine/cef_win/proton_engine_cef_win.c
+--- a/internal/native/ffi/src/engine/cef_win/proton_engine_cef_win.c
++++ b/internal/native/ffi/src/engine/cef_win/proton_engine_cef_win.c
+@@ -2119,10 +2119,10 @@ static LRESULT CALLBACK proton_engine_window_proc(HWND hwnd,
+     }
+     break;
+   case WM_ERASEBKGND:
+-    if (window != NULL && window->titlebar_overlay) {
++    if (window != NULL) {
+       RECT client;
+       GetClientRect(hwnd, &client);
+       FillRect((HDC)wparam, &client, (HBRUSH)GetStockObject(BLACK_BRUSH));
+       return 1;
+     }
+     break;
+@@ -2205,5 +2205,6 @@ static void proton_engine_register_window_class(void) {
+   wc.lpszClassName = PROTON_ENGINE_WINDOW_CLASS;
+   wc.hCursor = LoadCursor(NULL, IDC_ARROW);
++  wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+   RegisterClassW(&wc);
+   registered = 1;
+ }
+@@ -3525,8 +3526,7 @@ int32_t proton_engine_window_create(proton_engine_runtime_t *runtime,
+     if (window->size_hint == 1) {
+       window_style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
+     }
+-    if (window->titlebar_overlay) {
+-      window_style |= WS_CLIPCHILDREN;
+-    }
++    // Do not repaint over CEF's HWND while the user interactively resizes.
++    window_style |= WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
+     window->hwnd = CreateWindowExW(
+         0, PROTON_ENGINE_WINDOW_CLASS, wide_title, window_style, CW_USEDEFAULT,

@@ -19,7 +19,9 @@ pub mod tencent;
 pub mod tushare;
 pub mod world_bank;
 
-pub use cninfo_disclosure::{CninfoAnnouncement, CninfoDisclosureProvider, CninfoPage};
+pub use cninfo_disclosure::{
+    CninfoAnnouncement, CninfoDisclosureProvider, CninfoPage, CninfoStockIdentity,
+};
 pub use eastmoney::{EastMoney, IndustryClassified};
 pub use eastmoney_f10::{EastMoneyF10, F10Report};
 pub use em_datacenter::{

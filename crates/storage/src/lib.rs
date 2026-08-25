@@ -2274,6 +2274,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_write_lock_fails_bounded_then_recovers_without_data_loss() {
+        let (dir, storage) = test_storage();
+        storage.settings_set("lock-proof", "before").await.unwrap();
+        let lock = Connection::open(dir.path().join("meta.db")).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let started = std::time::Instant::now();
+        let blocked = storage.settings_set("lock-proof", "blocked").await;
+        let elapsed = started.elapsed();
+        assert!(
+            blocked.is_err(),
+            "a competing write lock must stay observable"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(8),
+            "busy timeout must remain bounded: {elapsed:?}"
+        );
+        lock.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(
+            storage.settings_get("lock-proof").await.unwrap().as_deref(),
+            Some("before"),
+            "failed write must not partially mutate the setting"
+        );
+        storage.settings_set("lock-proof", "after").await.unwrap();
+        assert_eq!(
+            storage.settings_get("lock-proof").await.unwrap().as_deref(),
+            Some("after")
+        );
+    }
+
+    #[tokio::test]
     async fn kv_set_get_delete_roundtrip() {
         let (_dir, storage) = test_storage();
         assert!(storage

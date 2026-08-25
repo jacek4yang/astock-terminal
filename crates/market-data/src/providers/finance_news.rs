@@ -213,6 +213,7 @@ struct SourceSnapshot {
 /// Stable facade used by Agent/UI. Provider additions do not change callers.
 pub struct FinanceNewsProvider {
     ingestor: NewsIngestor,
+    research_ingestor: NewsIngestor,
 }
 
 impl FinanceNewsProvider {
@@ -228,8 +229,11 @@ impl FinanceNewsProvider {
         providers: Vec<Arc<dyn NewsProvider>>,
         storage: Option<Storage>,
     ) -> Result<Self, NewsProviderError> {
+        let research_ingestor =
+            NewsIngestor::without_document_persistence(providers.clone(), storage.clone())?;
         Ok(Self {
             ingestor: NewsIngestor::new(providers, storage)?,
+            research_ingestor,
         })
     }
 
@@ -296,9 +300,15 @@ impl FinanceNewsProvider {
                 Err(_) => tracing::warn!("ASTOCK_NEWS_PROVIDERS is not valid JSON; ignored"),
             }
         }
+        let research_ingestor =
+            NewsIngestor::without_document_persistence(providers.clone(), storage.clone())
+                .expect("built-in research news provider configuration must be valid");
         let ingestor = NewsIngestor::new(providers, storage)
             .expect("built-in news provider configuration must be valid");
-        Self { ingestor }
+        Self {
+            ingestor,
+            research_ingestor,
+        }
     }
 
     /// Load several allowlisted sources and merge them newest-first.
@@ -351,14 +361,14 @@ impl FinanceNewsProvider {
     ) -> Result<FinanceNewsBatch, DataError> {
         let selection = normalize_finance_news_sources(Some(sources));
         let selected = symbol.is_none().then(|| {
-            self.ingestor
+            self.research_ingestor
                 .provider_ids()
                 .into_iter()
                 .filter(|id| id != "official-a-share-announcements")
                 .collect::<Vec<_>>()
         });
         let outcome = self
-            .ingestor
+            .research_ingestor
             .ingest_with_progress(
                 NewsIngestRequest {
                     source_ids: selection.sources,
@@ -383,7 +393,10 @@ impl FinanceNewsProvider {
         provider_id: &str,
         enabled: bool,
     ) -> Result<(), NewsProviderError> {
-        self.ingestor.set_enabled(provider_id, enabled).await
+        self.ingestor.set_enabled(provider_id, enabled).await?;
+        self.research_ingestor
+            .set_enabled(provider_id, enabled)
+            .await
     }
 }
 

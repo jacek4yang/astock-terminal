@@ -16,8 +16,9 @@ import {
   type DisclosureSyncSnapshot,
   type RelationDocumentKind,
 } from "../lib/api";
-import { useAgentSession } from "../agentSession";
 import { ErrorBox, Loading } from "../components/ui";
+import { queueAgentDraft } from "../workbench/agentDraft";
+import { useWorkspaceStore } from "../workbench/store";
 
 const CATEGORIES = [
   ["all", "全部类型"], ["periodic_report", "定期报告"], ["earnings_forecast", "业绩预告/快报"],
@@ -116,7 +117,6 @@ function DetailPanel({ detail, loading, onClose, onAgent, onExtract }: { detail:
 
 export default function DisclosurePage() {
   const navigate = useNavigate();
-  const setAgentInput = useAgentSession((state) => state.setInput);
   const [page, setPage] = useState<DisclosurePage>(EMPTY_PAGE);
   const [code, setCode] = useState(""); const [keyword, setKeyword] = useState("");
   const [category, setCategory] = useState("all"); const [status, setStatus] = useState("all");
@@ -155,7 +155,11 @@ export default function DisclosurePage() {
   const openDetail = async (item: DisclosureListItem) => { setSelected(item); setDetail(null); setDetailLoading(true); try { setDetail(await getDisclosureDetail(item.disclosure_id)); } catch (reason) { setError(errMsg(reason)); } finally { setDetailLoading(false); } };
   const startSync = async () => { setError(null); try { await disclosureSyncStart({ security_code: code || undefined, days: 365, max_pages: code ? 10 : 3 }); setSyncExpanded(true); setSync(await disclosureSyncStatus()); } catch (reason) { setError(errMsg(reason)); } };
   const openProviders = async () => { try { setProviders(await getDisclosureProviderHealth()); setShowProviders(true); } catch (reason) { setError(errMsg(reason)); } };
-  const askAgent = (item: DisclosureDetail) => { setAgentInput(`请优先核验正式披露 ${item.disclosure_id} 的交易所/巨潮/公司原文与附件，再分析其对 ${item.securities.map((security) => security.code).join("、") || "相关公司"} 的影响。请逐项引用 source_version_id、PDF 页码/表格单元格；如果当前只有镜像发现记录，明确说明“原文未核验”，不要提高结论置信度。`); navigate("/agent"); };
+  const askAgent = (item: DisclosureDetail) => {
+    queueAgentDraft(`请优先核验正式披露 ${item.disclosure_id} 的交易所/巨潮/公司原文与附件，再分析其对 ${item.securities.map((security) => security.code).join("、") || "相关公司"} 的影响。请逐项引用 source_version_id、PDF 页码/表格单元格；如果当前只有镜像发现记录，明确说明“原文未核验”，不要提高结论置信度。`);
+    useWorkspaceStore.getState().setPreset("agent");
+    navigate("/");
+  };
   const extractRelations = async (item: DisclosureDetail) => { const version = relationSourceVersion(item); if (!version) return; setError(null); try { const task = await startRelationExtraction(version, disclosureRelationKind(item)); localStorage.setItem("astock_relation_job", task.job_id); navigate(`/graph?relation_job=${encodeURIComponent(task.job_id)}`); } catch (reason) { setError(errMsg(reason)); } };
   const summary = useMemo(() => `${page.total.toLocaleString("zh-CN")} 条正式披露记录`, [page.total]);
 

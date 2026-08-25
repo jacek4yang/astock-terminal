@@ -1,0 +1,15 @@
+[package]
+name = "astock-protocol"
+description = "Versioned framed IPC contracts shared by AStock native workers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -9,27 +9,282 @@
 
 use crate::http::HttpClient;
 use crate::providers::{fill_pct, json_f64};
-use astock_core::time::parse_date;
-use astock_core::{Adjust, Bar, DataError, Fetched, KlinePeriod, Source, Symbol, VolumeUnit};
+use astock_core::time::{china_tz, parse_date, utc_now};
+use astock_core::{
+    normalize_security_name, Adjust, Bar, DataError, Fetched, KlinePeriod, Quote, Source,
+    StockListItem, Symbol, VolumeUnit,
+};
 use async_trait::async_trait;
+use chrono::{NaiveDateTime, TimeZone, Utc};
+use encoding_rs::GBK;
+use futures::stream::{self, StreamExt};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 use tracing::debug;
 
 use crate::provider::DataProvider;
 
 /// Tencent fqkline endpoint.
 pub const TENCENT_KLINE_URL: &str = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get";
+/// Tencent GBK quote endpoint; the symbol is appended to the URL path as
+/// `q=sh600519` / `q=sz300308`.
+pub const TENCENT_QUOTE_URL: &str = "https://qt.gtimg.cn/q=";
 const HOST_KEY: &str = "web.ifzq.gtimg.cn";
+const QUOTE_HOST_KEY: &str = "qt.gtimg.cn";
+const TENCENT_QUOTE_BATCH: usize = 60;
+const TENCENT_SNAPSHOT_CONCURRENCY: usize = 6;
+const TENCENT_MARKET_SNAPSHOT_TTL: Duration = Duration::from_secs(2);
 
 /// Tencent kline adapter.
 pub struct TencentKline {
     http: Arc<HttpClient>,
+    market_snapshot: Mutex<Option<(Instant, Fetched<Vec<StockListItem>>)>>,
 }
 
 impl TencentKline {
     /// Wrap the shared HTTP client.
     pub fn new(http: Arc<HttpClient>) -> Self {
-        TencentKline { http }
+        TencentKline {
+            http,
+            market_snapshot: Mutex::new(None),
+        }
+    }
+
+    fn parse_quote_body(
+        body: &str,
+        symbol: &Symbol,
+        fetched_at: chrono::DateTime<Utc>,
+    ) -> Result<Quote, DataError> {
+        let payload = body
+            .split_once('"')
+            .and_then(|(_, tail)| tail.rsplit_once('"').map(|(value, _)| value))
+            .ok_or_else(|| DataError::Parse {
+                upstream: format!("tencent quote {symbol}"),
+                message: "missing quoted quote payload".to_string(),
+            })?;
+        let fields = payload.split('~').collect::<Vec<_>>();
+        if fields.len() <= 38 {
+            return Err(DataError::Parse {
+                upstream: format!("tencent quote {symbol}"),
+                message: format!("expected at least 39 fields, received {}", fields.len()),
+            });
+        }
+        if fields[2] != symbol.code() {
+            return Err(DataError::Parse {
+                upstream: format!("tencent quote {symbol}"),
+                message: format!(
+                    "security identity mismatch: expected {}, received {}",
+                    symbol.code(),
+                    fields[2]
+                ),
+            });
+        }
+        let number = |index: usize, label: &str| {
+            fields[index]
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| DataError::Parse {
+                    upstream: format!("tencent quote {symbol}"),
+                    message: format!("invalid {label} at field {index}"),
+                })
+        };
+        let positive = |index: usize, label: &str| {
+            number(index, label).and_then(|value| {
+                if value > 0.0 {
+                    Ok(value)
+                } else {
+                    Err(DataError::Empty(format!(
+                        "tencent quote {symbol}: missing or non-positive {label}"
+                    )))
+                }
+            })
+        };
+        let name = normalize_security_name(fields[1]);
+        if name.is_empty() {
+            return Err(DataError::Empty(format!(
+                "tencent quote {symbol}: missing security name"
+            )));
+        }
+        let price = positive(3, "price")?;
+        let pre_close = positive(4, "pre-close")?;
+        let timestamp = NaiveDateTime::parse_from_str(fields[30], "%Y%m%d%H%M%S")
+            .ok()
+            .and_then(|value| china_tz().from_local_datetime(&value).single())
+            .map(|value| value.with_timezone(&Utc))
+            .ok_or_else(|| DataError::Parse {
+                upstream: format!("tencent quote {symbol}"),
+                message: format!("invalid market timestamp {}", fields[30]),
+            })?;
+        let exact_amount = fields[35]
+            .split('/')
+            .nth(2)
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .or_else(|| {
+                number(37, "amount in ten-thousand CNY")
+                    .ok()
+                    .map(|value| value * 10_000.0)
+            })
+            .ok_or_else(|| DataError::Parse {
+                upstream: format!("tencent quote {symbol}"),
+                message: "missing turnover amount".to_string(),
+            })?;
+        let mut field_provenance = std::collections::BTreeMap::new();
+        for field in [
+            "name",
+            "price",
+            "pre_close",
+            "volume",
+            "amount",
+            "change",
+            "pct",
+            "turnover",
+        ] {
+            let mut provenance = astock_core::FieldProvenance::reported("tencent", timestamp);
+            provenance.fetched_at = fetched_at;
+            field_provenance.insert(field.to_string(), provenance);
+        }
+        for (field, index) in [("open", 5), ("high", 33), ("low", 34)] {
+            let value = number(index, field)?;
+            let provenance = if value > 0.0 {
+                let mut provenance = astock_core::FieldProvenance::reported("tencent", timestamp);
+                provenance.fetched_at = fetched_at;
+                provenance
+            } else {
+                astock_core::FieldProvenance::missing(
+                    "tencent",
+                    format!("集合竞价/停牌阶段未返回{field}"),
+                )
+            };
+            field_provenance.insert(field.to_string(), provenance);
+        }
+        Ok(Quote {
+            symbol: symbol.code().to_string(),
+            name,
+            price,
+            open: number(5, "open")?,
+            high: number(33, "high")?,
+            low: number(34, "low")?,
+            pre_close,
+            volume: number(6, "volume")?,
+            amount: exact_amount,
+            change: number(31, "change")?,
+            pct: number(32, "pct")?,
+            turnover: number(38, "turnover").ok(),
+            timestamp,
+            field_provenance,
+        })
+    }
+
+    async fn fetch_quote_batch(
+        &self,
+        symbols: Vec<Symbol>,
+    ) -> Result<Vec<StockListItem>, DataError> {
+        let query = symbols
+            .iter()
+            .map(Symbol::tencent)
+            .collect::<Vec<_>>()
+            .join(",");
+        let response = self
+            .http
+            .get_text(&format!("{TENCENT_QUOTE_URL}{query}"), &[])
+            .await?;
+        let (decoded, _, malformed) = GBK.decode(&response.body_bytes);
+        if malformed {
+            return Err(DataError::Parse {
+                upstream: "tencent market snapshot".to_string(),
+                message: "GBK response contains malformed bytes".to_string(),
+            });
+        }
+        let lines = decoded
+            .lines()
+            .filter_map(|line| {
+                let payload = line
+                    .split_once('"')
+                    .and_then(|(_, tail)| tail.rsplit_once('"').map(|(value, _)| value))?;
+                let code = payload.split('~').nth(2)?;
+                Some((code.to_string(), line))
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        let fetched_at = utc_now();
+        let rows = symbols
+            .iter()
+            .filter_map(|symbol| {
+                let line = lines.get(symbol.code())?;
+                let quote = Self::parse_quote_body(line, symbol, fetched_at).ok()?;
+                Some(StockListItem {
+                    code: quote.symbol,
+                    name: quote.name,
+                    price: Some(quote.price),
+                    pct: Some(quote.pct),
+                    amount: (quote.amount > 0.0).then_some(quote.amount),
+                })
+            })
+            .collect::<Vec<_>>();
+        if rows.len() * 10 < symbols.len() * 9 {
+            return Err(DataError::Empty(format!(
+                "tencent quote batch coverage {}/{}",
+                rows.len(),
+                symbols.len()
+            )));
+        }
+        Ok(rows)
+    }
+
+    /// Complete current Shanghai/Shenzhen stock snapshot. Tencent's public
+    /// quote endpoint supports comma-separated symbols, so this provides a
+    /// real-price fallback when an EastMoney clist host returns placeholder
+    /// zeros instead of silently degrading the Agent candidate universe.
+    pub async fn market_snapshot(
+        &self,
+        securities: &[StockListItem],
+    ) -> Result<Fetched<Vec<StockListItem>>, DataError> {
+        let mut cache = self.market_snapshot.lock().await;
+        if let Some((stored_at, fetched)) = cache.as_ref() {
+            if stored_at.elapsed() <= TENCENT_MARKET_SNAPSHOT_TTL {
+                return Ok(fetched.clone());
+            }
+        }
+        let batches = securities
+            .chunks(TENCENT_QUOTE_BATCH)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .filter_map(|item| Symbol::new(&item.code).ok())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|batch| !batch.is_empty())
+            .collect::<Vec<_>>();
+        let requested = batches.iter().map(Vec::len).sum::<usize>();
+        let results = stream::iter(batches)
+            .map(|batch| async move { self.fetch_quote_batch(batch).await })
+            .buffer_unordered(TENCENT_SNAPSHOT_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+        let mut rows = Vec::with_capacity(requested);
+        let mut failures = Vec::new();
+        for result in results {
+            match result {
+                Ok(mut batch) => rows.append(&mut batch),
+                Err(error) => failures.push(error.to_string()),
+            }
+        }
+        let required = requested.saturating_mul(90).div_ceil(100);
+        if rows.len() < required || rows.len() < 4_000 {
+            return Err(DataError::AllFailed {
+                op: "tencent market snapshot",
+                details: format!(
+                    "coverage {}/{requested}, required {required}; {}",
+                    rows.len(),
+                    failures.join("; ")
+                ),
+            });
+        }
+        let fetched = Fetched::now(rows, Source::Tencent);
+        *cache = Some((Instant::now(), fetched.clone()));
+        Ok(fetched)
     }
 
     /// Fetch and parse bars for an already-converted Tencent symbol
@@ -169,6 +424,26 @@ impl DataProvider for TencentKline {
         HOST_KEY
     }
 
+    async fn quote(&self, symbol: &Symbol) -> Result<Fetched<Quote>, DataError> {
+        let url = format!("{TENCENT_QUOTE_URL}{}", symbol.tencent());
+        let response = self.http.get_text(&url, &[]).await?;
+        let (decoded, _, malformed) = GBK.decode(&response.body_bytes);
+        if malformed {
+            self.http.on_failure(QUOTE_HOST_KEY);
+            return Err(DataError::Parse {
+                upstream: format!("tencent quote {symbol}"),
+                message: "GBK response contains malformed bytes".to_string(),
+            });
+        }
+        let fetched_at = utc_now();
+        let quote = Self::parse_quote_body(&decoded, symbol, fetched_at)?;
+        Ok(Fetched {
+            data: quote,
+            source: Source::Tencent,
+            fetched_at,
+        })
+    }
+
     async fn kline(
         &self,
         symbol: &Symbol,
@@ -231,6 +506,49 @@ mod tests {
         // pct computed from consecutive closes, rounded to 2dp.
         let expect = ((1405.5_f64 - 1410.0) / 1410.0 * 100.0 * 100.0).round() / 100.0;
         assert_eq!(bars[1].pct, Some(expect));
+    }
+
+    #[test]
+    fn parses_gbk_quote_fields_units_and_market_time() {
+        let symbol = Symbol::new("300308").unwrap();
+        let fetched_at = "2026-08-25T00:51:35Z".parse().unwrap();
+        let body = r#"v_sz300308="51~中际旭创~300308~870.22~943.00~945.00~389093~166564~222529~870.22~8~870.11~1~870.08~1~870.07~1~870.05~1~870.60~1~870.63~1~870.70~2~870.71~16~870.72~10~~20260824161427~-72.78~-7.72~949.73~850.00~870.22/389093/34491670420~389093~3449167~3.51~49.77";"#;
+        let quote = TencentKline::parse_quote_body(body, &symbol, fetched_at).unwrap();
+        assert_eq!(quote.name, "中际旭创");
+        assert_eq!(quote.price, 870.22);
+        assert_eq!(quote.pre_close, 943.0);
+        assert_eq!(quote.volume, 389_093.0);
+        assert_eq!(quote.amount, 34_491_670_420.0);
+        assert_eq!(quote.timestamp.to_rfc3339(), "2026-08-24T08:14:27+00:00");
+        assert_eq!(quote.field_provenance["price"].fetched_at, fetched_at);
+    }
+
+    #[test]
+    fn auction_zero_ohlc_is_marked_missing_instead_of_reported() {
+        let symbol = Symbol::new("300308").unwrap();
+        let fetched_at = "2026-08-25T00:51:35Z".parse().unwrap();
+        let body = r#"v_sz300308="51~中际旭创~300308~851.00~870.22~0.00~0~0~0~851.00~1~0~0~0~0~0~0~0~0~851.00~1~0~0~0~0~0~0~0~0~~20260825091500~-19.22~-2.21~0.00~0.00~851.00/0/0~0~0~0.00";"#;
+        let quote = TencentKline::parse_quote_body(body, &symbol, fetched_at).unwrap();
+        assert_eq!(quote.price, 851.0);
+        for field in ["open", "high", "low"] {
+            assert_eq!(
+                quote.field_provenance[field].quality,
+                astock_core::DataQuality::Missing
+            );
+        }
+    }
+
+    #[test]
+    fn quote_parser_rejects_zero_placeholder_and_wrong_identity() {
+        let symbol = Symbol::new("300308").unwrap();
+        let fetched_at = "2026-08-25T00:51:35Z".parse().unwrap();
+        let zero = r#"v_sz300308="51~中际旭创~300308~0~943~945~1~~~~~~~~~~~~~~~~~~~~~~~~20260824161427~-943~-100~949~850~0/1/1~1~0~0~0";"#;
+        assert!(TencentKline::parse_quote_body(zero, &symbol, fetched_at).is_err());
+        let wrong = r#"v_sz000001="51~平安银行~000001~10~9~9~1~~~~~~~~~~~~~~~~~~~~~~~~20260824161427~1~1~10~9~10/1/1~1~0~0~0";"#;
+        assert!(matches!(
+            TencentKline::parse_quote_body(wrong, &symbol, fetched_at),
+            Err(DataError::Parse { message, .. }) if message.contains("identity mismatch")
+        ));
     }
 
     /// Contract guard: the same trading day, delivered in three upstream

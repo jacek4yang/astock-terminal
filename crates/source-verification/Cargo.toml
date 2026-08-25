@@ -3,17 +3,17 @@ name = "astock-source-verification"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-
+publish.workspace = true
 [dependencies]
-astock-security = { path = "../security" }
-astock-storage = { path = "../storage" }
+astock-security = { version = "6.0.0", path = "../security" }
+astock-storage = { version = "6.0.0", path = "../storage" }
 chrono.workspace = true
 flate2.workspace = true
-lopdf = "0.42"
+lopdf = "0.44"
 once_cell.workspace = true
 regex.workspace = true
 rusqlite.workspace = true
-scraper = "0.23"
+scraper = "0.27"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

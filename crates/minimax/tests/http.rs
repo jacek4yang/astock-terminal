@@ -257,6 +257,78 @@ async fn chat_stream_retries_only_before_establishment() {
 }
 
 #[tokio::test]
+async fn stream_break_before_commit_replays_but_never_publishes_private_chunks() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = common::spawn({
+        let calls = calls.clone();
+        move |req| {
+            if req.path.ends_with("/v1/token_plan/remains") {
+                return RawResponse::json(200, &quota_body(80));
+            }
+            calls.fetch_add(1, Ordering::SeqCst);
+            // A reasoning-only SSE fragment closes without a terminal marker.
+            // It is private protocol state and must be discarded on replay.
+            RawResponse::sse(
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"private\"}}]}\n\n",
+            )
+        }
+    });
+    let client = common::test_client("cn-key", &server.url).with_stream_policy(
+        astock_minimax::StreamPolicy {
+            first_chunk_timeout: std::time::Duration::from_secs(1),
+            idle_timeout: std::time::Duration::from_secs(1),
+            max_precommit_restarts: 2,
+            max_buffered_bytes: 1024,
+        },
+    );
+    let request = ChatRequest::new("MiniMax-M2.5", vec![ChatMessage::user("hi")]);
+    let stream = client.chat_stream(&request).await.unwrap();
+    futures::pin_mut!(stream);
+    let first = futures::StreamExt::next(&mut stream)
+        .await
+        .expect("stream must report an incomplete round");
+    assert!(matches!(first, Err(MinimaxError::Network(_))));
+    assert!(futures::StreamExt::next(&mut stream).await.is_none());
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn stream_break_after_visible_commit_is_not_replayed_or_misreported_complete() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = common::spawn({
+        let calls = calls.clone();
+        move |req| {
+            if req.path.ends_with("/v1/token_plan/remains") {
+                return RawResponse::json(200, &quota_body(80));
+            }
+            calls.fetch_add(1, Ordering::SeqCst);
+            RawResponse::sse(
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n",
+            )
+        }
+    });
+    let client = common::test_client("cn-key", &server.url);
+    let request = ChatRequest::new("MiniMax-M2.5", vec![ChatMessage::user("hi")]);
+    let stream = client.chat_stream(&request).await.unwrap();
+    futures::pin_mut!(stream);
+    let visible = futures::StreamExt::next(&mut stream)
+        .await
+        .expect("visible chunk")
+        .unwrap();
+    assert_eq!(visible.raw_delta().as_deref(), Some("partial"));
+    let failure = futures::StreamExt::next(&mut stream)
+        .await
+        .expect("terminal error after incomplete visible stream");
+    assert!(matches!(failure, Err(MinimaxError::Network(_))));
+    assert!(futures::StreamExt::next(&mut stream).await.is_none());
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "committed output must not replay"
+    );
+}
+
+#[tokio::test]
 async fn rate_gate_retries_429_then_succeeds() {
     let calls = Arc::new(AtomicUsize::new(0));
     let server = common::spawn({

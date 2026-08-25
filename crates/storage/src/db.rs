@@ -4,11 +4,13 @@
 //! dedicated blocking thread. Callers submit closures through
 //! [`Db::run`] (async) and get their result back over a oneshot channel.
 
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{backup::Backup, Connection};
 use tokio::sync::oneshot;
 
 use crate::error::{Error, Result};
@@ -1377,7 +1379,7 @@ pub(crate) struct Db {
 
 impl Db {
     /// Open (creating if needed) the database at `path` and run migrations.
-    pub(crate) fn open(path: &std::path::Path) -> Result<Db> {
+    pub(crate) fn open(path: &Path) -> Result<Db> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -1385,6 +1387,7 @@ impl Db {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        backup_before_schema_upgrade(path, &conn)?;
         migrate(&mut conn)?;
         let (tx, rx) = mpsc::channel::<Job>();
         let handle = std::thread::Builder::new()
@@ -1436,19 +1439,79 @@ impl Drop for Db {
     }
 }
 
-/// Apply pending migrations, tracking progress in the `user_version` pragma.
+/// Create a verified, immutable recovery point before changing an existing
+/// schema. SQLite's online backup API includes committed WAL content and does
+/// not require copying a live database file byte-for-byte.
+fn backup_before_schema_upgrade(path: &Path, source: &Connection) -> Result<Option<PathBuf>> {
+    let current: u32 = source.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let target = MIGRATIONS.last().map(|(number, _)| *number).unwrap_or(0);
+    if current == 0 || current >= target || !path.is_file() {
+        return Ok(None);
+    }
+
+    let backup_directory = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("backups")
+        .join("schema");
+    std::fs::create_dir_all(&backup_directory)?;
+    let backup_path = backup_directory.join(format!(
+        "meta-v{current}-before-v{target}-{}-{}.sqlite",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        std::process::id()
+    ));
+    let mut destination = Connection::open(&backup_path)?;
+    let backup_result = (|| -> Result<()> {
+        {
+            let backup = Backup::new(source, &mut destination)?;
+            backup.run_to_completion(128, Duration::from_millis(20), None)?;
+        }
+        let integrity: String =
+            destination.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        if integrity != "ok" {
+            return Err(Error::Invalid(format!(
+                "schema-upgrade backup integrity_check returned {integrity}"
+            )));
+        }
+        let backed_up_version: u32 =
+            destination.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if backed_up_version != current {
+            return Err(Error::Invalid(format!(
+                "schema-upgrade backup version mismatch: expected {current}, got {backed_up_version}"
+            )));
+        }
+        Ok(())
+    })();
+    drop(destination);
+    if let Err(error) = backup_result {
+        let _ = std::fs::remove_file(&backup_path);
+        return Err(error);
+    }
+    Ok(Some(backup_path))
+}
+
+/// Apply every pending migration in one transaction. A failure therefore
+/// leaves the pre-upgrade database version intact; the verified backup above
+/// remains available for recovery from storage or filesystem failures.
 fn migrate(conn: &mut Connection) -> Result<()> {
     let current: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    for &(number, sql) in MIGRATIONS {
-        if number <= current {
-            continue;
-        }
-        let tx = conn.transaction()?;
-        tx.execute_batch(sql)?;
-        tx.commit()?;
-        // user_version lives in the database header; set it after commit.
-        conn.pragma_update(None, "user_version", number)?;
+    let pending = MIGRATIONS
+        .iter()
+        .copied()
+        .filter(|(number, _)| *number > current)
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return Ok(());
     }
+    let tx = conn.transaction()?;
+    for (number, sql) in pending {
+        tx.execute_batch(sql)?;
+        tx.pragma_update(None, "user_version", number)?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -1578,6 +1641,25 @@ mod tests {
         // Reopening applies every migration after v4.
         let db = Db::open(&path).unwrap();
         drop(db);
+        let backups = std::fs::read_dir(dir.path().join("backups/schema"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            backups.len(),
+            1,
+            "an existing schema must be backed up once"
+        );
+        let backup = Connection::open(&backups[0]).unwrap();
+        let backup_version: u32 = backup
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let backup_integrity: String = backup
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(backup_version, 4);
+        assert_eq!(backup_integrity, "ok");
+        drop(backup);
         let conn = Connection::open(&path).unwrap();
         let version: u32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))

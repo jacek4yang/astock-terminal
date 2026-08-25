@@ -29,13 +29,14 @@ use crate::http::HttpClient;
 use crate::provider::DataProvider;
 use crate::providers::{
     EastMoney, EmDataCenter, FinanceNewsProvider, GlobalAssetProvider, IwencaiOpenApi,
-    JoinQuantProvider, SinaKline, TdxProvider, TencentKline, TushareProvider,
+    JoinQuantProvider, SecEdgarProvider, SinaKline, TdxProvider, TencentKline, TushareProvider,
 };
+use crate::proxy::ProxyConfig;
 use crate::security_master::SecurityMaster;
 use crate::validate::{filter_valid_bars, filter_valid_index_bars};
 use astock_core::{
-    Adjust, Bar, DataError, Fetched, FundFlowPoint, KlinePeriod, MarketBreadth, MinuteData, Quote,
-    SearchResult, Source, StockListItem, Symbol,
+    normalize_security_name, Adjust, Bar, DataError, Fetched, FundFlowPoint, KlinePeriod,
+    MarketBreadth, MinuteData, Quote, SearchResult, Source, StockListItem, Symbol,
 };
 use astock_storage::Storage;
 use async_trait::async_trait;
@@ -564,6 +565,16 @@ impl Inner {
     }
 }
 
+fn retain_resolved_search_hits(rows: &mut Vec<SearchResult>) {
+    for hit in rows.iter_mut() {
+        hit.name = normalize_security_name(&hit.name);
+    }
+    rows.retain(|hit| {
+        !hit.name.is_empty()
+            && Symbol::new(&hit.code).is_ok_and(|symbol| symbol.is_supported_market_instrument())
+    });
+}
+
 fn kline_cache_key(symbol: &Symbol, period: KlinePeriod, adjust: Adjust, count: u32) -> String {
     format!("kline_{symbol}_{count}_{period:?}_{adjust:?}")
 }
@@ -601,6 +612,35 @@ fn validate_market_breadth(breadth: &MarketBreadth) -> Result<(), DataError> {
     Ok(())
 }
 
+/// Credential material supplied by Engine after a direct Windows Credential
+/// Manager read. This type intentionally does not implement `Debug` or
+/// serialization and must never cross IPC.
+#[derive(Clone, Default)]
+pub struct MarketDataCredentials {
+    tushare_token: Option<String>,
+    iwencai_key: Option<String>,
+    sec_edgar_user_agent: Option<String>,
+    socks5: Option<String>,
+}
+
+impl MarketDataCredentials {
+    /// Construct the non-serializable credential bundle consumed once by
+    /// [`MarketData`]. Values remain private to prevent ad-hoc diagnostics.
+    pub fn new(
+        tushare_token: Option<String>,
+        iwencai_key: Option<String>,
+        sec_edgar_user_agent: Option<String>,
+        socks5: Option<String>,
+    ) -> Self {
+        Self {
+            tushare_token,
+            iwencai_key,
+            sec_edgar_user_agent,
+            socks5,
+        }
+    }
+}
+
 /// Composite market-data facade: kline failover + breaker + single-flight,
 /// everything else delegated to EastMoney.
 #[derive(Clone)]
@@ -620,15 +660,17 @@ pub struct MarketData {
     pub em_datacenter: Arc<EmDataCenter>,
     /// TDX (通达信) adapter; its server pool is probed lazily on first use.
     pub tdx: Arc<TdxProvider>,
-    /// Optional JoinQuant adapter (credentials from `JQ_USER`/`JQ_PWD`);
+    /// Optional JoinQuant adapter (configured in memory by Engine);
     /// `available() == false` without them. Explicit-call source only —
     /// never in the automatic failover chain.
     pub joinquant: Arc<JoinQuantProvider>,
-    /// Optional Tushare pro adapter (token from `TUSHARE_TOKEN`);
+    /// Optional Tushare pro adapter (token injected in memory by Engine);
     /// `available() == false` when no token is configured.
     pub tushare: Arc<TushareProvider>,
-    /// Optional iwencai OpenAPI adapter (key from `IWENCAI_KEY`).
+    /// Optional iwencai OpenAPI adapter (key injected in memory by Engine).
     pub iwencai: Arc<IwencaiOpenApi>,
+    /// Optional SEC EDGAR adapter with an in-memory Fair Access identity.
+    pub sec_edgar: Arc<SecEdgarProvider>,
     /// Public, credential-free finance headlines with bounded caching/retry.
     pub finance_news: Arc<FinanceNewsProvider>,
     /// Cross-market gold quotes and bounded daily trend history.
@@ -647,23 +689,60 @@ impl Default for MarketData {
 impl MarketData {
     /// Build the full stack with a fresh shared HTTP client and cache.
     pub fn new() -> Self {
-        Self::with_shared(Arc::new(HttpClient::new()), Arc::new(TtlCache::default()))
+        Self::with_credentials(MarketDataCredentials::default())
+    }
+
+    /// Build from explicit in-memory credentials. Intended for Engine and
+    /// isolated live tests; production callers must source these values from
+    /// Windows Credential Manager.
+    pub fn with_credentials(credentials: MarketDataCredentials) -> Self {
+        let http = Arc::new(HttpClient::with_proxy(ProxyConfig::with_socks5(
+            credentials.socks5.clone(),
+        )));
+        Self::build(
+            http,
+            Arc::new(TtlCache::default()),
+            None,
+            BreakerConfig::default(),
+            None,
+            credentials,
+        )
     }
 
     /// Build from existing shared components.
     pub fn with_shared(http: Arc<HttpClient>, cache: Arc<TtlCache>) -> Self {
-        Self::build(http, cache, None, BreakerConfig::default(), None)
+        Self::build(
+            http,
+            cache,
+            None,
+            BreakerConfig::default(),
+            None,
+            MarketDataCredentials::default(),
+        )
     }
 
     /// Production constructor with persistent news cursors, provider enable
     /// flags and last-good snapshots in the shared application storage.
     pub fn with_storage(storage: Storage) -> Self {
+        Self::with_storage_and_credentials(storage, MarketDataCredentials::default())
+    }
+
+    /// Production constructor with explicit credential material supplied by
+    /// Engine's Credential Manager boundary.
+    pub fn with_storage_and_credentials(
+        storage: Storage,
+        credentials: MarketDataCredentials,
+    ) -> Self {
+        let http = Arc::new(HttpClient::with_proxy(ProxyConfig::with_socks5(
+            credentials.socks5.clone(),
+        )));
         Self::build(
-            Arc::new(HttpClient::new()),
+            http,
             Arc::new(TtlCache::default()),
             None,
             BreakerConfig::default(),
             Some(storage),
+            credentials,
         )
     }
 
@@ -679,6 +758,7 @@ impl MarketData {
             Some(chain),
             breaker_config,
             None,
+            MarketDataCredentials::default(),
         )
     }
 
@@ -688,16 +768,32 @@ impl MarketData {
         chain: Option<Vec<Arc<dyn DataProvider>>>,
         breaker_config: BreakerConfig,
         storage: Option<Storage>,
+        credentials: MarketDataCredentials,
     ) -> Self {
+        let MarketDataCredentials {
+            tushare_token,
+            iwencai_key,
+            sec_edgar_user_agent,
+            socks5: _,
+        } = credentials;
         let tencent = Arc::new(TencentKline::new(http.clone()));
         let sina = Arc::new(SinaKline::new(http.clone()));
         let eastmoney = Arc::new(EastMoney::new(http.clone(), cache.clone()));
         let em_datacenter = Arc::new(EmDataCenter::new(http.clone(), cache.clone()));
         let tdx = Arc::new(TdxProvider::new());
         let security_master = Arc::new(SecurityMaster::default());
-        let joinquant = Arc::new(JoinQuantProvider::from_env());
-        let tushare = Arc::new(TushareProvider::from_env(http.clone(), cache.clone()));
-        let iwencai = Arc::new(IwencaiOpenApi::from_env(http.clone(), cache.clone()));
+        let joinquant = Arc::new(JoinQuantProvider::new(None));
+        let tushare = Arc::new(TushareProvider::new(
+            http.clone(),
+            cache.clone(),
+            tushare_token,
+        ));
+        let iwencai = Arc::new(IwencaiOpenApi::new(
+            http.clone(),
+            cache.clone(),
+            iwencai_key,
+        ));
+        let sec_edgar = Arc::new(SecEdgarProvider::new(http.clone(), sec_edgar_user_agent));
         let finance_news = Arc::new(match storage.clone() {
             Some(storage) => FinanceNewsProvider::with_storage(
                 http.clone(),
@@ -747,6 +843,7 @@ impl MarketData {
             joinquant,
             tushare,
             iwencai,
+            sec_edgar,
             finance_news,
             global_assets,
             security_master,
@@ -987,8 +1084,7 @@ impl DataProvider for MarketData {
     async fn quote(&self, symbol: &Symbol) -> Result<Fetched<Quote>, DataError> {
         // Single-flight coalescing only — no TTL cache, quote freshness
         // semantics are unchanged from the legacy pass-through. The fetch
-        // itself fails over through the breaker-gated chain (tdx → eastmoney;
-        // tencent/sina answer NoProvider and are skipped).
+        // itself fails over through the breaker-gated public provider chain.
         let inner = self.inner.clone();
         let eastmoney = self.eastmoney.clone();
         let symbol = symbol.clone();
@@ -1013,7 +1109,10 @@ impl DataProvider for MarketData {
                 for hit in &mut fetched.data {
                     if let Some(record) = self.security_master.get(&hit.code) {
                         hit.name = record.canonical_name;
-                    } else if !hit.name.trim().is_empty() {
+                    } else {
+                        hit.name = normalize_security_name(&hit.name);
+                    }
+                    if self.security_master.get(&hit.code).is_none() && !hit.name.is_empty() {
                         self.security_master.upsert(
                             astock_core::SecurityMasterRecord::listed_stock(
                                 hit.code.clone(),
@@ -1023,6 +1122,36 @@ impl DataProvider for MarketData {
                         );
                     }
                 }
+                // The provider deliberately avoids a network round-trip for a
+                // six-digit query, so that raw hit has no name. Resolve the
+                // identity through the normal failover quote path before it
+                // reaches the renderer; a blank or invented display name is
+                // worse than an explicit no-match result.
+                let unresolved: Vec<_> = fetched
+                    .data
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, hit)| hit.name.is_empty())
+                    .filter_map(|(index, hit)| {
+                        Symbol::new(&hit.code).ok().map(|symbol| (index, symbol))
+                    })
+                    .collect();
+                for (index, symbol) in unresolved {
+                    if let Ok(quote) = self.quote(&symbol).await {
+                        let name = normalize_security_name(&quote.data.name);
+                        if !name.is_empty() {
+                            self.security_master.upsert(
+                                astock_core::SecurityMasterRecord::listed_stock(
+                                    symbol.code(),
+                                    name.clone(),
+                                    "market_search_quote",
+                                ),
+                            );
+                            fetched.data[index].name = name;
+                        }
+                    }
+                }
+                retain_resolved_search_hits(&mut fetched.data);
                 if fetched.data.is_empty() && !local.is_empty() {
                     Ok(Fetched::now(local, Source::Tdx))
                 } else {
@@ -1068,9 +1197,32 @@ impl DataProvider for MarketData {
         // sequence used to prevent the second/third host from ever running.
         let fetched = match self.eastmoney.all_a_shares().await {
             Ok(fetched) => fetched,
-            Err(error) => {
-                debug!(%error, "EastMoney A-share list retries exhausted; using TDX security list");
-                self.tdx.all_a_shares().await?
+            Err(eastmoney_error) => {
+                debug!(%eastmoney_error, "EastMoney A-share snapshot unavailable or contains placeholder fields; using public quote fallback");
+                let identities = self
+                    .tdx
+                    .all_a_shares()
+                    .await
+                    .map_err(|tdx_identity_error| DataError::AllFailed {
+                        op: "all_a_shares",
+                        details: format!(
+                            "eastmoney: {eastmoney_error}; tdx identity: {tdx_identity_error}"
+                        ),
+                    })?;
+                match self.tencent.market_snapshot(&identities.data).await {
+                    Ok(fetched) => fetched,
+                    Err(tencent_error) => {
+                        debug!(%tencent_error, "Tencent market snapshot unavailable; trying TDX batch snapshot");
+                        self.tdx.market_snapshot().await.map_err(|tdx_quote_error| {
+                            DataError::AllFailed {
+                                op: "all_a_shares",
+                                details: format!(
+                                    "eastmoney: {eastmoney_error}; tencent: {tencent_error}; tdx quote: {tdx_quote_error}"
+                                ),
+                            }
+                        })?
+                    }
+                }
             }
         };
         self.security_master
@@ -1192,5 +1344,30 @@ mod tests {
             !md.chain_names().contains(&"joinquant"),
             "joinquant is explicit-call only, never in the automatic chain"
         );
+    }
+
+    #[test]
+    fn renderer_search_rows_are_named_normalized_and_current() {
+        let mut rows = vec![
+            SearchResult {
+                code: "300308".to_string(),
+                name: "中 际 旭 创".to_string(),
+                classify: "AStock".to_string(),
+            },
+            SearchResult {
+                code: "920001".to_string(),
+                name: String::new(),
+                classify: "BJ".to_string(),
+            },
+            SearchResult {
+                code: "430002".to_string(),
+                name: "历史三板代码".to_string(),
+                classify: "AStock".to_string(),
+            },
+        ];
+        retain_resolved_search_hits(&mut rows);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].code, "300308");
+        assert_eq!(rows[0].name, "中际旭创");
     }
 }
