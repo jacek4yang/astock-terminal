@@ -732,7 +732,7 @@ for (const evidenceMarker of [
 ]) {
   if (!releaseEvidenceValidator.includes(evidenceMarker)) failures.push(`signed PE evidence validation is missing ${evidenceMarker}`);
 }
-for (const packageMarker of ["RequestExecutionLevel user", "$LOCALAPPDATA\\Programs\\AStock Terminal", "/RELEASETEST=", "HKCU", "makensis"]) {
+for (const packageMarker of ["ConvertTo-AStockLf", ".Replace(\"`r`n\", \"`n\").Replace(\"`r\", \"`n\")", "RequestExecutionLevel user", "$LOCALAPPDATA\\Programs\\AStock Terminal", "/RELEASETEST=", "HKCU", "makensis"]) {
   if (!packageHardener.includes(packageMarker)) failures.push(`package hardening is missing ${packageMarker}`);
 }
 for (const migrationMarker of ["migration-engine-e2e.mjs", "uninstall-preserves-data", "release-evidence-check.mjs"]) {

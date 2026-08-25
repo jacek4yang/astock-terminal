@@ -6,6 +6,13 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'Build.Common.ps1')
 $build = Initialize-AStockBuildEnvironment -SkipSpaceCheck:$SkipSpaceCheck
+
+function ConvertTo-AStockLf {
+    param([AllowEmptyString()][string]$Text)
+
+    return $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+}
+
 $artifacts = $build.Paths.Artifacts
 $sourcePath = Join-Path $artifacts '.astock-terminal.installer.nsi'
 $stagingSetup = Join-Path $artifacts '.astock-terminal.staging-setup.exe'
@@ -14,7 +21,7 @@ if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
     throw "Generated NSIS source is missing: $sourcePath"
 }
 
-$source = Get-Content -LiteralPath $sourcePath -Raw
+$source = ConvertTo-AStockLf (Get-Content -LiteralPath $sourcePath -Raw)
 $required = @(
     'RequestExecutionLevel admin',
     'InstallDir "$PROGRAMFILES64\AStock Terminal"',
@@ -52,7 +59,8 @@ Function un.onInit
   ${GetOptions} $0 "/RELEASETEST=" $ReleaseTest
 FunctionEnd
 '@
-$hardened = $hardened.Replace('!insertmacro MUI_LANGUAGE "English"', '!insertmacro MUI_LANGUAGE "English"' + [Environment]::NewLine + $testSupport)
+$testSupport = ConvertTo-AStockLf $testSupport
+$hardened = $hardened.Replace('!insertmacro MUI_LANGUAGE "English"', '!insertmacro MUI_LANGUAGE "English"' + "`n" + $testSupport)
 $installKill = @'
   ; An update re-runs this installer while the application it is
   ; replacing is still running, so close it before overwriting.
@@ -60,6 +68,7 @@ $installKill = @'
   Pop $0
   Sleep 500
 '@
+$installKill = ConvertTo-AStockLf $installKill
 $installKillSafe = @'
   ${If} $ReleaseTest != "1"
     ; An update re-runs this installer while the application it is
@@ -69,6 +78,7 @@ $installKillSafe = @'
     Sleep 500
   ${EndIf}
 '@
+$installKillSafe = ConvertTo-AStockLf $installKillSafe
 $hardened = $hardened.Replace($installKill, $installKillSafe)
 $installState = @'
   WriteRegStr HKCU "Software\com.astock.terminal" "InstallDir" "$INSTDIR"
@@ -83,6 +93,7 @@ $installState = @'
 
   CreateShortCut "$SMPROGRAMS\AStock Terminal.lnk" "$INSTDIR\astock-terminal.exe"
 '@
+$installState = ConvertTo-AStockLf $installState
 $installStateSafe = @'
   ${If} $ReleaseTest != "1"
     WriteRegStr HKCU "Software\com.astock.terminal" "InstallDir" "$INSTDIR"
@@ -97,6 +108,7 @@ $installStateSafe = @'
     CreateShortCut "$SMPROGRAMS\AStock Terminal.lnk" "$INSTDIR\astock-terminal.exe"
   ${EndIf}
 '@
+$installStateSafe = ConvertTo-AStockLf $installStateSafe
 $hardened = $hardened.Replace($installState, $installStateSafe)
 $uninstallState = @'
   nsExec::Exec 'taskkill /F /IM "astock-terminal.exe"'
@@ -106,6 +118,7 @@ $uninstallState = @'
   DeleteRegKey HKCU "Software\com.astock.terminal"
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\com.astock.terminal"
 '@
+$uninstallState = ConvertTo-AStockLf $uninstallState
 $uninstallStateSafe = @'
   ${If} $ReleaseTest != "1"
     nsExec::Exec 'taskkill /F /IM "astock-terminal.exe"'
@@ -116,6 +129,7 @@ $uninstallStateSafe = @'
   ${EndIf}
   RMDir /r "$INSTDIR"
 '@
+$uninstallStateSafe = ConvertTo-AStockLf $uninstallStateSafe
 $hardened = $hardened.Replace($uninstallState, $uninstallStateSafe)
 if ($hardened.Contains($installKill) -or $hardened.Contains($installState) -or $hardened.Contains($uninstallState)) {
     throw 'NSIS release-test isolation could not wrap every machine-affecting instruction.'
