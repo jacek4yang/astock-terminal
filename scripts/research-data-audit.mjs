@@ -149,7 +149,8 @@ try {
     .flatMap((context) => Object.values(context.datasets ?? {}))
     .some((dataset) => dataset.ok === false);
   const providerDegraded = (reconciliation.quote_sources ?? []).some((source) => !source.ok) ||
-    (reconciliation.kline_sources ?? []).some((source) => !source.ok);
+    (reconciliation.kline_sources ?? []).some((source) => !source.ok) ||
+    (reconciliation.quote_outlier_providers ?? []).length > 0;
   const joinquantDatasetFailure = joinquant.ok && !joinquant.skipped &&
     Object.values(joinquant.value.datasets ?? {}).some((dataset) => dataset.ok === false);
   const newsDegraded = news.some((batch) => batch.error || batch.errors?.length || batch.stale_sources?.length);
@@ -235,6 +236,10 @@ try {
       blocking: reconciliation.blocking,
       quote_sources: (reconciliation.quote_sources ?? []).map(sourceSummary),
       quote_conflicts: (reconciliation.quote_checks ?? []).filter((row) => !row.consistent),
+      quote_consensus_sources: reconciliation.quote_consensus_sources,
+      quote_required_consensus: reconciliation.quote_required_consensus,
+      quote_consensus_providers: reconciliation.quote_consensus_providers ?? [],
+      quote_outlier_providers: reconciliation.quote_outlier_providers ?? [],
       kline_sources: reconciliation.kline_sources,
       kline_overlap_days: reconciliation.kline_overlap_days,
       kline_conflicts: (reconciliation.kline_close_checks ?? []).filter((row) => !row.consistent),

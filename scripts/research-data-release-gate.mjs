@@ -33,8 +33,25 @@ export function validateAuditResults({ standard, beijing, legacy }) {
     "300308: fewer than two quote providers succeeded");
   invariant(successfulProviders(standard.data.reconciliation?.kline_sources).size >= 2,
     "300308: fewer than two K-line providers succeeded");
-  invariant((standard.data.reconciliation?.quote_conflicts ?? []).length === 0,
-    "300308: quote reconciliation has conflicts");
+  const quoteProviders = successfulProviders(standard.data.reconciliation?.quote_sources);
+  const requiredConsensus = Math.max(2, Math.floor(quoteProviders.size / 2) + 1);
+  const reportedRequired = standard.data.reconciliation?.quote_required_consensus;
+  const consensusProviders = new Set(standard.data.reconciliation?.quote_consensus_providers ?? []);
+  const outlierProviders = new Set(standard.data.reconciliation?.quote_outlier_providers ?? []);
+  invariant(reportedRequired === requiredConsensus,
+    "300308: quote majority requirement is missing or inconsistent");
+  invariant(standard.data.reconciliation?.quote_consensus_sources === consensusProviders.size,
+    "300308: quote consensus count contradicts provider identities");
+  invariant(consensusProviders.size >= requiredConsensus,
+    "300308: quote reconciliation lacks a strict majority");
+  invariant([...consensusProviders, ...outlierProviders].every((provider) => quoteProviders.has(provider)) &&
+    consensusProviders.size + outlierProviders.size === quoteProviders.size,
+  "300308: quote consensus/outlier partition is incomplete");
+  invariant((standard.data.reconciliation?.quote_conflicts ?? [])
+    .every((conflict) => outlierProviders.has(conflict.provider)),
+  "300308: a quote conflict exists inside the accepted consensus");
+  invariant(outlierProviders.size === 0 || standard.data.degraded === true,
+    "300308: quarantined quote outliers are not exposed as degraded data");
   invariant((standard.data.reconciliation?.kline_conflicts ?? []).length === 0,
     "300308: K-line reconciliation has conflicts");
   invariant((standard.data.candidates?.count ?? 0) >= 50,
@@ -87,6 +104,8 @@ export function validateAuditResults({ standard, beijing, legacy }) {
       symbol: "300308",
       name: "中际旭创",
       quote_providers: [...successfulProviders(standard.data.reconciliation.quote_sources)],
+      quote_consensus_providers: [...consensusProviders],
+      quote_outlier_providers: [...outlierProviders],
       kline_providers: [...successfulProviders(standard.data.reconciliation.kline_sources)],
       news_items: standardNews.item_count,
       news_channels: [...new Set(standardNews.successful_channels)],

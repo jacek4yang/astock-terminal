@@ -3640,89 +3640,108 @@ type KlineSourceResult = (
     Result<astock_core::Fetched<Vec<astock_core::Bar>>, astock_core::DataError>,
 );
 
+fn quote_pair_checks(
+    reference_provider: &str,
+    reference: &astock_core::Quote,
+    provider: &str,
+    candidate: &astock_core::Quote,
+) -> Vec<Value> {
+    let mut checks = Vec::new();
+    for (field, left, right, absolute, relative) in [
+        ("price", reference.price, candidate.price, 0.01, 0.002),
+        ("open", reference.open, candidate.open, 0.01, 0.002),
+        ("high", reference.high, candidate.high, 0.01, 0.002),
+        ("low", reference.low, candidate.low, 0.01, 0.002),
+        (
+            "pre_close",
+            reference.pre_close,
+            candidate.pre_close,
+            0.01,
+            0.002,
+        ),
+        ("volume", reference.volume, candidate.volume, 1.0, 0.02),
+        ("amount", reference.amount, candidate.amount, 1.0, 0.02),
+        // One A-share price tick can move the displayed percentage by
+        // ~0.17 percentage points on a 6 CNY stock. Providers are sampled a
+        // few seconds apart, so 0.25pp represents one live tick; price and
+        // pre-close remain independently constrained above.
+        ("pct", reference.pct, candidate.pct, 0.25, 0.02),
+    ] {
+        let available = |quote: &astock_core::Quote| {
+            quote
+                .field_provenance
+                .get(field)
+                .is_none_or(|provenance| provenance.quality != astock_core::DataQuality::Missing)
+        };
+        if available(reference) && available(candidate) {
+            checks.push(numeric_check(
+                field,
+                reference_provider,
+                provider,
+                left,
+                right,
+                absolute,
+                relative,
+            ));
+        }
+    }
+    checks
+}
+
+fn quote_pair_consistent(reference: &astock_core::Quote, candidate: &astock_core::Quote) -> bool {
+    let checks = quote_pair_checks("reference", reference, "candidate", candidate);
+    !checks.is_empty()
+        && checks
+            .iter()
+            .all(|row| row.get("consistent") == Some(&Value::Bool(true)))
+}
+
 fn reconcile_market_sources(
     symbol: &str,
     quote_providers: [QuoteSourceResult; 4],
     kline_providers: [KlineSourceResult; 4],
 ) -> Value {
-    let mut quote_checks = Vec::new();
-    let quote_reference = quote_providers
+    let successful_quotes = quote_providers
         .iter()
-        .find_map(|(provider, result)| result.as_ref().ok().map(|value| (*provider, value)));
-    if let Some((reference_provider, reference)) = quote_reference {
-        for (provider, result) in quote_providers
+        .filter_map(|(provider, result)| result.as_ref().ok().map(|quote| (*provider, quote)))
+        .collect::<Vec<_>>();
+    let mut quote_reference = None;
+    for (provider, quote) in &successful_quotes {
+        let consensus_count = successful_quotes
             .iter()
-            .filter(|(provider, _)| *provider != reference_provider)
+            .filter(|(_, candidate)| quote_pair_consistent(&quote.data, &candidate.data))
+            .count();
+        if quote_reference
+            .as_ref()
+            .is_none_or(|(_, _, best_count)| consensus_count > *best_count)
         {
-            let Ok(candidate) = result else { continue };
-            for (field, lv, rv, absolute, relative) in [
-                (
-                    "price",
-                    reference.data.price,
-                    candidate.data.price,
-                    0.01,
-                    0.002,
-                ),
-                (
-                    "open",
-                    reference.data.open,
-                    candidate.data.open,
-                    0.01,
-                    0.002,
-                ),
-                (
-                    "high",
-                    reference.data.high,
-                    candidate.data.high,
-                    0.01,
-                    0.002,
-                ),
-                ("low", reference.data.low, candidate.data.low, 0.01, 0.002),
-                (
-                    "pre_close",
-                    reference.data.pre_close,
-                    candidate.data.pre_close,
-                    0.01,
-                    0.002,
-                ),
-                (
-                    "volume",
-                    reference.data.volume,
-                    candidate.data.volume,
-                    1.0,
-                    0.02,
-                ),
-                (
-                    "amount",
-                    reference.data.amount,
-                    candidate.data.amount,
-                    1.0,
-                    0.02,
-                ),
-                // One A-share price tick can move the displayed percentage by
-                // ~0.17 percentage points on a 6 CNY stock. Providers are sampled
-                // a few seconds apart, so a 0.25pp absolute tolerance represents
-                // one live tick instead of a data conflict; price/pre-close still
-                // have their own strict checks above.
-                ("pct", reference.data.pct, candidate.data.pct, 0.25, 0.02),
-            ] {
-                let available = |quote: &astock_core::Quote| {
-                    quote.field_provenance.get(field).is_none_or(|provenance| {
-                        provenance.quality != astock_core::DataQuality::Missing
-                    })
-                };
-                if available(&reference.data) && available(&candidate.data) {
-                    quote_checks.push(numeric_check(
-                        field,
-                        reference_provider,
-                        provider,
-                        lv,
-                        rv,
-                        absolute,
-                        relative,
-                    ));
-                }
+            quote_reference = Some((*provider, *quote, consensus_count));
+        }
+    }
+    let mut quote_checks = Vec::new();
+    let mut quote_consensus_providers = Vec::new();
+    let mut quote_outlier_providers = Vec::new();
+    if let Some((reference_provider, reference, _)) = quote_reference {
+        for (provider, candidate) in &successful_quotes {
+            if *provider == reference_provider {
+                quote_consensus_providers.push(*provider);
+                continue;
             }
+            let checks = quote_pair_checks(
+                reference_provider,
+                &reference.data,
+                provider,
+                &candidate.data,
+            );
+            if checks
+                .iter()
+                .all(|row| row.get("consistent") == Some(&Value::Bool(true)))
+            {
+                quote_consensus_providers.push(*provider);
+            } else {
+                quote_outlier_providers.push(*provider);
+            }
+            quote_checks.extend(checks);
         }
     }
     let reference = kline_providers
@@ -3781,19 +3800,25 @@ fn reconcile_market_sources(
         .iter()
         .filter(|row| row.get("ok") == Some(&Value::Bool(true)))
         .count();
+    let quote_required_consensus = (quote_successes / 2 + 1).max(2);
+    let quote_consensus_sources = quote_consensus_providers.len();
     json!({
         "symbol": symbol,
         "quote_sources": quote_sources,
         "quote_successful_sources": quote_successes,
         "quote_checks": quote_checks,
         "quote_conflicts": quote_conflicts,
+        "quote_consensus_sources": quote_consensus_sources,
+        "quote_required_consensus": quote_required_consensus,
+        "quote_consensus_providers": quote_consensus_providers,
+        "quote_outlier_providers": quote_outlier_providers,
         "kline_sources": kline_sources,
         "kline_successful_sources": kline_successes,
         "kline_overlap_days": kline_checks.len(),
         "kline_close_checks": kline_checks,
         "kline_conflicts": kline_conflicts,
-        "blocking": quote_successes < 2 || kline_successes < 2 || quote_conflicts > 0 || kline_conflicts > 0,
-        "policy": "报价从TDX/东方财富/腾讯/新浪至少取得两个有效独立源；缺失或非正价格不得以0冒充成功；K线从TDX/东方财富/腾讯/新浪至少取得两个独立源；价格容差max(0.01元,0.2%)，量额容差2%；冲突不得用于高置信度结论",
+        "blocking": quote_consensus_sources < quote_required_consensus || kline_successes < 2 || kline_conflicts > 0,
+        "policy": "报价从TDX/东方财富/腾讯/新浪取得严格多数共识（2源要求2、3源要求2、4源要求3）；缺失或非正价格不得以0冒充成功；单一实时滞后源显式隔离为outlier，2-2分裂或无多数时阻止发布；K线至少两个独立源且冲突为0；价格容差max(0.01元,0.2%)，量额容差2%",
     })
 }
 
@@ -4062,6 +4087,82 @@ mod tests {
         assert_eq!(result["blocking"], false);
         assert_eq!(result["quote_sources"][1]["provider"], "eastmoney");
         assert_eq!(result["quote_sources"][1]["ok"], false);
+    }
+
+    #[test]
+    fn reconciliation_quarantines_one_live_outlier_when_three_sources_agree() {
+        let mut delayed = reconciliation_quote(astock_core::Source::EastMoney);
+        delayed.data.volume *= 0.95;
+        delayed.data.amount *= 0.95;
+        let result = reconcile_market_sources(
+            "300308",
+            [
+                ("tdx", Ok(reconciliation_quote(astock_core::Source::Tdx))),
+                ("eastmoney", Ok(delayed)),
+                (
+                    "tencent",
+                    Ok(reconciliation_quote(astock_core::Source::Tencent)),
+                ),
+                ("sina", Ok(reconciliation_quote(astock_core::Source::Sina))),
+            ],
+            [
+                ("tdx", Ok(reconciliation_bars(astock_core::Source::Tdx))),
+                (
+                    "eastmoney",
+                    Ok(reconciliation_bars(astock_core::Source::EastMoney)),
+                ),
+                (
+                    "tencent",
+                    Ok(reconciliation_bars(astock_core::Source::Tencent)),
+                ),
+                ("sina", Ok(reconciliation_bars(astock_core::Source::Sina))),
+            ],
+        );
+        assert!(result["quote_conflicts"].as_u64().unwrap() > 0);
+        assert_eq!(result["quote_consensus_sources"], 3);
+        assert_eq!(result["quote_required_consensus"], 3);
+        assert_eq!(result["quote_outlier_providers"], json!(["eastmoney"]));
+        assert_eq!(result["blocking"], false);
+    }
+
+    #[test]
+    fn reconciliation_blocks_a_two_by_two_live_quote_split() {
+        let quote_group = |source, multiplier: f64| {
+            let mut quote = reconciliation_quote(source);
+            quote.data.volume *= multiplier;
+            quote.data.amount *= multiplier;
+            quote
+        };
+        let result = reconcile_market_sources(
+            "300308",
+            [
+                ("tdx", Ok(quote_group(astock_core::Source::Tdx, 1.0))),
+                (
+                    "eastmoney",
+                    Ok(quote_group(astock_core::Source::EastMoney, 0.5)),
+                ),
+                (
+                    "tencent",
+                    Ok(quote_group(astock_core::Source::Tencent, 1.0)),
+                ),
+                ("sina", Ok(quote_group(astock_core::Source::Sina, 0.5))),
+            ],
+            [
+                ("tdx", Ok(reconciliation_bars(astock_core::Source::Tdx))),
+                (
+                    "eastmoney",
+                    Ok(reconciliation_bars(astock_core::Source::EastMoney)),
+                ),
+                (
+                    "tencent",
+                    Ok(reconciliation_bars(astock_core::Source::Tencent)),
+                ),
+                ("sina", Ok(reconciliation_bars(astock_core::Source::Sina))),
+            ],
+        );
+        assert_eq!(result["quote_consensus_sources"], 2);
+        assert_eq!(result["quote_required_consensus"], 3);
+        assert_eq!(result["blocking"], true);
     }
 
     #[test]

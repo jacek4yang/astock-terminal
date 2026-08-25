@@ -21,6 +21,10 @@ function base(symbol, name, { blocking = false, ok = true } = {}) {
       reconciliation: {
         blocking,
         quote_sources: [{ provider: "tdx", ok: true }, { provider: "eastmoney", ok: true }],
+        quote_consensus_sources: 2,
+        quote_required_consensus: 2,
+        quote_consensus_providers: ["tdx", "eastmoney"],
+        quote_outlier_providers: [],
         kline_sources: [{ provider: "tdx", ok: true }, { provider: "sina", ok: true }],
         quote_conflicts: [],
         kline_conflicts: [],
@@ -62,4 +66,26 @@ test("rejects a legacy code carrying fabricated market data", () => {
   const value = fixture();
   value.legacy.data.reconciliation.quote_sources = [{ provider: "eastmoney", ok: true }];
   assert.throws(() => validateAuditResults(value), /fabricated live data/);
+});
+
+test("accepts one quarantined live quote outlier but rejects a two-by-two split", () => {
+  const majority = fixture();
+  majority.standard.data.degraded = true;
+  majority.standard.data.reconciliation.quote_sources.push(
+    { provider: "tencent", ok: true },
+    { provider: "sina", ok: true },
+  );
+  majority.standard.data.reconciliation.quote_consensus_sources = 3;
+  majority.standard.data.reconciliation.quote_required_consensus = 3;
+  majority.standard.data.reconciliation.quote_consensus_providers = ["tdx", "tencent", "sina"];
+  majority.standard.data.reconciliation.quote_outlier_providers = ["eastmoney"];
+  majority.standard.data.reconciliation.quote_conflicts = [{ provider: "eastmoney", field: "amount" }];
+  assert.deepEqual(validateAuditResults(majority).standard.quote_outlier_providers, ["eastmoney"]);
+
+  const split = structuredClone(majority);
+  split.standard.data.reconciliation.blocking = true;
+  split.standard.data.reconciliation.quote_consensus_sources = 2;
+  split.standard.data.reconciliation.quote_consensus_providers = ["tdx", "tencent"];
+  split.standard.data.reconciliation.quote_outlier_providers = ["eastmoney", "sina"];
+  assert.throws(() => validateAuditResults(split), /public data audit did not pass|reconciliation is blocking/);
 });
