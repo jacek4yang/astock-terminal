@@ -68,7 +68,18 @@ lru = "0.18.2"
 parking_lot = "0.12"
 dashmap = "6"
 governor = "0.8"
-keyring = { version = "3", features = ["windows-native"] }
+# Credential storage. A backend MUST be selected for every supported platform:
+# with no platform feature enabled, keyring 3.x silently falls back to an
+# in-memory *mock* store, where `store_key` reports success and the value is
+# never persisted. Silent credential loss is worse than a visible failure.
+#
+# linux-native uses the kernel keyutils keyring: pure Rust, no libdbus, works
+# headless. It is session/user scoped rather than persistent across reboot;
+# cross-reboot persistence needs the Secret Service backend, which pulls in
+# libdbus and requires a running gnome-keyring/kwallet daemon. That upgrade is
+# tracked separately rather than adopted blind, because it cannot be verified in
+# a headless environment.
+keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }
 rand = "0.9"
 regex = "1"
 once_cell = "1"

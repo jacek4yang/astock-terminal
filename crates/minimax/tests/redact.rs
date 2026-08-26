@@ -74,3 +74,39 @@ fn keystore_roundtrip_on_custom_account() {
     // Deleting twice is fine.
     store.delete_key().unwrap();
 }
+
+/// A real platform credential backend must be compiled in.
+///
+/// keyring 3.x silently falls back to an in-memory mock store when no platform
+/// feature is enabled. In that mode `store_key` returns `Ok(())` and the value
+/// is never persisted, so a user who installs a credential finds it missing
+/// later and non-interactive use can never work. This crate shipped exactly
+/// that on Linux and macOS, because only `windows-native` was enabled.
+///
+/// This test fails loudly if the workspace's keyring features are ever narrowed
+/// again, on whichever platform the suite runs.
+#[test]
+fn a_real_platform_credential_backend_is_compiled_in() {
+    let store = KeyStore::with_service(
+        "astock-terminal-test",
+        format!("minimax-backend-probe-{}", std::process::id()),
+    );
+    store.delete_key().ok();
+
+    let key = SecretKey::new("sk-backend-probe-0002");
+    // The contract under test: if the store reports success, the value must be
+    // retrievable. A mock backend satisfies the first half and fails the second.
+    store
+        .store_key(&key)
+        .expect("storing a credential must either succeed or report an error");
+    let loaded = store.load_key().expect("loading must not error");
+    assert!(
+        loaded.is_some(),
+        "the credential store accepted a key and then reported it absent, which means keyring \
+         is using its in-memory mock backend; enable the platform feature for this target in \
+         the workspace manifest"
+    );
+    assert_eq!(loaded.unwrap().expose(), "sk-backend-probe-0002");
+
+    store.delete_key().expect("cleanup must succeed");
+}

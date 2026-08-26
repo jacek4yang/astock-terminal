@@ -92,6 +92,26 @@ that has appeared in any of those places must be revoked rather than reused.
 The value is wrapped in a non-serializable redacted type and is never written
 to Agent events, SQLite, JSON output or tool arguments.
 
+### Where a stored credential actually lives
+
+| Platform | Backend | Survives reboot |
+| --- | --- | --- |
+| Windows | Credential Manager | yes |
+| macOS | Keychain | yes |
+| Linux | kernel keyutils (user keyring) | **no**, session scoped |
+
+On Linux the credential is held in the kernel user keyring, which is real
+storage but is cleared on logout/reboot, so a fresh login needs the hidden
+prompt again. Cross-reboot persistence there requires the D-Bus Secret Service
+backend (gnome-keyring or kwallet); that is deliberately not enabled yet
+because it adds a libdbus system dependency and cannot be verified in a
+headless environment.
+
+Earlier builds enabled only the Windows backend, which meant Linux and macOS
+silently used keyring's in-memory mock: storing a key reported success and the
+value was never persisted. A regression test now fails if a real platform
+backend is ever missing.
+
 Example non-secret configuration:
 
 ```toml
