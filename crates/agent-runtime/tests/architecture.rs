@@ -205,3 +205,98 @@ tempfile = "3"
     );
     assert!(!dependencies.contains("description"));
 }
+
+#[test]
+fn the_desktop_adapter_drives_the_shared_runtime() {
+    let dependencies = declared_dependencies(&manifest_of("desktop"));
+    assert!(
+        dependencies.contains("astock-agent-runtime"),
+        "the Tauri adapter must be an adapter over the shared runtime, not a second Agent"
+    );
+    assert!(
+        dependencies.contains("tauri"),
+        "the desktop adapter is the crate that owns the Tauri dependency"
+    );
+}
+
+#[test]
+fn the_desktop_adapter_does_not_reach_domain_crates_directly() {
+    // Same rule as the CLI. The desktop is presentation and OS integration; if
+    // it could reach domain crates it would be able to grow a parallel research
+    // implementation that bypasses the Engine's bounds and evidence records.
+    const ALLOWED_INTERNAL: &[&str] = &[
+        "astock-agent-runtime",
+        "astock-engine",
+        "astock-minimax",
+        "astock-protocol",
+    ];
+    let dependencies = declared_dependencies(&manifest_of("desktop"));
+    let offenders: Vec<&String> = dependencies
+        .iter()
+        .filter(|name| name.starts_with("astock-"))
+        .filter(|name| !ALLOWED_INTERNAL.contains(&name.as_str()))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "the desktop adapter must reach domain capability through the Engine, but depends \
+         directly on {offenders:?}"
+    );
+}
+
+#[test]
+fn only_the_desktop_adapter_depends_on_tauri() {
+    // Tauri must not leak into the runtime, the Engine or the CLI. Confining it
+    // to one crate is what keeps the Linux CLI free of a GUI toolchain and lets
+    // the desktop host be replaced without touching Agent logic.
+    let crates_dir = workspace_root().join("crates");
+    for entry in std::fs::read_dir(&crates_dir)
+        .expect("read the crates directory")
+        .flatten()
+    {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == "desktop" {
+            continue;
+        }
+        let manifest_path = entry.path().join("Cargo.toml");
+        if !manifest_path.exists() {
+            continue;
+        }
+        let dependencies = declared_dependencies(
+            &std::fs::read_to_string(&manifest_path).expect("read a crate manifest"),
+        );
+        for forbidden in ["tauri", "tauri-build"] {
+            assert!(
+                !dependencies.contains(forbidden),
+                "`{name}` must not depend on `{forbidden}`; only crates/desktop may"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_renderer_reaches_native_capability_only_through_the_bridge() {
+    // React is presentation only. The capability grant is deny-by-default and
+    // must not hand the renderer filesystem, shell, process or arbitrary HTTP
+    // access, which would let the UI bypass the Engine's bounded,
+    // evidence-carrying surface.
+    let capability =
+        std::fs::read_to_string(workspace_root().join("crates/desktop/capabilities/default.json"))
+            .expect("read the desktop capability grant");
+    for forbidden in [
+        "fs:",
+        "shell:",
+        "process:",
+        "http:",
+        "allow-execute",
+        "allow-read-file",
+        "allow-write-file",
+    ] {
+        assert!(
+            !capability.contains(forbidden),
+            "the renderer capability grant must not include `{forbidden}`"
+        );
+    }
+}

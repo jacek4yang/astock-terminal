@@ -6,6 +6,7 @@ members = [
     "crates/compute",
     "crates/agent-runtime",
     "crates/astock",
+    "crates/desktop",
     "crates/core",
     "crates/trading-rules",
     "crates/market-data",
@@ -33,7 +34,7 @@ members = [
 ]
 
 [workspace.package]
-version = "6.0.0"
+version = "7.0.0"
 edition = "2021"
 license = "LicenseRef-Proprietary"
 publish = false

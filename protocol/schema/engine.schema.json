@@ -4,7 +4,7 @@
   "title": "AStock Engine service contract v1",
   "type": "object",
   "properties": {
-    "service_version": { "const": "6.0.0" },
+    "service_version": { "const": "7.0.0" },
     "max_page_size": { "const": 500 },
     "startup_required_capabilities": {
       "type": "array",

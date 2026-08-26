@@ -14,7 +14,7 @@ default = []
 captcha = ["dep:image"]
 
 [dependencies]
-astock-core = { version = "6.0.0", path = "../core" }
+astock-core = { version = "7.0.0", path = "../core" }
 reqwest.workspace = true
 tokio.workspace = true
 serde.workspace = true

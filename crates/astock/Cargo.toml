@@ -7,9 +7,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-astock-agent-runtime = { version = "6.0.0", path = "../agent-runtime" }
-astock-engine = { version = "6.0.0", path = "../engine" }
-astock-minimax = { version = "6.0.0", path = "../minimax" }
+astock-agent-runtime = { version = "7.0.0", path = "../agent-runtime" }
+astock-engine = { version = "7.0.0", path = "../engine" }
+astock-minimax = { version = "7.0.0", path = "../minimax" }
 clap.workspace = true
 directories.workspace = true
 rpassword.workspace = true
