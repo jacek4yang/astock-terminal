@@ -79,6 +79,13 @@ pub struct DurableEffect {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct EffectPage {
+    pub items: Vec<DurableEffect>,
+    pub next_after_caused_by_seq: Option<i64>,
+    pub next_after_effect_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct DurableEvent {
     pub seq: i64,
     pub event_id: String,
@@ -91,6 +98,8 @@ pub struct DurableEvent {
 pub struct LoadedTask {
     pub task: DurableTask,
     pub events: Vec<DurableEvent>,
+    pub events_truncated: bool,
+    pub next_before_seq: Option<i64>,
 }
 
 const MAX_CONVERSATION_BYTES: usize = 4 * 1024 * 1024;
@@ -478,44 +487,82 @@ pub async fn complete_effect(storage: &Storage, input: CompleteEffect) -> Result
 pub async fn list_effects(
     storage: &Storage,
     task_id: String,
-) -> Result<Vec<DurableEffect>, String> {
+    limit: usize,
+    after: Option<(i64, String)>,
+) -> Result<EffectPage, String> {
     validate_identity(&task_id, "task_id")?;
+    let limit = limit.clamp(1, astock_protocol::MAX_PAGE_SIZE);
+    let (after_seq, after_effect_id) = after.unwrap_or((-1, String::new()));
+    if after_seq < -1 {
+        return Err("after_caused_by_seq must be at least -1".into());
+    }
+    if !after_effect_id.is_empty() {
+        validate_identity(&after_effect_id, "after_effect_id")?;
+    }
     storage
         .run(move |connection| {
             let mut statement = connection.prepare(
                 "SELECT effect_id,task_id,caused_by_seq,effect_kind,effect_json,status,
                         result_json,idempotency_key,created_at,updated_at
-                 FROM agent_effects_v2 WHERE task_id=?1 ORDER BY created_at ASC,effect_id ASC",
+                 FROM agent_effects_v2
+                 WHERE task_id=?1 AND
+                       (caused_by_seq>?2 OR (caused_by_seq=?2 AND effect_id>?3))
+                 ORDER BY caused_by_seq ASC,effect_id ASC LIMIT ?4",
             )?;
-            let rows = statement
-                .query_map(params![task_id], |row| {
-                    let effect_json: String = row.get(4)?;
-                    let result_json: Option<String> = row.get(6)?;
-                    Ok(DurableEffect {
-                        effect_id: row.get(0)?,
-                        task_id: row.get(1)?,
-                        caused_by_seq: row.get(2)?,
-                        effect_kind: row.get(3)?,
-                        effect: serde_json::from_str(&effect_json).unwrap_or(Value::Null),
-                        status: row.get(5)?,
-                        result: result_json
-                            .as_deref()
-                            .map(serde_json::from_str)
-                            .transpose()
-                            .unwrap_or(None),
-                        idempotency_key: row.get(7)?,
-                        created_at: row.get(8)?,
-                        updated_at: row.get(9)?,
-                    })
-                })?
+            let mut items = statement
+                .query_map(
+                    params![task_id, after_seq, after_effect_id, limit as i64 + 1],
+                    |row| {
+                        let effect_json: String = row.get(4)?;
+                        let result_json: Option<String> = row.get(6)?;
+                        Ok(DurableEffect {
+                            effect_id: row.get(0)?,
+                            task_id: row.get(1)?,
+                            caused_by_seq: row.get(2)?,
+                            effect_kind: row.get(3)?,
+                            effect: serde_json::from_str(&effect_json).unwrap_or(Value::Null),
+                            status: row.get(5)?,
+                            result: result_json
+                                .as_deref()
+                                .map(serde_json::from_str)
+                                .transpose()
+                                .unwrap_or(None),
+                            idempotency_key: row.get(7)?,
+                            created_at: row.get(8)?,
+                            updated_at: row.get(9)?,
+                        })
+                    },
+                )?
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
+            let has_more = items.len() > limit;
+            if has_more {
+                items.truncate(limit);
+            }
+            let (next_after_caused_by_seq, next_after_effect_id) = if has_more {
+                let last = items.last().expect("a non-empty bounded effect page");
+                (Some(last.caused_by_seq), Some(last.effect_id.clone()))
+            } else {
+                (None, None)
+            };
+            Ok(EffectPage {
+                items,
+                next_after_caused_by_seq,
+                next_after_effect_id,
+            })
         })
         .await
         .map_err(|error| error.to_string())
 }
 
-pub async fn load_task(storage: &Storage, task_id: String) -> Result<LoadedTask, String> {
+pub async fn load_task(
+    storage: &Storage,
+    task_id: String,
+    event_limit: usize,
+    event_before_seq: Option<i64>,
+) -> Result<LoadedTask, String> {
+    validate_identity(&task_id, "task_id")?;
+    let event_limit = event_limit.clamp(1, astock_protocol::MAX_PAGE_SIZE);
+    let event_before_seq = event_before_seq.unwrap_or(i64::MAX);
     storage
         .run(move |connection| {
             let task = connection
@@ -546,21 +593,37 @@ pub async fn load_task(storage: &Storage, task_id: String) -> Result<LoadedTask,
             };
             let mut statement = connection.prepare(
                 "SELECT seq,event_id,event_kind,event_json,created_at FROM agent_events_v2
-                 WHERE task_id=?1 ORDER BY seq ASC",
+                 WHERE task_id=?1 AND seq<?2 ORDER BY seq DESC LIMIT ?3",
             )?;
-            let events = statement
-                .query_map(params![task.task_id], |row| {
-                    let body: String = row.get(3)?;
-                    Ok(DurableEvent {
-                        seq: row.get(0)?,
-                        event_id: row.get(1)?,
-                        event_kind: row.get(2)?,
-                        event: serde_json::from_str(&body).unwrap_or(Value::Null),
-                        created_at: row.get(4)?,
-                    })
-                })?
+            let mut events = statement
+                .query_map(
+                    params![task.task_id, event_before_seq, event_limit as i64 + 1],
+                    |row| {
+                        let body: String = row.get(3)?;
+                        Ok(DurableEvent {
+                            seq: row.get(0)?,
+                            event_id: row.get(1)?,
+                            event_kind: row.get(2)?,
+                            event: serde_json::from_str(&body).unwrap_or(Value::Null),
+                            created_at: row.get(4)?,
+                        })
+                    },
+                )?
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(LoadedTask { task, events })
+            let events_truncated = events.len() > event_limit;
+            if events_truncated {
+                events.truncate(event_limit);
+            }
+            let next_before_seq = events_truncated
+                .then(|| events.last().map(|event| event.seq))
+                .flatten();
+            events.reverse();
+            Ok(LoadedTask {
+                task,
+                events,
+                events_truncated,
+                next_before_seq,
+            })
         })
         .await
         .map_err(|error| error.to_string())
@@ -1071,11 +1134,75 @@ mod tests {
         )
         .await
         .unwrap();
-        let loaded = load_task(&storage, "task-1".into()).await.unwrap();
+        let loaded = load_task(&storage, "task-1".into(), 500, None)
+            .await
+            .unwrap();
         assert_eq!(loaded.task.accepted_seq, 1);
         assert_eq!(loaded.task.checkpoint.unwrap()["accepted_seq"], 1);
         assert_eq!(loaded.events.len(), 1);
         assert_eq!(loaded.events[0].event_id, "event-1");
+        assert!(!loaded.events_truncated);
+        assert!(loaded.next_before_seq.is_none());
+    }
+
+    #[tokio::test]
+    async fn task_events_are_loaded_in_bounded_backward_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(StorageConfig::with_base_dir(dir.path())).unwrap();
+        migrate(&storage).await.unwrap();
+        create_task(
+            &storage,
+            CreateTask {
+                task_id: "task-page".into(),
+                reducer_version: "kernel-v1".into(),
+                task_spec: serde_json::json!({"objective":"page"}),
+                phase: "preparing".into(),
+            },
+        )
+        .await
+        .unwrap();
+        for seq in 1..=3 {
+            append_event(
+                &storage,
+                AppendEvent {
+                    task_id: "task-page".into(),
+                    seq,
+                    event_id: format!("event-{seq}"),
+                    event_kind: "step".into(),
+                    event: serde_json::json!({"seq":seq}),
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let latest = load_task(&storage, "task-page".into(), 2, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            latest
+                .events
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert!(latest.events_truncated);
+        assert_eq!(latest.next_before_seq, Some(2));
+
+        let earlier = load_task(&storage, "task-page".into(), 2, latest.next_before_seq)
+            .await
+            .unwrap();
+        assert_eq!(
+            earlier
+                .events
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert!(!earlier.events_truncated);
+        assert!(earlier.next_before_seq.is_none());
     }
 
     #[tokio::test]
@@ -1104,11 +1231,13 @@ mod tests {
         };
         assert!(begin_effect(&storage, intent.clone()).await.unwrap());
         assert!(!begin_effect(&storage, intent).await.unwrap());
-        let pending = list_effects(&storage, "task-effect".into()).await.unwrap();
-        assert_eq!(pending[0].status, "pending");
-        assert!(pending[0].result.is_none());
-        assert_eq!(pending[0].idempotency_key.len(), 71);
-        assert!(pending[0].idempotency_key.starts_with("sha256:"));
+        let pending = list_effects(&storage, "task-effect".into(), 500, None)
+            .await
+            .unwrap();
+        assert_eq!(pending.items[0].status, "pending");
+        assert!(pending.items[0].result.is_none());
+        assert_eq!(pending.items[0].idempotency_key.len(), 71);
+        assert!(pending.items[0].idempotency_key.starts_with("sha256:"));
 
         let completion = CompleteEffect {
             effect_id: "effect-1".into(),
@@ -1117,12 +1246,41 @@ mod tests {
         };
         complete_effect(&storage, completion.clone()).await.unwrap();
         complete_effect(&storage, completion).await.unwrap();
-        let completed = list_effects(&storage, "task-effect".into()).await.unwrap();
-        assert_eq!(completed[0].status, "succeeded");
+        let completed = list_effects(&storage, "task-effect".into(), 500, None)
+            .await
+            .unwrap();
+        assert_eq!(completed.items[0].status, "succeeded");
         assert_eq!(
-            completed[0].result.as_ref().unwrap()["evidence_ids"][0],
+            completed.items[0].result.as_ref().unwrap()["evidence_ids"][0],
             "evidence-1"
         );
+
+        begin_effect(
+            &storage,
+            BeginEffect {
+                effect_id: "effect-2".into(),
+                task_id: "task-effect".into(),
+                caused_by_seq: 2,
+                effect_kind: "provider.request".into(),
+                effect: serde_json::json!({"model":"minimax-plus","operation":"review"}),
+                idempotency_key: "task-effect:review:2".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let first_page = list_effects(&storage, "task-effect".into(), 1, None)
+            .await
+            .unwrap();
+        assert_eq!(first_page.items[0].effect_id, "effect-1");
+        let cursor = (
+            first_page.next_after_caused_by_seq.unwrap(),
+            first_page.next_after_effect_id.unwrap(),
+        );
+        let second_page = list_effects(&storage, "task-effect".into(), 1, Some(cursor))
+            .await
+            .unwrap();
+        assert_eq!(second_page.items[0].effect_id, "effect-2");
+        assert!(second_page.next_after_effect_id.is_none());
     }
 
     #[tokio::test]

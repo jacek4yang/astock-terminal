@@ -38,6 +38,7 @@ use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -65,6 +66,21 @@ pub struct Engine {
 impl Engine {
     pub async fn initialize() -> Result<Self, String> {
         let (storage, data_root) = data_root::resolve_and_open().await?;
+        Self::initialize_with_storage(storage, data_root).await
+    }
+
+    /// Initialize the embedded Engine at a caller-selected native data root.
+    /// CLI and desktop adapters use this instead of mutating process-wide
+    /// environment variables.
+    pub async fn initialize_at(path: impl AsRef<Path>) -> Result<Self, String> {
+        let (storage, data_root) = data_root::open_at(path)?;
+        Self::initialize_with_storage(storage, data_root).await
+    }
+
+    async fn initialize_with_storage(
+        storage: Storage,
+        data_root: DataRootDecision,
+    ) -> Result<Self, String> {
         let credential_migration_error = credentials::migrate_legacy(&storage)
             .await
             .err()
@@ -121,6 +137,37 @@ impl Engine {
             credential_migration_error,
             data_root,
         })
+    }
+
+    /// Whether the optional JoinQuant adapter has credentials for this
+    /// Engine process. No credential material crosses this diagnostic API.
+    pub fn joinquant_configured(&self) -> bool {
+        self.market.joinquant.available()
+    }
+
+    /// Inject JoinQuant credentials for this process only. CLI prompts use
+    /// this typed in-process path so passwords never enter command arguments,
+    /// environment variables, JSON/IPC, SQLite or Agent history.
+    pub fn configure_joinquant_session(
+        &self,
+        username: astock_minimax::SecretKey,
+        password: astock_minimax::SecretKey,
+    ) -> Result<(), String> {
+        let username_value = username.expose().trim();
+        let password_value = password.expose();
+        if username_value.is_empty()
+            || username_value.len() > 256
+            || password_value.len() < 6
+            || password_value.len() > 4_096
+            || username_value.chars().any(char::is_control)
+            || password_value.chars().any(char::is_control)
+        {
+            return Err("JoinQuant username or password has an invalid format".into());
+        }
+        self.market
+            .joinquant
+            .configure(username_value.to_owned(), password_value.to_owned())
+            .map_err(|error| format!("configure JoinQuant session: {error}"))
     }
 
     pub async fn dispatch(&self, request: &RequestEnvelope) -> ResponseEnvelope {
@@ -1200,6 +1247,78 @@ impl Engine {
                 let payload: SymbolPayload = decode_payload(&request.payload)?;
                 data_quality::reconcile_valuation(self, payload.symbol.trim()).await
             }
+            "research.compute" => {
+                let payload: ComputePayload = decode_payload(&request.payload)?;
+                let execution = astock_compute::execute(&payload.program)
+                    .map_err(|error| ServiceError::new("compute", error.to_string(), false))?;
+                let mut result = json!({
+                    "source": "astock-compute",
+                    "source_version_id": execution.program_sha256,
+                    "execution": execution,
+                    "safety": "bounded_deterministic_json_ast",
+                });
+                agent_context::attach_evidence_registry(&mut result, "finance_compute");
+                Ok(result)
+            }
+            "research.joinquant_compute" => {
+                let payload: JoinQuantComputePayload = decode_payload(&request.payload)?;
+                let symbol = parse_live_symbol(&payload.symbol)?;
+                if !self.market.joinquant.available() {
+                    return Ok(json!({
+                        "configured": false,
+                        "symbol": symbol.code(),
+                        "source": "JoinQuant",
+                        "execution": null,
+                        "evidence_note": "聚宽未配置；未执行计算，也没有用其他来源伪装聚宽数据"
+                    }));
+                }
+                let start = parse_research_date(&payload.start, "start")?;
+                let end = parse_research_date(&payload.end, "end")?;
+                if start > end || (end - start).num_days() > 1_830 {
+                    return Err(ServiceError::new(
+                        "invalid_research_window",
+                        "聚宽计算区间必须按时间正序且不超过5年",
+                        false,
+                    ));
+                }
+                let fetched = self
+                    .market
+                    .joinquant
+                    .daily(&symbol, start, end)
+                    .await
+                    .map_err(upstream)?;
+                if fetched.data.is_empty() {
+                    return Err(ServiceError::new(
+                        "empty_joinquant_series",
+                        "聚宽没有返回可用于计算的日线数据",
+                        true,
+                    ));
+                }
+                let mut program = payload.program;
+                inject_joinquant_inputs(&mut program, &fetched.data)?;
+                let execution = astock_compute::execute(&program)
+                    .map_err(|error| ServiceError::new("compute", error.to_string(), false))?;
+                let dates = fetched.data.iter().map(|bar| bar.date).collect::<Vec<_>>();
+                let source_version_id =
+                    format!("joinquant-qfq:{}:{}:{}", symbol.code(), start, end);
+                let mut result = json!({
+                    "configured": true,
+                    "symbol": symbol.code(),
+                    "start": start,
+                    "end": end,
+                    "rows": fetched.data.len(),
+                    "dates": dates,
+                    "source": fetched.source.to_string(),
+                    "fetched_at": fetched.fetched_at,
+                    "source_version_id": source_version_id,
+                    "adjustment": "qfq",
+                    "injected_inputs": ["open", "high", "low", "close", "volume", "amount", "turnover", "pct"],
+                    "execution": execution,
+                    "safety": "JoinQuant data fetched by an allowlisted adapter; calculation executed locally by the bounded deterministic Rust AST evaluator",
+                });
+                agent_context::attach_evidence_registry(&mut result, "joinquant_finance_compute");
+                Ok(result)
+            }
             "research.joinquant_context" => {
                 let payload: JoinQuantResearchPayload = decode_payload(&request.payload)?;
                 let symbol = parse_live_symbol(&payload.symbol)?;
@@ -2191,17 +2310,40 @@ impl Engine {
                 Ok(json!({"ok": true}))
             }
             "agent.effect.list" => {
-                let payload: TaskIdPayload = decode_payload(&request.payload)?;
-                let effects = event_store::list_effects(&self.storage, payload.task_id)
-                    .await
-                    .map_err(event_store_error)?;
-                Ok(json!({"items": effects}))
+                let payload: EffectListPayload = decode_payload(&request.payload)?;
+                let after = match (payload.after_caused_by_seq, payload.after_effect_id) {
+                    (Some(seq), Some(effect_id)) => Some((seq, effect_id)),
+                    (None, None) => None,
+                    _ => {
+                        return Err(ServiceError::new(
+                            "invalid_payload",
+                            "effect cursor requires both after_caused_by_seq and after_effect_id",
+                            false,
+                        ));
+                    }
+                };
+                let page = event_store::list_effects(
+                    &self.storage,
+                    payload.task_id,
+                    payload.limit.unwrap_or(astock_protocol::MAX_PAGE_SIZE),
+                    after,
+                )
+                .await
+                .map_err(event_store_error)?;
+                serde_json::to_value(page).map_err(invalid)
             }
             "agent.task.load" => {
                 let payload: TaskIdPayload = decode_payload(&request.payload)?;
-                let loaded = event_store::load_task(&self.storage, payload.task_id)
-                    .await
-                    .map_err(event_store_error)?;
+                let loaded = event_store::load_task(
+                    &self.storage,
+                    payload.task_id,
+                    payload
+                        .event_limit
+                        .unwrap_or(astock_protocol::MAX_PAGE_SIZE),
+                    payload.event_before_seq,
+                )
+                .await
+                .map_err(event_store_error)?;
                 serde_json::to_value(loaded).map_err(invalid)
             }
             "agent.task.list" => {
@@ -2751,6 +2893,21 @@ struct JoinQuantResearchPayload {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ComputePayload {
+    program: astock_compute::Program,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JoinQuantComputePayload {
+    symbol: String,
+    start: String,
+    end: String,
+    program: astock_compute::Program,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OptionalSourcesPayload {
     symbol: String,
     start: String,
@@ -3054,6 +3211,22 @@ struct QuantSnapshotListPayload {
 #[serde(deny_unknown_fields)]
 struct TaskIdPayload {
     task_id: String,
+    #[serde(default)]
+    event_limit: Option<usize>,
+    #[serde(default)]
+    event_before_seq: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EffectListPayload {
+    task_id: String,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    after_caused_by_seq: Option<i64>,
+    #[serde(default)]
+    after_effect_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -3132,6 +3305,80 @@ fn parse_adjust(value: &str) -> Result<Adjust, ServiceError> {
             false,
         )),
     }
+}
+
+fn inject_joinquant_inputs(
+    program: &mut astock_compute::Program,
+    bars: &[astock_core::Bar],
+) -> Result<(), ServiceError> {
+    const PROTECTED: [&str; 8] = [
+        "open", "high", "low", "close", "volume", "amount", "turnover", "pct",
+    ];
+    if let Some(name) = PROTECTED
+        .iter()
+        .find(|name| program.inputs.contains_key(**name))
+    {
+        return Err(ServiceError::new(
+            "reserved_joinquant_input",
+            format!("聚宽计算程序不得自行定义保留输入 `{name}`；该序列只能由 Engine 注入"),
+            false,
+        ));
+    }
+    let required = program.inputs.len().saturating_add(PROTECTED.len());
+    if required > astock_compute::MAX_INPUTS {
+        return Err(ServiceError::new(
+            "compute_input_limit",
+            format!(
+                "聚宽注入后输入数为 {required}，超过计算语言上限 {}",
+                astock_compute::MAX_INPUTS
+            ),
+            false,
+        ));
+    }
+    let required_points = program
+        .inputs
+        .values()
+        .map(Vec::len)
+        .sum::<usize>()
+        .saturating_add(bars.len().saturating_mul(PROTECTED.len()));
+    if required_points > astock_compute::MAX_TOTAL_INPUT_POINTS {
+        return Err(ServiceError::new(
+            "compute_input_limit",
+            format!(
+                "聚宽注入后共有 {required_points} 个观测，超过计算语言上限 {}",
+                astock_compute::MAX_TOTAL_INPUT_POINTS
+            ),
+            false,
+        ));
+    }
+
+    let required = |read: fn(&astock_core::Bar) -> f64| {
+        bars.iter().map(|bar| Some(read(bar))).collect::<Vec<_>>()
+    };
+    program
+        .inputs
+        .insert("open".into(), required(|bar| bar.open));
+    program
+        .inputs
+        .insert("high".into(), required(|bar| bar.high));
+    program.inputs.insert("low".into(), required(|bar| bar.low));
+    program
+        .inputs
+        .insert("close".into(), required(|bar| bar.close));
+    program
+        .inputs
+        .insert("volume".into(), required(|bar| bar.volume));
+    program
+        .inputs
+        .insert("amount".into(), bars.iter().map(|bar| bar.amount).collect());
+    program.inputs.insert(
+        "turnover".into(),
+        bars.iter().map(|bar| bar.turnover).collect(),
+    );
+    program
+        .inputs
+        .insert("pct".into(), bars.iter().map(|bar| bar.pct).collect());
+    Ok(())
 }
 
 fn parse_live_symbol(value: &str) -> Result<Symbol, ServiceError> {
@@ -4402,6 +4649,52 @@ mod tests {
             .await
             .expect_err("missing snapshots must not be fabricated");
         assert_eq!(missing.code, "not_found");
+    }
+
+    #[test]
+    fn joinquant_compute_inputs_are_injected_and_cannot_be_forged() {
+        let bars = vec![
+            astock_core::Bar::new(
+                NaiveDate::from_ymd_opt(2026, 8, 24).unwrap(),
+                10.0,
+                10.5,
+                10.8,
+                9.9,
+                1_000.0,
+                astock_core::VolumeUnit::Lots,
+            ),
+            astock_core::Bar::new(
+                NaiveDate::from_ymd_opt(2026, 8, 25).unwrap(),
+                10.5,
+                11.0,
+                11.2,
+                10.4,
+                1_200.0,
+                astock_core::VolumeUnit::Lots,
+            ),
+        ];
+        let mut program = astock_compute::Program {
+            version: 1,
+            inputs: BTreeMap::new(),
+            bindings: vec![],
+            outputs: BTreeMap::from([(
+                "last_close".into(),
+                astock_compute::Expr::Last {
+                    input: Box::new(astock_compute::Expr::Var {
+                        name: "close".into(),
+                    }),
+                },
+            )]),
+        };
+        inject_joinquant_inputs(&mut program, &bars).unwrap();
+        assert_eq!(
+            astock_compute::execute(&program).unwrap().outputs["last_close"].scalar(),
+            Some(11.0)
+        );
+
+        let mut forged = program;
+        let error = inject_joinquant_inputs(&mut forged, &bars).unwrap_err();
+        assert_eq!(error.code, "reserved_joinquant_input");
     }
 
     #[test]

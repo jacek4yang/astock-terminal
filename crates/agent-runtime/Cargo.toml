@@ -1,0 +1,26 @@
+[package]
+name = "astock-agent-runtime"
+description = "Provider-independent, durable financial research Agent runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+astock-engine = { version = "6.0.0", path = "../engine" }
+astock-minimax = { version = "6.0.0", path = "../minimax" }
+astock-protocol = { version = "6.0.0", path = "../protocol" }
+async-trait.workspace = true
+chrono.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+

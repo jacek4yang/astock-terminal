@@ -168,3 +168,29 @@ jobs:
       - run: cargo test --locked --workspace
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: cargo check --locked --workspace --all-targets --all-features
+
+  rust-cli:
+    name: rust-cli-${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-2022, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/astock-build/cargo-target
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test calculation language, shared Agent runtime and CLI adapter
+        run: cargo test --locked -p astock-compute -p astock-agent-runtime -p astock --all-targets
+      - name: Lint calculation language, shared Agent runtime and CLI adapter
+        run: cargo clippy --locked -p astock-compute -p astock-agent-runtime -p astock --all-targets -- -D warnings
+      - name: Build headless CLI
+        run: cargo build --locked -p astock
+      - name: Smoke test non-provider commands
+        run: cargo run --locked -p astock -- version

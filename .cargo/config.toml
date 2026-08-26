@@ -1,4 +1,3 @@
-[build]
-# The Windows product is intentionally built outside the C: workspace. CI
-# overrides this with CARGO_TARGET_DIR so non-Windows runners stay portable.
-target-dir = "D:/astock-build/astock-terminal/cargo-target"
+# Keep the shared Rust workspace platform-neutral. Windows build scripts set
+# CARGO_TARGET_DIR beneath ASTOCK_BUILD_ROOT; other platforms use Cargo's
+# native default unless the caller explicitly overrides it.

@@ -1,79 +1,209 @@
-# 趋势智研 · AStock Terminal
+# AStock
 
-面向个人投资者的 A 股研究与人工决策支持终端。应用以 Rust 确定性行情、技术分析、基本面、图谱、量化和回测引擎为底座，由 MiniMax Agent 负责选择工具、交叉核验和解释证据。
+AStock is an evidence-driven financial research Agent platform for A-share
+research and human decision support. The product is being consolidated around
+one Rust Agent Runtime and one deterministic Rust financial Engine:
 
-本项目不是自动交易系统：不登录券商、不路由订单、不自动买卖，也不承诺收益。交易计划只提供带成立条件、失效条件和风险预算的人工执行参考。
+- `astock`: cross-platform CLI and inline terminal Agent; Linux is the
+  reference development platform.
+- `astock-terminal`: desktop research terminal. The current v6 Proton/MoonBit
+  implementation remains preserved while a thin Tauri v2 adapter is restored
+  over the shared Rust runtime.
 
-## 主要能力
+This is not an automatic trading system. AStock does not log in to brokers,
+route orders or buy/sell automatically. Any trading plan is a research
+artifact that requires review and manual execution.
 
-- Security Master 统一证券身份，覆盖沪深、科创、创业、北交所及研究范围内的基金品种。
-- TDX、腾讯、新浪、东方财富及可选数据源的字段级合并、来源标记、质量校验、缓存、限频和熔断。
-- 行情、K 线、五档、技术结构、缠论、资金流、基本面、估值、产业链图谱和市场状态工作台。
-- 年报、招股书、调研、招投标、合同、专利与产能材料的供应链关系后台抽取、原文证据校验、人工审核、幂等发布和可审计撤回。
-- 双时间关系图谱：不可变修订、业务/系统知悉时间快照、证据过期复核、实体合并回放、时间滑块与事件回测防穿越（见 [设计文档](docs/bitemporal-graph.md)）。
-- 盈利驱动树：按金融/地产/资源/制造/消费/软件适配经营公式，参数与证据逐行追溯，支持三情景、敏感性、Monte Carlo、现价隐含假设及供应链冲击到收入/毛利/EPS/现金流桥接（见 [设计文档](docs/earnings-driver-tree.md)）。
-- 可复现量化研究工作台：统一界面/Agent 配置与数值，提供 Bootstrap/置换推断、FDR、多维稳健性、O(n²) 预算、无硬超时后台任务和不可变研究快照（见 [设计文档](docs/quant-lab.md)）。
-- 全市场分页筛选表、后台扫描、可恢复后台回测和持久化可调整桌面布局。
-- 独立专业资讯中心，支持多源增量更新、修订追踪、事件折叠、丰富筛选、分页与十万条虚拟浏览。
-- 资讯按统一 A 股日历和 15:00 边界归入盘前/盘中/下一交易日，实时 Agent 与事件回测共享 Point-in-Time 口径。
-- MiniMax Plus 工具调用、Token Plan 额度查看、动态澄清、自动上下文压缩、中断恢复、证据清单和多轮反方复核。
-- Agent Runtime 提供 SSE 空闲看门狗、pre-commit 安全重建、持久化检查点恢复、工具 single-flight、缓存参数规范化和防死锁预算（见 [运行时加固](docs/agent-runtime-hardening.md)）。
-- 基于 ATR、结构位、交易规则与时段配置生成的 `ManualTradingPlan`。
+## Current Rust CLI milestone
 
-## 开发与构建
+The recovery branch contains the first native Rust vertical slice:
 
-首版仅支持 Windows x64，需要 MSVC Build Tools、Rust 1.88+、Node.js
-20+、MoonBit、Proton 0.2.1 和固定 CEF 147 runtime。构建脚本强制把
-Cargo、MoonBit、CEF、Vite、npm 与打包中间产物写入
-`D:\astock-build\astock-terminal`；D 盘不可用或剩余空间少于 60 GiB
-时不会回退到 C 盘。
+- provider-independent streamed model interface with MiniMax as the first
+  adapter;
+- closed typed financial-tool registry backed by the existing Rust Engine;
+- durable Agent events, checkpoints and effect intent/result ordering;
+- bounded parallel read-only tools, cooperative cancellation and deadlines;
+- deterministic report verification before a successful completion event;
+- a fuel-metered financial calculation language, including a protected
+  JoinQuant-data calculation path with no arbitrary code execution;
+- durable multi-turn conversations with bounded model history, offline
+  session listing/history inspection and interactive continuation;
+- plain text, JSON and JSONL single-shot modes;
+- XDG/native paths, hidden session credential prompts and an inline TTY mode;
+- deterministic mock-provider vertical tests that do not consume paid APIs.
 
-```powershell
-.\scripts\bootstrap.ps1
-.\scripts\dev.ps1
-.\scripts\test.ps1
-.\scripts\package.ps1
+Exact interrupted-task replay, semantic model-generated compaction, deeper
+tool-by-tool v5 parity, broader fault-injection coverage, the polished TUI and
+shared Tauri GUI are active migration work. See [the recovery
+map](docs/rust-agent-recovery.md) for the audited boundary and phase plan.
+
+## Build on Linux
+
+The CLI does not require Proton, CEF, Tauri, React, Node.js, MoonBit or a
+graphical session.
+
+```bash
+cargo build --release -p astock
+./target/release/astock version
+./target/release/astock doctor
 ```
 
-The NSIS package is a per-user installation under
-`%LOCALAPPDATA%\Programs\AStock Terminal` and does not request administrator
-rights. Automated migration verification uses an isolated
-`/RELEASETEST=1` path under `ASTOCK_BUILD_ROOT`; that mode skips process,
-registry and shortcut changes while exercising the exact packaged payload and
-uninstaller.
+Run the deterministic Rust gates:
 
-生产发布必须从干净、与 `origin/main` 完全一致的提交执行：
-
-```powershell
-$env:ASTOCK_SIGNING_CERT_THUMBPRINT = '<CurrentUser\\My certificate thumbprint>'
-.\scripts\release-gate.ps1
+```bash
+cargo fmt --all -- --check
+cargo test -p astock-agent-runtime -p astock --all-targets
+cargo clippy -p astock-agent-runtime -p astock --all-targets -- -D warnings
 ```
 
-门禁在 D 盘生成 JSON/HTML 报告；能力迁移、数据、Agent、恢复、形式
-验证、浏览器、桌面 40 场景、迁移、性能、真实 Provider、凭据轮换、
-签名或安装任一项缺失都会失败。GitHub Actions 因计费限制未执行时，
-Release 必须明确写明 `GitHub Actions: NOT VERIFIED — billing/spending
-restriction; release gates executed locally`。
+The full workspace remains buildable with:
 
-生产签名还必须设置 `ASTOCK_SIGNING_CERT_THUMBPRINT` 与
-`ASTOCK_RFC3161_TIMESTAMP_URL`。门禁会签署 App 中所有未签名 PE，保留并
-验证已有有效的 CEF 签名，借助 NSIS `!uninstfinalize` 签署卸载器，重建
-签名后的 ZIP/NSIS，并生成 `SHA256SUMS` 与 `signed-artifacts.json`；任一
-PE 的 Authenticode 状态不是 `Valid` 都会中止发布。
+```bash
+cargo test --workspace
+```
 
-聊天、工单或日志中出现过的 Provider 凭据一律视为已泄露。正式门禁前应先在
-MiniMax 和聚宽侧创建新凭据/密码、撤销旧值，再通过桌面配置页写入 Windows
-Credential Manager。随后使用 `record-credential-rotation.ps1` 做显式操作员
-确认和只读回读，再运行 `external-services-e2e.ps1`；后者才会执行真实模型目录、
-额度、SSE 两万元研究计划和聚宽最小数据验收。两个脚本都不接受凭据参数，也不
-把报告正文、账号或密钥写入证据。
+Windows product scripts continue to put build intermediates below
+`ASTOCK_BUILD_ROOT`; shared Cargo configuration no longer imposes a Windows
+drive on Linux or macOS.
 
-## 配置与凭证
+## Configure MiniMax safely
 
-MiniMax Key 保存在 Windows 凭据管理器，不写入数据库或日志。Tushare、问财、聚宽及 SOCKS5 为可选配置；未配置时相应数据源会标记为不可用，核心页面继续降级运行。
+Ordinary settings are read from the platform-native config path shown by:
 
-架构与方法详见 [架构](docs/architecture.md)、[数据源](docs/data-sources.md)、[专业资讯中心](docs/news-center.md)、[数据契约](docs/data-contracts.md)、[Agent 协议](docs/agent-protocol.md)、[Agent Runtime](docs/agent-runtime-hardening.md)、[量化方法](docs/quant-methodology.md) 和 [可复现量化实验室](docs/quant-lab.md)。
+```bash
+astock config path
+astock config validate
+```
 
-## 数据与风险
+On Linux this normally resolves to `~/.config/astock/config.toml`; data and
+cache use `~/.local/share/astock` and `~/.cache/astock`. A custom file can be
+selected with `--config /path/to/config.toml`.
 
-公开金融上游可能超时、限流、变更结构或返回错误数据。终端会展示来源、时间、缺失原因和降级状态，但这些机制不能消除全部数据风险。历史回测不代表未来表现。
+Never put API keys, passwords, authenticated proxy URLs or cookies in the
+TOML file, command arguments or environment variables. When `astock`, `astock
+chat`, `astock ask`, `astock models` or `astock quota` needs a missing MiniMax
+key in a terminal, it asks for the key with echo disabled. Agent runs also
+offer an optional hidden JoinQuant session prompt. Prompted values stay in
+that process and are not persisted. Non-interactive use requires a credential
+already installed in the OS credential store.
+
+Do not paste live credentials into issues, commits, chat or logs. A credential
+that has appeared in any of those places must be revoked rather than reused.
+The value is wrapped in a non-serializable redacted type and is never written
+to Agent events, SQLite, JSON output or tool arguments.
+
+Example non-secret configuration:
+
+```toml
+[agent]
+profile = "senior-analyst"
+depth = "deep"
+tool_policy = "full"
+language = "zh-CN"
+max_parallel_tools = 4
+
+[provider.minimax]
+region = "auto"
+model = "auto"
+timeout_secs = 120
+
+[research]
+strict_evidence = true
+cross_source_check = true
+verify_numeric_claims = true
+counter_evidence = true
+allow_backtest = true
+
+[network]
+proxy = "socks5h://127.0.0.1:1080"
+
+[tui]
+show_tools = true
+show_evidence = true
+stream = true
+```
+
+Proxy URLs with embedded credentials are rejected.
+
+## Use the CLI
+
+```bash
+astock ask '分析紫金矿业当前投资价值'
+astock ask --symbol 601899 --depth deep '分析目前风险收益比'
+astock ask --json '分析沪深300市场状态'
+astock ask --jsonl '研究最近一个月AI产业链变化'
+printf '%s\n' '分析沪深300市场状态' | astock ask -
+astock
+astock sessions
+astock history --json
+astock resume
+astock branch
+astock compact
+astock sources
+astock cache
+```
+
+When stdout is not a TTY, AStock does not emit ANSI control sequences or open
+a fullscreen interface. Diagnostics go to stderr. `--json` emits one final
+object; `--jsonl` emits typed progress events. The default tool policy is
+`full`, so every tool registered in the Rust Runtime is offered to the Agent;
+the allowlist remains closed and read-only. `astock ask` creates a durable
+conversation. `astock resume [SESSION_ID]` continues the latest or selected
+conversation as a new task with bounded prior user/Agent messages in model
+context; it does not yet restart an interrupted task from its exact effect
+checkpoint.
+
+`astock branch [SESSION_ID]` creates a new conversation at the latest message;
+`--message-id` selects an earlier point. The Engine verifies the latest source
+checkpoint when applicable, retains the original conversation unchanged and
+clears executable task state in the new branch before any fresh research.
+Long conversations keep every original message in SQLite while model context
+is bounded to the latest 40 user/Agent messages and 120,000 characters.
+`astock compact [SESSION_ID]` (or `/compact`) refreshes a deterministic,
+extractive index of older messages without deleting them; the prompt marks
+that index as historical context rather than current evidence.
+
+Useful non-provider commands:
+
+```bash
+astock doctor
+astock tools
+astock sources
+astock cache
+astock version
+```
+
+`astock models` and `astock quota` are provider-backed account queries and
+therefore require the MiniMax credential path.
+
+## Data and evidence discipline
+
+Security identity, source, timestamp, adjustment mode, units, currency,
+quality and missing/conflicting observations remain explicit. Large datasets
+are normalized and bounded by the Engine before model ingestion. The model may
+plan, interpret and synthesize; deterministic Rust computes financial and
+quantitative results.
+
+A report with blocking verification findings is not emitted as a successful
+completion. Partial upstream failure is surfaced as degraded coverage rather
+than silently converted to success or zero. Current/latest questions require
+current configured sources and exposed data timestamps.
+
+Public financial upstreams can time out, rate-limit, change schema or return
+incorrect data. Provenance and cross-source checks reduce but cannot eliminate
+that risk. Historical backtests do not predict future returns.
+
+## Architecture and development
+
+- [Rust Agent recovery map](docs/rust-agent-recovery.md)
+- [Bounded financial calculation language](docs/compute-language.md)
+- [Current architecture](docs/architecture.md)
+- [Data sources](docs/data-sources.md)
+- [Data contracts](docs/data-contracts.md)
+- [Agent protocol](docs/agent-protocol.md)
+- [Runtime hardening history](docs/agent-runtime-hardening.md)
+- [Quant methodology](docs/quant-methodology.md)
+
+The v5.0.3 Rust Agent is used only as a differential oracle. The current v6
+Engine, evidence registry, report verifier and durable event/effect store are
+preserved and consumed by the new runtime rather than replaced wholesale.

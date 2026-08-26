@@ -146,6 +146,21 @@ pub async fn resolve_and_open() -> Result<(Storage, DataRootDecision), String> {
     )
 }
 
+pub(super) fn open_at(path: impl AsRef<Path>) -> Result<(Storage, DataRootDecision), String> {
+    let path = path.as_ref();
+    if !path.is_absolute() {
+        return Err(format!(
+            "Engine data root must be an absolute path: {}",
+            path.display()
+        ));
+    }
+    open_decision(
+        path.to_path_buf(),
+        DataRootOrigin::ExplicitEnvironment,
+        None,
+    )
+}
+
 pub async fn migrate(storage: &Storage, requested: &str) -> Result<MigrationOutcome, String> {
     let bootstrap_root = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
