@@ -157,29 +157,42 @@ jobs:
         run: cargo build --locked --release -p astock-desktop
       - name: Bundle the Windows installer
         if: runner.os == 'Windows'
+        # Run from the crate directory so the Tauri CLI resolves the config, the
+        # crate and `frontendDist` consistently. Bundling is the default, so the
+        # earlier `--no-bundle=false` was rejected outright: the flag takes no
+        # value. The cargo step above stays as a fast compile signal, and its
+        # artifacts are reused here through CARGO_TARGET_DIR.
+        working-directory: crates/desktop
         run: |
           npm install --global @tauri-apps/cli@^2
-          tauri build --config crates/desktop/tauri.conf.json --no-bundle=false
-        continue-on-error: true
+          tauri build
       - name: Collect desktop artifacts
         if: runner.os == 'Windows'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p desktop-artifacts
-          # The release binary is the minimum evidence that the adapter links on
-          # the shipping platform. Bundles are collected when the bundler ran.
-          find "${CARGO_TARGET_DIR}/release" -maxdepth 1 -name 'astock-desktop.exe' \
-            -exec cp {} desktop-artifacts/ \; || true
-          find "${CARGO_TARGET_DIR}/release/bundle" -type f \
-            \( -name '*.exe' -o -name '*.msi' \) -exec cp {} desktop-artifacts/ \; || true
+          cp "${CARGO_TARGET_DIR}/release/astock-desktop.exe" desktop-artifacts/
+          # A bundle is required: shipping only a bare executable would leave
+          # users without an installer, so a missing bundle fails the job.
+          found=0
+          for pattern in '*.exe' '*.msi'; do
+            while IFS= read -r bundle; do
+              cp "$bundle" desktop-artifacts/
+              found=1
+            done < <(find "${CARGO_TARGET_DIR}/release/bundle" -type f -name "$pattern" 2>/dev/null)
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "no NSIS or MSI bundle was produced" >&2
+            exit 1
+          fi
           ls -la desktop-artifacts
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'
         with:
           name: astock-desktop-windows-x64
           path: desktop-artifacts/
-          if-no-files-found: warn
+          if-no-files-found: error
 
   moonbit-agent:
     runs-on: ubuntu-latest
