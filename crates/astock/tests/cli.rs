@@ -198,12 +198,20 @@ fn compact_without_a_durable_session_fails_as_an_explicit_configuration_error() 
 /// pseudo-terminal with no credential available and expects control output, not
 /// a credential prompt.
 ///
-/// The test is skipped rather than failed when no usable `script` is present,
-/// because a missing pty helper is an environment gap, not a product regression.
-/// Windows has no `script` at all, and its interactive path is covered by the
-/// non-interactive tests plus the runtime's own intent suite.
+/// Scope note. This runs only where GNU `script` is available, which in practice
+/// means Linux, the reference development platform. BSD `script` on macOS
+/// forwards a redirected stdin and closes it before the child's read loop
+/// starts, so the process reaches EOF having printed only its banner: an
+/// artifact of the harness, not a product signal. Windows has no `script` at
+/// all. The credential-free property itself is still asserted on every platform
+/// by `inspection_commands_need_no_credential_and_never_prompt`; only this
+/// pty-driven interactive variant is Linux-scoped.
 #[test]
 fn interactive_control_intents_work_without_a_model_credential() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping: reliable pty input feeding requires GNU script");
+        return;
+    }
     let Some(script) = which_script() else {
         eprintln!("skipping: no `script` binary available to allocate a pseudo-terminal");
         return;
@@ -215,26 +223,12 @@ fn interactive_control_intents_work_without_a_model_credential() {
 
     let binary = env!("CARGO_BIN_EXE_astock");
     let data_dir = root.path().display().to_string();
-    let mut command = Command::new(script);
-    if cfg!(target_os = "macos") {
-        // BSD script: `script -q <logfile> <command> [args...]`. It does not
-        // accept GNU's `-c`, which is why the GNU form failed on macOS.
-        command
-            .arg("-q")
-            .arg("/dev/null")
-            .arg(binary)
-            .arg("--data-dir")
-            .arg(&data_dir)
-            .arg("chat");
-    } else {
-        // GNU script: the command is one string passed to `-c`.
-        command.args([
+    let output = Command::new(script)
+        .args([
             "-qec",
             &format!("{binary} --data-dir {data_dir} chat"),
             "/dev/null",
-        ]);
-    }
-    let output = command
+        ])
         .env("HOME", root.path())
         .env("XDG_DATA_HOME", root.path().join("data"))
         .env("XDG_CACHE_HOME", root.path().join("cache"))
