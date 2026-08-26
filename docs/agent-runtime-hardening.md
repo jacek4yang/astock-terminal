@@ -1,107 +1,114 @@
 # Agent Runtime 加固
 
-本文描述 `astock-terminal` Agent 在模型流、工具执行、缓存并发和进程中断方面的运行时约束。目标不是承诺上游永不失败，而是保证失败有边界、有状态、可诊断且可恢复，不再出现无限等待或无终态退出。
+本文描述 `astock-agent-runtime` 在模型流、工具执行、证据校验和任务中断方面的
+运行时约束。目标不是承诺上游永不失败，而是保证失败**有边界、有状态、可诊断、
+可恢复**，不出现无限等待，也不出现没有终态的退出。
 
-## 1. 模型流提交边界
+> 历史说明：本文早期版本描述的是 v6 Proton/CEF 宿主中的 MoonBit Agent Worker。
+> 生产实现已经收敛到 Rust `astock-agent-runtime`，因此下述约束以当前 Rust 运行时
+> 为准。MoonBit 模型与 `formal/` TLA+ 规格仍作为规格与模型检验资产保留。
+> 表中数值取自 `RuntimeConfig::default()`，改代码时必须同步改本文。
 
-MiniMax Provider 位于 MoonBit Agent Worker。结构化规划与审查使用非流式 JSON，最多进行三次有界尝试；每次结果必须完整解析为声明类型，私有思考文本和不完整 JSON 都不会进入任务历史。
+## 1. 模型流的提交边界
 
-最终纯文本报告使用 SSE，但 Worker 在内存中收到并校验完整响应后才一次性交给 reducer：
+MiniMax SSE 被划分为两个阶段：
 
-- 必须观察到 `[DONE]`；提前 EOF、无效 UTF-8、损坏 JSON 或缺失结束标记都视为未完成；
-- 传输总量最多 2 MiB、单行最多 256 KiB、最多 32768 个事件、可见正文最多 120000 字节；
-- 每次完整报告尝试最多 180 秒，最多三次；失败尝试的部分文本被整体丢弃，后一次从同一持久化输入重新生成；
-- `<think>`、`reasoning_details` 和只包含思考内容的响应不会展示或持久化。
+- **pre-commit**：尚未向上层交付任何用户可见文本、工具调用或结束原因。仅含
+  `reasoning_content` / `reasoning_details` 的 chunk 只存在于内存中。
+- **committed**：第一段可见文本、第一个工具调用或结束原因已经出现。此后
+  **不允许在 provider 层重放整次请求**。
 
-因此 Renderer 不会看到“半段答案”，Provider 也不会把一次失败流和后续恢复流拼接为伪完整结论。
+已提交后断流直接返回瞬时错误，由上层从最近一次完整持久化的轮次恢复。这条边界
+的作用是防止重复文本、重复执行工具，以及破坏 `tool_call_id → tool result` 的
+一一对应关系。
 
-## 2. 持久化 Runtime Supervisor
+私有推理永不外泄：`<think>` 段、`reasoning_details` 以及只包含思考内容的响应
+都不会进入可见输出、任务历史或durable事件。该性质由
+`fragmented_private_reasoning_never_becomes_visible` 覆盖，包括推理文本被切成
+多个 chunk 的情况。
 
-MoonBit Agent 的纯 reducer 只处理事件并产生 Effect；Rust Engine 保存任务事件、检查点、Effect 意图和结果；Proton Host 监督两个 Worker 并编排最多四轮 `host_effects + continuation`：
+默认边界：
 
-1. Renderer 只能提交公开 Agent 请求，不能调用任务创建、事件追加、检查点写入或 Effect 写入/列表等内部日志原语。
-2. Host 对 `agent.start`、`agent.event`、`agent.research.workflow` 先持久化输入事件和整体操作意图，再调用 Agent；相同已完成操作直接复用持久化响应。
-3. Host 先持久化 Agent 检查点，再读取工具 Effect 历史。
-4. 只接受 `target=engine`，且 kind 必须属于 `research.agent_prepare_context`、`research.agent_security_context`、`research.agent_report_verify` 三项闭集。
-5. Host 持久化工具 Effect 意图后才调用 Engine，Engine 结果持久化成功后才传回 Agent。
-6. 已成功的幂等键直接复用；崩溃留下的 pending 记录只允许上述三个可重放研究聚合以 `:retry:N` 重新执行。
-7. 每个非 start 的用户事件或研究工作流调用前，Host 都把 Engine 中最新检查点恢复到 Agent；Worker 重启后的正确性不依赖 React 恰好观察到故障。
-8. Agent/Engine 连续丢失三次 2 秒心跳后由 Job Object 监督器重启并重新握手；首次启动与重启都必须匹配 schema 固定的协议 v1、6.0.0 版本、8 MiB 帧限制、Agent reducer 版本和最低能力子集，只有 `ok=true` 不会被接纳；Provider 暂停保留检查点，不发布未完成报告。
-9. 用户显式停止长研究时，Host 会抢占单通道 Agent Worker，记录被中断操作、重启握手并从最新持久化检查点提交 `cancel` 事件；超时通道同样立即作废，不能继续接收迟到帧。
+| 参数 | 默认值 | 作用 |
+|---|---:|---|
+| provider 连接超时 | 90 秒 | 永久无首包时终止本次连接 |
+| chunk 空闲超时 | 120 秒 | 流建立后长期无数据时终止连接 |
+| 每轮最大 chunk 数 | 10 000 | 防止无终止流耗尽资源 |
+| 每轮可见正文上限 | 120 000 字符 | 越界按失败处理并关闭 effect |
+| 每轮最大工具调用 | 32 | 限制单轮扇出 |
+| 工具参数上限 | 256 000 字符 | 防止参数无限增长 |
+| 工具结果上限 | 2 MiB | 越界作为**有界失败**回传模型 |
+| 最大模型轮数 | 16 | 防止工具循环不收敛 |
+| 并行工具上限 | 4 | 仅只读工具可并行 |
 
-### 自动恢复分类
+正常完成必须观察到结束原因。SSE 在结束标记前关闭不会被误判为完整回答。
 
-鉴权失败、无效密钥、额度暂停、协议损坏、SQLite 错误、证据校验失败和用户取消不会被无限重试。MiniMax 不可用时任务进入 `Suspended` 并保留证券计划；确定性 Engine Effect 失败则安全终止当前执行，不把缺失结果改写为零或继续发布。
+## 2. 失败分类与恢复
 
-## 3. 工具权限、幂等与缓存
+自动恢复只用于保守识别的**瞬时**错误：网络中断、连接重置、EOF、SSE 中断、
+429/限流、超时、502/503/504。
 
-Renderer 只提交一个 `agent.research.workflow`。模型不能产生任意 Engine kind，只能在以下高级模块闭集中选择子集：`earnings_driver`、`industry_graph`、`relationship`、`market_regime`、`historical_backtest`。`market/evidence/full` 策略在模型规划后由程序强制覆盖，`auto` 也必须通过闭集校验；交易、凭据和存储修改永远不在集合中。
+以下错误**不进入**重试循环，而是直接成为终态或挂起：
 
-Effect 幂等身份由任务、工具 kind 和完整结构化 JSON payload 构成，因而证券、研究区间、数据截止时间、工具策略与高级模块都会参与身份；参数比较使用结构化相等而不依赖对象字段顺序。Engine 在写 SQLite 唯一键前统一转换为 SHA-256 摘要，长参数不会超出键长度或以明文泄露。Host 串行化同一 Worker 通道、读取持久化 Effect 历史并复用成功结果；Rust 数据层继续按来源版本和参数管理读缓存。缓存命中只复用不可变成功结果，失败、跳过、过期和冲突状态仍显式返回。
+- 鉴权失败与无效凭据（`provider_authentication_failure_is_terminal_failed`）；
+- API 业务错误与响应解析错误；
+- 工具调用历史协议损坏；
+- 存储错误；
+- 超过最大模型轮数；
+- 证据校验失败；
+- 用户取消。
 
-## 4. 工具防死锁预算
+限流发生在部分流之后时，任务进入 `Suspended` 而不是 `Completed`，避免把截断的
+回答当成成品交付（`provider_rate_limit_after_partial_stream_is_suspended_not_completed`）。
+空闲超时同样是有界挂起（`provider_idle_timeout_is_bounded_and_suspended`）。
 
-预算是最终安全边界，不是预计完成时间。工具内部的来源切换、退避、熔断和进度事件仍先正常运行。
+## 3. 工具执行
 
-| Effect | 上限 |
-|---|---:|
-| 市场/宏观/新闻/候选准备聚合 | 300 秒 |
-| 证券证据与高级分析聚合 | 600 秒 |
-| 独立报告校验 | 120 秒 |
-| 单次完整 MiniMax 报告流 | 180 秒 |
-| Renderer 到 Agent 整体请求 | 最高 900 秒 |
+工具注册表是封闭的：模型只能调用注册过的类型化工具。未知工具**在到达 Engine
+之前**失败（`unknown_model_tool_fails_closed_and_never_reaches_engine`），因此
+模型无法通过编造工具名扩大权限。运行时不暴露任意文件系统访问、进程执行或模型
+生成代码；计算语言是有燃料计量的求值器，没有任意执行。
 
-任何超时都形成结构化失败或暂停状态；不得以历史旧值、零值或模型猜测填补本轮缺失。
+分片到达的工具参数会被重建成单个 JSON 对象，且保留原始不透明字符串
+（`fragmented_tool_arguments_reconstruct_one_json_object`）。超限的工具结果不会
+静默截断成"成功"，而是作为有界失败对模型可见
+（`oversized_tool_result_is_visible_to_model_as_a_bounded_failure`）。
 
-## 5. 运行时不变量
+## 4. 取消
 
-- 每个 reducer 调用和 Effect 结果保持唯一、单调、可重放。
-- Renderer 对内部事件、检查点和 Effect 日志始终只有 Host 代写、无直接写权限。
-- 不完整模型流不得写入 SQLite；完整流恢复不得拼接前一次草稿。
-- 任何 TaskStream 必须产生终态，或由监督器转换为恢复/挂起状态。
-- 高级模块失败与跳过必须显示在 `tool_activities`，失败不得伪装为成功证据。
-- Host 与浏览器验收 Bridge 的 Agent Effect 白名单必须精确相同。
-- 独立报告验证未通过时只能进入 `VerificationFailed`，不能发布报告。
-- 自动恢复、Provider 尝试和 Host continuation 都有明确上限。
+取消是协作式的，覆盖两个位置：等待中的 provider 流
+（`cancellation_interrupts_a_pending_provider_stream`）和正在执行的 Engine 工具
+（`cancellation_reaches_a_cooperative_engine_tool`）。取消后任务进入 `Cancelled`
+终态，不留伪运行状态。
 
-## 6. 故障测试矩阵
+`/cancel` 与"先停一下"解析为同一个 `UserIntent::Cancel`，因此两条路径不会分叉。
 
-| 场景 | 预期结果 |
-|---|---|
-| SSE 在 `[DONE]` 前断流 | 丢弃全部部分正文，有界地从头生成 |
-| SSE 多字节字符跨 TCP chunk | 按字节重组后再 UTF-8 解码，不产生乱码 |
-| 模型选择未知/交易工具 | 规划立即失败，Engine 不执行 |
-| Agent 首次请求凭据/存储 kind | Host 与浏览器 Bridge 都在持久化 Effect 前拒绝 |
-| 相同成功 Effect 重放 | 从持久化结果命中，不重复执行 |
-| 可重放研究 Effect 在 checkpoint 后崩溃 | 使用有界 retry 幂等键恢复 |
-| Worker 连续三次心跳失败 | Job Object 监督器重启并重新握手 |
-| 鉴权/协议/存储错误 | 立即失败，不自动循环 |
-| Token Plan 耗尽 | 挂起并保留检查点，用户恢复后继续 |
-| 长研究期间显式停止 | 抢占 Worker、恢复最后检查点、持久化取消并进入 `Cancelled` |
-| Worker 响应超时后迟到 | 原通道被终止，下一请求重启握手，不消费迟到帧 |
-| 报告引用或数字无法复现 | `VerificationFailed`，不发布 |
+## 5. 持久化与恢复
 
-## 7. 验证限制
+意图和 effect intent 在执行副作用**之前**持久化；重复、过期与重放输入按幂等
+处理。任务投影完整落盘
+（`embedded_engine_persists_the_complete_headless_task_projection`），可见计划
+（`Plan`）随任务状态持久化，因此中断后恢复时用户看到的工作分解不会丢失。
 
-当前仓库的 GitHub Actions 因账户 billing/spending-limit 限制，在执行任何 step 前即失败且没有 job 日志。因此，本次 PR 不能把 Actions 状态声明为通过。恢复 CI 额度后必须补跑：
+可选字段被省略而不是编码成 `null`
+（`task_optional_fields_are_omitted_not_encoded_as_null`），旧版本会话仍可读取
+（`completed_v6_conversation_without_rust_version_remains_readable`）。
 
-```powershell
-npm --prefix ui ci
-npm --prefix ui test -- --run
-npm --prefix ui run build
-cargo fmt --all -- --check
-cargo test --locked --workspace
-cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-cargo check --locked --workspace --all-targets --all-features
-node protocol/codegen.mjs --check
-node scripts/capability-parity-check.mjs --release
-Push-Location app-moon
-moon fmt --check --target-dir D:\astock-build\astock-terminal\moon-target\agent
-moon check --target native --target-dir D:\astock-build\astock-terminal\moon-target\agent
-moon test --target native --target-dir D:\astock-build\astock-terminal\moon-target\agent
-Pop-Location
-```
+## 6. 上下文边界
 
-上述列表是普通质量回归，不构成生产发布证明。双求解器 MoonBit/Why3、
-TLA+/TLC、故障注入、浏览器、打包桌面、迁移、真实性能、外部服务和
-Authenticode 证据必须由不可变提交上的 `scripts/release-gate.ps1` 生成。
+长会话保留全部原始消息，同时对模型上下文设上限：最近 40 条用户/Agent 消息且
+不超过 120 000 字符（`compaction_keeps_full_history_and_bounds_model_context`、
+`long_session_uses_summary_plus_bounded_recent_history`）。摘要是**历史上下文**，
+不得静默变成当前市场证据。
+
+## 7. 发布闸门
+
+存在阻塞性校验发现时不得作为成功报告发布。上游部分失败呈现为**降级覆盖**，
+而不是静默成功或补零。计划中的 `Degraded` 与 `Done` 是不同状态，正是为了让降级
+在最终报告里保持可见。
+
+## 尚未验证的部分
+
+- 真实 provider 行为仍是受信边界，需显式选择加入的实时测试；
+- 精确 effect 检查点重放与语义压缩尚未完成，属于迁移中的工作；
+- 上述性质由确定性集成测试覆盖，不等于实时数据正确性。

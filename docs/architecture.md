@@ -1,4 +1,28 @@
-# v6 architecture
+# Architecture
+
+## Cross-platform recovery target
+
+```text
+astock CLI / inline TUI ─┐
+                         ├──> shared Rust Agent Runtime ──> Rust Engine
+React + thin Tauri v2 ───┘                                  │
+                                                            └──> domain/data/storage crates
+```
+
+The Rust Agent Runtime owns provider-independent orchestration, task state,
+bounded retries/review, evidence/publication policy and public progress
+events. The Engine owns deterministic financial algorithms, source adapters,
+SQLite/Parquet persistence and evidence registries. CLI and Tauri are adapters
+and may not create alternate Agent implementations.
+
+The current recovery branch has the first CLI/runtime vertical slice while the
+v6 Proton/MoonBit implementation remains preserved. The sections below record
+that v6 production boundary as migration history; they are not the final
+cross-platform target. MoonBit may remain for formal/specification work but is
+not required by the `astock` binary. See `rust-agent-recovery.md` for the
+KEEP/PORT/REWRITE/REMOVE/ARCHIVE audit and replacement gates.
+
+## v6 preserved architecture
 
 ## Production process boundary
 

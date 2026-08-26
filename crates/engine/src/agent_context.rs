@@ -396,7 +396,7 @@ fn collect_evidence_facts(
     }
 }
 
-fn attach_evidence_registry(payload: &mut Value, scope: &str) {
+pub(super) fn attach_evidence_registry(payload: &mut Value, scope: &str) {
     let mut facts = Vec::new();
     collect_evidence_facts(payload, "", scope, &EvidenceMetadata::default(), &mut facts);
     let truncated = facts.len() == MAX_EVIDENCE_FACTS;

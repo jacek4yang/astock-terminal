@@ -111,6 +111,31 @@ impl ReqwestHttp {
         Self::build(true)
     }
 
+    /// Build a production transport with an explicit HTTP(S) or SOCKS proxy.
+    /// The caller must keep credentials out of the URL; this value is ordinary
+    /// configuration and may appear in actionable transport diagnostics.
+    pub fn with_proxy(proxy_url: &str) -> Result<Self, MinimaxError> {
+        let proxy = reqwest::Proxy::all(proxy_url)
+            .map_err(|error| MinimaxError::Network(format!("invalid proxy URL: {error}")))?;
+        let builder = || {
+            reqwest::Client::builder()
+                .user_agent(concat!("astock-terminal/", env!("CARGO_PKG_VERSION")))
+                .connect_timeout(Duration::from_secs(10))
+                .proxy(proxy.clone())
+        };
+        let client = builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .map_err(|error| MinimaxError::Network(format!("build proxy client: {error}")))?;
+        let stream_client = builder().build().map_err(|error| {
+            MinimaxError::Network(format!("build streaming proxy client: {error}"))
+        })?;
+        Ok(Self {
+            client,
+            stream_client,
+        })
+    }
+
     fn build(direct: bool) -> Self {
         let builder = || {
             let builder = reqwest::Client::builder()

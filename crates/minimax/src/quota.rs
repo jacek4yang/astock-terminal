@@ -9,13 +9,13 @@
 
 use std::time::{Duration, SystemTime};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Below this remaining-percent threshold the plan is considered throttled.
 pub const THROTTLE_PERCENT: f64 = 5.0;
 
 /// Remaining quota for one model.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ModelQuota {
     /// Model name, e.g. `MiniMax-M2.5`.
     #[serde(default)]
@@ -100,7 +100,7 @@ pub struct Pacing {
 }
 
 /// Snapshot of the Token Plan for all models.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct QuotaStatus {
     /// Per-model quota rows.
     pub models: Vec<ModelQuota>,
