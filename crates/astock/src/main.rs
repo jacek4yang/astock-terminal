@@ -30,6 +30,14 @@ struct Cli {
     /// Read ordinary configuration from this TOML file.
     #[arg(long, global = true)]
     config: Option<PathBuf>,
+    /// Store durable sessions, evidence and cache under this directory instead
+    /// of the platform default. Also settable with ASTOCK_DATA_DIR.
+    ///
+    /// The platform default is resolved through OS APIs rather than environment
+    /// variables on Windows, so an explicit override is the only portable way to
+    /// select a data root; tests and portable installs need it.
+    #[arg(long, global = true)]
+    data_dir: Option<PathBuf>,
     /// Diagnostic log filter (for example: info or astock_agent_runtime=debug).
     #[arg(long, global = true, default_value = "warn")]
     log_level: String,
@@ -234,7 +242,8 @@ fn run() -> ExitCode {
 }
 
 async fn dispatch(cli: Cli) -> Result<(), RuntimeError> {
-    let paths = AppPaths::discover(cli.config.as_deref()).map_err(RuntimeError::Configuration)?;
+    let paths = AppPaths::discover(cli.config.as_deref(), cli.data_dir.as_deref())
+        .map_err(RuntimeError::Configuration)?;
     if matches!(
         cli.command,
         Some(Command::Config {

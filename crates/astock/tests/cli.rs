@@ -13,22 +13,29 @@ use tempfile::TempDir;
 
 /// Run `astock` with the given arguments against an isolated environment.
 ///
-/// `HOME` and the XDG base directories all point inside `root`, so a developer
-/// or CI machine with real AStock data cannot influence the result and the test
-/// cannot mutate real user state.
+/// Isolation uses the explicit `--data-dir` override rather than environment
+/// variables. `HOME` and the XDG variables are enough on Linux and macOS, but
+/// `directories` resolves the Windows data root through Win32 known-folder APIs
+/// that ignore the environment entirely. Relying on env vars therefore looked
+/// isolated on Linux while every Windows test shared the real user data
+/// directory, which produced `database is locked` and schema conflicts as the
+/// tests ran in parallel — and meant the suite was mutating real user state.
 fn run(root: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_astock"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_astock"));
+    command
+        .arg("--data-dir")
+        .arg(root)
         .args(args)
         .env("HOME", root)
         .env("XDG_DATA_HOME", root.join("data"))
         .env("XDG_CACHE_HOME", root.join("cache"))
         .env("XDG_CONFIG_HOME", root.join("config"))
+        .env_remove("ASTOCK_DATA_DIR")
         .env_remove("ASTOCK_BUILD_ROOT")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("spawn the astock binary")
+        .stderr(Stdio::piped());
+    command.output().expect("spawn the astock binary")
 }
 
 fn stdout_of(output: &Output) -> &str {
@@ -191,12 +198,14 @@ fn compact_without_a_durable_session_fails_as_an_explicit_configuration_error() 
 /// pseudo-terminal with no credential available and expects control output, not
 /// a credential prompt.
 ///
-/// The test is skipped rather than failed when `script` is unavailable, because
-/// a missing pty helper is an environment gap, not a product regression.
+/// The test is skipped rather than failed when no usable `script` is present,
+/// because a missing pty helper is an environment gap, not a product regression.
+/// Windows has no `script` at all, and its interactive path is covered by the
+/// non-interactive tests plus the runtime's own intent suite.
 #[test]
 fn interactive_control_intents_work_without_a_model_credential() {
     let Some(script) = which_script() else {
-        eprintln!("skipping: `script` is required to allocate a pseudo-terminal");
+        eprintln!("skipping: no `script` binary available to allocate a pseudo-terminal");
         return;
     };
     let root = TempDir::new().expect("create a temporary data root");
@@ -204,16 +213,33 @@ fn interactive_control_intents_work_without_a_model_credential() {
     // Natural language only: no slash command is used anywhere here.
     std::fs::write(&input, "你有哪些工具\n现在什么状态\n退出\n").expect("write driver input");
 
-    let output = Command::new(script)
-        .args([
+    let binary = env!("CARGO_BIN_EXE_astock");
+    let data_dir = root.path().display().to_string();
+    let mut command = Command::new(script);
+    if cfg!(target_os = "macos") {
+        // BSD script: `script -q <logfile> <command> [args...]`. It does not
+        // accept GNU's `-c`, which is why the GNU form failed on macOS.
+        command
+            .arg("-q")
+            .arg("/dev/null")
+            .arg(binary)
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .arg("chat");
+    } else {
+        // GNU script: the command is one string passed to `-c`.
+        command.args([
             "-qec",
-            &format!("{} chat", env!("CARGO_BIN_EXE_astock")),
+            &format!("{binary} --data-dir {data_dir} chat"),
             "/dev/null",
-        ])
+        ]);
+    }
+    let output = command
         .env("HOME", root.path())
         .env("XDG_DATA_HOME", root.path().join("data"))
         .env("XDG_CACHE_HOME", root.path().join("cache"))
         .env("XDG_CONFIG_HOME", root.path().join("config"))
+        .env_remove("ASTOCK_DATA_DIR")
         .stdin(std::fs::File::open(&input).expect("open driver input"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

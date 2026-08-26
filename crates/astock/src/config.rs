@@ -11,16 +11,43 @@ pub struct AppPaths {
 }
 
 impl AppPaths {
-    pub fn discover(config_override: Option<&Path>) -> Result<Self, String> {
+    /// Resolve application paths, optionally relocating the data and cache roots.
+    ///
+    /// `data_root_override` takes precedence over `ASTOCK_DATA_DIR`, which takes
+    /// precedence over the platform default. An explicit override is required
+    /// for portability: on Windows the platform default comes from Win32
+    /// known-folder APIs, which ignore `HOME` and the XDG variables, so
+    /// environment tricks cannot redirect it. Without this, tests and portable
+    /// installs silently share the real user data directory.
+    pub fn discover(
+        config_override: Option<&Path>,
+        data_root_override: Option<&Path>,
+    ) -> Result<Self, String> {
         let project = ProjectDirs::from("com", "AStock", "astock").ok_or_else(|| {
             "the operating system did not provide a user data directory".to_string()
         })?;
+        let explicit_root = data_root_override
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::var_os("ASTOCK_DATA_DIR").map(PathBuf::from))
+            .filter(|path| !path.as_os_str().is_empty());
+        let (data_dir, cache_dir) = match &explicit_root {
+            // Keep cache separate from durable data even when relocated, so
+            // clearing a cache can never remove evidence or sessions.
+            Some(root) => (root.join("data"), root.join("cache")),
+            None => (
+                project.data_dir().to_path_buf(),
+                project.cache_dir().to_path_buf(),
+            ),
+        };
+        let config_file = match (config_override, &explicit_root) {
+            (Some(path), _) => path.to_path_buf(),
+            (None, Some(root)) => root.join("config.toml"),
+            (None, None) => project.config_dir().join("config.toml"),
+        };
         Ok(Self {
-            config_file: config_override
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| project.config_dir().join("config.toml")),
-            data_dir: project.data_dir().to_path_buf(),
-            cache_dir: project.cache_dir().to_path_buf(),
+            config_file,
+            data_dir,
+            cache_dir,
         })
     }
 }
