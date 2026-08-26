@@ -25,6 +25,22 @@ use crate::tools::{default_registry, ToolDefinition, ToolExecutor, ToolRegistry}
 
 const MAX_OBJECTIVE_CHARS: usize = 120_000;
 
+/// Characters of a tool result that may enter the model conversation.
+///
+/// Deliberately far below `max_tool_result_bytes`, which bounds what may be
+/// *stored*. A result large enough to be worth persisting is usually far too
+/// large to put in a context window, and mixing the two limits caused a live
+/// task to fail with `context window exceeds limit` after 13 successful tool
+/// calls.
+const DEFAULT_MAX_TOOL_RESULT_MODEL_CHARS: usize = 24_000;
+
+/// Evidence identifiers listed to the model for a single tool result.
+///
+/// A market-wide preparation tool can register thousands of observations. The
+/// model needs enough identifiers to cite specific facts, not the entire
+/// registry; the full set stays in durable task state either way.
+const DEFAULT_MAX_EVIDENCE_IDS_IN_CONTEXT: usize = 40;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeTask {
@@ -1455,10 +1471,81 @@ struct CompletedTool {
 
 impl CompletedTool {
     fn success(call: ModelToolCall, value: Value, evidence_ids: Vec<String>) -> Self {
+        Self::success_bounded(
+            call,
+            value,
+            evidence_ids,
+            DEFAULT_MAX_TOOL_RESULT_MODEL_CHARS,
+            DEFAULT_MAX_EVIDENCE_IDS_IN_CONTEXT,
+        )
+    }
+
+    /// Build the model-facing projection of a tool result.
+    ///
+    /// What is persisted and what the model sees are deliberately different
+    /// sizes. The full result is already written to the effect record and its
+    /// observations are registered in the evidence store, so the model does not
+    /// need the whole payload — it needs enough to reason plus the evidence IDs
+    /// to cite.
+    ///
+    /// Sending the full value was a real production failure: three research
+    /// tools returning close to the 2 MiB per-result ceiling produced a model
+    /// request that MiniMax rejected with `context window exceeds limit`, which
+    /// killed an otherwise successful multi-round task after 13 tool calls. A
+    /// 2 MiB allowance is meaningful for durable storage and meaningless for a
+    /// context window, so the two bounds are now separate.
+    ///
+    /// Truncation is explicit rather than silent: the model is told the payload
+    /// was bounded and that the complete result is retrievable by evidence ID,
+    /// so it cannot mistake a truncated page for the whole dataset.
+    fn success_bounded(
+        call: ModelToolCall,
+        value: Value,
+        evidence_ids: Vec<String>,
+        max_chars: usize,
+        max_evidence_ids: usize,
+    ) -> Self {
+        let total_evidence = evidence_ids.len();
+        let (shown_ids, omitted_ids) = if total_evidence > max_evidence_ids {
+            (
+                &evidence_ids[..max_evidence_ids],
+                total_evidence - max_evidence_ids,
+            )
+        } else {
+            (&evidence_ids[..], 0)
+        };
+
+        let encoded = value.to_string();
+        let content = if encoded.chars().count() <= max_chars {
+            json!({
+                "ok": true,
+                "data": value,
+                "evidence_ids": shown_ids,
+            })
+        } else {
+            let kept: String = encoded.chars().take(max_chars).collect();
+            json!({
+                "ok": true,
+                "truncated": true,
+                "data_preview": kept,
+                "original_chars": encoded.chars().count(),
+                "preview_chars": max_chars,
+                "evidence_ids": shown_ids,
+                "note": "结果超过模型上下文预算，已按前缀截断。完整结果已持久化在证据库中，可通过 evidence_ids 引用；不要把此预览当作完整数据集。",
+            })
+        };
+
+        let mut content = content;
+        if omitted_ids > 0 {
+            content["omitted_evidence_ids"] = json!(omitted_ids);
+            content["evidence_note"] =
+                json!("证据标识过多，仅列出前若干条；其余已记录在任务状态中，可按需引用。");
+        }
+
         Self {
             index: call.index,
             call_id: call.id,
-            content: json!({"ok": true, "data": value, "evidence_ids": evidence_ids}),
+            content,
         }
     }
 
@@ -1515,6 +1602,116 @@ fn evidence_ids(value: &Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tool_call() -> ModelToolCall {
+        ModelToolCall {
+            index: 0,
+            id: "call-1".into(),
+            name: "research_securities".into(),
+            arguments: String::new(),
+        }
+    }
+
+    /// A tool result that fits the context budget is passed through unchanged.
+    #[test]
+    fn a_small_tool_result_reaches_the_model_intact() {
+        let value = json!({"symbol": "601899", "close": 18.42});
+        let completed = CompletedTool::success_bounded(
+            tool_call(),
+            value.clone(),
+            vec!["evf_1".into()],
+            24_000,
+            40,
+        );
+        assert_eq!(completed.content["ok"], json!(true));
+        assert_eq!(completed.content["data"], value);
+        assert!(completed.content.get("truncated").is_none());
+    }
+
+    /// An oversized result is bounded before it reaches the model, and says so.
+    ///
+    /// This is the failure live acceptance found: three research tools each
+    /// returning close to the 2 MiB storage ceiling produced a request MiniMax
+    /// rejected with `context window exceeds limit`, ending a task that had
+    /// already completed 13 tool calls. The storage bound and the context bound
+    /// must be different numbers.
+    #[test]
+    fn an_oversized_tool_result_is_bounded_for_the_model_and_marked_truncated() {
+        let big = json!({"rows": vec!["0123456789"; 5_000]});
+        let original_chars = big.to_string().chars().count();
+        assert!(
+            original_chars > 24_000,
+            "the fixture must exceed the budget"
+        );
+
+        let completed =
+            CompletedTool::success_bounded(tool_call(), big, vec!["evf_1".into()], 24_000, 40);
+
+        assert_eq!(completed.content["truncated"], json!(true));
+        assert!(
+            completed.content.get("data").is_none(),
+            "the unbounded payload must not be sent"
+        );
+        let preview = completed.content["data_preview"]
+            .as_str()
+            .expect("a bounded preview is provided");
+        assert_eq!(preview.chars().count(), 24_000);
+        assert_eq!(completed.content["original_chars"], json!(original_chars));
+
+        // The model must be told this is a page, not the dataset, or it could
+        // report a truncated view as complete coverage.
+        let note = completed.content["note"].as_str().unwrap_or_default();
+        assert!(
+            note.contains("截断"),
+            "the note must state it was truncated"
+        );
+        assert!(
+            note.contains("证据库"),
+            "the note must point at the durable evidence record"
+        );
+
+        // Evidence identifiers survive truncation, otherwise the model could not
+        // cite the observations it just obtained.
+        assert_eq!(completed.content["evidence_ids"], json!(["evf_1"]));
+    }
+
+    /// Thousands of evidence identifiers must not flood the context.
+    #[test]
+    fn evidence_identifiers_are_capped_and_the_omission_is_reported() {
+        let ids: Vec<String> = (0..3_000).map(|n| format!("evf_{n}")).collect();
+        let completed =
+            CompletedTool::success_bounded(tool_call(), json!({"ok": true}), ids, 24_000, 40);
+
+        let shown = completed.content["evidence_ids"]
+            .as_array()
+            .expect("identifiers are listed");
+        assert_eq!(shown.len(), 40, "the listed identifiers must be capped");
+        assert_eq!(
+            completed.content["omitted_evidence_ids"],
+            json!(2_960),
+            "the omission must be counted rather than hidden"
+        );
+        assert!(completed.content["evidence_note"].is_string());
+    }
+
+    /// A failed tool keeps its typed error and gains no payload.
+    #[test]
+    fn a_failed_tool_reports_only_its_error() {
+        let completed = CompletedTool::failure(tool_call(), "upstream 429".into());
+        assert_eq!(completed.content["ok"], json!(false));
+        assert_eq!(completed.content["error"], json!("upstream 429"));
+        assert!(completed.content.get("data").is_none());
+    }
+
+    /// The context budget must stay far below the storage ceiling.
+    #[test]
+    fn the_context_budget_is_much_smaller_than_the_storage_ceiling() {
+        let storage = RuntimeConfig::default().max_tool_result_bytes;
+        assert!(
+            DEFAULT_MAX_TOOL_RESULT_MODEL_CHARS * 8 < storage,
+            "a context budget close to the storage ceiling reintroduces the overflow"
+        );
+    }
 
     #[test]
     fn task_optional_fields_are_omitted_not_encoded_as_null() {
