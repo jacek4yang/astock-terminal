@@ -85,8 +85,31 @@ impl Engine {
             .await
             .err()
             .map(|error| error.message);
-        let market_credentials = credentials::load_market_credentials()
-            .map_err(|error| format!("load provider credentials: {}", error.message))?;
+        let market_credentials = match credentials::load_market_credentials() {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                // These are optional market provider credentials. An
+                // *unavailable* OS credential store is different from having no
+                // credential stored, and it must not stop the deterministic
+                // Engine from starting: read-only local work such as `astock
+                // sources` or `astock cache` needs no credential at all.
+                //
+                // This previously used `?`, which coupled every Engine
+                // consumer to credential-store availability. It surfaced on a
+                // headless macOS runner, where no default keychain exists and
+                // the store returns a hard platform error rather than
+                // "no entry", breaking commands that never wanted a credential.
+                //
+                // Degrade visibly rather than silently: the affected providers
+                // report as unconfigured, and the reason is logged.
+                tracing::warn!(
+                    error = %error.message,
+                    "provider credential store unavailable; continuing without optional market \
+                     provider credentials, which will report as unconfigured"
+                );
+                astock_market_data::MarketDataCredentials::new(None, None, None, None)
+            }
+        };
         event_store::migrate(&storage)
             .await
             .map_err(|error| format!("migrate Agent event store: {error}"))?;

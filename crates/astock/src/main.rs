@@ -174,17 +174,63 @@ enum OutputMode {
     Jsonl,
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    let cli = Cli::parse();
-    init_tracing(&cli.log_level);
-    match dispatch(cli).await {
-        Ok(()) => ExitCode::SUCCESS,
+/// Stack size for the thread that drives the async entry point.
+///
+/// Windows gives a process's main thread a 1 MiB stack, while Linux and macOS
+/// give 8 MiB. The Engine's initialization future is a large async state
+/// machine, and on Windows it overflowed that 1 MiB main stack: every command,
+/// including read-only ones like `astock sources`, aborted with
+/// `STATUS_STACK_OVERFLOW` (`0xC00000FD`). The failure was invisible on Linux
+/// and macOS purely because of their larger default.
+///
+/// Rather than depend on a platform default, drive the runtime from a thread
+/// with an explicit stack and give tokio's workers the same, so behaviour is
+/// identical on every supported platform.
+const MAIN_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn main() -> ExitCode {
+    match std::thread::Builder::new()
+        .name("astock-main".to_owned())
+        .stack_size(MAIN_STACK_BYTES)
+        .spawn(run)
+    {
+        Ok(handle) => match handle.join() {
+            Ok(code) => code,
+            Err(_) => {
+                eprintln!("astock: the main worker thread terminated abnormally");
+                ExitCode::FAILURE
+            }
+        },
         Err(error) => {
-            eprintln!("astock: {error}");
-            ExitCode::from(exit_code(&error))
+            eprintln!("astock: could not start the main worker thread: {error}");
+            ExitCode::FAILURE
         }
     }
+}
+
+fn run() -> ExitCode {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(MAIN_STACK_BYTES)
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("astock: could not start the async runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(async {
+        let cli = Cli::parse();
+        init_tracing(&cli.log_level);
+        match dispatch(cli).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("astock: {error}");
+                ExitCode::from(exit_code(&error))
+            }
+        }
+    })
 }
 
 async fn dispatch(cli: Cli) -> Result<(), RuntimeError> {
