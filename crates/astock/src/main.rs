@@ -105,6 +105,15 @@ enum Command {
     },
     /// Diagnose paths, credentials and terminal capabilities without showing secrets.
     Doctor,
+    /// Install or inspect provider credentials using hidden input.
+    ///
+    /// Values are read with echo disabled, stored in the OS credential store and
+    /// verified by read-back. A credential value is never printed, logged or
+    /// passed as a command argument.
+    Credentials {
+        #[command(subcommand)]
+        command: CredentialCommand,
+    },
     /// List the allowlisted financial tools.
     Tools,
     /// List recent versioned source documents from the local evidence archive.
@@ -173,6 +182,44 @@ enum ConfigCommand {
     Path,
     /// Parse and validate the selected configuration file.
     Validate,
+}
+
+/// Which provider credential to operate on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CredentialProvider {
+    /// MiniMax API key, required for Agent research.
+    Minimax,
+    /// JoinQuant account, optional and used for quantitative data.
+    Joinquant,
+}
+
+impl CredentialProvider {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimax => "minimax",
+            Self::Joinquant => "joinquant",
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum CredentialCommand {
+    /// Install a credential using hidden terminal input.
+    Set {
+        /// Provider to configure.
+        provider: CredentialProvider,
+    },
+    /// Report which credentials are installed, without revealing any value.
+    Status {
+        /// Emit one JSON object instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a stored credential.
+    Delete {
+        /// Provider to clear.
+        provider: CredentialProvider,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,6 +343,7 @@ async fn dispatch(cli: Cli) -> Result<(), RuntimeError> {
             command: ConfigCommand::Path,
         }) => unreachable!("handled before configuration loading"),
         Some(Command::Doctor) => doctor(&config, &paths),
+        Some(Command::Credentials { command }) => credentials(&paths, command).await,
         Some(Command::Tools) => {
             let registry = astock_agent_runtime::default_registry();
             for name in registry.names() {
@@ -743,6 +791,126 @@ fn build_agent_runtime(
         ..RuntimeConfig::default()
     };
     Ok(AgentRuntime::new(provider, gateway.clone(), gateway).with_config(runtime_config))
+}
+
+/// Install or inspect provider credentials.
+///
+/// Every value is read with echo disabled and handed straight to the Engine's
+/// credential operations, which store it in the OS credential store and verify
+/// it by read-back before reporting success. A value is never echoed, printed,
+/// logged, written to JSON or passed as a command argument, so it cannot end up
+/// in shell history or a CI log.
+async fn credentials(paths: &AppPaths, command: CredentialCommand) -> Result<(), RuntimeError> {
+    let gateway = build_inspection_gateway(paths).await?;
+    match command {
+        CredentialCommand::Set { provider } => {
+            if !std::io::stdin().is_terminal() {
+                return Err(RuntimeError::Configuration(format!(
+                    "installing the {} credential requires a terminal for hidden input; \
+                     piping a secret would place it in shell history or a CI log",
+                    provider.as_str()
+                )));
+            }
+            match provider {
+                CredentialProvider::Minimax => {
+                    let key = read_hidden("MiniMax API key")?;
+                    gateway
+                        .set_minimax_credential(&key)
+                        .await
+                        .map_err(RuntimeError::Store)?;
+                    println!("minimax: installed and verified by read-back");
+                }
+                CredentialProvider::Joinquant => {
+                    let username = read_visible("JoinQuant username")?;
+                    let password = read_hidden("JoinQuant password")?;
+                    gateway
+                        .set_joinquant_credential(&username, &password)
+                        .await
+                        .map_err(RuntimeError::Store)?;
+                    println!("joinquant: installed and verified by read-back");
+                }
+            }
+            Ok(())
+        }
+        CredentialCommand::Status { json } => {
+            let status = gateway
+                .credential_status()
+                .await
+                .map_err(RuntimeError::Store)?;
+            if json {
+                // Presence only. The payload carries booleans, never values.
+                println!("{}", serde_json::to_string_pretty(&status)?);
+                return Ok(());
+            }
+            let providers = status.get("providers").unwrap_or(&status);
+            for name in ["minimax", "joinquant"] {
+                let configured = providers
+                    .get(name)
+                    .and_then(serde_json::Value::as_bool)
+                    .or_else(|| {
+                        providers
+                            .get(name)
+                            .and_then(|entry| entry.get("configured"))
+                            .and_then(serde_json::Value::as_bool)
+                    })
+                    .unwrap_or(false);
+                println!(
+                    "{name:<10} {}",
+                    if configured {
+                        "installed"
+                    } else {
+                        "not configured"
+                    }
+                );
+            }
+            Ok(())
+        }
+        CredentialCommand::Delete { provider } => {
+            gateway
+                .delete_credential(provider.as_str())
+                .await
+                .map_err(RuntimeError::Store)?;
+            println!("{}: removed", provider.as_str());
+            Ok(())
+        }
+    }
+}
+
+/// Read a secret with echo disabled.
+fn read_hidden(label: &str) -> Result<String, RuntimeError> {
+    eprint!("{label} (input hidden): ");
+    std::io::stderr()
+        .flush()
+        .map_err(|error| RuntimeError::Internal(format!("flush credential prompt: {error}")))?;
+    let raw = rpassword::read_password()
+        .map_err(|error| RuntimeError::Configuration(format!("read hidden {label}: {error}")))?;
+    let value = raw.trim().to_owned();
+    if value.is_empty() {
+        return Err(RuntimeError::Configuration(format!("{label} was empty")));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(RuntimeError::Configuration(format!(
+            "{label} contains control characters"
+        )));
+    }
+    Ok(value)
+}
+
+/// Read a non-secret identifier with normal echo.
+fn read_visible(label: &str) -> Result<String, RuntimeError> {
+    eprint!("{label}: ");
+    std::io::stderr()
+        .flush()
+        .map_err(|error| RuntimeError::Internal(format!("flush prompt: {error}")))?;
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|error| RuntimeError::Configuration(format!("read {label}: {error}")))?;
+    let value = line.trim().to_owned();
+    if value.is_empty() {
+        return Err(RuntimeError::Configuration(format!("{label} was empty")));
+    }
+    Ok(value)
 }
 
 async fn build_runtime(
