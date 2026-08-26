@@ -8,7 +8,7 @@ use std::sync::Arc;
 use astock_agent_runtime::{
     AgentEvent, AgentRuntime, EngineGateway, MinimaxProvider, RuntimeConfig, RuntimeError,
     RuntimeSession, RuntimeTask, SessionManager, SessionMessageRole, SessionRunOutcome,
-    SessionSummary,
+    SessionSummary, UserIntent,
 };
 use astock_engine::Engine;
 use astock_minimax::{
@@ -358,7 +358,12 @@ async fn interactive_with_session(
             "interactive mode requires a TTY; use `astock ask -` for piped input".into(),
         ));
     }
-    let (runtime, sessions) = build_runtime(config, paths).await?;
+    // The Engine, sessions and every control intent work without a model
+    // credential. The provider is attached on the first research request, so a
+    // user can launch `astock`, look around and ask for help without being
+    // asked for a secret first.
+    let (engine, gateway, sessions) = build_engine_stack(paths).await?;
+    let mut runtime: Option<AgentRuntime> = None;
     let mut session = restored
         .unwrap_or_else(|| RuntimeSession::new(&config.agent.depth, &config.agent.tool_policy));
     println!("AStock Analyst");
@@ -394,29 +399,40 @@ async fn interactive_with_session(
             return Ok(());
         };
         let line = line.trim();
-        match line {
-            "" => continue,
-            "/exit" | "/quit" => return Ok(()),
-            "/help" => {
-                println!(
-                    "/help  /new  /resume [id]  /branch [message-id]  /sessions  /history  /compact  /depth [level]  /tools  /sources  /cache  /evidence  /context  /status  /clear  /exit"
-                );
+        // Every input, slash or conversational, is resolved once into
+        // canonical intent. The adapter renders results; it does not decide
+        // what the user meant. Adding a slash-only branch here would recreate
+        // the second control plane this indirection exists to prevent.
+        let intent = UserIntent::interpret(line);
+        match intent {
+            UserIntent::Research { prompt } if prompt.is_empty() => continue,
+            UserIntent::Exit => return Ok(()),
+            UserIntent::Help => {
+                println!("{}", shortcut_help());
                 continue;
             }
-            "/new" => {
+            UserIntent::ClearScreen => {
+                // Presentation only: durable Agent truth is untouched.
+                print!("\x1b[2J\x1b[H");
+                std::io::stdout()
+                    .flush()
+                    .map_err(|error| RuntimeError::Internal(error.to_string()))?;
+                continue;
+            }
+            UserIntent::NewSession => {
                 session = RuntimeSession::new(&config.agent.depth, &config.agent.tool_policy);
                 println!("new session: {}", session.session_id);
                 continue;
             }
-            "/sessions" => {
+            UserIntent::ListSessions => {
                 print_session_summaries(&sessions.list(20, None).await?);
                 continue;
             }
-            "/history" => {
+            UserIntent::ShowHistory => {
                 print_session_history(&session);
                 continue;
             }
-            "/compact" => {
+            UserIntent::Compact => {
                 if session.refresh_compacted_summary() {
                     sessions.save(&session).await?;
                     println!(
@@ -434,19 +450,34 @@ async fn interactive_with_session(
                 }
                 continue;
             }
-            "/tools" => {
-                println!("{}", runtime.tools().names().collect::<Vec<_>>().join(", "));
+            UserIntent::ShowPlan => {
+                match session.task.as_ref().and_then(|task| task.plan.as_ref()) {
+                    Some(plan) => println!("{}", plan.render_plain()),
+                    None => println!("no active research plan"),
+                }
                 continue;
             }
-            "/sources" => {
+            UserIntent::ListTools => {
+                // The registry is a static capability list, so it needs no
+                // provider and therefore no credential.
+                println!(
+                    "{}",
+                    astock_agent_runtime::default_registry()
+                        .names()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                continue;
+            }
+            UserIntent::ShowSources => {
                 sources(paths, 20, false).await?;
                 continue;
             }
-            "/cache" => {
+            UserIntent::ShowCache => {
                 cache(paths, false).await?;
                 continue;
             }
-            "/evidence" => {
+            UserIntent::ShowEvidence => {
                 let ids = session
                     .task
                     .as_ref()
@@ -459,7 +490,7 @@ async fn interactive_with_session(
                 }
                 continue;
             }
-            "/context" => {
+            UserIntent::ShowContext => {
                 let prompt_history = session.model_history();
                 println!(
                     "session={} messages={} model_history={} summary_chars={} evidence={} title={}",
@@ -480,7 +511,7 @@ async fn interactive_with_session(
                 );
                 continue;
             }
-            "/status" => {
+            UserIntent::ShowStatus => {
                 println!(
                     "session={} phase={} depth={} tool_policy={} data={}",
                     session.session_id,
@@ -495,97 +526,158 @@ async fn interactive_with_session(
                 );
                 continue;
             }
-            "/clear" => {
-                print!("\x1b[2J\x1b[H");
-                std::io::stdout()
-                    .flush()
-                    .map_err(|error| RuntimeError::Internal(error.to_string()))?;
-                continue;
-            }
-            value if value.starts_with('/') => {
-                if value == "/resume" || value.starts_with("/resume ") {
-                    let argument = value.trim_start_matches("/resume").trim();
-                    let argument = argument.trim();
-                    let stored = if argument.is_empty() {
-                        sessions.latest().await?.ok_or_else(|| {
-                            RuntimeError::Configuration(
-                                "there is no durable session to resume".into(),
-                            )
-                        })?
-                    } else {
-                        sessions.load(argument).await?
-                    };
-                    session = stored.session;
+            UserIntent::Cancel => {
+                // At the prompt no research is in flight, because the loop is
+                // synchronous. Reporting that honestly is better than printing
+                // a cancellation that did not happen. Cancelling a running
+                // task is handled cooperatively inside `run_session_task`.
+                let running = session
+                    .task
+                    .as_ref()
+                    .is_some_and(|task| !task.phase.is_terminal());
+                if running {
                     println!(
-                        "resumed: {} · {} messages · session {}",
-                        session.title,
-                        session.messages.len(),
-                        session.session_id
+                        "the durable task is not executing right now; its last phase was {}",
+                        session
+                            .task
+                            .as_ref()
+                            .map(|task| task.phase.as_str())
+                            .unwrap_or("idle")
                     );
-                } else if value == "/branch" || value.starts_with("/branch ") {
-                    let message_id = value.trim_start_matches("/branch").trim();
-                    let branched = sessions
-                        .branch(
-                            &session.session_id,
-                            (!message_id.is_empty()).then_some(message_id),
-                            None,
-                        )
-                        .await?;
-                    session = branched.session;
-                    println!(
-                        "branched: {} · {} messages · session {}",
-                        session.title,
-                        session.messages.len(),
-                        session.session_id
-                    );
-                } else if value == "/depth" || value.starts_with("/depth ") {
-                    let depth = value.trim_start_matches("/depth").trim();
-                    if depth.is_empty() {
-                        println!("depth={}", session.depth);
-                    } else if matches!(depth, "fast" | "balanced" | "deep" | "exhaustive") {
-                        session.depth = depth.to_owned();
-                        if !session.messages.is_empty() {
-                            sessions.save(&session).await?;
-                        }
-                        println!("depth={depth}");
-                    } else {
-                        println!("depth must be fast, balanced, deep or exhaustive");
-                    }
                 } else {
-                    println!("unknown command: {value}");
+                    println!("there is no running task to cancel");
                 }
                 continue;
             }
-            _ => {}
-        }
-        let mut task = RuntimeTask::ask(line);
-        task.depth = session.depth.clone();
-        task.tool_policy = session.tool_policy.clone();
-        task.language = config.agent.language.clone();
-        let session_id = session.session_id.clone();
-        match run_session_task(&runtime, session, task, OutputMode::Plain, true).await {
-            Ok(outcome) => session = outcome.session,
-            Err(error) => {
-                eprintln!("research failed: {error}");
-                session = sessions.load(&session_id).await?.session;
+            UserIntent::Resume { session_id } => {
+                let stored = match session_id.as_deref() {
+                    Some(identifier) => sessions.load(identifier).await?,
+                    None => sessions.latest().await?.ok_or_else(|| {
+                        RuntimeError::Configuration("there is no durable session to resume".into())
+                    })?,
+                };
+                session = stored.session;
+                println!(
+                    "resumed: {} · {} messages · session {}",
+                    session.title,
+                    session.messages.len(),
+                    session.session_id
+                );
+                continue;
+            }
+            UserIntent::Branch { message_id } => {
+                let branched = sessions
+                    .branch(&session.session_id, message_id.as_deref(), None)
+                    .await?;
+                session = branched.session;
+                println!(
+                    "branched: {} · {} messages · session {}",
+                    session.title,
+                    session.messages.len(),
+                    session.session_id
+                );
+                continue;
+            }
+            UserIntent::SetDepth { depth } => {
+                session.depth = depth.as_str().to_owned();
+                if !session.messages.is_empty() {
+                    sessions.save(&session).await?;
+                }
+                println!("depth={depth}");
+                continue;
+            }
+            UserIntent::Research { prompt } => {
+                // First research request in this process pays for the
+                // credential prompt; later ones reuse the attached provider.
+                if runtime.is_none() {
+                    runtime = Some(build_agent_runtime(
+                        config,
+                        engine.as_ref(),
+                        gateway.clone(),
+                    )?);
+                }
+                let active = runtime
+                    .as_ref()
+                    .expect("the provider was just attached for this research request");
+                let mut task = RuntimeTask::ask(&prompt);
+                task.depth = session.depth.clone();
+                task.tool_policy = session.tool_policy.clone();
+                task.language = config.agent.language.clone();
+                let session_id = session.session_id.clone();
+                match run_session_task(active, session, task, OutputMode::Plain, true).await {
+                    Ok(outcome) => session = outcome.session,
+                    Err(error) => {
+                        eprintln!("research failed: {error}");
+                        session = sessions.load(&session_id).await?.session;
+                    }
+                }
             }
         }
     }
 }
 
-async fn build_runtime(
-    config: &AppConfig,
+/// Shortcut surface for experienced users.
+///
+/// Every entry is an alias for something that can also simply be said in
+/// conversation, which is why the help text advertises that rather than
+/// presenting the list as the primary way to drive the product.
+fn shortcut_help() -> String {
+    [
+        "Just type what you want in ordinary language — these are only shortcuts.",
+        "",
+        "  /new                    开一个新的研究会话",
+        "  /resume [session]       继续之前的会话",
+        "  /branch [message]       从刚才那个结论之前分一个新方向",
+        "  /sessions               列出会话",
+        "  /history                看一下会话历史",
+        "  /compact                整理一下上下文",
+        "  /plan                   给我看一下你现在准备怎么分析",
+        "  /depth [fast|balanced|deep|exhaustive]   这次给我做最深入的分析",
+        "  /tools                  你有哪些工具",
+        "  /sources                你目前用了哪些数据源",
+        "  /cache                  本地缓存情况",
+        "  /evidence               把支持这个结论的证据列出来",
+        "  /context                上下文用了多少",
+        "  /status                 现在什么状态",
+        "  /cancel                 先停一下",
+        "  /clear                  clear the screen (local only)",
+        "  /help                   this list",
+        "  /exit                   退出",
+    ]
+    .join("\n")
+}
+
+/// Build the Engine, its gateway and a session manager.
+///
+/// None of this needs a model credential, which is what allows the interactive
+/// adapter to start and answer control intents before any provider exists.
+async fn build_engine_stack(
     paths: &AppPaths,
-) -> Result<(AgentRuntime, SessionManager), RuntimeError> {
-    let client = minimax_client(config)?;
-    let provider = Arc::new(MinimaxProvider::new(client));
+) -> Result<(Arc<Engine>, Arc<EngineGateway>, SessionManager), RuntimeError> {
     let engine = Arc::new(
         Engine::initialize_at(&paths.data_dir)
             .await
             .map_err(|error| RuntimeError::Store(format!("initialize Engine: {error}")))?,
     );
-    configure_joinquant_session(engine.as_ref())?;
-    let gateway = Arc::new(EngineGateway::new(engine));
+    let gateway = Arc::new(EngineGateway::new(engine.clone()));
+    let sessions = SessionManager::new(gateway.clone());
+    Ok((engine, gateway, sessions))
+}
+
+/// Attach the model provider to an existing Engine stack.
+///
+/// This is the only step that needs a MiniMax credential, and it also installs
+/// the optional JoinQuant session, so it is deferred until research is actually
+/// requested. Asking a user for a secret before they have asked for anything
+/// that needs one is both hostile and unnecessary.
+fn build_agent_runtime(
+    config: &AppConfig,
+    engine: &Engine,
+    gateway: Arc<EngineGateway>,
+) -> Result<AgentRuntime, RuntimeError> {
+    let client = minimax_client(config)?;
+    let provider = Arc::new(MinimaxProvider::new(client));
+    configure_joinquant_session(engine)?;
     let runtime_config = RuntimeConfig {
         max_parallel_tools: config.agent.max_parallel_tools,
         verify_reports: config.research.strict_evidence && config.research.verify_numeric_claims,
@@ -595,8 +687,15 @@ async fn build_runtime(
         provider_idle_timeout: std::time::Duration::from_secs(config.provider.minimax.timeout_secs),
         ..RuntimeConfig::default()
     };
-    let sessions = SessionManager::new(gateway.clone());
-    let runtime = AgentRuntime::new(provider, gateway.clone(), gateway).with_config(runtime_config);
+    Ok(AgentRuntime::new(provider, gateway.clone(), gateway).with_config(runtime_config))
+}
+
+async fn build_runtime(
+    config: &AppConfig,
+    paths: &AppPaths,
+) -> Result<(AgentRuntime, SessionManager), RuntimeError> {
+    let (engine, gateway, sessions) = build_engine_stack(paths).await?;
+    let runtime = build_agent_runtime(config, engine.as_ref(), gateway)?;
     Ok((runtime, sessions))
 }
 

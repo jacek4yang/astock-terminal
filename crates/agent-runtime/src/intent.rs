@@ -88,6 +88,12 @@ pub enum UserIntent {
     ListTools,
     /// Show which data sources have been consulted.
     ShowSources,
+    /// Show local cache and storage counters.
+    ///
+    /// Not part of the documented shortcut surface, but retained because the
+    /// interactive adapter already offered it and `astock cache` exists as a
+    /// top-level command; removing it would be an unjustified regression.
+    ShowCache,
     /// Show evidence backing the current conclusions.
     ShowEvidence,
     /// Show context/window accounting.
@@ -120,6 +126,7 @@ impl UserIntent {
             Self::SetDepth { .. } => "set_depth",
             Self::ListTools => "list_tools",
             Self::ShowSources => "show_sources",
+            Self::ShowCache => "show_cache",
             Self::ShowEvidence => "show_evidence",
             Self::ShowContext => "show_context",
             Self::ShowStatus => "show_status",
@@ -193,6 +200,7 @@ impl UserIntent {
             },
             "tools" => Self::ListTools,
             "sources" => Self::ShowSources,
+            "cache" => Self::ShowCache,
             "evidence" => Self::ShowEvidence,
             "context" => Self::ShowContext,
             "status" => Self::ShowStatus,
@@ -247,6 +255,9 @@ impl UserIntent {
         }
         if contains_any(&normalized, SOURCES_PHRASES) {
             return Some(Self::ShowSources);
+        }
+        if contains_any(&normalized, CACHE_PHRASES) {
+            return Some(Self::ShowCache);
         }
         if contains_any(&normalized, TOOLS_PHRASES) {
             return Some(Self::ListTools);
@@ -572,6 +583,8 @@ const SOURCES_PHRASES: &[&str] = &[
     "用了哪些来源",
     "数据源列表",
 ];
+
+const CACHE_PHRASES: &[&str] = &["缓存用了多少", "缓存情况", "缓存大小", "本地缓存"];
 
 const TOOLS_PHRASES: &[&str] = &["哪些工具", "什么工具", "工具列表", "你会用什么"];
 

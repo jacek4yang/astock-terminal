@@ -181,3 +181,62 @@ fn compact_without_a_durable_session_fails_as_an_explicit_configuration_error() 
         "a refused compact must not emit a result document on stdout"
     );
 }
+
+/// The interactive adapter must start and answer control intents before any
+/// model credential exists.
+///
+/// Requiring a MiniMax key just to type `/help` contradicts the product's
+/// launch-and-type promise, so the provider is attached lazily on the first
+/// research request. This test pins that: it drives the loop through a
+/// pseudo-terminal with no credential available and expects control output, not
+/// a credential prompt.
+///
+/// The test is skipped rather than failed when `script` is unavailable, because
+/// a missing pty helper is an environment gap, not a product regression.
+#[test]
+fn interactive_control_intents_work_without_a_model_credential() {
+    let Some(script) = which_script() else {
+        eprintln!("skipping: `script` is required to allocate a pseudo-terminal");
+        return;
+    };
+    let root = TempDir::new().expect("create a temporary data root");
+    let input = root.path().join("input.txt");
+    // Natural language only: no slash command is used anywhere here.
+    std::fs::write(&input, "你有哪些工具\n现在什么状态\n退出\n").expect("write driver input");
+
+    let output = Command::new(script)
+        .args([
+            "-qec",
+            &format!("{} chat", env!("CARGO_BIN_EXE_astock")),
+            "/dev/null",
+        ])
+        .env("HOME", root.path())
+        .env("XDG_DATA_HOME", root.path().join("data"))
+        .env("XDG_CACHE_HOME", root.path().join("cache"))
+        .env("XDG_CONFIG_HOME", root.path().join("config"))
+        .stdin(std::fs::File::open(&input).expect("open driver input"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run the interactive adapter under a pseudo-terminal");
+
+    let combined = format!("{}{}", stdout_of(&output), stderr_of(&output));
+    assert!(
+        !combined.contains("MiniMax API key") && !combined.contains("API key:"),
+        "control intents must not trigger a credential prompt, got: {combined}"
+    );
+    assert!(
+        combined.contains("get_quote"),
+        "`你有哪些工具` must list the bounded tool registry, got: {combined}"
+    );
+    assert!(
+        combined.contains("phase=idle"),
+        "`现在什么状态` must report durable task status, got: {combined}"
+    );
+}
+
+fn which_script() -> Option<&'static str> {
+    ["/usr/bin/script", "/bin/script"]
+        .into_iter()
+        .find(|path| Path::new(path).exists())
+}

@@ -166,10 +166,17 @@ fn slash_aliases_collapse_onto_one_intent_each() {
 }
 
 #[test]
+fn cache_is_reachable_both_ways() {
+    assert_equivalent("/cache", "本地缓存情况");
+    assert_eq!(UserIntent::interpret("/cache"), UserIntent::ShowCache);
+}
+
+#[test]
 fn the_documented_shortcut_surface_is_covered_and_stays_compact() {
-    // Section 4's recommended surface. Each must resolve to a real intent
-    // rather than falling through to research, and the surface must not grow
-    // into dozens of obscure commands.
+    // Section 4's recommended surface, plus `/cache`, which predates this
+    // change and is kept so the interactive adapter loses no functionality.
+    // Each must resolve to a real intent rather than falling through to
+    // research, and the surface must not grow into dozens of obscure commands.
     let surface = [
         "/new",
         "/resume",
@@ -181,6 +188,7 @@ fn the_documented_shortcut_surface_is_covered_and_stays_compact() {
         "/depth deep",
         "/tools",
         "/sources",
+        "/cache",
         "/evidence",
         "/context",
         "/status",
@@ -199,10 +207,38 @@ fn the_documented_shortcut_surface_is_covered_and_stays_compact() {
     }
     assert_eq!(
         surface.len(),
-        17,
+        18,
         "the shortcut surface changed; confirm the addition materially improves ergonomics \
          and has a natural-language equivalent before updating this count"
     );
+}
+
+#[test]
+fn every_control_intent_has_a_natural_language_route() {
+    // The guarantee that makes slash commands aliases rather than a control
+    // plane: for each shortcut there is a sentence producing the same intent.
+    // A new shortcut without a conversational equivalent fails here.
+    let pairs = [
+        ("/new", "我们开一个新的研究会话"),
+        ("/resume", "继续之前的会话"),
+        ("/branch", "从刚才那个结论之前分一个新方向"),
+        ("/sessions", "列出会话"),
+        ("/history", "看一下会话历史"),
+        ("/compact", "整理一下上下文"),
+        ("/plan", "给我看一下你现在准备怎么分析"),
+        ("/depth exhaustive", "这次给我做最深入的分析"),
+        ("/tools", "你有哪些工具"),
+        ("/sources", "你目前用了哪些数据源"),
+        ("/cache", "本地缓存情况"),
+        ("/evidence", "把支持这个结论的证据列出来"),
+        ("/context", "上下文用了多少"),
+        ("/status", "现在什么状态"),
+        ("/cancel", "先停一下"),
+        ("/exit", "退出"),
+    ];
+    for (slash, natural) in pairs {
+        assert_equivalent(slash, natural);
+    }
 }
 
 #[test]

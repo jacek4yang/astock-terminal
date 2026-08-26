@@ -30,6 +30,11 @@ impl AgentPhase {
             Self::Failed => "failed",
         }
     }
+
+    /// True once the task will not progress further on its own.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Cancelled | Self::Failed)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
