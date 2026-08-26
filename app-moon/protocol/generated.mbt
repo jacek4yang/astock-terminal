@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=c05962bf3738e85026b4c9543e611f41b2d49d19029533a299c5cdc19da598f5
+// GENERATED from protocol/schema; schema-sha256=1f27c82e0cb609ecfb01ecff51788842ffad59c078ff41310f107e6faab441b1
 // Run: node protocol/codegen.mjs
 
 ///|
@@ -11,7 +11,7 @@ pub let max_frame_bytes : Int = 8 * 1024 * 1024
 pub let max_page_size : Int = 500
 
 ///|
-pub let release_version : String = "6.0.0"
+pub let release_version : String = "7.0.0"
 
 ///|
 pub let engine_startup_required_capabilities : Array[String] = ["market","research","data_quality","agent_advanced_analysis_v1","storage","credentials","agent_event_store_v2"]

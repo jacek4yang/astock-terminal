@@ -6,26 +6,26 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 [dependencies]
-astock-core = { version = "6.0.0", path = "../core" }
-astock-compute = { version = "6.0.0", path = "../compute" }
-astock-chanlun = { version = "6.0.0", path = "../chanlun" }
-astock-backtest = { version = "6.0.0", path = "../backtest" }
-astock-disclosure = { version = "6.0.0", path = "../disclosure" }
-astock-entity-linking = { version = "6.0.0", path = "../entity-linking" }
-astock-event-intelligence = { version = "6.0.0", path = "../event-intelligence" }
-astock-fundamental = { version = "6.0.0", path = "../fundamental" }
-astock-global-intelligence = { version = "6.0.0", path = "../global-intelligence" }
-astock-graph = { version = "6.0.0", path = "../graph" }
-astock-market-data = { version = "6.0.0", path = "../market-data" }
-astock-minimax = { version = "6.0.0", path = "../minimax" }
-astock-news-intelligence = { version = "6.0.0", path = "../news-intelligence" }
-astock-protocol = { version = "6.0.0", path = "../protocol" }
-astock-quant = { version = "6.0.0", path = "../quant" }
-astock-relation-extraction = { version = "6.0.0", path = "../relation-extraction" }
-astock-source-verification = { version = "6.0.0", path = "../source-verification" }
-astock-storage = { version = "6.0.0", path = "../storage" }
-astock-technical = { version = "6.0.0", path = "../technical" }
-astock-trading-rules = { version = "6.0.0", path = "../trading-rules" }
+astock-core = { version = "7.0.0", path = "../core" }
+astock-compute = { version = "7.0.0", path = "../compute" }
+astock-chanlun = { version = "7.0.0", path = "../chanlun" }
+astock-backtest = { version = "7.0.0", path = "../backtest" }
+astock-disclosure = { version = "7.0.0", path = "../disclosure" }
+astock-entity-linking = { version = "7.0.0", path = "../entity-linking" }
+astock-event-intelligence = { version = "7.0.0", path = "../event-intelligence" }
+astock-fundamental = { version = "7.0.0", path = "../fundamental" }
+astock-global-intelligence = { version = "7.0.0", path = "../global-intelligence" }
+astock-graph = { version = "7.0.0", path = "../graph" }
+astock-market-data = { version = "7.0.0", path = "../market-data" }
+astock-minimax = { version = "7.0.0", path = "../minimax" }
+astock-news-intelligence = { version = "7.0.0", path = "../news-intelligence" }
+astock-protocol = { version = "7.0.0", path = "../protocol" }
+astock-quant = { version = "7.0.0", path = "../quant" }
+astock-relation-extraction = { version = "7.0.0", path = "../relation-extraction" }
+astock-source-verification = { version = "7.0.0", path = "../source-verification" }
+astock-storage = { version = "7.0.0", path = "../storage" }
+astock-technical = { version = "7.0.0", path = "../technical" }
+astock-trading-rules = { version = "7.0.0", path = "../trading-rules" }
 base64 = "0.22"
 chrono.workspace = true
 futures.workspace = true

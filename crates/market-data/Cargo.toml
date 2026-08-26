@@ -6,13 +6,13 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 [dependencies]
-astock-core = { version = "6.0.0", path = "../core" }
-astock-tdx = { version = "6.0.0", path = "../tdx" }
-astock-joinquant = { version = "6.0.0", path = "../joinquant" }
-astock-security = { version = "6.0.0", path = "../security" }
-astock-storage = { version = "6.0.0", path = "../storage" }
-astock-news-intelligence = { version = "6.0.0", path = "../news-intelligence" }
-astock-entity-linking = { version = "6.0.0", path = "../entity-linking" }
+astock-core = { version = "7.0.0", path = "../core" }
+astock-tdx = { version = "7.0.0", path = "../tdx" }
+astock-joinquant = { version = "7.0.0", path = "../joinquant" }
+astock-security = { version = "7.0.0", path = "../security" }
+astock-storage = { version = "7.0.0", path = "../storage" }
+astock-news-intelligence = { version = "7.0.0", path = "../news-intelligence" }
+astock-entity-linking = { version = "7.0.0", path = "../entity-linking" }
 tokio.workspace = true
 reqwest.workspace = true
 futures.workspace = true

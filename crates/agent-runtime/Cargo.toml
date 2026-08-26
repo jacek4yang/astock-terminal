@@ -7,9 +7,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-astock-engine = { version = "6.0.0", path = "../engine" }
-astock-minimax = { version = "6.0.0", path = "../minimax" }
-astock-protocol = { version = "6.0.0", path = "../protocol" }
+astock-engine = { version = "7.0.0", path = "../engine" }
+astock-minimax = { version = "7.0.0", path = "../minimax" }
+astock-protocol = { version = "7.0.0", path = "../protocol" }
 async-trait.workspace = true
 chrono.workspace = true
 futures.workspace = true

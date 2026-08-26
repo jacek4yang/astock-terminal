@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Permissions for the AStock main window. Deny-by-default: the renderer receives only the application bridge commands and the events it needs, and no filesystem, shell, process or arbitrary HTTP capability.","local":true,"windows":["main"],"permissions":["core:default","core:event:allow-listen","core:event:allow-unlisten"]}}

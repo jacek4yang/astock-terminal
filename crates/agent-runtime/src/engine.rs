@@ -62,6 +62,44 @@ impl EngineGateway {
     pub async fn cache_stats(&self) -> Result<Value, String> {
         self.request("storage.cache.stats", json!({})).await
     }
+
+    /// Install the MiniMax credential in the OS credential store.
+    ///
+    /// The Engine validates the format, stores the value and verifies it by
+    /// read-back, deleting it again if the read-back disagrees. The secret is
+    /// passed by value here and never logged; callers must not print it.
+    pub async fn set_minimax_credential(&self, key: &str) -> Result<Value, String> {
+        self.request("credentials.minimax.set", json!({ "key": key }))
+            .await
+    }
+
+    /// Install the optional JoinQuant account credential.
+    pub async fn set_joinquant_credential(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<Value, String> {
+        self.request(
+            "credentials.joinquant.set",
+            json!({ "username": username, "password": password }),
+        )
+        .await
+    }
+
+    /// Report which credentials are installed. Presence only, never values.
+    pub async fn credential_status(&self) -> Result<Value, String> {
+        self.request("credentials.status", json!({})).await
+    }
+
+    /// Remove a stored credential.
+    pub async fn delete_credential(&self, provider: &str) -> Result<Value, String> {
+        let kind = match provider {
+            "minimax" => "credentials.minimax.delete",
+            "joinquant" => "credentials.joinquant.delete",
+            other => return Err(format!("unknown credential provider `{other}`")),
+        };
+        self.request(kind, json!({})).await
+    }
 }
 
 fn response_payload(response: ResponseEnvelope) -> Result<Value, String> {

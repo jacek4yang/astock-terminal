@@ -76,7 +76,52 @@ fn load(slot: Slot) -> Result<Option<SecretKey>, ServiceError> {
 }
 
 fn configured(slot: Slot) -> Result<bool, ServiceError> {
-    Ok(load(slot)?.is_some_and(|value| !value.expose().trim().is_empty()))
+    // Presence reads must stay answerable when the OS credential store cannot be
+    // reached, for the same reason as the primary providers: nothing is
+    // installed in that state, and failing would make `credentials status`
+    // unusable on a host with no keychain.
+    Ok(match load(slot) {
+        Ok(value) => value.is_some_and(|value| !value.expose().trim().is_empty()),
+        Err(error) => {
+            tracing::debug!(
+                slot = slot.id,
+                error = %error.message,
+                "credential store unavailable; reporting the optional provider as absent"
+            );
+            false
+        }
+    })
+}
+
+/// Is a credential present, treating an unavailable store as "no".
+///
+/// Asking whether a credential is installed must be answerable even where the OS
+/// credential store cannot be reached at all, such as a headless macOS session
+/// with no default keychain. In that situation nothing *is* installed, so
+/// reporting `false` is both true and useful, whereas failing the whole request
+/// makes `astock credentials status` unusable and blocks unrelated work.
+///
+/// This is deliberately not applied to storing a credential: claiming success
+/// when the value could not be written would be the dangerous direction, so
+/// `set` still fails loudly.
+pub(super) fn present_or_absent_when_unavailable(store: &astock_minimax::KeyStore) -> bool {
+    match store.load_key() {
+        Ok(value) => value.is_some(),
+        Err(error) => {
+            tracing::debug!(%error, "credential store unavailable; reporting the slot as absent");
+            false
+        }
+    }
+}
+
+/// Remove a credential, treating an unavailable store as nothing to remove.
+///
+/// Deletion is idempotent by contract. If the store cannot be reached there is
+/// no entry to leave behind, so the caller's intent is already satisfied.
+pub(super) fn delete_or_ignore_when_unavailable(store: &astock_minimax::KeyStore) {
+    if let Err(error) = store.delete_key() {
+        tracing::debug!(%error, "credential store unavailable; nothing to delete");
+    }
 }
 
 fn validate(slot: Slot, value: String) -> Result<String, ServiceError> {

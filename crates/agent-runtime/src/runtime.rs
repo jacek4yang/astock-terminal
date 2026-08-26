@@ -1254,6 +1254,16 @@ impl SessionTaskStream {
         self.cancellation.cancel();
     }
 
+    /// Clone the cooperative cancellation handle.
+    ///
+    /// An adapter that hands the stream to a relay task still needs to cancel
+    /// it from a separate request, which is how the desktop's cancel command and
+    /// the terminal's `/cancel` reach the *same* cancellation path rather than
+    /// growing two different ones.
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation.clone()
+    }
+
     pub async fn finish(mut self) -> Result<SessionRunOutcome, RuntimeError> {
         while self.receiver.recv().await.is_some() {}
         let join = self

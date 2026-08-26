@@ -260,3 +260,74 @@ fn which_script() -> Option<&'static str> {
         .into_iter()
         .find(|path| Path::new(path).exists())
 }
+
+/// Installing a credential must require a terminal.
+///
+/// Accepting a piped secret would place it in shell history, a CI log or a
+/// process listing. The command must refuse rather than silently accept it.
+#[test]
+fn installing_a_credential_refuses_a_piped_secret() {
+    let root = TempDir::new().expect("create a temporary data root");
+    let output = run(root.path(), &["credentials", "set", "minimax"]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a piped secret must be refused as a configuration error; stderr: {}",
+        stderr_of(&output)
+    );
+    assert!(
+        stderr_of(&output).contains("requires a terminal"),
+        "the refusal must explain why, got: {}",
+        stderr_of(&output)
+    );
+}
+
+/// Credential status reports presence, never values.
+#[test]
+fn credential_status_reports_presence_without_revealing_values() {
+    let root = TempDir::new().expect("create a temporary data root");
+    let output = run(root.path(), &["credentials", "status", "--json"]);
+    assert!(
+        output.status.success(),
+        "credential status must work without any credential installed; stderr: {}",
+        stderr_of(&output)
+    );
+
+    let status: serde_json::Value =
+        serde_json::from_str(stdout_of(&output)).expect("status emits one JSON document");
+    let providers = status
+        .get("providers")
+        .expect("status exposes a providers object");
+
+    // Presence must be a boolean or a `configured` flag. Anything string-shaped
+    // here would risk carrying key material into JSON output.
+    for name in ["minimax", "joinquant"] {
+        let entry = providers
+            .get(name)
+            .unwrap_or_else(|| panic!("status exposes `{name}`"));
+        assert!(
+            entry.is_boolean() || entry.get("configured").is_some_and(|f| f.is_boolean()),
+            "`{name}` presence must be a boolean, found {entry}"
+        );
+    }
+
+    // No value-looking secret may appear anywhere in the document.
+    let rendered = stdout_of(&output);
+    assert!(
+        !rendered.contains("sk-"),
+        "credential status must never emit key material"
+    );
+}
+
+/// Deleting an absent credential is not an error.
+#[test]
+fn deleting_an_absent_credential_succeeds_idempotently() {
+    let root = TempDir::new().expect("create a temporary data root");
+    let output = run(root.path(), &["credentials", "delete", "joinquant"]);
+    assert!(
+        output.status.success(),
+        "removing an absent credential must be idempotent; stderr: {}",
+        stderr_of(&output)
+    );
+}

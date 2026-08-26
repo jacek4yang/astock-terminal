@@ -1,3 +1,6 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+
 import {
   AGENT_RENDERER_REQUEST_KINDS,
   ENGINE_RENDERER_REQUEST_KINDS,
@@ -12,19 +15,20 @@ import {
 
 const PROTOCOL_VERSION = 1;
 
-interface ProtonRoot {
-  core?: {
-    invokeOp?: (operation: string, payload: unknown, options?: unknown) => Promise<unknown>;
-  };
-  events?: {
-    on?: (name: string, handler: (event: { payload: unknown }) => void) => () => void;
-  };
-}
-
 declare global {
   interface Window {
-    __MoonBit__?: ProtonRoot;
+    /** Present only inside the Tauri host. Used for capability detection. */
+    __TAURI_INTERNALS__?: unknown;
   }
+}
+
+/// True when running inside the Tauri desktop host.
+///
+/// Detection is by Tauri's own internals marker rather than a user-agent guess,
+/// so a browser preview degrades to the presentation-only path instead of
+/// failing on a missing native bridge.
+function isTauriHost(): boolean {
+  return typeof window !== "undefined" && window.__TAURI_INTERNALS__ !== undefined;
 }
 
 export type WorkerTarget = "engine" | "agent" | "host";
@@ -135,10 +139,19 @@ export function isBrowserTestBridge(): boolean {
   return browserTestConfig !== null;
 }
 
+/// True when a native host is reachable, whether the Tauri desktop or the
+/// development browser bridge.
+///
+/// Retains the historical `isProton` name as a deprecated alias so existing call
+/// sites keep compiling while they migrate; the meaning is now "native host
+/// available", not "Proton".
+export function isNativeHost(): boolean {
+  return isTauriHost() || isBrowserTestBridge();
+}
+
+/** @deprecated Use {@link isNativeHost}. Kept so call sites migrate gradually. */
 export function isProton(): boolean {
-  return typeof window !== "undefined" && (
-    typeof window.__MoonBit__?.core?.invokeOp === "function" || isBrowserTestBridge()
-  );
+  return isNativeHost();
 }
 
 export function createRequestId(): string {
@@ -173,8 +186,10 @@ export async function requestNative<T>(
   if (!isRendererRequestKind(target, kind)) {
     throw new Error(`Renderer 请求未在 ${target} 协议白名单中声明：${kind}`);
   }
-  const invokeOp = window.__MoonBit__?.core?.invokeOp;
-  if (!invokeOp && !isBrowserTestBridge()) throw new Error("Proton Host 尚未连接；浏览器预览仅提供界面演示。");
+  const native = isTauriHost();
+  if (!native && !isBrowserTestBridge()) {
+    throw new Error("桌面宿主尚未连接；浏览器预览仅提供界面演示。");
+  }
 
   const request: RequestEnvelope = {
     protocol_version: PROTOCOL_VERSION,
@@ -184,9 +199,12 @@ export async function requestNative<T>(
     deadline_ms: options.deadlineMs ?? 30_000,
     ...(options.cancellationId ? { cancellation_id: options.cancellationId } : {}),
   };
-  const testConfig = invokeOp ? null : await browserTestSession();
-  const raw = invokeOp
-    ? await invokeOp("app:request", { target, request })
+  const testConfig = native ? null : await browserTestSession();
+  const raw = native
+    ? // One typed Tauri command carries every renderer request, so the wire
+      // contract stays the protocol envelope the terminal adapter also uses
+      // rather than a GUI-specific surface.
+      await invoke("bridge_request", { target, envelope: request })
     : await fetch(`http://127.0.0.1:${testConfig?.port}/request`, {
         method: "POST",
         headers: {
@@ -198,7 +216,7 @@ export async function requestNative<T>(
       }).then(parseBrowserBridgeResponse);
   const response = parseResponseEnvelope<T>(raw);
   if (!response || response.request_id !== request.request_id) {
-    throw new Error("Host 返回了无法关联的响应。");
+    throw new Error("桌面宿主返回了无法关联的响应。");
   }
   if (!response.ok) {
     throw new Error(response.error?.message ?? response.error?.code ?? "本地服务请求失败");
@@ -206,9 +224,53 @@ export async function requestNative<T>(
   return response.payload as T;
 }
 
+/// Subscribe to a native event.
+///
+/// Tauri's `listen` resolves asynchronously, so the returned unsubscribe
+/// function detaches once the listener is attached. Callers keep a synchronous
+/// cleanup signature, which is what React effects need.
 export function subscribeNativeEvent(
   name: string,
   handler: (payload: unknown) => void,
 ): () => void {
-  return window.__MoonBit__?.events?.on?.(name, (event) => handler(event.payload)) ?? (() => undefined);
+  if (!isTauriHost()) return () => undefined;
+  let detach: (() => void) | null = null;
+  let cancelled = false;
+  void listen(name, (event) => handler(event.payload)).then((unlisten) => {
+    if (cancelled) {
+      unlisten();
+      return;
+    }
+    detach = unlisten;
+  });
+  return () => {
+    cancelled = true;
+    detach?.();
+    detach = null;
+  };
+}
+
+/// Start research through the shared Agent runtime.
+///
+/// The adapter forwards the prompt into the same canonical intent path the
+/// terminal uses; the renderer performs no planning of its own.
+export async function startAgentResearch(
+  prompt: string,
+  options: { sessionId?: string; depth?: string } = {},
+): Promise<{ task_id: string; session_id: string }> {
+  if (!isTauriHost()) throw new Error("桌面宿主尚未连接；无法启动研究任务。");
+  return invoke("agent_start", {
+    prompt,
+    sessionId: options.sessionId ?? null,
+    depth: options.depth ?? null,
+  });
+}
+
+/// Cancel research cooperatively.
+///
+/// This reaches the same cancellation token the terminal's `/cancel` and
+/// `先停一下` reach, so cancellation semantics are shared rather than duplicated.
+export async function cancelAgentResearch(taskId: string): Promise<{ cancelled: boolean }> {
+  if (!isTauriHost()) throw new Error("桌面宿主尚未连接；无法取消研究任务。");
+  return invoke("agent_cancel", { taskId });
 }

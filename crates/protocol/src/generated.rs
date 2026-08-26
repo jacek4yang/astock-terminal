@@ -1,4 +1,4 @@
-// GENERATED from protocol/schema; schema-sha256=c05962bf3738e85026b4c9543e611f41b2d49d19029533a299c5cdc19da598f5
+// GENERATED from protocol/schema; schema-sha256=1f27c82e0cb609ecfb01ecff51788842ffad59c078ff41310f107e6faab441b1
 // Run: node protocol/codegen.mjs
 
 use serde::{Deserialize, Serialize};
@@ -7,7 +7,7 @@ use serde_json::Value;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_PAGE_SIZE: usize = 500;
-pub const RELEASE_VERSION: &str = "6.0.0";
+pub const RELEASE_VERSION: &str = "7.0.0";
 pub const ENGINE_STARTUP_REQUIRED_CAPABILITIES: &[&str] = &[
     "market",
     "research",

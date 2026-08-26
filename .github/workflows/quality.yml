@@ -19,11 +19,11 @@ jobs:
       - name: Check generated protocol contracts
         run: node protocol/codegen.mjs --check
       - name: Check v6 version convergence
-        run: node scripts/release-version-check.mjs 6.0.0
+        run: node scripts/release-version-check.mjs 7.0.0
       - name: Check all 127 legacy capabilities are migrated
         run: node scripts/capability-parity-check.mjs --release
-      - name: Check Proton, MoonBit Agent and Rust Engine boundaries
-        run: node scripts/release-architecture-check.mjs
+      - name: Check the v7 production architecture boundaries
+        run: node scripts/release-architecture-check.mjs 7.0.0
       - name: Test immutable release-evidence validation
         run: node --test scripts/release-evidence-check.test.mjs scripts/acceptance-evidence.test.mjs scripts/research-data-release-gate.test.mjs scripts/live-data-validation.test.mjs
 
@@ -100,6 +100,99 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+
+  # Thin Tauri v2 desktop adapter.
+  #
+  # Linux proves the adapter compiles and its unit tests pass without needing a
+  # display, using WebKitGTK. Windows is the shipping target and uses WebView2,
+  # so it is the only place the real installer can be produced and is therefore
+  # the gate that matters for the desktop artifact.
+  tauri-desktop:
+    name: tauri-desktop-${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure runner-local build root
+        shell: bash
+        run: |
+          echo "CARGO_TARGET_DIR=${RUNNER_TEMP}/astock-build/cargo-target" >> "$GITHUB_ENV"
+          echo "npm_config_cache=${RUNNER_TEMP}/astock-build/npm-cache" >> "$GITHUB_ENV"
+      - name: Install Linux WebKit dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
+            librsvg2-dev patchelf
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the renderer
+        run: |
+          npm ci --prefix ui
+          npm --prefix ui run build
+      - name: Confirm the renderer output is where Tauri expects it
+        shell: bash
+        run: |
+          # A misconfigured build root previously emitted the renderer outside
+          # the repository, which would have produced an installer with no
+          # frontend. Fail loudly instead of bundling nothing.
+          test -f ui/dist/index.html
+      - name: Check the desktop adapter
+        run: cargo clippy --locked -p astock-desktop --all-targets -- -D warnings
+      - name: Test the desktop adapter
+        run: cargo test --locked -p astock-desktop
+      - name: Build the Windows installer
+        if: runner.os == 'Windows'
+        run: cargo build --locked --release -p astock-desktop
+      - name: Bundle the Windows installer
+        if: runner.os == 'Windows'
+        # Run from the crate directory so the Tauri CLI resolves the config, the
+        # crate and `frontendDist` consistently. Bundling is the default, so the
+        # earlier `--no-bundle=false` was rejected outright: the flag takes no
+        # value. The cargo step above stays as a fast compile signal, and its
+        # artifacts are reused here through CARGO_TARGET_DIR.
+        working-directory: crates/desktop
+        run: |
+          npm install --global @tauri-apps/cli@^2
+          tauri build
+      - name: Collect desktop artifacts
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p desktop-artifacts
+          cp "${CARGO_TARGET_DIR}/release/astock-desktop.exe" desktop-artifacts/
+          # A bundle is required: shipping only a bare executable would leave
+          # users without an installer, so a missing bundle fails the job.
+          found=0
+          for pattern in '*.exe' '*.msi'; do
+            while IFS= read -r bundle; do
+              cp "$bundle" desktop-artifacts/
+              found=1
+            done < <(find "${CARGO_TARGET_DIR}/release/bundle" -type f -name "$pattern" 2>/dev/null)
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "no NSIS or MSI bundle was produced" >&2
+            exit 1
+          fi
+          ls -la desktop-artifacts
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: astock-desktop-windows-x64
+          path: desktop-artifacts/
+          if-no-files-found: error
 
   moonbit-agent:
     runs-on: ubuntu-latest
