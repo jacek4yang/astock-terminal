@@ -5,7 +5,31 @@ targets = [
 all-features = true
 
 [advisories]
-ignore = []
+# Scoped, justified exceptions. Every entry must name why it is accepted and
+# what would remove it. This list is not a place to silence a vulnerability.
+#
+# RUSTSEC-2025-0075/0080/0081/0098/0100 are `unmaintained` advisories, not
+# vulnerabilities: no CVE, no known exploit, and the advisories themselves state
+# "No safe upgrade is available!". They cover the `unic-*` family, which enters
+# the graph only transitively through the desktop framework:
+#
+#   unic-char-property / unic-char-range / unic-common / unic-ucd-ident /
+#   unic-ucd-version  <-  urlpattern  <-  tauri-utils  <-  tauri, tauri-build,
+#                                                          tauri-codegen
+#
+# Nothing in AStock depends on them directly, and they are not reachable from the
+# Agent runtime or the Engine. Removing them requires upstream Tauri to drop
+# `urlpattern` or `urlpattern` to drop `unic-*`; neither is in this project's
+# control, and pinning around it is not possible because no fixed version exists.
+#
+# Re-check on every Tauri upgrade and delete entries that no longer apply.
+ignore = [
+  "RUSTSEC-2025-0075",
+  "RUSTSEC-2025-0080",
+  "RUSTSEC-2025-0081",
+  "RUSTSEC-2025-0098",
+  "RUSTSEC-2025-0100",
+]
 git-fetch-with-cli = true
 
 [licenses]
