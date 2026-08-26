@@ -2083,20 +2083,16 @@ impl Engine {
                 Ok(json!({"updated": updated}))
             }
             "credentials.status" => {
-                let minimax = astock_minimax::KeyStore::new()
-                    .load_key()
-                    .map_err(|error| {
-                        ServiceError::new("credential_store", error.to_string(), false)
-                    })?
-                    .is_some();
-                let joinquant_user = joinquant_username_store()
-                    .load_key()
-                    .map_err(credential_store)?
-                    .is_some();
-                let joinquant_password = joinquant_password_store()
-                    .load_key()
-                    .map_err(credential_store)?
-                    .is_some();
+                // Presence reads degrade to "absent" when the OS credential
+                // store cannot be reached, so status stays answerable on a host
+                // with no keychain instead of failing unrelated work.
+                let minimax = credentials::present_or_absent_when_unavailable(
+                    &astock_minimax::KeyStore::new(),
+                );
+                let joinquant_user =
+                    credentials::present_or_absent_when_unavailable(&joinquant_username_store());
+                let joinquant_password =
+                    credentials::present_or_absent_when_unavailable(&joinquant_password_store());
                 let optional = credentials::status(self)?;
                 Ok(json!({"providers": {
                     "minimax": minimax,
@@ -2143,11 +2139,8 @@ impl Engine {
                 Ok(json!({"stored": true}))
             }
             "credentials.minimax.delete" => {
-                astock_minimax::KeyStore::new()
-                    .delete_key()
-                    .map_err(|error| {
-                        ServiceError::new("credential_store", error.to_string(), false)
-                    })?;
+                // Deletion is idempotent: an unreachable store holds no entry.
+                credentials::delete_or_ignore_when_unavailable(&astock_minimax::KeyStore::new());
                 Ok(json!({"deleted": true}))
             }
             "credentials.minimax.quota" => {
@@ -2235,12 +2228,8 @@ impl Engine {
                 Ok(json!({"stored": true, "active": true}))
             }
             "credentials.joinquant.delete" => {
-                joinquant_username_store()
-                    .delete_key()
-                    .map_err(credential_store)?;
-                joinquant_password_store()
-                    .delete_key()
-                    .map_err(credential_store)?;
+                credentials::delete_or_ignore_when_unavailable(&joinquant_username_store());
+                credentials::delete_or_ignore_when_unavailable(&joinquant_password_store());
                 self.market.joinquant.clear_credentials();
                 Ok(json!({"deleted": true}))
             }
