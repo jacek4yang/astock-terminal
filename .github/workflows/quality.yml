@@ -31,6 +31,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # `rustsec/audit-check` publishes its findings as a check run. Without
+      # `checks: write` it fails with "Resource not accessible by integration"
+      # *after* completing the scan, so a clean audit was reported as a failed
+      # job. This surfaced once the Tauri desktop adapter pulled the archived
+      # gtk-rs GTK3 bindings into the Linux graph and raised the informational
+      # warning count; the scan itself found no vulnerabilities.
+      checks: write
     steps:
       - uses: actions/checkout@v4
         with:
