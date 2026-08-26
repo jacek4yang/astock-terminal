@@ -48,8 +48,36 @@ pub enum AgentEvent {
     },
     UserMessageAccepted,
     PlanningStarted,
+    /// Legacy free-text plan summary, retained so existing adapters keep
+    /// working while they migrate to the structured `PlanRevised` event.
     PlanUpdated {
         summary: String,
+    },
+    /// The structured user-visible plan changed. Carries the mutation that
+    /// caused the change plus the resulting plan, so an adapter can either
+    /// animate the delta or simply re-render.
+    PlanRevised {
+        mutation: crate::plan::PlanMutation,
+        plan: crate::plan::Plan,
+    },
+    /// The Agent needs one materially necessary decision from the user.
+    ClarificationRequested {
+        id: String,
+        question: String,
+        /// Pre-rendered option rows, including `Let Agent choose` and
+        /// `Other...` when offered, so the terminal and the desktop adapter
+        /// display the same list.
+        options: Vec<String>,
+        recommended: Option<String>,
+    },
+    /// A clarification was answered, by any accepted spelling.
+    ClarificationResolved {
+        id: String,
+        /// Canonical answer kind: option, delegated, other_requested, free_text.
+        answer: String,
+        /// Recorded reason when the Agent chose after the user delegated.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     ModelStarted {
         model: String,
@@ -105,6 +133,9 @@ impl AgentEvent {
             Self::UserMessageAccepted => "user_message_accepted",
             Self::PlanningStarted => "planning_started",
             Self::PlanUpdated { .. } => "plan_updated",
+            Self::PlanRevised { .. } => "plan_revised",
+            Self::ClarificationRequested { .. } => "clarification_requested",
+            Self::ClarificationResolved { .. } => "clarification_resolved",
             Self::ModelStarted { .. } => "model_started",
             Self::TextDelta { .. } => "text_delta",
             Self::ToolScheduled { .. } => "tool_scheduled",

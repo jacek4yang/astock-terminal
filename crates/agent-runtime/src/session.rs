@@ -45,6 +45,12 @@ pub struct SessionTaskState {
     pub completed_tool_ids: Vec<String>,
     #[serde(default)]
     pub evidence_ids: Vec<String>,
+    /// User-visible research plan. Persisted so an interrupted task can be
+    /// resumed with its plan intact instead of silently losing the work
+    /// breakdown the user was watching. `default` keeps sessions written by
+    /// earlier versions readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<crate::plan::Plan>,
 }
 
 /// Persisted multi-turn session shared by terminal and future desktop

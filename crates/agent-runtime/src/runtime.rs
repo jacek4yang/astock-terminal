@@ -309,6 +309,7 @@ impl AgentRuntime {
                 model_round: 0,
                 completed_tool_ids: Vec::new(),
                 evidence_ids: Vec::new(),
+                plan: None,
             });
             session.validate()?;
             runtime
@@ -1160,6 +1161,21 @@ fn apply_session_event(session: &mut RuntimeSession, event: &AgentEvent) {
             }
             AgentEvent::PlanningStarted | AgentEvent::PlanUpdated { .. } => {
                 task.phase = AgentPhase::Planning;
+            }
+            // A structured plan revision may happen at any point during
+            // research, so it records the plan without rewinding the phase.
+            // Treating it as `Planning` would misreport an Agent that revised
+            // its plan mid-execution as having gone back to planning.
+            AgentEvent::PlanRevised { plan, .. } => {
+                task.plan = Some(plan.clone());
+            }
+            // Waiting for a materially necessary user decision is a suspension
+            // of autonomous progress, not a failure.
+            AgentEvent::ClarificationRequested { .. } => {
+                task.phase = AgentPhase::Suspended;
+            }
+            AgentEvent::ClarificationResolved { .. } => {
+                task.phase = AgentPhase::Reasoning;
             }
             AgentEvent::ModelStarted { round, .. } => {
                 task.phase = AgentPhase::Reasoning;
