@@ -30,4 +30,3 @@ All source edits should preserve the dependency graph documented in
 `rust-agent-recovery.md`. Domain computation belongs in Engine/domain crates;
 orchestration belongs in Agent Runtime; terminal and desktop behavior belongs
 in adapters.
-
