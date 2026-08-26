@@ -176,10 +176,17 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-2022, macos-latest]
     runs-on: ${{ matrix.os }}
-    env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/astock-build/cargo-target
     steps:
       - uses: actions/checkout@v4
+      # The `runner` context is not available in job-level `env`, so a
+      # job-level `CARGO_TARGET_DIR: ${{ runner.temp }}/...` makes the whole
+      # workflow invalid and every run fails in 0s with no logs. Export it from
+      # a step instead, matching the pattern the Windows job already uses.
+      # `bash` is present on the Linux, Windows and macOS runners, so one step
+      # covers the whole matrix.
+      - name: Configure runner-local build root
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP}/astock-build/cargo-target" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@1.89.0
         with:
           components: rustfmt, clippy
