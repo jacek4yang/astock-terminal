@@ -81,8 +81,13 @@ describe("量化研究工作台", () => {
     mocks.status.mockResolvedValue(completedJob);
     render(<QuantResearchWorkbench />);
     expect(await screen.findByText("全部关系检验")).toBeInTheDocument();
-    expect(screen.getByText("[0.2000, 0.6000]")).toBeInTheDocument();
-    expect(screen.getByText("0.0200 · 通过")).toBeInTheDocument();
+    // The effect interval is rendered in both the summary and the detail row,
+    // so assert presence rather than uniqueness. `getByText` throws on multiple
+    // matches, which made this fail intermittently in CI depending on how much
+    // of the table had rendered when the heading resolved. The neighbouring
+    // sample-size assertion already uses this form for the same reason.
+    expect(screen.getAllByText("[0.2000, 0.6000]").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("0.0200 · 通过").length).toBeGreaterThan(0);
     expect(screen.getAllByText("240").length).toBeGreaterThan(0);
     expect(screen.getByText(/不能单独证明结构性因果/)).toBeInTheDocument();
     expect(screen.getByText(/第 1\/1 页/)).toBeInTheDocument();
