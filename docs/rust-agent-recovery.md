@@ -90,6 +90,31 @@ requires replacement evidence and preserved Git history.
   descriptions, provider behavior and user flows—not a source tree to restore
   wholesale.
 
+### Branch disposition
+
+Every non-`main` development branch was audited with `git merge-base`,
+`git cherry` and per-branch file diffs. All of them targeted code that v6
+deleted, or a release target that is now superseded, so none could be merged.
+Deleting a branch makes its commits unreachable, so each tip was first
+preserved as an annotated tag. Release tags `v5.0.0`–`v6.0.0` are untouched.
+
+| Deleted branch | Archive tag | Why it could not be merged |
+| --- | --- | --- |
+| `fix/agent-runtime-hardening` | `archive/v5-agent-runtime-hardening` | Based on v5.0.3 and targets `crates/agent`, removed in v6. Behaviour reimplemented in `crates/agent-runtime`; see PR #64 for the property-to-test mapping. |
+| `fix/agent-runtime-suspension-ui` | `archive/v5-agent-suspension-ui` | Targets `ui/src/agentSession.ts`, removed in v6. Worth consulting when the thin Tauri adapter renders suspension recovery. |
+| `fix/agent-runtime-lockfile` | `archive/v5-agent-single-flight-lockfile` | Single-flight without `dashmap`, inside the removed `crates/agent`. |
+| `chore/manual-agent-runtime-release` | `archive/v5.0.3-agent-runtime-release-plumbing` | `v5.0.3-agent-runtime.1` release plumbing; see issue #58. |
+| `chore/release-agent-runtime` | `archive/v5.0.3-agent-runtime-gated-prerelease` | Same superseded release target. |
+| `fix/pin-agent-runtime-release-target` | `archive/v5.0.3-agent-runtime-pinned-target` | Same superseded release target. |
+| `fix/release-manifest-agent-runtime` | `archive/v5.0.3-agent-runtime-manifest` | Same superseded release target. |
+| `codex/v6-production` | none needed | Already an ancestor of `main`, zero unique commits. |
+| `codex/v6-release-recovery` | none needed | Already an ancestor of `main`, zero unique commits. |
+
+The gate discipline from the superseded release work is retained: run every
+gate in order, never publish before verifying, and refuse to overwrite a tag
+that points elsewhere. A replacement pipeline must produce its own evidence
+rather than inheriting v6's.
+
 ## Target dependency graph
 
 ```text
