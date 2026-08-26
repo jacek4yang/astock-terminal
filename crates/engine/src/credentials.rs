@@ -76,7 +76,21 @@ fn load(slot: Slot) -> Result<Option<SecretKey>, ServiceError> {
 }
 
 fn configured(slot: Slot) -> Result<bool, ServiceError> {
-    Ok(load(slot)?.is_some_and(|value| !value.expose().trim().is_empty()))
+    // Presence reads must stay answerable when the OS credential store cannot be
+    // reached, for the same reason as the primary providers: nothing is
+    // installed in that state, and failing would make `credentials status`
+    // unusable on a host with no keychain.
+    Ok(match load(slot) {
+        Ok(value) => value.is_some_and(|value| !value.expose().trim().is_empty()),
+        Err(error) => {
+            tracing::debug!(
+                slot = slot.id,
+                error = %error.message,
+                "credential store unavailable; reporting the optional provider as absent"
+            );
+            false
+        }
+    })
 }
 
 /// Is a credential present, treating an unavailable store as "no".

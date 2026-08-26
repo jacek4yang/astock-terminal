@@ -22,8 +22,8 @@ jobs:
         run: node scripts/release-version-check.mjs 7.0.0
       - name: Check all 127 legacy capabilities are migrated
         run: node scripts/capability-parity-check.mjs --release
-      - name: Check Proton, MoonBit Agent and Rust Engine boundaries
-        run: node scripts/release-architecture-check.mjs
+      - name: Check the v7 production architecture boundaries
+        run: node scripts/release-architecture-check.mjs 7.0.0
       - name: Test immutable release-evidence validation
         run: node --test scripts/release-evidence-check.test.mjs scripts/acceptance-evidence.test.mjs scripts/research-data-release-gate.test.mjs scripts/live-data-validation.test.mjs
 
