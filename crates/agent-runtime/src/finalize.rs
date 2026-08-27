@@ -202,8 +202,9 @@ fn validation_action(code: &str) -> &'static str {
              reference."
         }
         "claim_not_in_any_section" => {
-            "Every claim must appear in exactly one section, or it would never be shown. Place it \
-             or remove it."
+            "Every claim must appear in at least one section, or it would never be shown. Place \
+             it or remove it. Listing one claim in several sections renders it several times, so \
+             prefer a claim per point."
         }
         "empty_statement" => "A claim needs a statement in the task output_language.",
         "oversized" => {
