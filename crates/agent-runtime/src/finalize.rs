@@ -195,14 +195,15 @@ fn validation_action(code: &str) -> &'static str {
              holds this figure. Do not round: a rounded figure is a different figure."
         }
         "figure_in_free_text" => {
-            "Do not write the digits. Declare the number as a numeric_item with its provenance \
-             and reference it from the prose by its label in braces: \
+            "This figure is not declared by the claim and is not in the evidence it cites, so \
+             nothing verifies it. Declare it as a numeric_item with its provenance, or reference \
+             an existing one by label in braces: \
              `statement: \"收盘价{收盘价}，成交额{成交额}\"` with numeric_items labelled `收盘价` \
              and `成交额`. The runtime substitutes the verified value and unit, so the sentence \
              reads normally and the figure is checked, and the number lives in exactly one \
-             place. Braces work in statements. Other free-text fields — executive_summary, \
-             overall_uncertainty, limitations, assumptions, uncertainty — take no figures at all; \
-             describe the finding and let the claims carry the numbers. Write no formulas in \
+             place. Braces work in statements, and in executive_summary, overall_uncertainty and \
+             limitations where a label may come from any claim. Do not delete the figure: a \
+             report that states no checkable quantity is refused as well. Write no formulas in \
              prose; put the operation on the numeric_item."
         }
         "unknown_number_reference" => {
@@ -276,8 +277,9 @@ fn verification_action(code: &str) -> &'static str {
              Cite the evidence the research actually used rather than summarising it away."
         }
         "report_contains_no_verifiable_numeric_claims" => {
-            "The report states no checkable quantity. A research conclusion needs the figures it \
-             rests on, as numeric_items with provenance."
+            "The report states no checkable quantity. If a previous round asked you to stop \
+             writing digits in prose, the answer was to declare the figure and reference it by \
+             label, not to remove it. A research conclusion needs the figures it rests on."
         }
         _ => "Resolve this finding before resubmitting.",
     }

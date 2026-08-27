@@ -635,21 +635,34 @@ fn figures(problems: &[DraftProblem]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// A figure in a statement is refused even when the claim declares it.
+/// A declared figure may be written literally; an unbacked one may not.
 ///
-/// This is the change: duplicating numeric truth in prose and in `numeric_items` was
-/// what the model could not do reliably, so it is no longer allowed at all.
+/// Forbidding literal figures outright was measured live and reduced convergence, so
+/// the rule is what it always needed to be: every printed figure must be backed.
+/// Placeholders remain the better path and are what the control plane asks for.
 #[test]
-fn a_figure_in_a_statement_is_refused_even_when_declared() {
+fn a_declared_figure_may_be_written_literally() {
     let draft = one_claim_draft(observed_claim(
         "紫金矿业当日成交额为 7,987,376,586.00 元人民币。",
         vec![amount_item()],
         vec!["evf_amount"],
     ));
     let problems = validate_draft(&draft, &amount_registry(), &BTreeSet::new());
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+/// A figure nothing in the draft backs is refused.
+#[test]
+fn an_unbacked_figure_in_a_statement_is_refused() {
+    let draft = one_claim_draft(observed_claim(
+        "紫金矿业当日成交额为 1,234,567.00 元人民币。",
+        vec![amount_item()],
+        vec!["evf_amount"],
+    ));
+    let problems = validate_draft(&draft, &amount_registry(), &BTreeSet::new());
     assert_eq!(
         figures(&problems),
-        vec![("statement".to_owned(), "7,987,376,586.00".to_owned())],
+        vec![("statement".to_owned(), "1,234,567.00".to_owned())],
         "{problems:?}"
     );
 }
@@ -677,11 +690,12 @@ fn a_figure_in_free_text_the_verifier_never_reads_is_refused() {
         vec![amount_item()],
         vec!["evf_amount"],
     ));
-    draft.executive_summary = "当日成交额约 79.87 亿元。".to_owned();
-    draft.overall_uncertainty = Some("盘中波动可达 3%。".to_owned());
-    draft.limitations = vec!["未覆盖成交额低于 5 亿元的标的。".to_owned()];
-    draft.claims[0].uncertainty = Some("单一来源，误差可能 0.5%。".to_owned());
-    draft.claims[0].assumptions = vec!["假设换手率维持 1.12%。".to_owned()];
+    // None of these figures is declared or cited anywhere in the draft.
+    draft.executive_summary = "当日成交额约 1.23 亿元。".to_owned();
+    draft.overall_uncertainty = Some("盘中波动可达 3.7%。".to_owned());
+    draft.limitations = vec!["未覆盖成交额低于 5.5 亿元的标的。".to_owned()];
+    draft.claims[0].uncertainty = Some("单一来源，误差可能 0.55%。".to_owned());
+    draft.claims[0].assumptions = vec!["假设换手率维持 1.17%。".to_owned()];
     let problems = validate_draft(&draft, &amount_registry(), &BTreeSet::new());
     let fields: Vec<String> = figures(&problems).into_iter().map(|(f, _)| f).collect();
     for expected in [
@@ -706,7 +720,7 @@ fn a_report_level_figure_carries_no_claim_id() {
         vec![amount_item()],
         vec!["evf_amount"],
     ));
-    draft.executive_summary = "成交额 79.87 亿元。".to_owned();
+    draft.executive_summary = "成交额 4.56 亿元。".to_owned();
     let problems = validate_draft(&draft, &amount_registry(), &BTreeSet::new());
     let report_level = problems
         .iter()

@@ -682,7 +682,7 @@ pub fn validate_draft(
     for claim in &draft.claims {
         validate_claim(claim, registry, task_symbols, &mut problems);
     }
-    validate_free_text(draft, &mut problems);
+    validate_free_text(draft, registry, &mut problems);
     problems
 }
 
@@ -912,7 +912,11 @@ fn ambiguous_report_labels(draft: &VerifiedReportDraft) -> BTreeSet<String> {
     ambiguous
 }
 
-fn validate_free_text(draft: &VerifiedReportDraft, problems: &mut Vec<DraftProblem>) {
+fn validate_free_text(
+    draft: &VerifiedReportDraft,
+    registry: &BTreeMap<String, EvidenceDescriptor>,
+    problems: &mut Vec<DraftProblem>,
+) {
     // Report-level fields resolve references against every claim's declarations, so a
     // summary can name a figure without repeating its digits. Without this the summary
     // could carry no number at all, which is not how a research summary is written:
@@ -940,11 +944,30 @@ fn validate_free_text(draft: &VerifiedReportDraft, problems: &mut Vec<DraftProbl
         check_references(&format!("limitations[{index}]"), limitation, problems);
     }
 
-    let mut check = |claim_id: Option<&str>, field: &str, text: &str| {
+    // A literal figure is refused only when nothing in the draft backs it.
+    //
+    // Forbidding literal figures outright was measured across many live moderate runs
+    // and did not improve convergence — it reduced it. The model writes prose as an
+    // analyst does, and a rule it will not follow produces refusals rather than better
+    // reports.
+    //
+    // What is kept is the part that was a real defect: a figure with no backing. The
+    // verifier reads only the title, the section headings and the claim lines, so a
+    // figure in `executive_summary`, `limitations`, `assumptions` or `uncertainty` used
+    // to be published with no check at all. Those fields are checked here now, and the
+    // ones that reference a number are emitted into the verifier form too, so this is
+    // strictly stricter than the original contract while remaining satisfiable.
+    //
+    // Placeholders stay the better path — one numeric truth, presented by the runtime —
+    // and remain what the control plane asks for. They are simply no longer the only one.
+    let mut check = |claim_id: Option<&str>, field: &str, text: &str, backing: &[f64]| {
         // Placeholders are removed before extraction: `{最新价}` names a declared
         // number and is not itself a figure. Their labels are checked separately.
         let prose = strip_placeholders(text);
         for numeral in astock_engine::financial_numerals(&prose) {
+            if backing.iter().any(|value| numeral.supported_by(*value)) {
+                continue;
+            }
             problems.push(DraftProblem::FigureInFreeText {
                 claim_id: claim_id.map(str::to_owned),
                 field: field.to_owned(),
@@ -952,31 +975,56 @@ fn validate_free_text(draft: &VerifiedReportDraft, problems: &mut Vec<DraftProbl
             });
         }
     };
-    check(None, "title", &draft.title);
-    check(None, "executive_summary", &draft.executive_summary);
+    // Report-level prose is backed by any declared number.
+    let report_backing: Vec<f64> = report_numbers.values().map(|item| item.value).collect();
+    check(None, "title", &draft.title, &report_backing);
+    check(
+        None,
+        "executive_summary",
+        &draft.executive_summary,
+        &report_backing,
+    );
     if let Some(uncertainty) = &draft.overall_uncertainty {
-        check(None, "overall_uncertainty", uncertainty);
+        check(None, "overall_uncertainty", uncertainty, &report_backing);
     }
     for (index, limitation) in draft.limitations.iter().enumerate() {
-        check(None, &format!("limitations[{index}]"), limitation);
+        check(
+            None,
+            &format!("limitations[{index}]"),
+            limitation,
+            &report_backing,
+        );
     }
     for section in &draft.sections {
         check(
             None,
             &format!("sections[{}].heading", section.heading),
             &section.heading,
+            &report_backing,
         );
     }
     for claim in &draft.claims {
-        check(Some(&claim.id), "statement", &claim.statement);
+        // A claim's prose is backed by what it declares and by what it cites, which is
+        // exactly what the verifier compares that line against.
+        let mut backing: Vec<f64> = claim.numeric_items.iter().map(|item| item.value).collect();
+        backing.extend(
+            claim
+                .evidence_ids
+                .iter()
+                .filter_map(|id| registry.get(id))
+                .filter_map(|descriptor| descriptor.value.as_ref())
+                .filter_map(evidence_number),
+        );
+        check(Some(&claim.id), "statement", &claim.statement, &backing);
         if let Some(uncertainty) = &claim.uncertainty {
-            check(Some(&claim.id), "uncertainty", uncertainty);
+            check(Some(&claim.id), "uncertainty", uncertainty, &backing);
         }
         for (index, assumption) in claim.assumptions.iter().enumerate() {
             check(
                 Some(&claim.id),
                 &format!("assumptions[{index}]"),
                 assumption,
+                &backing,
             );
         }
     }
