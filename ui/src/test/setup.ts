@@ -1,4 +1,17 @@
 import "@testing-library/jest-dom/vitest";
+import { cleanup } from "@testing-library/react";
+import { afterEach } from "vitest";
+
+// Unmount rendered components between tests.
+//
+// React Testing Library registers this itself only when the test framework's
+// globals are enabled; this project runs Vitest without `globals`, so nothing was
+// unmounting. Every rendered component stayed in the document, and a file that
+// rendered twice made the second test query a DOM containing both copies —
+// `Found multiple elements with the text: …`. Whether it failed depended on how far
+// the first test's async work had progressed, which is exactly the kind of flake
+// that makes a CI gate untrustworthy.
+afterEach(cleanup);
 
 // Node 26 exposes an experimental, unconfigured global localStorage getter
 // which can shadow jsdom's storage. Use a deterministic in-memory browser
