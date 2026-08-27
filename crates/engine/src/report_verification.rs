@@ -173,7 +173,18 @@ fn mask_non_financial_tokens(line: &str) -> String {
         // reporting period names a window, asserts no quantity, and appears in
         // almost every fundamentals claim; a live moderate run was blocked by
         // `2025 全年营业总收入` and `2026Q1 末归母权益` being read as figures.
-        r"\d{4}\s*(?:全年|年度|年报|中报|季报|上半年|下半年|财年|财报)",
+        r"\d{4}\s*(?:全年|年度|年报|中报|季报|中期|报告期|上半年|下半年|财年|财报)",
+        // Chinese counters: 命中 2 项, 覆盖 3 家, 持有 5 只, 分 2 次.
+        //
+        // A count of things is not a financial amount. A live run was blocked by
+        // `可用信号命中 2 项`, which asserts no quantity at all. A real amount carries a
+        // currency, a percentage or a magnitude suffix, none of which are counters.
+        r"\d+\s*(?:项|个|只|家|次|条|种|档|层|类|户|席)",
+        // Distribution-ratio denominators: 每 10 股派 …, 每 10 股转增 ….
+        //
+        // The share count in a dividend ratio is a convention, not a claimed figure;
+        // the payout beside it is the figure, and it stays extractable.
+        r"每\s*\d+\s*股",
         // Clock times, including exchange session boundaries.
         r"\d{1,2}:\d{2}(?::\d{2})?",
         // Markdown headings and ordered-list markers.
@@ -764,6 +775,34 @@ mod tests {
                 financial_numerals(label)
             );
         }
+    }
+
+    /// Chinese counters and distribution ratios assert no financial amount.
+    ///
+    /// A live run was blocked by `可用信号命中 2 项` and `每 10 股派 …`. Neither claims a
+    /// quantity; the payout beside the ratio does, and it stays extractable.
+    #[test]
+    fn counters_and_distribution_ratios_are_not_treated_as_figures() {
+        for label in [
+            "可用信号命中 2 项",
+            "覆盖 3 家同业",
+            "持有 5 只标的",
+            "2026 中期分红",
+            "分 2 次派息",
+        ] {
+            assert!(
+                financial_numerals(label).is_empty(),
+                "`{label}` asserts no quantity, found {:?}",
+                financial_numerals(label)
+            );
+        }
+        // The payout in a distribution ratio is still a figure.
+        let found = financial_numerals("每 10 股派 3.5 元");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].raw, "3.5");
+        // A currency amount is never a counter.
+        let amount = financial_numerals("净利润 517.77 亿元");
+        assert_eq!(amount.len(), 1, "{amount:?}");
     }
 
     /// A three digit lookback window leaves no stray digit behind.

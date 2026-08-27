@@ -800,7 +800,7 @@ pub(crate) const PLACEHOLDER_OPEN: char = '{';
 pub(crate) const PLACEHOLDER_CLOSE: char = '}';
 
 /// Labels referenced by `{…}` in a piece of prose, in order of appearance.
-pub(crate) fn placeholder_labels(text: &str) -> Vec<String> {
+pub fn placeholder_labels(text: &str) -> Vec<String> {
     let mut labels = Vec::new();
     let mut rest = text;
     while let Some(open) = rest.find(PLACEHOLDER_OPEN) {
@@ -818,7 +818,7 @@ pub(crate) fn placeholder_labels(text: &str) -> Vec<String> {
 }
 
 /// Remove `{…}` spans so figure extraction sees prose only.
-pub(crate) fn strip_placeholders(text: &str) -> String {
+pub fn strip_placeholders(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(open) = rest.find(PLACEHOLDER_OPEN) {
