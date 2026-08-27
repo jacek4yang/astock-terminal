@@ -9,6 +9,7 @@ mod clarify;
 mod engine;
 mod error;
 mod events;
+mod fault;
 mod finalize;
 mod intent;
 mod minimax;
@@ -27,6 +28,9 @@ pub use clarify::{ClarificationAnswer, ClarificationOption, ClarificationRequest
 pub use engine::EngineGateway;
 pub use error::{ProviderError, ProviderErrorKind, RuntimeError};
 pub use events::{AgentEvent, AgentPhase, VerificationFinding};
+pub use fault::{
+    plan as plan_recovery, AttemptBudget, ModelFault, RecoveryAction, MAX_FOREGROUND_WAIT,
+};
 pub use finalize::{
     fingerprint, validation_repair, verification_repair, ExhaustionReason, FinalizationLedger,
     RepairVerdict, MAX_REPAIR_TARGETS, MAX_REPORTED_PROBLEMS,

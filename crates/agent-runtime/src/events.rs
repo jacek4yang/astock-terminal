@@ -132,6 +132,17 @@ pub enum AgentEvent {
     },
     Suspended {
         reason: String,
+        /// When the task may be resumed, when the provider said.
+        ///
+        /// Previously a suspension recorded only prose, so nothing knew *when* to try
+        /// again and a user had to restart deep research by hand after a quota window
+        /// closed. A live run suspended with 123 minutes to go and no record of it.
+        /// `default` keeps events written by earlier versions readable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume_at: Option<String>,
+        /// Typed fault name, so recovery does not have to parse the reason text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fault: Option<String>,
     },
     Cancelled,
     Completed {

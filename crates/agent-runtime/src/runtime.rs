@@ -375,6 +375,8 @@ impl AgentRuntime {
                 model_round: 0,
                 completed_tool_ids: Vec::new(),
                 evidence_ids: Vec::new(),
+                resume_at: None,
+                suspended_by: None,
                 plan: None,
             });
             session.validate()?;
@@ -468,9 +470,29 @@ impl AgentRuntime {
                             ProviderErrorKind::Quota | ProviderErrorKind::RateLimited
                         ) =>
                 {
+                    // Record *when* the task may resume, not just that it stopped.
+                    //
+                    // A suspension used to carry prose only, so nothing knew when to try
+                    // again and a user had to restart deep research by hand once the
+                    // window reopened. A live run suspended with 123 minutes to go and
+                    // no record of it.
+                    let fault = crate::fault::ModelFault::classify(provider);
+                    let action = crate::fault::plan(
+                        &fault,
+                        &crate::fault::AttemptBudget::new(1),
+                        chrono::Utc::now(),
+                    );
+                    let resume_at = match &action {
+                        crate::fault::RecoveryAction::SuspendUntil { resume_at, .. } => {
+                            Some(resume_at.to_rfc3339())
+                        }
+                        _ => None,
+                    };
                     state.phase = AgentPhase::Suspended;
                     AgentEvent::Suspended {
                         reason: provider.to_string(),
+                        resume_at,
+                        fault: Some(fault.as_str().to_owned()),
                     }
                 }
                 _ => {
@@ -1786,7 +1808,13 @@ fn apply_session_event(session: &mut RuntimeSession, event: &AgentEvent) {
                 task.phase = AgentPhase::Verifying;
             }
             AgentEvent::TextDelta { .. } => {}
-            AgentEvent::Suspended { .. } => task.phase = AgentPhase::Suspended,
+            AgentEvent::Suspended {
+                resume_at, fault, ..
+            } => {
+                task.phase = AgentPhase::Suspended;
+                task.resume_at = resume_at.clone();
+                task.suspended_by = fault.clone();
+            }
             AgentEvent::Cancelled => task.phase = AgentPhase::Cancelled,
             AgentEvent::Completed {
                 report,

@@ -1163,3 +1163,121 @@ async fn retrieval_tools_are_withdrawn_once_the_research_budget_is_spent() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// A suspension records when it may resume
+//
+// It used to carry prose only, so nothing knew when to try again and a user had to
+// restart deep research by hand once a quota window reopened. A live run suspended
+// with 123 minutes to go and no record of it.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct FaultingProvider {
+    error: ProviderError,
+}
+
+#[async_trait]
+impl ModelProvider for FaultingProvider {
+    fn name(&self) -> &'static str {
+        "faulting"
+    }
+
+    async fn selected_model(&self) -> Result<String, ProviderError> {
+        Ok("faulting-model".into())
+    }
+
+    async fn stream(&self, _request: ModelRequest) -> Result<ModelStream, ProviderError> {
+        Err(self.error.clone())
+    }
+}
+
+async fn run_faulting(error: ProviderError) -> Vec<AgentEvent> {
+    let runtime = AgentRuntime::new(
+        Arc::new(FaultingProvider { error }),
+        Arc::new(ScriptedEngine::new(vec![])),
+        Arc::new(NullStore),
+    );
+    let mut stream = runtime.start(RuntimeTask::ask("紫金矿业最新价格是多少？"));
+    let mut events = Vec::new();
+    while let Some(event) = stream.recv().await {
+        events.push(event);
+    }
+    let _ = stream.finish().await;
+    events
+}
+
+/// A long rate limit suspends with the resume time recorded.
+#[tokio::test]
+async fn a_long_rate_limit_suspends_with_a_recorded_resume_time() {
+    let mut error = ProviderError::new(
+        astock_agent_runtime::ProviderErrorKind::RateLimited,
+        "MiniMax rate limit reached",
+        true,
+    );
+    error.retry_after = Some(std::time::Duration::from_secs(123 * 60));
+    let events = run_faulting(error).await;
+    let suspended = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::Suspended {
+                resume_at, fault, ..
+            } => Some((resume_at.clone(), fault.clone())),
+            _ => None,
+        })
+        .expect("a rate limit suspends the task");
+    let (resume_at, fault) = suspended;
+    assert_eq!(fault.as_deref(), Some("rate_limited"));
+    let resume_at = resume_at.expect("the resume time is recorded, not just the reason");
+    let parsed = chrono::DateTime::parse_from_rfc3339(&resume_at).expect("an RFC3339 instant");
+    let minutes = (parsed.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_minutes();
+    assert!(
+        (120..=124).contains(&minutes),
+        "the resume time must reflect the provider's guidance, got {minutes} minutes"
+    );
+}
+
+/// Quota exhaustion with no reported reset suspends without inventing a time.
+#[tokio::test]
+async fn quota_exhaustion_without_guidance_suspends_without_a_fabricated_time() {
+    let error = ProviderError::new(
+        astock_agent_runtime::ProviderErrorKind::Quota,
+        "MiniMax quota exhausted",
+        false,
+    );
+    let events = run_faulting(error).await;
+    let (resume_at, fault) = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::Suspended {
+                resume_at, fault, ..
+            } => Some((resume_at.clone(), fault.clone())),
+            _ => None,
+        })
+        .expect("quota exhaustion suspends the task");
+    assert_eq!(fault.as_deref(), Some("quota_exhausted"));
+    assert!(
+        resume_at.is_none(),
+        "a reset time the provider never reported must not be invented"
+    );
+}
+
+/// A credential failure is not a suspension: only the operator can clear it.
+#[tokio::test]
+async fn an_authentication_failure_is_terminal_rather_than_suspended() {
+    let error = ProviderError::new(
+        astock_agent_runtime::ProviderErrorKind::Authentication,
+        "invalid credential",
+        false,
+    );
+    let events = run_faulting(error).await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Suspended { .. })),
+        "a credential failure must not look like a transient window"
+    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::Failed { .. })));
+}
