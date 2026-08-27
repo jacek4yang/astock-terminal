@@ -28,12 +28,16 @@ type Turn = Vec<Result<ModelChunk, ProviderError>>;
 #[derive(Clone)]
 struct ScriptedProvider {
     turns: Arc<Mutex<VecDeque<Turn>>>,
+    /// Tool names offered on each round, so a test can assert what the model could
+    /// actually have called rather than what it was asked to do.
+    offered_tool_names: Arc<Mutex<Vec<Vec<String>>>>,
 }
 
 impl ScriptedProvider {
     fn new(turns: Vec<Turn>) -> Self {
         Self {
             turns: Arc::new(Mutex::new(turns.into())),
+            offered_tool_names: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -48,7 +52,11 @@ impl ModelProvider for ScriptedProvider {
         Ok("scripted-financial-model".into())
     }
 
-    async fn stream(&self, _request: ModelRequest) -> Result<ModelStream, ProviderError> {
+    async fn stream(&self, request: ModelRequest) -> Result<ModelStream, ProviderError> {
+        self.offered_tool_names
+            .lock()
+            .unwrap()
+            .push(request.tools.iter().map(|tool| tool.name.clone()).collect());
         let turn = self
             .turns
             .lock()
@@ -1098,4 +1106,60 @@ async fn a_repaired_draft_publishes_after_a_shape_error() {
     .await;
     result.expect("the corrected draft publishes");
     assert!(matches!(events.last(), Some(AgentEvent::Completed { .. })));
+}
+
+// ---------------------------------------------------------------------------
+// The research budget is a mechanism, not a request
+//
+// It used to be a system message asking the model to stop researching, and a
+// model that kept going simply ignored it: two live moderate runs reached the
+// 32-round ceiling having never submitted a report, one after 26 tool calls.
+// Retrieval tools are now withdrawn once the budget is spent.
+// ---------------------------------------------------------------------------
+
+/// A retrieval tool disappears from the offered set once research is spent.
+#[tokio::test]
+async fn retrieval_tools_are_withdrawn_once_the_research_budget_is_spent() {
+    let engine = ScriptedEngine::new(vec![passing()]);
+    // Research budget of 1: round 1 may retrieve, round 2 onwards may not.
+    let provider = ScriptedProvider::new(vec![
+        quote_round(),
+        submit_round("call-good", valid_draft()),
+    ]);
+    let offered = provider.offered_tool_names.clone();
+    let runtime = AgentRuntime::new(Arc::new(provider), Arc::new(engine), Arc::new(NullStore))
+        .with_config(RuntimeConfig {
+            max_research_rounds: 1,
+            ..RuntimeConfig::default()
+        });
+    let mut task = RuntimeTask::ask("紫金矿业最新价格是多少？");
+    task.symbol = Some("601899".into());
+    let mut stream = runtime.start(task);
+    while stream.recv().await.is_some() {}
+    stream.finish().await.expect("the task publishes");
+
+    let rounds = offered.lock().unwrap().clone();
+    assert_eq!(rounds.len(), 2, "two model rounds were requested");
+    assert!(
+        rounds[0].iter().any(|name| name == "get_quote"),
+        "the research round must offer retrieval: {:?}",
+        rounds[0]
+    );
+    assert!(
+        !rounds[1].iter().any(|name| name == "get_quote"),
+        "the finalization round must not offer retrieval: {:?}",
+        rounds[1]
+    );
+    // Finalization still needs identifiers and deterministic arithmetic.
+    for required in [
+        "search_evidence",
+        "submit_report",
+        "run_financial_calculation",
+    ] {
+        assert!(
+            rounds[1].iter().any(|name| name == required),
+            "`{required}` must remain available during finalization: {:?}",
+            rounds[1]
+        );
+    }
 }

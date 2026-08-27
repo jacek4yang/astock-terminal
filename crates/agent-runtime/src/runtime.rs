@@ -598,12 +598,41 @@ impl AgentRuntime {
             // reconnect. A provider *error* frame is not an empty turn — it is
             // returned as a typed provider error before reaching this point — so a
             // real fault is never silently retried as emptiness.
+            // Once the research budget is spent, retrieval tools are withdrawn.
+            //
+            // The budget used to be a request in a system message, and a model that
+            // kept researching simply ignored it: two live moderate runs reached the
+            // 32-round ceiling having never submitted a report at all, one after 26
+            // tool calls. A budget the model can decline is not a budget.
+            //
+            // Withdrawing the tools makes it a mechanism. `search_evidence` stays,
+            // because finalization needs identifiers, and the deterministic
+            // calculation tool stays, because a figure may still need to be computed
+            // to be citable — neither reaches an upstream. The one-time prompt-cache
+            // invalidation at the phase boundary is worth a task that finishes.
+            let finalization_only = round
+                > self
+                    .config
+                    .max_research_rounds
+                    .min(self.config.max_model_rounds);
+            let offered_tools = if finalization_only {
+                self.tools
+                    .definitions()
+                    .into_iter()
+                    .filter(|tool| {
+                        tool.handler == ToolHandler::Runtime
+                            || tool.name == "run_financial_calculation"
+                    })
+                    .collect()
+            } else {
+                self.tools.definitions()
+            };
             let mut empty_turns = 0usize;
             let (text, calls) = loop {
                 let request = ModelRequest {
                     model: selected_model.clone(),
                     messages: messages.clone(),
-                    tools: self.tools.definitions(),
+                    tools: offered_tools.clone(),
                     max_tokens: self.config.max_tokens,
                     temperature: self.config.temperature,
                 };
@@ -909,10 +938,11 @@ impl AgentRuntime {
                 {
                     messages.push(Message::text(
                         MessageRole::System,
-                        "Research budget for this task is spent. Do not call any further \
-                         retrieval tool. Use search_evidence if you need identifiers, then call \
-                         submit_report with what the evidence supports. State remaining gaps as \
-                         limitations or as claims of kind=unknown rather than asserting them.",
+                        "The research budget for this task is spent, so the retrieval tools have \
+                         been withdrawn. Only search_evidence, run_financial_calculation and \
+                         submit_report remain. Finalize with the evidence already gathered and \
+                         state remaining gaps as limitations or as claims of kind=unknown rather \
+                         than asserting them.",
                     ));
                 }
                 continue;
