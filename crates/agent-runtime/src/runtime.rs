@@ -180,6 +180,15 @@ impl RuntimeTask {
 
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
+    /// Hard ceiling on model rounds for the whole task.
+    ///
+    /// Must accommodate both phases: `max_research_rounds` of retrieval plus roughly
+    /// one round per finalization attempt, plus slack. A measured moderate run used
+    /// 18 rounds of genuine tool work and then had only 6 rounds left, so the
+    /// ceiling bound before the finalization budget did and the task died on the
+    /// round limit while repair was still progressing. Raising this is not a way to
+    /// paper over a failing Agent; it is what keeps the phase budgets meaningful
+    /// rather than being silently pre-empted by a shared ceiling.
     pub max_model_rounds: usize,
     /// Rounds during which the model may still gather evidence.
     ///
@@ -222,8 +231,8 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            max_model_rounds: 24,
-            max_research_rounds: 18,
+            max_model_rounds: 32,
+            max_research_rounds: 20,
             max_finalization_attempts: 6,
             max_model_chunks_per_round: 10_000,
             max_empty_turn_retries: 2,
@@ -951,7 +960,7 @@ impl AgentRuntime {
         state: &mut RunState,
         arguments: Value,
     ) -> Result<Finalization, RuntimeError> {
-        let draft: VerifiedReportDraft = match serde_json::from_value(arguments.clone()) {
+        let draft: VerifiedReportDraft = match crate::report::decode_draft(&arguments) {
             Ok(draft) => draft,
             Err(error) => {
                 // A shape error consumes the budget like any other rejection.
@@ -973,16 +982,17 @@ impl AgentRuntime {
                 let response = json!({
                     "ok": false,
                     "stage": "decode",
-                    "error": error.to_string(),
+                    "error": error,
                     "attempt": state.finalization.attempts(),
                     "instruction": if verdict.is_exhausted() {
                         "No finalization attempts remain. The report will not be published."
                     } else {
                         "The draft did not match the submit_report schema, so no claim was read. \
-                         A numeric item must carry every field its provenance requires: observed \
-                         needs evidence_id; calculated needs calculation_evidence_id, operation \
-                         and input_evidence_ids; estimated needs method and basis_evidence_ids. \
-                         Fix the reported field and resubmit the complete draft."
+                         The error names the exact field: fix that field and resubmit the complete \
+                         draft. A numeric item must carry every field its provenance requires: \
+                         observed needs evidence_id; calculated needs calculation_evidence_id, \
+                         operation and input_evidence_ids; estimated needs method and \
+                         basis_evidence_ids."
                     },
                 });
                 return Ok(match verdict {

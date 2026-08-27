@@ -776,3 +776,85 @@ fn declared_numbers_appear_in_the_published_report() {
     assert!(rendered.markdown.contains("实测数据"));
     assert!(!contains_internal_identifier(&rendered.markdown));
 }
+
+/// A decode failure must name the field, or it cannot be repaired.
+///
+/// `serde_json::from_value` reports `invalid type: map, expected a string` with no
+/// indication of where. A live moderate run spent its entire finalization budget on
+/// exactly that: an otherwise complete report whose `limitations` entries were each
+/// wrapped in an object, six submissions in a row, with nothing in the diagnostic
+/// that could have located the field.
+#[test]
+fn a_decode_failure_names_the_offending_field() {
+    let malformed = json!({
+        "version": REPORT_CONTRACT_VERSION,
+        "title": "紫金矿业估值",
+        "executive_summary": "摘要。",
+        "sections": [{"heading": "估值", "claim_ids": ["c1"]}],
+        "claims": [{
+            "id": "c1",
+            "kind": "observed_fact",
+            "statement": "最新价已披露。",
+            "evidence_ids": ["evf_price"]
+        }],
+        // The exact live shape: a string field wrapped in an object.
+        "limitations": [{"limit": "未取得 PE(TTM)。"}]
+    });
+    let error = astock_agent_runtime::decode_draft(&malformed)
+        .expect_err("a wrapped limitation must not decode");
+    assert!(
+        error.contains("limitations"),
+        "the diagnostic must name the field, got: {error}"
+    );
+    assert!(
+        error.contains('0'),
+        "the diagnostic should locate the element, got: {error}"
+    );
+}
+
+/// Incomplete numeric provenance is named at the item that lacks it.
+#[test]
+fn a_decode_failure_locates_incomplete_provenance() {
+    let malformed = json!({
+        "version": REPORT_CONTRACT_VERSION,
+        "title": "计算",
+        "executive_summary": "摘要。",
+        "sections": [{"heading": "计算", "claim_ids": ["c1"]}],
+        "claims": [{
+            "id": "c1",
+            "kind": "deterministic_calculation",
+            "statement": "市盈率。",
+            "numeric_items": [{
+                "label": "市盈率", "value": 28.4,
+                "provenance": "calculated"
+            }]
+        }]
+    });
+    let error = astock_agent_runtime::decode_draft(&malformed)
+        .expect_err("calculated provenance without its fields must not decode");
+    assert!(
+        error.contains("claims") && error.contains("numeric_items"),
+        "the diagnostic must locate the item, got: {error}"
+    );
+}
+
+/// A well-formed draft decodes unchanged.
+#[test]
+fn a_well_formed_draft_decodes() {
+    let good = json!({
+        "version": REPORT_CONTRACT_VERSION,
+        "title": "紫金矿业估值",
+        "executive_summary": "摘要。",
+        "sections": [{"heading": "估值", "claim_ids": ["c1"]}],
+        "claims": [{
+            "id": "c1",
+            "kind": "observed_fact",
+            "statement": "最新价已披露。",
+            "evidence_ids": ["evf_price"]
+        }],
+        "limitations": ["未取得 PE(TTM)。"]
+    });
+    let draft = astock_agent_runtime::decode_draft(&good).expect("a valid draft decodes");
+    assert_eq!(draft.claims.len(), 1);
+    assert_eq!(draft.limitations.len(), 1);
+}

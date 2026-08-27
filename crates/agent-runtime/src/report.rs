@@ -27,6 +27,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Contract version. Bump when the shape changes in a way consumers must notice.
 pub const REPORT_CONTRACT_VERSION: &str = "astock-report-contract-v1";
@@ -533,6 +534,30 @@ fn short_timestamp(raw: &str) -> Option<String> {
         Some(date.to_owned())
     } else {
         Some(format!("{date} {time}"))
+    }
+}
+
+/// Decode a submitted draft, naming the field that failed.
+///
+/// `serde_json::from_value` reports `invalid type: map, expected a string` with no
+/// indication of *where*. A live moderate run spent its entire finalization budget
+/// on exactly that: an otherwise complete report whose `limitations` entries were
+/// each wrapped in an object, six times, with nothing in the diagnostic that could
+/// have located the field. Repair is only possible if the model is told which field
+/// is wrong, so the path is part of the contract's diagnostic surface.
+pub fn decode_draft(arguments: &Value) -> Result<VerifiedReportDraft, String> {
+    let mut track = serde_path_to_error::Track::new();
+    let deserializer = serde_path_to_error::Deserializer::new(arguments, &mut track);
+    match VerifiedReportDraft::deserialize(deserializer) {
+        Ok(draft) => Ok(draft),
+        Err(error) => {
+            let path = track.path().to_string();
+            if path.is_empty() {
+                Err(error.to_string())
+            } else {
+                Err(format!("{path}: {error}"))
+            }
+        }
     }
 }
 

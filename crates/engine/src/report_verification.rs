@@ -163,6 +163,13 @@ fn mask_non_financial_tokens(line: &str) -> String {
     static PATTERNS: &[&str] = &[
         // Calendar dates and fiscal periods: 2026-08-26, 2026年, 8月, 26日, 2024Q3.
         r"\d{4}-\d{2}-\d{2}|\d{4}/\d{1,2}/\d{1,2}|\d{4}\s*年|\d{1,2}\s*月|\d{1,2}\s*日|\d{4}\s*Q[1-4]|\bQ[1-4]\b",
+        // Reporting-period labels: 2025 全年, 2026 上半年, 2024 年度, 2025 财年.
+        //
+        // `\d{4}\s*年` above only catches a year written immediately before 年. A
+        // reporting period names a window, asserts no quantity, and appears in
+        // almost every fundamentals claim; a live moderate run was blocked by
+        // `2025 全年营业总收入` and `2026Q1 末归母权益` being read as figures.
+        r"\d{4}\s*(?:全年|年度|年报|中报|季报|上半年|下半年|财年|财报)",
         // Clock times, including exchange session boundaries.
         r"\d{1,2}:\d{2}(?::\d{2})?",
         // Markdown headings and ordered-list markers.
@@ -170,8 +177,11 @@ fn mask_non_financial_tokens(line: &str) -> String {
         r"(?m)^\s{0,3}\d{1,3}[.、)]\s",
         // Chinese section numbering: 第一步, 第3节, 第二部分.
         r"第\s*[0-9一二三四五六七八九十百]+\s*[步章节条部分项]",
-        // Window and horizon labels: 6个月, 20个交易日, 5年期, 3周.
-        r"\d+\s*(?:个月|个交易日|个季度|年期|周|天|日线|分钟)",
+        // Window and horizon labels: 6个月, 20个交易日, 5年期, 3周, 近3年.
+        //
+        // A one or two digit count before 年 is a duration; a calendar year in this
+        // corpus is four digits and is masked by the date rule above.
+        r"\d+\s*(?:个月|个交易日|个季度|年期|周|天|日线|分钟)|\d{1,2}\s*年",
     ];
     let mut masked = line.to_owned();
     for pattern in PATTERNS {
@@ -231,6 +241,7 @@ fn parse_claim_number(number: &str, unit: Option<&str>) -> Option<f64> {
     match unit {
         Some("万") => value *= 10_000.0,
         Some("亿") => value *= 100_000_000.0,
+        Some("万亿") => value *= 1_000_000_000_000.0,
         Some("%") => value /= 100.0,
         _ => {}
     }
@@ -380,8 +391,16 @@ pub fn financial_numerals(line: &str) -> Vec<ReportNumeral> {
         .collect()
 }
 
+/// The quantity pattern.
+///
+/// Whitespace is allowed before the magnitude suffix. Chinese financial prose writes
+/// both `79.87亿元` and `79.87 亿元`, and requiring adjacency made the spaced form
+/// parse as `79.87` — a number three orders of magnitude from what the text says,
+/// which no evidence could reproduce. Reading the suffix makes the comparison
+/// stricter, not looser: a figure written `2,314,388 万手` is now judged as
+/// 23.1 billion rather than as 2.3 million.
 fn numeric_pattern() -> Result<Regex, regex::Error> {
-    Regex::new(r"(?P<number>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)(?P<unit>%|万|亿)?")
+    Regex::new(r"(?P<number>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*(?P<unit>%|万亿|万|亿)?")
 }
 
 pub(super) fn verify(payload: VerifyReportPayload) -> Result<Value, ServiceError> {
@@ -678,6 +697,41 @@ mod tests {
         ));
         assert!(negative_sign_before("涨跌幅 -3.5%", "涨跌幅 -".len()));
         assert!(negative_sign_before("-15", "-".len()));
+    }
+
+    /// A reporting-period label is not a financial quantity.
+    ///
+    /// `\d{4}\s*年` only catches a year written immediately before 年. A live moderate
+    /// run was blocked because `2025 全年营业总收入`, `2026Q1 末归母权益` and `近 3 年`
+    /// were read as unsupported figures. A period names a window and asserts no
+    /// quantity, so counting one narrows what a claim is; it does not relax how a
+    /// claim is verified.
+    #[test]
+    fn reporting_period_and_horizon_labels_are_not_treated_as_figures() {
+        for label in [
+            "2025 全年营业总收入",
+            "2024 年度归母净利润",
+            "2026 上半年营业收入",
+            "2025 财年现金流",
+            "近 3 年复合增速",
+            "过去 5 年",
+            "2026Q1 末归母权益",
+        ] {
+            assert!(
+                financial_numerals(label).is_empty(),
+                "`{label}` asserts no quantity, found {:?}",
+                financial_numerals(label)
+            );
+        }
+    }
+
+    /// Narrowing must not swallow a real quantity that happens to sit near a period.
+    #[test]
+    fn a_real_quantity_beside_a_period_label_is_still_extracted() {
+        let found = financial_numerals("2025 全年营业总收入 3490.79 亿元");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].raw, "3490.79");
+        assert_eq!(found[0].unit.as_deref(), Some("亿"));
     }
 
     /// An unsigned claim still fails against negative evidence, as before.

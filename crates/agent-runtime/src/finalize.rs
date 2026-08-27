@@ -184,7 +184,8 @@ fn validation_action(code: &str) -> &'static str {
              Either add it as a numeric_item with real provenance, or remove the figure from the \
              prose and let the rendered numbers carry it. A rounded restatement of a cited value \
              (\"约 79.87 亿元\" for 7,987,376,586) is a separate, unverifiable figure — state the \
-             cited value or declare the rounded one."
+             cited value or declare the rounded one. Do not write formulas or arithmetic in a \
+             statement; put the operation on the numeric_item instead."
         }
         "evidence_outside_task_scope" => {
             "This evidence belongs to a different security than the task covers. Remove it, or \
