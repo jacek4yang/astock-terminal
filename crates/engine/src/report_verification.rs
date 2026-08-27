@@ -288,6 +288,35 @@ fn identifier_adjacent(text: &str, start: usize, end: usize) -> bool {
         || after.is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
 }
 
+/// Is the digit run at `start` preceded by a minus sign that is really a sign?
+///
+/// The number pattern deliberately matches no sign, because a hyphen in a report is
+/// usually a separator — `20-30 元`, `2026-08-26`. The consequence was that a
+/// negative quantity could **never** be reproduced: a maximum drawdown registered
+/// as `-0.0999` was extracted from the report as `0.0999`, compared against
+/// `-0.0999`, and reported as `numeric_claim_not_reproduced`. Every signed figure a
+/// deterministic calculation produces hit this.
+///
+/// A leading `-` counts as a sign only when what precedes it is not itself part of a
+/// number, which keeps `20-30` two positive quantities and makes `=-0.0999` and
+/// `下跌 -15%` negative. An unsigned token is still compared unsigned, so this adds
+/// no new way for a claim to pass: it only lets a correctly signed claim match the
+/// evidence it cites.
+fn negative_sign_before(text: &str, start: usize) -> bool {
+    let mut characters = text[..start].chars().rev();
+    match characters.next() {
+        Some('-') | Some('\u{2212}') => {}
+        _ => return false,
+    }
+    // Skip nothing else: a sign binds tightly to its number. Whatever sits before
+    // the sign decides whether it is a sign or a separator.
+    match characters.next() {
+        Some(previous) => !previous.is_ascii_digit() && previous != '.',
+        // Start of line: `-5%` is negative.
+        None => true,
+    }
+}
+
 pub(super) fn verify(payload: VerifyReportPayload) -> Result<Value, ServiceError> {
     let report = payload.report.trim();
     if report.is_empty() || report.chars().count() > MAX_REPORT_CHARS {
@@ -388,7 +417,10 @@ pub(super) fn verify(payload: VerifyReportPayload) -> Result<Value, ServiceError
         for claim in claims {
             let raw = claim.name("number").unwrap().as_str();
             let unit = claim.name("unit").map(|value| value.as_str());
-            let Some(parsed) = parse_claim_number(raw, unit) else {
+            let negative = negative_sign_before(&claim_text, claim.get(0).unwrap().start());
+            let Some(parsed) =
+                parse_claim_number(raw, unit).map(|value| if negative { -value } else { value })
+            else {
                 findings.insert(format!(
                     "invalid_numeric_claim:line_{}:{raw}",
                     line_index + 1
@@ -401,8 +433,9 @@ pub(super) fn verify(payload: VerifyReportPayload) -> Result<Value, ServiceError
                     .is_some_and(|fact| fact_supports_token(fact, raw, parsed, unit))
             }) {
                 findings.insert(format!(
-                    "numeric_claim_not_reproduced:line_{}:{raw}",
-                    line_index + 1
+                    "numeric_claim_not_reproduced:line_{}:{}{raw}",
+                    line_index + 1,
+                    if negative { "-" } else { "" }
                 ));
             }
         }
@@ -536,6 +569,79 @@ mod tests {
         })
         .unwrap();
         assert_eq!(result["passed"], false);
+        assert!(result["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item
+                .as_str()
+                .unwrap()
+                .starts_with("numeric_claim_not_reproduced")));
+    }
+
+    /// A negative quantity must be reproducible against its negative evidence.
+    ///
+    /// The number pattern matches no sign, so a drawdown registered as `-0.0999`
+    /// was extracted from the report as `0.0999` and reported as unreproduced. Every
+    /// signed figure a deterministic calculation produces hit this, which made a
+    /// correct report unpublishable.
+    #[test]
+    fn a_negative_quantity_is_reproduced_by_its_negative_evidence() {
+        let mut signed = context(false);
+        signed["evidence_registry"]["facts"] = json!([
+            {"evidence_id":"evf_drawdown","path":"/execution/outputs/max_drawdown/value","value":-0.09999999999999998,"source":"astock-compute","observed_at":null,"source_version_id":"program-v1","quality_blocking":false},
+            {"evidence_id":"evf_change","path":"/quote/change_pct","value":-3.5,"source":"tdx","observed_at":"2026-08-25T10:00:00+08:00","source_version_id":"quote-v1","quality_blocking":false},
+            {"evidence_id":"evf_code","path":"/quote/symbol","value":"000001","source":"master","observed_at":"2026-08-25T10:00:00+08:00","source_version_id":"master-v1","quality_blocking":false},
+            {"evidence_id":"evf_date","path":"/quote/date","value":"2026-08-25","source":"tdx","observed_at":"2026-08-25T10:00:00+08:00","source_version_id":"quote-v1","quality_blocking":false}
+        ]);
+        let result = verify(VerifyReportPayload {
+            report: "最大回撤 max_drawdown=-0.09999999999999998【E:evf_drawdown】\n\
+                     当日涨跌幅 -3.5%【E:evf_change】【E:evf_code】【E:evf_date】"
+                .into(),
+            context: signed,
+            task_spec: task(),
+        })
+        .unwrap();
+        let findings = result["findings"].as_array().unwrap();
+        assert!(
+            !findings.iter().any(|item| item
+                .as_str()
+                .unwrap()
+                .starts_with("numeric_claim_not_reproduced")),
+            "a signed figure must reproduce against signed evidence: {findings:?}"
+        );
+    }
+
+    /// A hyphen between two numbers stays a separator, not a sign.
+    #[test]
+    fn a_range_separator_is_not_read_as_a_negative_sign() {
+        assert!(!negative_sign_before("区间 20-30 元", "区间 20-".len()));
+        assert!(!negative_sign_before("0.5-0.8", "0.5-".len()));
+        // A sign after an operator, a space or at the start of a line is a sign.
+        assert!(negative_sign_before(
+            "max_drawdown=-0.1",
+            "max_drawdown=-".len()
+        ));
+        assert!(negative_sign_before("涨跌幅 -3.5%", "涨跌幅 -".len()));
+        assert!(negative_sign_before("-15", "-".len()));
+    }
+
+    /// An unsigned claim still fails against negative evidence, as before.
+    ///
+    /// The sign fix removes a false positive; it must not become a way for a claim
+    /// asserting a gain to be supported by evidence of a loss.
+    #[test]
+    fn an_unsigned_claim_is_not_supported_by_negative_evidence() {
+        let mut signed = context(false);
+        signed["evidence_registry"]["facts"] = json!([
+            {"evidence_id":"evf_change","path":"/quote/change_pct","value":-3.5,"source":"tdx","observed_at":"2026-08-25T10:00:00+08:00","source_version_id":"quote-v1","quality_blocking":false}
+        ]);
+        let result = verify(VerifyReportPayload {
+            report: "当日上涨 3.5%【E:evf_change】".into(),
+            context: signed,
+            task_spec: task(),
+        })
+        .unwrap();
         assert!(result["findings"]
             .as_array()
             .unwrap()

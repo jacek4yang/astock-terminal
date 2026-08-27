@@ -4,10 +4,12 @@
 //! tool execution and report publication policy. Financial effects are
 //! performed only through the GUI-independent Rust Engine.
 
+mod catalog;
 mod clarify;
 mod engine;
 mod error;
 mod events;
+mod finalize;
 mod intent;
 mod minimax;
 mod model;
@@ -20,10 +22,15 @@ mod session;
 mod store;
 mod tools;
 
+pub use catalog::{EvidenceCatalog, EvidenceQuery, MAX_CATALOG_ENTRIES, MAX_SEARCH_RESULTS};
 pub use clarify::{ClarificationAnswer, ClarificationOption, ClarificationRequest};
 pub use engine::EngineGateway;
 pub use error::{ProviderError, ProviderErrorKind, RuntimeError};
 pub use events::{AgentEvent, AgentPhase, VerificationFinding};
+pub use finalize::{
+    fingerprint, validation_repair, verification_repair, ExhaustionReason, FinalizationLedger,
+    RepairVerdict, MAX_REPAIR_TARGETS, MAX_REPORTED_PROBLEMS,
+};
 pub use intent::{ResearchDepth, UserIntent};
 pub use minimax::MinimaxProvider;
 pub use model::{
@@ -31,8 +38,8 @@ pub use model::{
 };
 pub use plan::{Plan, PlanMutation, PlanStep, PlanStepStatus};
 pub use render::{
-    contains_internal_identifier, render, EvidenceReference, RenderedClaim, RenderedNumber,
-    RenderedReport, RenderedSection,
+    contains_internal_identifier, render, verifier_line_claims, EvidenceReference, RenderedClaim,
+    RenderedNumber, RenderedReport, RenderedSection,
 };
 pub use report::{
     validate_draft, Claim, ClaimKind, DraftProblem, EvidenceDescriptor, NumericItem,
