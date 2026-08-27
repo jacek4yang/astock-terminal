@@ -202,7 +202,7 @@ pub fn render(
     }
 
     let markdown = render_markdown(draft, &sections, &references);
-    let verifier_markdown = render_verifier_markdown(draft);
+    let (verifier_markdown, _) = render_verifier_form(draft);
 
     RenderedReport {
         title: draft.title.clone(),
@@ -329,11 +329,30 @@ fn render_markdown(
 /// Canonical form for the verifier: every claim line carries its exact
 /// `【E:evf_…】` citations, which is what the deterministic verifier matches
 /// numbers against. Users never see this string.
-fn render_verifier_markdown(draft: &VerifiedReportDraft) -> String {
+///
+/// Returns the line index alongside the text. The verifier reports positional
+/// findings — `numeric_claim_without_evidence:line_7` — and a positional finding is
+/// useless for repair unless it can be turned back into a claim. Producing both
+/// from one traversal is what makes that mapping trustworthy: there is no second
+/// implementation of the layout to drift out of step.
+///
+/// Keys are 1-based line numbers, matching the verifier's `line_index + 1`.
+fn render_verifier_form(draft: &VerifiedReportDraft) -> (String, BTreeMap<usize, String>) {
     let mut out = String::new();
-    out.push_str(&format!("{}\n", draft.title));
+    let mut index = BTreeMap::new();
+    let mut line_number = 0usize;
+    let mut push = |out: &mut String, text: &str, claim: Option<&str>| {
+        line_number += 1;
+        out.push_str(text);
+        out.push('\n');
+        if let Some(claim) = claim {
+            index.insert(line_number, claim.to_owned());
+        }
+    };
+
+    push(&mut out, &draft.title, None);
     for section in &draft.sections {
-        out.push_str(&format!("{}\n", section.heading));
+        push(&mut out, &section.heading, None);
         for claim_id in &section.claim_ids {
             let Some(claim) = draft.claims.iter().find(|c| &c.id == claim_id) else {
                 continue;
@@ -357,11 +376,18 @@ fn render_verifier_markdown(draft: &VerifiedReportDraft) -> String {
             for id in &claim.evidence_ids {
                 line.push_str(&format!("【E:{id}】"));
             }
-            out.push_str(&line);
-            out.push('\n');
+            push(&mut out, &line, Some(&claim.id));
         }
     }
-    out
+    (out, index)
+}
+
+/// Which claim occupies each line of the verifier form.
+///
+/// Exposed so finalization can turn a positional verifier finding into a targeted
+/// claim repair instead of asking the model to rewrite the whole report.
+pub fn verifier_line_claims(draft: &VerifiedReportDraft) -> BTreeMap<usize, String> {
+    render_verifier_form(draft).1
 }
 
 /// Does this text leak a canonical identifier?

@@ -12,16 +12,22 @@ use uuid::Uuid;
 
 use astock_protocol::TaskSpec;
 
+use crate::catalog::{EvidenceCatalog, EvidenceQuery};
 use crate::error::{ProviderErrorKind, RuntimeError};
 use crate::events::{AgentEvent, AgentPhase, VerificationFinding};
+use crate::finalize::{
+    fingerprint, validation_repair, verification_repair, FinalizationLedger, RepairVerdict,
+};
 use crate::model::{Message, MessageRole, ModelChunk, ModelProvider, ModelRequest, ModelToolCall};
 use crate::prompt;
+use crate::render::{render, RenderedReport};
+use crate::report::{validate_draft, VerifiedReportDraft};
 use crate::session::{
     RuntimeSession, SessionMessageRole, SessionTaskState, MAX_MODEL_HISTORY_CHARS,
     MAX_MODEL_HISTORY_MESSAGES,
 };
 use crate::store::{AgentStore, EffectIntent, StoredCheckpoint};
-use crate::tools::{default_registry, ToolDefinition, ToolExecutor, ToolRegistry};
+use crate::tools::{default_registry, ToolDefinition, ToolExecutor, ToolHandler, ToolRegistry};
 
 const MAX_OBJECTIVE_CHARS: usize = 120_000;
 
@@ -175,7 +181,24 @@ impl RuntimeTask {
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub max_model_rounds: usize,
+    /// Rounds during which the model may still gather evidence.
+    ///
+    /// Separate from `max_model_rounds` because one budget cannot express "research
+    /// widely, then finalize". Once these are spent the runtime tells the model to
+    /// finalize with what it has, which is a bounded, honest report rather than a
+    /// task that hits the round ceiling with nothing published.
+    pub max_research_rounds: usize,
+    /// Total `submit_report` attempts, counting both contract rejections and
+    /// verifier refusals. Exhausting them fails closed; it never publishes.
+    pub max_finalization_attempts: usize,
     pub max_model_chunks_per_round: usize,
+    /// Safe replays of a provider turn that returned nothing at all.
+    ///
+    /// An empty turn commits nothing — no text reached the user and no tool call was
+    /// assembled — so re-requesting the identical round cannot duplicate an effect.
+    /// Counted separately from `max_model_rounds`, because a provider hiccup should
+    /// not consume the task's reasoning budget.
+    pub max_empty_turn_retries: usize,
     pub max_visible_chars_per_round: usize,
     pub max_tool_calls_per_round: usize,
     pub max_tool_argument_chars: usize,
@@ -186,7 +209,6 @@ pub struct RuntimeConfig {
     pub provider_connect_timeout: Duration,
     pub provider_idle_timeout: Duration,
     pub verification_timeout: Duration,
-    pub max_verification_revisions: usize,
     pub verify_reports: bool,
     pub event_channel_capacity: usize,
 }
@@ -194,8 +216,11 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            max_model_rounds: 16,
+            max_model_rounds: 24,
+            max_research_rounds: 18,
+            max_finalization_attempts: 4,
             max_model_chunks_per_round: 10_000,
+            max_empty_turn_retries: 2,
             max_visible_chars_per_round: 120_000,
             max_tool_calls_per_round: 32,
             max_tool_argument_chars: 256_000,
@@ -206,7 +231,6 @@ impl Default for RuntimeConfig {
             provider_connect_timeout: Duration::from_secs(90),
             provider_idle_timeout: Duration::from_secs(120),
             verification_timeout: Duration::from_secs(30),
-            max_verification_revisions: 2,
             verify_reports: true,
             event_channel_capacity: 256,
         }
@@ -398,7 +422,12 @@ impl AgentRuntime {
             .create_task(&task_id, &task)
             .await
             .map_err(RuntimeError::Store)?;
-        let mut state = RunState::new(task_id, sender, cancellation);
+        let mut state = RunState::new(
+            task_id,
+            sender,
+            cancellation,
+            self.config.max_finalization_attempts,
+        );
         let result = self.execute_loop(&task, &mut state).await;
         if let Err(error) = &result {
             let terminal = match error {
@@ -524,7 +553,6 @@ impl AgentRuntime {
         messages.extend(task.history.clone());
         messages.push(Message::text(MessageRole::User, task.objective.trim()));
         let mut evidence_contexts = Vec::<Value>::new();
-        let mut revision_count = 0usize;
 
         for round in 1..=self.config.max_model_rounds {
             self.ensure_active(state)?;
@@ -539,191 +567,56 @@ impl AgentRuntime {
             )
             .await?;
 
-            let request = ModelRequest {
-                model: selected_model.clone(),
-                messages: messages.clone(),
-                tools: self.tools.definitions(),
-                max_tokens: self.config.max_tokens,
-                temperature: self.config.temperature,
-            };
-            let effect_id = self
-                .begin_effect(
-                    state,
-                    "provider.stream",
-                    json!({
-                        "provider": self.provider.name(),
-                        "model": selected_model,
-                        "round": round,
-                        "message_count": request.messages.len(),
-                        "tool_count": request.tools.len(),
-                    }),
-                )
-                .await?;
-            let connection = tokio::select! {
-                _ = state.cancellation.cancelled() => {
-                    self.complete_effect(
-                        &effect_id,
-                        "failed",
-                        json!({"error": "cancelled during provider connection"}),
+            // One round, with bounded safe replay of an empty provider turn.
+            //
+            // A live simple-price task died on `model returned neither visible text
+            // nor a tool call` after ten successful tool calls. That turn committed
+            // nothing: no text was streamed to the user and no tool call was
+            // assembled, so re-issuing the identical request cannot repeat an
+            // effect. Each attempt opens a fresh connection, so a replay is also a
+            // reconnect. A provider *error* frame is not an empty turn — it is
+            // returned as a typed provider error before reaching this point — so a
+            // real fault is never silently retried as emptiness.
+            let mut empty_turns = 0usize;
+            let (text, calls) = loop {
+                let request = ModelRequest {
+                    model: selected_model.clone(),
+                    messages: messages.clone(),
+                    tools: self.tools.definitions(),
+                    max_tokens: self.config.max_tokens,
+                    temperature: self.config.temperature,
+                };
+                let effect_id = self
+                    .begin_effect(
+                        state,
+                        "provider.stream",
+                        json!({
+                            "provider": self.provider.name(),
+                            "model": selected_model,
+                            "round": round,
+                            "message_count": request.messages.len(),
+                            "tool_count": request.tools.len(),
+                        }),
                     )
                     .await?;
-                    return Err(RuntimeError::Cancelled);
-                }
-                result = tokio::time::timeout(
-                    self.config.provider_connect_timeout,
-                    self.provider.stream(request),
-                ) => result,
-            };
-            let mut stream = match connection {
-                Ok(Ok(stream)) => stream,
-                Ok(Err(error)) => {
-                    self.complete_effect(&effect_id, "failed", json!({"error": error.to_string()}))
-                        .await?;
-                    return Err(error.into());
-                }
-                Err(_) => {
-                    self.complete_effect(
-                        &effect_id,
-                        "failed",
-                        json!({"error": "provider connection timed out"}),
-                    )
-                    .await?;
-                    return Err(RuntimeError::Provider(crate::ProviderError::new(
-                        ProviderErrorKind::Network,
-                        "provider connection timed out",
-                        true,
-                    )));
-                }
-            };
-
-            let mut text = String::new();
-            let mut visible_chars = 0usize;
-            let mut chunk_count = 0usize;
-            let mut partial_calls = BTreeMap::<u32, PartialToolCall>::new();
-            loop {
-                self.ensure_active(state)?;
-                let next = tokio::select! {
+                let connection = tokio::select! {
                     _ = state.cancellation.cancelled() => {
                         self.complete_effect(
                             &effect_id,
                             "failed",
-                            json!({"error": "cancelled during provider stream"}),
+                            json!({"error": "cancelled during provider connection"}),
                         )
                         .await?;
                         return Err(RuntimeError::Cancelled);
                     }
                     result = tokio::time::timeout(
-                        self.config.provider_idle_timeout,
-                        stream.next(),
+                        self.config.provider_connect_timeout,
+                        self.provider.stream(request),
                     ) => result,
                 };
-                match next {
-                    Ok(Some(Ok(ModelChunk::TextDelta(delta)))) => {
-                        chunk_count = chunk_count.saturating_add(1);
-                        if chunk_count > self.config.max_model_chunks_per_round {
-                            let error = self
-                                .fail_malformed_stream(
-                                    &effect_id,
-                                    format!(
-                                        "model round exceeded {} streamed chunks",
-                                        self.config.max_model_chunks_per_round
-                                    ),
-                                )
-                                .await?;
-                            return Err(error);
-                        }
-                        if !delta.is_empty() {
-                            visible_chars = visible_chars.saturating_add(delta.chars().count());
-                            if visible_chars > self.config.max_visible_chars_per_round {
-                                let error = self
-                                    .fail_malformed_stream(
-                                        &effect_id,
-                                        format!(
-                                            "model round exceeded {} visible characters",
-                                            self.config.max_visible_chars_per_round
-                                        ),
-                                    )
-                                    .await?;
-                                return Err(error);
-                            }
-                            text.push_str(&delta);
-                            self.record(state, AgentEvent::TextDelta { text: delta })
-                                .await?;
-                        }
-                    }
-                    Ok(Some(Ok(ModelChunk::ToolCallDelta {
-                        index,
-                        id,
-                        name,
-                        arguments,
-                    }))) => {
-                        chunk_count = chunk_count.saturating_add(1);
-                        if chunk_count > self.config.max_model_chunks_per_round {
-                            let error = self
-                                .fail_malformed_stream(
-                                    &effect_id,
-                                    format!(
-                                        "model round exceeded {} streamed chunks",
-                                        self.config.max_model_chunks_per_round
-                                    ),
-                                )
-                                .await?;
-                            return Err(error);
-                        }
-                        if !partial_calls.contains_key(&index)
-                            && partial_calls.len() >= self.config.max_tool_calls_per_round
-                        {
-                            let error = self
-                                .fail_malformed_stream(
-                                    &effect_id,
-                                    format!(
-                                        "model round exceeded {} tool calls",
-                                        self.config.max_tool_calls_per_round
-                                    ),
-                                )
-                                .await?;
-                            return Err(error);
-                        }
-                        if let Err(message) = validate_tool_fragment(
-                            id.as_deref(),
-                            name.as_deref(),
-                            arguments.as_deref(),
-                            self.config.max_tool_argument_chars,
-                        ) {
-                            let error = self.fail_malformed_stream(&effect_id, message).await?;
-                            return Err(error);
-                        }
-                        let partial = partial_calls.entry(index).or_default();
-                        partial.merge(id, name, arguments);
-                        if partial.argument_chars > self.config.max_tool_argument_chars {
-                            let error = self
-                                .fail_malformed_stream(
-                                    &effect_id,
-                                    format!(
-                                        "tool call arguments exceeded {} characters",
-                                        self.config.max_tool_argument_chars
-                                    ),
-                                )
-                                .await?;
-                            return Err(error);
-                        }
-                    }
-                    Ok(Some(Ok(ModelChunk::Finished { .. }))) => {
-                        chunk_count = chunk_count.saturating_add(1);
-                        if chunk_count > self.config.max_model_chunks_per_round {
-                            let error = self
-                                .fail_malformed_stream(
-                                    &effect_id,
-                                    format!(
-                                        "model round exceeded {} streamed chunks",
-                                        self.config.max_model_chunks_per_round
-                                    ),
-                                )
-                                .await?;
-                            return Err(error);
-                        }
-                    }
-                    Ok(Some(Err(error))) => {
+                let mut stream = match connection {
+                    Ok(Ok(stream)) => stream,
+                    Ok(Err(error)) => {
                         self.complete_effect(
                             &effect_id,
                             "failed",
@@ -732,50 +625,239 @@ impl AgentRuntime {
                         .await?;
                         return Err(error.into());
                     }
-                    Ok(None) => break,
                     Err(_) => {
                         self.complete_effect(
                             &effect_id,
                             "failed",
-                            json!({"error": "provider stream idle timeout"}),
+                            json!({"error": "provider connection timed out"}),
                         )
                         .await?;
                         return Err(RuntimeError::Provider(crate::ProviderError::new(
                             ProviderErrorKind::Network,
-                            "provider stream idle timeout",
+                            "provider connection timed out",
                             true,
                         )));
                     }
+                };
+
+                let mut text = String::new();
+                let mut visible_chars = 0usize;
+                let mut chunk_count = 0usize;
+                let mut partial_calls = BTreeMap::<u32, PartialToolCall>::new();
+                loop {
+                    self.ensure_active(state)?;
+                    let next = tokio::select! {
+                        _ = state.cancellation.cancelled() => {
+                            self.complete_effect(
+                                &effect_id,
+                                "failed",
+                                json!({"error": "cancelled during provider stream"}),
+                            )
+                            .await?;
+                            return Err(RuntimeError::Cancelled);
+                        }
+                        result = tokio::time::timeout(
+                            self.config.provider_idle_timeout,
+                            stream.next(),
+                        ) => result,
+                    };
+                    match next {
+                        Ok(Some(Ok(ModelChunk::TextDelta(delta)))) => {
+                            chunk_count = chunk_count.saturating_add(1);
+                            if chunk_count > self.config.max_model_chunks_per_round {
+                                let error = self
+                                    .fail_malformed_stream(
+                                        &effect_id,
+                                        format!(
+                                            "model round exceeded {} streamed chunks",
+                                            self.config.max_model_chunks_per_round
+                                        ),
+                                    )
+                                    .await?;
+                                return Err(error);
+                            }
+                            if !delta.is_empty() {
+                                visible_chars = visible_chars.saturating_add(delta.chars().count());
+                                if visible_chars > self.config.max_visible_chars_per_round {
+                                    let error = self
+                                        .fail_malformed_stream(
+                                            &effect_id,
+                                            format!(
+                                                "model round exceeded {} visible characters",
+                                                self.config.max_visible_chars_per_round
+                                            ),
+                                        )
+                                        .await?;
+                                    return Err(error);
+                                }
+                                text.push_str(&delta);
+                                self.record(state, AgentEvent::TextDelta { text: delta })
+                                    .await?;
+                            }
+                        }
+                        Ok(Some(Ok(ModelChunk::ToolCallDelta {
+                            index,
+                            id,
+                            name,
+                            arguments,
+                        }))) => {
+                            chunk_count = chunk_count.saturating_add(1);
+                            if chunk_count > self.config.max_model_chunks_per_round {
+                                let error = self
+                                    .fail_malformed_stream(
+                                        &effect_id,
+                                        format!(
+                                            "model round exceeded {} streamed chunks",
+                                            self.config.max_model_chunks_per_round
+                                        ),
+                                    )
+                                    .await?;
+                                return Err(error);
+                            }
+                            if !partial_calls.contains_key(&index)
+                                && partial_calls.len() >= self.config.max_tool_calls_per_round
+                            {
+                                let error = self
+                                    .fail_malformed_stream(
+                                        &effect_id,
+                                        format!(
+                                            "model round exceeded {} tool calls",
+                                            self.config.max_tool_calls_per_round
+                                        ),
+                                    )
+                                    .await?;
+                                return Err(error);
+                            }
+                            if let Err(message) = validate_tool_fragment(
+                                id.as_deref(),
+                                name.as_deref(),
+                                arguments.as_deref(),
+                                self.config.max_tool_argument_chars,
+                            ) {
+                                let error = self.fail_malformed_stream(&effect_id, message).await?;
+                                return Err(error);
+                            }
+                            let partial = partial_calls.entry(index).or_default();
+                            partial.merge(id, name, arguments);
+                            if partial.argument_chars > self.config.max_tool_argument_chars {
+                                let error = self
+                                    .fail_malformed_stream(
+                                        &effect_id,
+                                        format!(
+                                            "tool call arguments exceeded {} characters",
+                                            self.config.max_tool_argument_chars
+                                        ),
+                                    )
+                                    .await?;
+                                return Err(error);
+                            }
+                        }
+                        Ok(Some(Ok(ModelChunk::Finished { .. }))) => {
+                            chunk_count = chunk_count.saturating_add(1);
+                            if chunk_count > self.config.max_model_chunks_per_round {
+                                let error = self
+                                    .fail_malformed_stream(
+                                        &effect_id,
+                                        format!(
+                                            "model round exceeded {} streamed chunks",
+                                            self.config.max_model_chunks_per_round
+                                        ),
+                                    )
+                                    .await?;
+                                return Err(error);
+                            }
+                        }
+                        Ok(Some(Err(error))) => {
+                            self.complete_effect(
+                                &effect_id,
+                                "failed",
+                                json!({"error": error.to_string()}),
+                            )
+                            .await?;
+                            return Err(error.into());
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            self.complete_effect(
+                                &effect_id,
+                                "failed",
+                                json!({"error": "provider stream idle timeout"}),
+                            )
+                            .await?;
+                            return Err(RuntimeError::Provider(crate::ProviderError::new(
+                                ProviderErrorKind::Network,
+                                "provider stream idle timeout",
+                                true,
+                            )));
+                        }
+                    }
                 }
-            }
-            let tool_call_count = partial_calls.len();
-            let calls = match partial_calls
-                .into_iter()
-                .map(|(index, call)| call.finish(index))
-                .collect::<Result<Vec<_>, _>>()
-            {
-                Ok(calls) => calls,
-                Err(error) => {
-                    self.complete_effect(&effect_id, "failed", json!({"error": error.to_string()}))
+                let tool_call_count = partial_calls.len();
+                let calls = match partial_calls
+                    .into_iter()
+                    .map(|(index, call)| call.finish(index))
+                    .collect::<Result<Vec<_>, _>>()
+                {
+                    Ok(calls) => calls,
+                    Err(error) => {
+                        self.complete_effect(
+                            &effect_id,
+                            "failed",
+                            json!({"error": error.to_string()}),
+                        )
                         .await?;
-                    return Err(error);
+                        return Err(error);
+                    }
+                };
+                if calls.is_empty() && text.trim().is_empty() {
+                    self.complete_effect(
+                        &effect_id,
+                        "failed",
+                        json!({"error": "model returned neither visible text nor a tool call"}),
+                    )
+                    .await?;
+                    empty_turns = empty_turns.saturating_add(1);
+                    let exhausted = empty_turns > self.config.max_empty_turn_retries;
+                    self.record(
+                        state,
+                        AgentEvent::ModelTurnEmpty {
+                            round,
+                            attempt: empty_turns,
+                            action: if exhausted {
+                                "exhausted".into()
+                            } else if empty_turns == 1 {
+                                "replay".into()
+                            } else {
+                                "replay_with_instruction".into()
+                            },
+                        },
+                    )
+                    .await?;
+                    if exhausted {
+                        return Err(RuntimeError::EmptyModelTurn);
+                    }
+                    if empty_turns > 1 {
+                        // An identical replay already failed once, so the emptiness is
+                        // unlikely to be a transient stream fault. Name the two things
+                        // that constitute progress; anything vaguer invites another
+                        // empty turn.
+                        messages.push(Message::text(
+                            MessageRole::System,
+                            "Your previous turn returned nothing. Respond with exactly one of: a \
+                         tool call that advances the research, or submit_report with the claims \
+                         the evidence already supports. Do not reply with an empty turn.",
+                        ));
+                    }
+                    continue;
                 }
-            };
-            if calls.is_empty() && text.trim().is_empty() {
                 self.complete_effect(
                     &effect_id,
-                    "failed",
-                    json!({"error": "model returned neither visible text nor a tool call"}),
+                    "succeeded",
+                    json!({"visible_chars": visible_chars, "tool_calls": tool_call_count}),
                 )
                 .await?;
-                return Err(RuntimeError::EmptyModelTurn);
-            }
-            self.complete_effect(
-                &effect_id,
-                "succeeded",
-                json!({"visible_chars": visible_chars, "tool_calls": tool_call_count}),
-            )
-            .await?;
+                break (text, calls);
+            };
             if !calls.is_empty() {
                 state.phase = AgentPhase::AwaitingTools;
                 messages.push(Message {
@@ -784,10 +866,36 @@ impl AgentRuntime {
                     tool_calls: calls.clone(),
                     tool_call_id: None,
                 });
-                let tool_messages = self
-                    .execute_tools(state, calls, &mut evidence_contexts)
+                let batch = self
+                    .execute_tools(task, state, calls, &mut evidence_contexts)
                     .await?;
-                messages.extend(tool_messages);
+                messages.extend(batch.messages);
+                // Publication is the only way out of the loop that produces a
+                // report, and it happens only after the independent verifier has
+                // passed. Everything else continues or fails closed.
+                if let Some(outcome) = batch.published {
+                    return Ok(outcome);
+                }
+                if let Some(reason) = batch.finalization_exhausted {
+                    return Err(RuntimeError::VerificationFailed(reason));
+                }
+                // Research is bounded separately from the round ceiling, so a task
+                // that keeps gathering is told to finalize rather than dying at the
+                // limit with nothing published.
+                if round
+                    == self
+                        .config
+                        .max_research_rounds
+                        .min(self.config.max_model_rounds)
+                {
+                    messages.push(Message::text(
+                        MessageRole::System,
+                        "Research budget for this task is spent. Do not call any further \
+                         retrieval tool. Use search_evidence if you need identifiers, then call \
+                         submit_report with what the evidence supports. State remaining gaps as \
+                         limitations or as claims of kind=unknown rather than asserting them.",
+                    ));
+                }
                 continue;
             }
 
@@ -795,103 +903,231 @@ impl AgentRuntime {
                 return self.complete_run(state, text).await;
             }
 
-            state.phase = AgentPhase::Verifying;
-            self.record(state, AgentEvent::VerificationStarted).await?;
-            let verification_spec = task.verification_spec();
-            let verification_context = json!({
-                "task_spec": verification_spec,
-                "tool_results": evidence_contexts,
-            });
-            let verification_effect = self
-                .begin_effect(
-                    state,
-                    "report.verify",
-                    json!({"report_chars": text.chars().count()}),
-                )
-                .await?;
-            let verification = tokio::time::timeout(
-                self.config.verification_timeout,
-                self.executor.execute(
-                    "research.agent_report_verify",
-                    json!({
-                        "report": text,
-                        "context": verification_context,
-                        "task_spec": verification_spec,
-                    }),
-                    state.cancellation.child_token(),
-                ),
-            )
-            .await;
-            let verification = match verification {
-                Ok(Ok(result)) => result,
-                Ok(Err(error)) => {
-                    self.complete_effect(&verification_effect, "failed", json!({"error": error}))
-                        .await?;
-                    return Err(RuntimeError::VerificationFailed(error));
-                }
-                Err(_) => {
-                    self.complete_effect(
-                        &verification_effect,
-                        "failed",
-                        json!({"error": "verification timeout"}),
-                    )
-                    .await?;
-                    return Err(RuntimeError::VerificationFailed(
-                        "deterministic verification timed out".into(),
-                    ));
-                }
-            };
-            self.complete_effect(&verification_effect, "succeeded", verification.clone())
-                .await?;
-            if verification.get("passed").and_then(Value::as_bool) == Some(true) {
-                return self.complete_run(state, text).await;
+            // A text-only turn is not a publication.
+            //
+            // Previously it was: the model's free-form Markdown went straight to
+            // the verifier, which forced the model to hand-format `【E:evf_…】`
+            // citations into investor-facing prose — leaking machine identity into
+            // the product, and leaving provenance entirely to its formatting
+            // discipline. Measured live, that path ended with 41 uncited figures
+            // and 82 unreproducible ones and never published. Publication now has
+            // exactly one entrance, `submit_report`, so a report cannot exist
+            // without typed provenance for every number in it.
+            let verdict = state.finalization.record_rejection(format!(
+                "free-form-turn:{}",
+                text.chars().take(512).collect::<String>()
+            ));
+            if verdict.is_exhausted() {
+                return Err(RuntimeError::VerificationFailed(
+                    "the report was never submitted through the structured contract".into(),
+                ));
             }
+            state.phase = AgentPhase::Reviewing;
+            messages.push(Message::text(MessageRole::Assistant, text));
+            messages.push(Message::text(
+                MessageRole::System,
+                "That answer was not published: prose is not a publishable report. Call \
+                 submit_report with typed claims. Use search_evidence for canonical identifiers, \
+                 give every material number a provenance, and state what the evidence does not \
+                 support as a limitation or as kind=unknown.",
+            ));
+            continue;
+        }
+        Err(RuntimeError::ModelRoundLimit(self.config.max_model_rounds))
+    }
 
-            let findings = verification
-                .get("findings")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|value| value.as_str().map(str::to_owned))
-                .collect::<Vec<_>>();
-            for code in &findings {
+    /// Validate, render, verify and publish one submitted draft.
+    ///
+    /// The order is the contract: nothing is rendered before it validates, and
+    /// nothing is published before the independent verifier passes on the canonical
+    /// form. A failure at either stage produces a targeted repair response, never a
+    /// publication and never a relaxed check.
+    async fn finalize_report(
+        &self,
+        task: &RuntimeTask,
+        state: &mut RunState,
+        arguments: Value,
+        evidence_contexts: &[Value],
+    ) -> Result<Finalization, RuntimeError> {
+        let draft: VerifiedReportDraft = match serde_json::from_value(arguments) {
+            Ok(draft) => draft,
+            Err(error) => {
+                // A shape error is one bad call, like any other malformed tool
+                // argument, and the model is told precisely what failed to decode.
+                return Ok(Finalization::Repair(json!({
+                    "ok": false,
+                    "stage": "decode",
+                    "error": error.to_string(),
+                    "instruction": "The draft did not match the submit_report schema. Fix the \
+                                    reported field and resubmit the complete draft.",
+                })));
+            }
+        };
+
+        let task_symbols: BTreeSet<String> = task.symbol.iter().cloned().collect();
+        let problems = validate_draft(&draft, state.catalog.descriptors(), &task_symbols);
+        if !problems.is_empty() {
+            let verdict = state.finalization.record_rejection(fingerprint(&draft));
+            for problem in problems.iter().take(crate::finalize::MAX_REPORTED_PROBLEMS) {
                 self.record(
                     state,
                     AgentEvent::VerificationFinding {
                         finding: VerificationFinding {
-                            code: code.clone(),
-                            message: format!("确定性报告校验未通过：{code}"),
+                            code: problem.code().to_owned(),
+                            message: format!(
+                                "报告契约校验未通过：{}{}",
+                                problem.code(),
+                                problem
+                                    .claim_id()
+                                    .map(|id| format!("（结论 {id}）"))
+                                    .unwrap_or_default()
+                            ),
                             blocking: true,
                         },
                     },
                 )
                 .await?;
             }
-            if revision_count >= self.config.max_verification_revisions {
-                return Err(RuntimeError::VerificationFailed(findings.join(", ")));
-            }
-            revision_count += 1;
-            state.phase = AgentPhase::Reviewing;
-            messages.push(Message::text(MessageRole::Assistant, text));
-            messages.push(Message::text(
-                MessageRole::System,
-                format!(
-                    "独立确定性校验阻止发布。仅依据已有工具证据修订报告，不得发明数字。修复以下问题后重新提交完整报告：{}",
-                    findings.join("；")
-                ),
-            ));
+            let response = validation_repair(&problems, verdict);
+            return Ok(match verdict {
+                RepairVerdict::Exhausted { .. } => Finalization::Exhausted {
+                    response,
+                    reason: format!(
+                        "structured report validation failed after {} attempts",
+                        state.finalization.attempts()
+                    ),
+                },
+                RepairVerdict::Retry { .. } => Finalization::Repair(response),
+            });
         }
-        Err(RuntimeError::ModelRoundLimit(self.config.max_model_rounds))
+
+        let rendered = render(&draft, state.catalog.descriptors());
+        state.phase = AgentPhase::Verifying;
+        self.record(state, AgentEvent::VerificationStarted).await?;
+        let verification = self
+            .verify_canonical_report(task, state, &rendered, evidence_contexts)
+            .await?;
+
+        if verification.get("passed").and_then(Value::as_bool) == Some(true) {
+            // The user-facing string is the rendered prose, never the canonical
+            // form: a published report must not contain an `evf_` identifier.
+            debug_assert!(
+                !crate::render::contains_internal_identifier(&rendered.markdown),
+                "the renderer must not leak a canonical identifier"
+            );
+            return Ok(Finalization::Published(Box::new(rendered)));
+        }
+
+        let findings: Vec<String> = verification
+            .get("findings")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for code in findings.iter().take(crate::finalize::MAX_REPORTED_PROBLEMS) {
+            self.record(
+                state,
+                AgentEvent::VerificationFinding {
+                    finding: VerificationFinding {
+                        code: code.clone(),
+                        message: format!("独立确定性校验阻止发布：{code}"),
+                        blocking: true,
+                    },
+                },
+            )
+            .await?;
+        }
+        let verdict = state.finalization.record_rejection(fingerprint(&draft));
+        let response = verification_repair(
+            &findings,
+            &crate::render::verifier_line_claims(&draft),
+            verdict,
+        );
+        Ok(match verdict {
+            RepairVerdict::Exhausted { .. } => Finalization::Exhausted {
+                response,
+                reason: findings.join(", "),
+            },
+            RepairVerdict::Retry { .. } => Finalization::Repair(response),
+        })
+    }
+
+    /// Run the independent verifier over the canonical form of a rendered report.
+    async fn verify_canonical_report(
+        &self,
+        task: &RuntimeTask,
+        state: &mut RunState,
+        rendered: &RenderedReport,
+        evidence_contexts: &[Value],
+    ) -> Result<Value, RuntimeError> {
+        let verification_spec = task.verification_spec();
+        let verification_context = json!({
+            "task_spec": verification_spec,
+            "tool_results": evidence_contexts,
+        });
+        let effect_id = self
+            .begin_effect(
+                state,
+                "report.verify",
+                json!({
+                    "report_chars": rendered.verifier_markdown.chars().count(),
+                    "claims": rendered.sections.iter().map(|s| s.claims.len()).sum::<usize>(),
+                    "references": rendered.references.len(),
+                    "contract": "structured",
+                }),
+            )
+            .await?;
+        let verification = tokio::time::timeout(
+            self.config.verification_timeout,
+            self.executor.execute(
+                "research.agent_report_verify",
+                json!({
+                    "report": rendered.verifier_markdown,
+                    "context": verification_context,
+                    "task_spec": verification_spec,
+                }),
+                state.cancellation.child_token(),
+            ),
+        )
+        .await;
+        match verification {
+            Ok(Ok(result)) => {
+                self.complete_effect(&effect_id, "succeeded", result.clone())
+                    .await?;
+                Ok(result)
+            }
+            Ok(Err(error)) => {
+                self.complete_effect(&effect_id, "failed", json!({"error": error}))
+                    .await?;
+                Err(RuntimeError::VerificationFailed(error))
+            }
+            Err(_) => {
+                self.complete_effect(
+                    &effect_id,
+                    "failed",
+                    json!({"error": "verification timeout"}),
+                )
+                .await?;
+                Err(RuntimeError::VerificationFailed(
+                    "deterministic verification timed out".into(),
+                ))
+            }
+        }
     }
 
     async fn execute_tools(
         &self,
+        task: &RuntimeTask,
         state: &mut RunState,
         calls: Vec<ModelToolCall>,
         evidence_contexts: &mut Vec<Value>,
-    ) -> Result<Vec<Message>, RuntimeError> {
+    ) -> Result<ToolBatch, RuntimeError> {
         let mut prepared = Vec::with_capacity(calls.len());
+        let mut runtime_calls: Vec<PreparedTool> = Vec::new();
         let mut rejected: Vec<CompletedTool> = Vec::new();
         for call in calls {
             // An unknown tool name stays fatal. The registry is closed, so a
@@ -986,6 +1222,20 @@ impl AgentRuntime {
             });
         }
 
+        // Runtime-served tools act on state this batch may still be changing, so
+        // they run after the Engine calls rather than alongside them: a
+        // `search_evidence` in the same round as a retrieval must see that
+        // retrieval's evidence, and `submit_report` must validate against the
+        // complete catalog.
+        let mut index = 0;
+        while index < prepared.len() {
+            if prepared[index].definition.handler == ToolHandler::Runtime {
+                runtime_calls.push(prepared.remove(index));
+            } else {
+                index += 1;
+            }
+        }
+
         let executor = self.executor.clone();
         let cancellation = state.cancellation.clone();
         let max_parallel = self.config.max_parallel_tools.max(1);
@@ -1045,6 +1295,17 @@ impl AgentRuntime {
                     let evidence_ids = evidence_ids(&value);
                     self.complete_effect(&prepared.effect_id, "succeeded", value.clone())
                         .await?;
+                    // The catalog is built from the durable result, not from the
+                    // bounded projection the model sees, so a truncated context
+                    // never means lost provenance.
+                    state.catalog.ingest(
+                        &value,
+                        prepared
+                            .arguments
+                            .get("symbol")
+                            .and_then(Value::as_str)
+                            .or(task.symbol.as_deref()),
+                    );
                     self.record(
                         state,
                         AgentEvent::ToolCompleted {
@@ -1105,10 +1366,127 @@ impl AgentRuntime {
             }
         }
         completed.sort_by_key(|item| item.index);
-        completed
+        let mut messages = completed
             .into_iter()
             .map(CompletedTool::into_message)
-            .collect()
+            .collect::<Result<Vec<Message>, RuntimeError>>()?;
+
+        // Runtime-served tools, in call order for determinism.
+        runtime_calls.sort_by_key(|prepared| prepared.call.index);
+        let mut published = None;
+        let mut finalization_exhausted = None;
+        for prepared in runtime_calls {
+            self.ensure_active(state)?;
+            let completed = match prepared.definition.name.as_str() {
+                "search_evidence" => {
+                    let response =
+                        match serde_json::from_value::<EvidenceQuery>(prepared.arguments.clone()) {
+                            Ok(query) => state.catalog.search(&query),
+                            Err(error) => json!({
+                                "ok": false,
+                                "error": error.to_string(),
+                                "instruction": "Correct the search arguments and try again.",
+                            }),
+                        };
+                    self.complete_effect(&prepared.effect_id, "succeeded", response.clone())
+                        .await?;
+                    self.record(
+                        state,
+                        AgentEvent::ToolCompleted {
+                            call_id: prepared.call.id.clone(),
+                            tool: prepared.call.name.clone(),
+                            evidence_ids: Vec::new(),
+                        },
+                    )
+                    .await?;
+                    CompletedTool::runtime(prepared.call, response)
+                }
+                "submit_report" => {
+                    let outcome = self
+                        .finalize_report(task, state, prepared.arguments.clone(), evidence_contexts)
+                        .await?;
+                    match outcome {
+                        Finalization::Published(rendered) => {
+                            self.complete_effect(
+                                &prepared.effect_id,
+                                "succeeded",
+                                json!({"published": true}),
+                            )
+                            .await?;
+                            self.record(
+                                state,
+                                AgentEvent::ToolCompleted {
+                                    call_id: prepared.call.id.clone(),
+                                    tool: prepared.call.name.clone(),
+                                    evidence_ids: rendered
+                                        .references
+                                        .iter()
+                                        .map(|reference| reference.internal_id.clone())
+                                        .collect(),
+                                },
+                            )
+                            .await?;
+                            published =
+                                Some(self.complete_run(state, rendered.markdown.clone()).await?);
+                            break;
+                        }
+                        Finalization::Repair(response) => {
+                            self.complete_effect(
+                                &prepared.effect_id,
+                                "failed",
+                                json!({"published": false}),
+                            )
+                            .await?;
+                            self.record(
+                                state,
+                                AgentEvent::ToolFailed {
+                                    call_id: prepared.call.id.clone(),
+                                    tool: prepared.call.name.clone(),
+                                    message: "报告未通过发布前校验，已返回结构化修复指引".into(),
+                                    retryable: true,
+                                },
+                            )
+                            .await?;
+                            CompletedTool::runtime(prepared.call, response)
+                        }
+                        Finalization::Exhausted { response, reason } => {
+                            self.complete_effect(
+                                &prepared.effect_id,
+                                "failed",
+                                json!({"published": false, "exhausted": true}),
+                            )
+                            .await?;
+                            self.record(
+                                state,
+                                AgentEvent::ToolFailed {
+                                    call_id: prepared.call.id.clone(),
+                                    tool: prepared.call.name.clone(),
+                                    message: "报告发布预算已用尽，拒绝发布".into(),
+                                    retryable: false,
+                                },
+                            )
+                            .await?;
+                            finalization_exhausted = Some(reason);
+                            CompletedTool::runtime(prepared.call, response)
+                        }
+                    }
+                }
+                other => {
+                    // A Runtime handler is required for every Runtime-served tool.
+                    // Reaching here means the registry advertises a capability the
+                    // runtime cannot serve, which is a configuration defect, not a
+                    // model error — and exactly the state this change repaired.
+                    return Err(RuntimeError::UnknownTool(other.to_owned()));
+                }
+            };
+            messages.push(completed.into_message()?);
+        }
+
+        Ok(ToolBatch {
+            messages,
+            published,
+            finalization_exhausted,
+        })
     }
 
     async fn complete_run(
@@ -1243,6 +1621,12 @@ fn apply_session_event(session: &mut RuntimeSession, event: &AgentEvent) {
             AgentEvent::ModelStarted { round, .. } => {
                 task.phase = AgentPhase::Reasoning;
                 task.model_round = *round;
+            }
+            // An empty turn is being replayed, so the task is still reasoning at
+            // the same round. Advancing or rewinding the phase here would misreport
+            // a recovered hiccup as progress or as a fault.
+            AgentEvent::ModelTurnEmpty { .. } => {
+                task.phase = AgentPhase::Reasoning;
             }
             AgentEvent::ToolScheduled { .. } | AgentEvent::ToolStarted { .. } => {
                 task.phase = AgentPhase::AwaitingTools;
@@ -1392,6 +1776,12 @@ struct RunState {
     model_round: usize,
     completed_tool_ids: Vec<String>,
     evidence_ids: Vec<String>,
+    /// Canonical evidence the task has seen, with the metadata a citation needs.
+    ///
+    /// Durable task state, not model context: the model reaches it only through
+    /// bounded `search_evidence` queries.
+    catalog: EvidenceCatalog,
+    finalization: FinalizationLedger,
     sender: mpsc::Sender<AgentEvent>,
     cancellation: CancellationToken,
 }
@@ -1401,6 +1791,7 @@ impl RunState {
         task_id: String,
         sender: mpsc::Sender<AgentEvent>,
         cancellation: CancellationToken,
+        max_finalization_attempts: usize,
     ) -> Self {
         Self {
             task_id,
@@ -1409,6 +1800,8 @@ impl RunState {
             model_round: 0,
             completed_tool_ids: Vec::new(),
             evidence_ids: Vec::new(),
+            catalog: EvidenceCatalog::default(),
+            finalization: FinalizationLedger::new(max_finalization_attempts),
             sender,
             cancellation,
         }
@@ -1510,6 +1903,29 @@ struct PreparedTool {
     effect_id: String,
 }
 
+/// What one batch of tool calls produced.
+struct ToolBatch {
+    /// One tool result message per call the model made, in call order.
+    messages: Vec<Message>,
+    /// Set when `submit_report` validated, rendered and passed the independent
+    /// verifier. The only path to a published report.
+    published: Option<RunOutcome>,
+    /// Set when finalization ran out of attempts. The task fails closed with this
+    /// reason; it is never converted into a publication.
+    finalization_exhausted: Option<String>,
+}
+
+/// Result of one `submit_report` call.
+enum Finalization {
+    /// Validated, rendered and verified. Boxed because a rendered report is large
+    /// relative to the other variants.
+    Published(Box<RenderedReport>),
+    /// Refused, with a targeted repair response for the model.
+    Repair(Value),
+    /// Refused, and no attempts remain.
+    Exhausted { response: Value, reason: String },
+}
+
 struct CompletedTool {
     index: u32,
     call_id: String,
@@ -1601,6 +2017,19 @@ impl CompletedTool {
             index: call.index,
             call_id: call.id,
             content: json!({"ok": false, "error": message}),
+        }
+    }
+
+    /// A Runtime-served result, passed through as composed.
+    ///
+    /// Runtime responses are already bounded by construction — a search caps its
+    /// rows, a repair response caps its problems — so they are not re-bounded here;
+    /// doing so would truncate the very instructions the model must act on.
+    fn runtime(call: ModelToolCall, content: Value) -> Self {
+        Self {
+            index: call.index,
+            call_id: call.id,
+            content,
         }
     }
 

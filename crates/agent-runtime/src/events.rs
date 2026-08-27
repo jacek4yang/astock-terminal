@@ -88,6 +88,18 @@ pub enum AgentEvent {
         model: String,
         round: usize,
     },
+    /// The provider returned a turn carrying neither visible text nor a tool call.
+    ///
+    /// Recorded rather than inferred from a failure, because the recovery is
+    /// bounded and a reader needs to see how many replays a task consumed. An empty
+    /// turn commits nothing, so `action` distinguishes a safe replay from the point
+    /// where the runtime gave up.
+    ModelTurnEmpty {
+        round: usize,
+        attempt: usize,
+        /// `replay`, `replay_with_instruction` or `exhausted`.
+        action: String,
+    },
     TextDelta {
         text: String,
     },
@@ -142,6 +154,7 @@ impl AgentEvent {
             Self::ClarificationRequested { .. } => "clarification_requested",
             Self::ClarificationResolved { .. } => "clarification_resolved",
             Self::ModelStarted { .. } => "model_started",
+            Self::ModelTurnEmpty { .. } => "model_turn_empty",
             Self::TextDelta { .. } => "text_delta",
             Self::ToolScheduled { .. } => "tool_scheduled",
             Self::ToolStarted { .. } => "tool_started",

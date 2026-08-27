@@ -211,14 +211,63 @@ fn tool_round() -> Vec<Result<ModelChunk, ProviderError>> {
     ]
 }
 
-fn report_round() -> Vec<Result<ModelChunk, ProviderError>> {
+/// The model asks for canonical identifiers before citing anything.
+fn search_round() -> Vec<Result<ModelChunk, ProviderError>> {
     vec![
-        Ok(ModelChunk::TextDelta(
-            "【事实】紫金矿业现价为21.5元【E:evf_price】，数据时间为2026-08-25【E:evf_time】。\n【未知】单一行情快照不足以支持完整投资结论，仍需基本面、公告和反方证据。"
-                .into(),
-        )),
+        Ok(ModelChunk::ToolCallDelta {
+            index: 0,
+            id: Some("call-search".into()),
+            name: Some("search_evidence".into()),
+            arguments: Some("{\"symbol\":\"601899\",\"field\":\"price\",\"limit\":10}".into()),
+        }),
         Ok(ModelChunk::Finished {
-            reason: Some("stop".into()),
+            reason: Some("tool_calls".into()),
+        }),
+    ]
+}
+
+/// The structured draft. Every number carries provenance; no citation markup is
+/// written by the model, because the renderer owns that.
+fn submit_round() -> Vec<Result<ModelChunk, ProviderError>> {
+    let draft = json!({
+        "version": "astock-report-contract-v1",
+        "title": "紫金矿业当前风险收益比",
+        "executive_summary": "单一行情快照不足以支持完整投资结论。",
+        "sections": [{"heading": "当前市场状态", "claim_ids": ["c1", "c2"]}],
+        "claims": [
+            {
+                "id": "c1",
+                "kind": "observed_fact",
+                "statement": "最新成交价为每股 21.5 元",
+                "evidence_ids": ["evf_price", "evf_time", "evf_symbol", "evf_source"],
+                "numeric_items": [{
+                    "label": "最新价",
+                    "value": 21.5,
+                    "unit": "元",
+                    "provenance": "observed",
+                    "evidence_id": "evf_price",
+                    "field": "/quote/price"
+                }]
+            },
+            {
+                "id": "c2",
+                "kind": "unknown",
+                "statement": "仅凭一次行情快照无法判断风险收益比，仍需基本面、公告与反方证据。",
+                "evidence_ids": []
+            }
+        ],
+        "overall_uncertainty": "证据覆盖不足，结论仅限当前行情事实。",
+        "limitations": ["未取得基本面与公告证据。"]
+    });
+    vec![
+        Ok(ModelChunk::ToolCallDelta {
+            index: 0,
+            id: Some("call-submit".into()),
+            name: Some("submit_report".into()),
+            arguments: Some(draft.to_string()),
+        }),
+        Ok(ModelChunk::Finished {
+            reason: Some("tool_calls".into()),
         }),
     ]
 }
@@ -233,10 +282,20 @@ async fn collect(runtime: AgentRuntime, task: RuntimeTask) -> (Vec<AgentEvent>, 
     (events, outcome)
 }
 
+/// The whole publication path, end to end.
+///
+/// prompt → tool → evidence catalog → `search_evidence` → `submit_report` →
+/// contract validation → deterministic rendering → independent verifier → publish.
+/// Nothing in this flow lets the model write a citation or publish prose: the
+/// report exists only because every number in it declared where it came from.
 #[tokio::test]
-async fn prompt_to_tool_to_evidence_to_verified_report_is_one_durable_flow() {
+async fn prompt_to_tool_to_structured_submission_to_verified_publication_is_one_durable_flow() {
     let log = Arc::new(Mutex::new(Vec::new()));
-    let provider = Arc::new(ScriptedProvider::new(vec![tool_round(), report_round()]));
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_round(),
+        search_round(),
+        submit_round(),
+    ]));
     let engine = Arc::new(RecordingEngine { log: log.clone() });
     let store = Arc::new(RecordingStore { log: log.clone() });
     let runtime = AgentRuntime::new(provider, engine, store);
@@ -244,10 +303,25 @@ async fn prompt_to_tool_to_evidence_to_verified_report_is_one_durable_flow() {
     task.symbol = Some("601899".into());
 
     let (events, outcome) = collect(runtime, task).await;
-    assert!(outcome.report.contains("证据"));
+    // The published report is the rendered form: numbered citations, and never a
+    // canonical identifier.
+    assert!(outcome.report.contains("紫金矿业当前风险收益比"));
+    assert!(outcome.report.contains("[1]"));
+    assert!(
+        !astock_agent_runtime::contains_internal_identifier(&outcome.report),
+        "a published report must not leak an internal identifier:\n{}",
+        outcome.report
+    );
     assert!(outcome.evidence_ids.contains(&"evf_price".to_string()));
     assert!(events.iter().any(
         |event| matches!(event, AgentEvent::ToolCompleted { tool, .. } if tool == "get_quote")
+    ));
+    // Evidence discovery really ran and really was served by the runtime.
+    assert!(events.iter().any(
+        |event| matches!(event, AgentEvent::ToolCompleted { tool, .. } if tool == "search_evidence")
+    ));
+    assert!(events.iter().any(
+        |event| matches!(event, AgentEvent::ToolCompleted { tool, .. } if tool == "submit_report")
     ));
     assert!(events
         .iter()
@@ -255,6 +329,11 @@ async fn prompt_to_tool_to_evidence_to_verified_report_is_one_durable_flow() {
     assert!(matches!(events.last(), Some(AgentEvent::Completed { .. })));
 
     let log = log.lock().unwrap();
+    // A Runtime tool must never reach the Engine.
+    assert!(
+        !log.iter().any(|line| line == "execute:"),
+        "a runtime-served tool was dispatched to the Engine: {log:?}"
+    );
     let intent = log
         .iter()
         .position(|line| line == "begin:tool.get_quote")
