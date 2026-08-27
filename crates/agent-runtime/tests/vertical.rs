@@ -357,31 +357,63 @@ async fn prompt_to_tool_to_structured_submission_to_verified_publication_is_one_
     }
 }
 
+/// A tool outside the closed registry is never executed.
+///
+/// The capability boundary is the invariant: `run_shell` must not reach the Engine,
+/// no matter how often it is asked for. The task no longer dies on the first
+/// occurrence — a model that writes `search_news` for `research_news` has made a slip
+/// and should be told the real names — but repetition is bounded, so a model calling
+/// tools that do not exist cannot loop. Both halves are asserted here.
 #[tokio::test]
 async fn unknown_model_tool_fails_closed_and_never_reaches_engine() {
     let log = Arc::new(Mutex::new(Vec::new()));
-    let provider = Arc::new(ScriptedProvider::new(vec![vec![
-        Ok(ModelChunk::ToolCallDelta {
-            index: 0,
-            id: Some("call-shell".into()),
-            name: Some("run_shell".into()),
-            arguments: Some("{}".into()),
-        }),
-        Ok(ModelChunk::Finished {
-            reason: Some("tool_calls".into()),
-        }),
-    ]]));
+    let shell_call = || {
+        vec![
+            Ok(ModelChunk::ToolCallDelta {
+                index: 0,
+                id: Some("call-shell".into()),
+                name: Some("run_shell".into()),
+                arguments: Some("{}".into()),
+            }),
+            Ok(ModelChunk::Finished {
+                reason: Some("tool_calls".into()),
+            }),
+        ]
+    };
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        shell_call(),
+        shell_call(),
+        shell_call(),
+        shell_call(),
+    ]));
     let engine = Arc::new(RecordingEngine { log: log.clone() });
     let store = Arc::new(RecordingStore { log: log.clone() });
-    let runtime = AgentRuntime::new(provider, engine, store);
+    let runtime = AgentRuntime::new(provider, engine, store).with_config(
+        astock_agent_runtime::RuntimeConfig {
+            max_unknown_tool_rejections: 3,
+            ..astock_agent_runtime::RuntimeConfig::default()
+        },
+    );
     let mut stream = runtime.start(RuntimeTask::ask("执行任意命令"));
     let mut saw_failure = false;
+    let mut refusals = 0usize;
     while let Some(event) = stream.recv().await {
         saw_failure |= matches!(event, AgentEvent::Failed { .. });
+        if let AgentEvent::ToolFailed { tool, message, .. } = &event {
+            if tool == "run_shell" {
+                refusals += 1;
+                // The refusal must name the real tools, which is what makes it
+                // repairable rather than a dead end.
+                assert!(message.contains("no such tool"));
+                assert!(message.contains("get_quote"));
+            }
+        }
     }
     let error = stream.finish().await.unwrap_err();
     assert!(error.to_string().contains("unknown tool"));
     assert!(saw_failure);
+    assert_eq!(refusals, 3, "refusals must be bounded, then fatal");
+    // The invariant: never dispatched, on any attempt.
     assert!(!log
         .lock()
         .unwrap()

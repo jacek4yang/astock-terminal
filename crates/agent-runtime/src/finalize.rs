@@ -179,6 +179,19 @@ fn validation_action(code: &str) -> &'static str {
              identifiers in disclosed_conflicts and say in the statement what disagrees. Do not \
              silently pick one side."
         }
+        "number_disagrees_with_evidence" => {
+            "The value you declared is not the value the cited evidence contains. Read the value \
+             back from search_evidence and use it exactly, or cite the identifier that actually \
+             holds this figure. Do not round: a rounded figure is a different figure."
+        }
+        "undeclared_number_in_statement" => {
+            "The statement writes a figure the claim does not declare, so nothing verifies it. \
+             Either add it as a numeric_item with real provenance, or remove the figure from the \
+             prose and let the rendered numbers carry it. A rounded restatement of a cited value \
+             (\"约 79.87 亿元\" for 7,987,376,586) is a separate, unverifiable figure — state the \
+             cited value or declare the rounded one. Do not write formulas or arithmetic in a \
+             statement; put the operation on the numeric_item instead."
+        }
         "evidence_outside_task_scope" => {
             "This evidence belongs to a different security than the task covers. Remove it, or \
              cite evidence for the security under research."
@@ -189,8 +202,9 @@ fn validation_action(code: &str) -> &'static str {
              reference."
         }
         "claim_not_in_any_section" => {
-            "Every claim must appear in exactly one section, or it would never be shown. Place it \
-             or remove it."
+            "Every claim must appear in at least one section, or it would never be shown. Place \
+             it or remove it. Listing one claim in several sections renders it several times, so \
+             prefer a claim per point."
         }
         "empty_statement" => "A claim needs a statement in the task output_language.",
         "oversized" => {
@@ -336,6 +350,14 @@ pub fn validation_repair(problems: &[DraftProblem], verdict: RepairVerdict) -> V
     let mut payload = envelope("validation", verdict, problems.len());
     let mut grouped: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
     let mut report_level: BTreeSet<&str> = BTreeSet::new();
+    // The specific offending token, per claim.
+    //
+    // Naming the claim and the rule is not enough when a claim carries a dozen
+    // figures: a live run spent eleven attempts on `undeclared_number_in_statement`
+    // because each round it fixed some figures and left others, with nothing telling
+    // it which. The token is the actionable part.
+    let mut undeclared: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut unknown_ids: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for problem in problems {
         match problem.claim_id() {
             Some(claim_id) => {
@@ -343,6 +365,21 @@ pub fn validation_repair(problems: &[DraftProblem], verdict: RepairVerdict) -> V
                     .entry(claim_id.to_owned())
                     .or_default()
                     .insert(problem.code());
+                match problem {
+                    DraftProblem::UndeclaredNumberInStatement { numeral, .. } => {
+                        undeclared
+                            .entry(claim_id.to_owned())
+                            .or_default()
+                            .insert(numeral.clone());
+                    }
+                    DraftProblem::UnknownEvidence { supplied_id, .. } => {
+                        unknown_ids
+                            .entry(claim_id.to_owned())
+                            .or_default()
+                            .insert(supplied_id.clone());
+                    }
+                    _ => {}
+                }
             }
             None => {
                 report_level.insert(problem.code());
@@ -365,10 +402,43 @@ pub fn validation_repair(problems: &[DraftProblem], verdict: RepairVerdict) -> V
             Value::from(problems.len() - MAX_REPORTED_PROBLEMS),
         );
     }
-    payload.insert(
-        "repair".into(),
-        Value::Array(repair_targets(grouped, validation_action)),
-    );
+    let mut repair = repair_targets(grouped, validation_action);
+    for target in &mut repair {
+        let Some(claim_id) = target
+            .get("claim_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let Some(object) = target.as_object_mut() else {
+            continue;
+        };
+        if let Some(numerals) = undeclared.get(&claim_id) {
+            object.insert(
+                "undeclared_numerals".into(),
+                Value::Array(
+                    numerals
+                        .iter()
+                        .take(16)
+                        .map(|n| Value::from(n.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(ids) = unknown_ids.get(&claim_id) {
+            object.insert(
+                "unknown_evidence_ids".into(),
+                Value::Array(
+                    ids.iter()
+                        .take(12)
+                        .map(|id| Value::from(id.clone()))
+                        .collect(),
+                ),
+            );
+        }
+    }
+    payload.insert("repair".into(), Value::Array(repair));
     if !report_level.is_empty() {
         payload.insert(
             "report_level".into(),
@@ -553,6 +623,46 @@ mod tests {
             .as_str()
             .expect("an instruction")
             .contains("Repair only the listed claims"));
+    }
+
+    /// Repair names the offending figure, not just the rule.
+    ///
+    /// A live run spent eleven attempts on `undeclared_number_in_statement` because
+    /// each round it fixed some figures in a claim and left others, with nothing
+    /// telling it which one was wrong.
+    #[test]
+    fn a_repair_target_names_the_specific_offending_token() {
+        let problems = vec![
+            DraftProblem::UndeclaredNumberInStatement {
+                claim_id: "c1".into(),
+                numeral: "79.87".into(),
+            },
+            DraftProblem::UndeclaredNumberInStatement {
+                claim_id: "c1".into(),
+                numeral: "100".into(),
+            },
+            DraftProblem::UnknownEvidence {
+                claim_id: "c1".into(),
+                supplied_id: "evf_made_up".into(),
+            },
+        ];
+        let response = validation_repair(
+            &problems,
+            RepairVerdict::Retry {
+                attempt: 1,
+                remaining: 2,
+                unchanged: false,
+            },
+        );
+        let target = &response["repair"][0];
+        assert_eq!(target["claim_id"], json!("c1"));
+        let numerals = target["undeclared_numerals"]
+            .as_array()
+            .expect("numerals listed");
+        assert_eq!(numerals.len(), 2);
+        assert!(numerals.contains(&json!("79.87")));
+        assert!(numerals.contains(&json!("100")));
+        assert_eq!(target["unknown_evidence_ids"][0], json!("evf_made_up"));
     }
 
     /// A positional verifier finding becomes a claim-level repair.
@@ -764,6 +874,8 @@ mod tests {
             "invalid_estimate",
             "scenario_without_assumption",
             "conflicting_evidence",
+            "undeclared_number_in_statement",
+            "number_disagrees_with_evidence",
             "evidence_outside_task_scope",
             "duplicate_claim_id",
             "section_references_unknown_claim",

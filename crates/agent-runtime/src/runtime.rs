@@ -180,6 +180,15 @@ impl RuntimeTask {
 
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
+    /// Hard ceiling on model rounds for the whole task.
+    ///
+    /// Must accommodate both phases: `max_research_rounds` of retrieval plus roughly
+    /// one round per finalization attempt, plus slack. A measured moderate run used
+    /// 18 rounds of genuine tool work and then had only 6 rounds left, so the
+    /// ceiling bound before the finalization budget did and the task died on the
+    /// round limit while repair was still progressing. Raising this is not a way to
+    /// paper over a failing Agent; it is what keeps the phase budgets meaningful
+    /// rather than being silently pre-empted by a shared ceiling.
     pub max_model_rounds: usize,
     /// Rounds during which the model may still gather evidence.
     ///
@@ -190,8 +199,20 @@ pub struct RuntimeConfig {
     pub max_research_rounds: usize,
     /// Total `submit_report` attempts, counting both contract rejections and
     /// verifier refusals. Exhausting them fails closed; it never publishes.
+    ///
+    /// Six rather than four because a measured live run was still converging when it
+    /// ran out — 14 contract problems, then 4, 8 and 2 verifier findings — and
+    /// stopping a converging repair loop wastes the research that preceded it. The
+    /// budget still exists: a loop that is not converging is caught by
+    /// identical-resubmission detection long before this bound.
     pub max_finalization_attempts: usize,
     pub max_model_chunks_per_round: usize,
+    /// Calls to tools that do not exist, before the task fails closed.
+    ///
+    /// Such a call is never executed, so the capability boundary holds regardless.
+    /// This bounds how many times the model may misremember a name before the task
+    /// is judged to be making no progress.
+    pub max_unknown_tool_rejections: usize,
     /// Safe replays of a provider turn that returned nothing at all.
     ///
     /// An empty turn commits nothing — no text reached the user and no tool call was
@@ -216,10 +237,11 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            max_model_rounds: 24,
-            max_research_rounds: 18,
-            max_finalization_attempts: 4,
+            max_model_rounds: 32,
+            max_research_rounds: 20,
+            max_finalization_attempts: 6,
             max_model_chunks_per_round: 10_000,
+            max_unknown_tool_rejections: 3,
             max_empty_turn_retries: 2,
             max_visible_chars_per_round: 120_000,
             max_tool_calls_per_round: 32,
@@ -552,7 +574,6 @@ impl AgentRuntime {
         }
         messages.extend(task.history.clone());
         messages.push(Message::text(MessageRole::User, task.objective.trim()));
-        let mut evidence_contexts = Vec::<Value>::new();
 
         for round in 1..=self.config.max_model_rounds {
             self.ensure_active(state)?;
@@ -866,9 +887,7 @@ impl AgentRuntime {
                     tool_calls: calls.clone(),
                     tool_call_id: None,
                 });
-                let batch = self
-                    .execute_tools(task, state, calls, &mut evidence_contexts)
-                    .await?;
+                let batch = self.execute_tools(task, state, calls).await?;
                 messages.extend(batch.messages);
                 // Publication is the only way out of the loop that produces a
                 // report, and it happens only after the independent verifier has
@@ -947,20 +966,51 @@ impl AgentRuntime {
         task: &RuntimeTask,
         state: &mut RunState,
         arguments: Value,
-        evidence_contexts: &[Value],
     ) -> Result<Finalization, RuntimeError> {
-        let draft: VerifiedReportDraft = match serde_json::from_value(arguments) {
+        let draft: VerifiedReportDraft = match crate::report::decode_draft(&arguments) {
             Ok(draft) => draft,
             Err(error) => {
-                // A shape error is one bad call, like any other malformed tool
-                // argument, and the model is told precisely what failed to decode.
-                return Ok(Finalization::Repair(json!({
+                // A shape error consumes the budget like any other rejection.
+                //
+                // It did not, and that was an unbounded loop: a live moderate run
+                // submitted 11 drafts against a budget of 6 and died on the round
+                // limit instead of failing closed, because a draft serde could not
+                // decode never reached the ledger. Provenance shape is the usual
+                // cause — `provenance: "calculated"` without
+                // `calculation_evidence_id` fails to decode rather than validating —
+                // so this path is reached by exactly the drafts most in need of
+                // bounded repair.
+                //
+                // The fingerprint is of the raw arguments, so an identical malformed
+                // resubmission is detected as no progress just like a decoded one.
+                let verdict = state
+                    .finalization
+                    .record_rejection(format!("undecodable:{arguments}"));
+                let response = json!({
                     "ok": false,
                     "stage": "decode",
-                    "error": error.to_string(),
-                    "instruction": "The draft did not match the submit_report schema. Fix the \
-                                    reported field and resubmit the complete draft.",
-                })));
+                    "error": error,
+                    "attempt": state.finalization.attempts(),
+                    "instruction": if verdict.is_exhausted() {
+                        "No finalization attempts remain. The report will not be published."
+                    } else {
+                        "The draft did not match the submit_report schema, so no claim was read. \
+                         The error names the exact field: fix that field and resubmit the complete \
+                         draft. A numeric item must carry every field its provenance requires: \
+                         observed needs evidence_id; calculated needs calculation_evidence_id, \
+                         operation and input_evidence_ids; estimated needs method and \
+                         basis_evidence_ids."
+                    },
+                });
+                return Ok(match verdict {
+                    RepairVerdict::Exhausted { .. } => Finalization::Exhausted {
+                        response,
+                        reason: format!(
+                            "the submitted report never matched the contract schema: {error}"
+                        ),
+                    },
+                    RepairVerdict::Retry { .. } => Finalization::Repair(response),
+                });
             }
         };
 
@@ -1005,7 +1055,7 @@ impl AgentRuntime {
         state.phase = AgentPhase::Verifying;
         self.record(state, AgentEvent::VerificationStarted).await?;
         let verification = self
-            .verify_canonical_report(task, state, &rendered, evidence_contexts)
+            .verify_canonical_report(task, state, &draft, &rendered)
             .await?;
 
         if verification.get("passed").and_then(Value::as_bool) == Some(true) {
@@ -1057,17 +1107,40 @@ impl AgentRuntime {
     }
 
     /// Run the independent verifier over the canonical form of a rendered report.
+    ///
+    /// The context carries the registered facts the draft cites and nothing else.
+    /// See [`EvidenceCatalog::verifier_facts`] for why that is both bounded and
+    /// equivalent to handing over every tool result.
     async fn verify_canonical_report(
         &self,
         task: &RuntimeTask,
         state: &mut RunState,
+        draft: &VerifiedReportDraft,
         rendered: &RenderedReport,
-        evidence_contexts: &[Value],
     ) -> Result<Value, RuntimeError> {
+        let cited: BTreeSet<String> = draft
+            .claims
+            .iter()
+            .flat_map(|claim| {
+                claim
+                    .evidence_ids
+                    .iter()
+                    .cloned()
+                    .chain(claim.disclosed_conflicts.iter().cloned())
+                    .chain(
+                        claim
+                            .numeric_items
+                            .iter()
+                            .flat_map(|item| item.provenance.referenced_evidence())
+                            .map(str::to_owned),
+                    )
+            })
+            .collect();
+        let facts = state.catalog.verifier_facts(&cited);
         let verification_spec = task.verification_spec();
         let verification_context = json!({
             "task_spec": verification_spec,
-            "tool_results": evidence_contexts,
+            "evidence_registry": {"facts": facts},
         });
         let effect_id = self
             .begin_effect(
@@ -1077,6 +1150,7 @@ impl AgentRuntime {
                     "report_chars": rendered.verifier_markdown.chars().count(),
                     "claims": rendered.sections.iter().map(|s| s.claims.len()).sum::<usize>(),
                     "references": rendered.references.len(),
+                    "cited_facts": cited.len(),
                     "contract": "structured",
                 }),
             )
@@ -1124,22 +1198,50 @@ impl AgentRuntime {
         task: &RuntimeTask,
         state: &mut RunState,
         calls: Vec<ModelToolCall>,
-        evidence_contexts: &mut Vec<Value>,
     ) -> Result<ToolBatch, RuntimeError> {
         let mut prepared = Vec::with_capacity(calls.len());
         let mut runtime_calls: Vec<PreparedTool> = Vec::new();
         let mut rejected: Vec<CompletedTool> = Vec::new();
         for call in calls {
-            // An unknown tool name stays fatal. The registry is closed, so a
-            // call to something outside it is an attempted capability escape
-            // rather than a formatting slip, and failing closed is the right
-            // response. `unknown_model_tool_fails_closed_and_never_reaches_engine`
-            // pins this.
-            let definition = self
-                .tools
-                .get(&call.name)
-                .cloned()
-                .ok_or_else(|| RuntimeError::UnknownTool(call.name.clone()))?;
+            // An unknown tool name is refused, never executed — and no longer fatal
+            // on the first occurrence.
+            //
+            // Fail-closed is about capability: the call must not reach the Engine and
+            // must grant nothing. Ending the task is a separate policy, and it cost a
+            // live run everything after eight successful tool calls because the model
+            // asked for `search_news` instead of `research_news`. That is a slip, not
+            // an attempted escape, and it is the same class as the malformed argument
+            // that used to destroy a task.
+            //
+            // So: refuse, name the registered tools, and let the model correct itself
+            // — bounded, because a model that keeps calling tools that do not exist is
+            // not making progress and must not loop. Nothing is dispatched either way.
+            let definition = match self.tools.get(&call.name).cloned() {
+                Some(definition) => definition,
+                None => {
+                    state.unknown_tool_calls = state.unknown_tool_calls.saturating_add(1);
+                    if state.unknown_tool_calls > self.config.max_unknown_tool_rejections {
+                        return Err(RuntimeError::UnknownTool(call.name.clone()));
+                    }
+                    let available = self.tools.names().collect::<Vec<_>>().join(", ");
+                    let message = format!(
+                        "no such tool `{}`; it was not executed. Registered tools: {available}",
+                        call.name
+                    );
+                    self.record(
+                        state,
+                        AgentEvent::ToolFailed {
+                            call_id: call.id.clone(),
+                            tool: call.name.clone(),
+                            message: message.clone(),
+                            retryable: true,
+                        },
+                    )
+                    .await?;
+                    rejected.push(CompletedTool::failure(call, message));
+                    continue;
+                }
+            };
 
             // Malformed arguments on a *registered* tool are different: the model
             // asked for something it is permitted to ask for and mis-encoded it.
@@ -1329,7 +1431,6 @@ impl AgentRuntime {
                     state.evidence_ids.extend(evidence_ids.iter().cloned());
                     state.evidence_ids.sort();
                     state.evidence_ids.dedup();
-                    evidence_contexts.push(value.clone());
                     completed.push(CompletedTool::success(prepared.call, value, evidence_ids));
                 }
                 Ok(Err(message)) => {
@@ -1403,7 +1504,7 @@ impl AgentRuntime {
                 }
                 "submit_report" => {
                     let outcome = self
-                        .finalize_report(task, state, prepared.arguments.clone(), evidence_contexts)
+                        .finalize_report(task, state, prepared.arguments.clone())
                         .await?;
                     match outcome {
                         Finalization::Published(rendered) => {
@@ -1776,6 +1877,8 @@ struct RunState {
     model_round: usize,
     completed_tool_ids: Vec<String>,
     evidence_ids: Vec<String>,
+    /// Calls to tools that do not exist, refused so far.
+    unknown_tool_calls: usize,
     /// Canonical evidence the task has seen, with the metadata a citation needs.
     ///
     /// Durable task state, not model context: the model reaches it only through
@@ -1800,6 +1903,7 @@ impl RunState {
             model_round: 0,
             completed_tool_ids: Vec::new(),
             evidence_ids: Vec::new(),
+            unknown_tool_calls: 0,
             catalog: EvidenceCatalog::default(),
             finalization: FinalizationLedger::new(max_finalization_attempts),
             sender,

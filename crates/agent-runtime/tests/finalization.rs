@@ -1018,3 +1018,84 @@ async fn a_provider_error_frame_is_not_treated_as_an_empty_turn() {
         "a fault must not be recorded as an empty turn"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Malformed drafts
+//
+// A draft `serde` cannot decode used to bypass the finalization ledger, which
+// made the repair loop unbounded: a live moderate run submitted 11 drafts
+// against a budget of 6 and died on the model round limit instead of failing
+// closed. Provenance shape is the usual cause — `provenance: "calculated"`
+// without `calculation_evidence_id` fails to decode rather than validating — so
+// this path is reached by exactly the drafts most in need of a bounded budget.
+// ---------------------------------------------------------------------------
+
+/// A draft with incomplete numeric provenance cannot be decoded.
+fn undecodable_draft() -> Value {
+    with_claims(
+        json!([{
+            "id": "c1",
+            "kind": "deterministic_calculation",
+            "statement": "计算结果",
+            "numeric_items": [{
+                "label": "市盈率", "value": 28.4,
+                "provenance": "calculated"
+            }]
+        }]),
+        json!(["c1"]),
+    )
+}
+
+/// A malformed draft consumes the budget and eventually fails closed.
+#[tokio::test]
+async fn an_undecodable_draft_consumes_the_finalization_budget() {
+    let engine = ScriptedEngine::new(vec![]);
+    let (_, result) = run_with_config(
+        ScriptedProvider::new(vec![
+            quote_round(),
+            submit_round("s1", undecodable_draft()),
+            submit_round("s2", undecodable_draft()),
+            submit_round("s3", undecodable_draft()),
+            submit_round("s4", undecodable_draft()),
+        ]),
+        engine.clone(),
+        RuntimeConfig {
+            max_finalization_attempts: 2,
+            ..RuntimeConfig::default()
+        },
+    )
+    .await;
+    match result {
+        Err(RuntimeError::VerificationFailed(reason)) => {
+            assert!(
+                reason.contains("never matched the contract schema"),
+                "the refusal must name the cause: {reason}"
+            );
+        }
+        other => panic!("an unbounded decode loop must fail closed, got {other:?}"),
+    }
+    assert!(
+        !engine
+            .dispatched()
+            .iter()
+            .any(|kind| kind == "research.agent_report_verify"),
+        "an undecodable draft never reaches the verifier"
+    );
+}
+
+/// A malformed draft followed by a valid one still publishes.
+#[tokio::test]
+async fn a_repaired_draft_publishes_after_a_shape_error() {
+    let engine = ScriptedEngine::new(vec![passing()]);
+    let (events, result) = run(
+        ScriptedProvider::new(vec![
+            quote_round(),
+            submit_round("s1", undecodable_draft()),
+            submit_round("s2", valid_draft()),
+        ]),
+        engine,
+    )
+    .await;
+    result.expect("the corrected draft publishes");
+    assert!(matches!(events.last(), Some(AgentEvent::Completed { .. })));
+}

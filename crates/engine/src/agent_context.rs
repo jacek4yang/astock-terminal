@@ -817,4 +817,89 @@ mod tests {
             .unwrap();
         assert_eq!(repeated["evidence_id"], first_id);
     }
+
+    /// A focused market tool must register citable evidence with real provenance.
+    ///
+    /// The tools that answer a focused question — quote, k-line, fundamentals, news,
+    /// market regime — registered nothing. A live run therefore had to sweep the
+    /// whole market through `agent_prepare_context` to obtain a single citable
+    /// identifier for one price, and the verifier saw an empty registry. The
+    /// registry is what makes an observation citable at all, so a tool that returns
+    /// observations without one cannot support a published claim.
+    #[test]
+    fn a_quote_shaped_payload_registers_citable_facts_with_provenance() {
+        let mut payload = json!({
+            "symbol": "601899",
+            "quote": {"symbol": "601899", "last": 34.47, "change_pct": 1.12},
+            "source": "tencent",
+            "fetched_at": "2026-08-26T07:00:00Z",
+            "stale": Value::Null,
+            "quality": Value::Null,
+        });
+        attach_evidence_registry(&mut payload, "market_quote");
+        let facts = payload["evidence_registry"]["facts"].as_array().unwrap();
+        let last = facts
+            .iter()
+            .find(|fact| fact["path"] == "/quote/last")
+            .expect("the quoted price is citable");
+        assert_eq!(last["value"], json!(34.47));
+        assert_eq!(last["source"], "tencent");
+        // The verifier refuses an observation with no time, and refuses one with no
+        // source version, so both must be present or the fact is uncitable.
+        assert_eq!(last["observed_at"], "2026-08-26T07:00:00Z");
+        assert!(last["source_version_id"].is_string());
+        assert!(last["evidence_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("evf_")));
+        // A null field asserts nothing and must not become an identifier.
+        assert!(!facts.iter().any(|fact| fact["path"] == "/stale"));
+    }
+
+    /// A long series stays bounded, and the shortfall is declared.
+    ///
+    /// Registering every field of every bar would put a 500-row series into the
+    /// registry. The bound already exists; this pins that it applies to the series
+    /// shape a k-line request actually produces, and that truncation is reported
+    /// rather than silent.
+    #[test]
+    fn a_long_series_registry_stays_bounded_and_declares_truncation() {
+        let bars: Vec<Value> = (0..500)
+            .map(|index| {
+                json!({
+                    "date": "2026-08-26",
+                    "open": 30.0 + index as f64,
+                    "high": 31.0 + index as f64,
+                    "low": 29.0 + index as f64,
+                    "close": 30.5 + index as f64,
+                    "volume": 1_000_000 + index,
+                    "amount": 34_000_000 + index,
+                })
+            })
+            .collect();
+        let mut payload = json!({
+            "symbol": "601899",
+            "period": "day",
+            "adjust": "qfq",
+            "bars": bars,
+            "source": "tencent",
+            "fetched_at": "2026-08-26T07:00:00Z",
+        });
+        attach_evidence_registry(&mut payload, "market_kline");
+        let registry = &payload["evidence_registry"];
+        let facts = registry["facts"].as_array().unwrap();
+        assert!(
+            facts.len() <= MAX_EVIDENCE_FACTS,
+            "the registry must stay bounded, got {}",
+            facts.len()
+        );
+        assert_eq!(registry["truncated"], json!(true));
+        // A bounded registry must still fit comfortably inside the runtime's
+        // per-result storage ceiling of 2 MiB.
+        let encoded = serde_json::to_vec(&registry).unwrap();
+        assert!(
+            encoded.len() < 1024 * 1024,
+            "a series registry grew to {} bytes",
+            encoded.len()
+        );
+    }
 }

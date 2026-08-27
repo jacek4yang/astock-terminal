@@ -163,6 +163,13 @@ fn mask_non_financial_tokens(line: &str) -> String {
     static PATTERNS: &[&str] = &[
         // Calendar dates and fiscal periods: 2026-08-26, 2026年, 8月, 26日, 2024Q3.
         r"\d{4}-\d{2}-\d{2}|\d{4}/\d{1,2}/\d{1,2}|\d{4}\s*年|\d{1,2}\s*月|\d{1,2}\s*日|\d{4}\s*Q[1-4]|\bQ[1-4]\b",
+        // Reporting-period labels: 2025 全年, 2026 上半年, 2024 年度, 2025 财年.
+        //
+        // `\d{4}\s*年` above only catches a year written immediately before 年. A
+        // reporting period names a window, asserts no quantity, and appears in
+        // almost every fundamentals claim; a live moderate run was blocked by
+        // `2025 全年营业总收入` and `2026Q1 末归母权益` being read as figures.
+        r"\d{4}\s*(?:全年|年度|年报|中报|季报|上半年|下半年|财年|财报)",
         // Clock times, including exchange session boundaries.
         r"\d{1,2}:\d{2}(?::\d{2})?",
         // Markdown headings and ordered-list markers.
@@ -170,8 +177,22 @@ fn mask_non_financial_tokens(line: &str) -> String {
         r"(?m)^\s{0,3}\d{1,3}[.、)]\s",
         // Chinese section numbering: 第一步, 第3节, 第二部分.
         r"第\s*[0-9一二三四五六七八九十百]+\s*[步章节条部分项]",
-        // Window and horizon labels: 6个月, 20个交易日, 5年期, 3周.
-        r"\d+\s*(?:个月|个交易日|个季度|年期|周|天|日线|分钟)",
+        // Window and horizon labels: 6个月, 20个交易日, 5年期, 3周, 近3年, 250日, 60日均线.
+        //
+        // A one or two digit count before 年 is a duration; a calendar year in this
+        // corpus is four digits and is masked by the date rule above. A count before
+        // 日 is either a day of month or a lookback window — `250 日 K 线`,
+        // `60 日均线` — and neither asserts a quantity.
+        r"\d+\s*(?:个月|个交易日|个季度|年期|周|天|日线|分钟)|\d{1,2}\s*年|\d{1,3}\s*日",
+        // Inline enumeration markers: `关键不确定性: 1) 铜价 2) 汇率 3) 执行`.
+        //
+        // The line-start rule above only catches a list that begins a line, and
+        // Chinese research prose enumerates inline. A one or two digit number
+        // closing a bracket after a separator, a space or an opening bracket is a
+        // list marker or a footnote, not a quantity; a real quantity carries a unit
+        // or a magnitude suffix. The separator is consumed with the marker, which
+        // affects nothing: masking only decides what is read as a quantity.
+        r"[:：;；,，、（(\s]\d{1,2}[)）]",
     ];
     let mut masked = line.to_owned();
     for pattern in PATTERNS {
@@ -231,6 +252,7 @@ fn parse_claim_number(number: &str, unit: Option<&str>) -> Option<f64> {
     match unit {
         Some("万") => value *= 10_000.0,
         Some("亿") => value *= 100_000_000.0,
+        Some("万亿") => value *= 1_000_000_000_000.0,
         Some("%") => value /= 100.0,
         _ => {}
     }
@@ -242,15 +264,15 @@ fn approximately_equal(left: f64, right: f64) -> bool {
     (left - right).abs() <= tolerance
 }
 
-fn fact_supports_token(fact: &EvidenceFact, raw: &str, parsed: f64, unit: Option<&str>) -> bool {
+fn fact_supports_numeral(fact: &EvidenceFact, numeral: &ReportNumeral) -> bool {
     if let Some(value) = numeric_value(&fact.value) {
-        if approximately_equal(value, parsed) {
-            return true;
-        }
-        if unit == Some("%") && approximately_equal(value, parsed * 100.0) {
+        if numeral.supported_by(value) {
             return true;
         }
     }
+    let raw = numeral.raw.as_str();
+    let parsed = numeral.value;
+    let unit = numeral.unit.as_deref();
     fact.value.as_str().is_some_and(|value| {
         let normalized_value = value.replace(',', "");
         let normalized_raw = raw.replace(',', "");
@@ -317,6 +339,81 @@ fn negative_sign_before(text: &str, start: usize) -> bool {
     }
 }
 
+/// One financial quantity found in a line of report prose.
+///
+/// Produced by [`financial_numerals`] and matched by [`ReportNumeral::supported_by`].
+/// Both the verifier and the Runtime's report contract use these, so "what counts as
+/// a financial claim" and "when does evidence support it" have exactly one
+/// implementation. Two implementations of that rule would drift, and the drift would
+/// show up as a report that validation accepted and verification refused.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReportNumeral {
+    /// The characters as written, without sign or unit.
+    pub raw: String,
+    /// Scaled and signed value: `-3.5%` is `-0.035`, `2万` is `20000`.
+    pub value: f64,
+    /// The unit suffix, when one was written.
+    pub unit: Option<String>,
+}
+
+impl ReportNumeral {
+    /// Would this evidence value support the quantity as written?
+    ///
+    /// Mirrors the verifier's numeric acceptance exactly, including the percentage
+    /// convention: evidence recording `3.5` supports a written `3.5%`, because
+    /// sources publish percentages both scaled and unscaled.
+    pub fn supported_by(&self, value: f64) -> bool {
+        if approximately_equal(value, self.value) {
+            return true;
+        }
+        self.unit.as_deref() == Some("%") && approximately_equal(value, self.value * 100.0)
+    }
+}
+
+/// Extract the financial quantities asserted by one line of report prose.
+///
+/// Narrows what counts as a claim before anything is judged: a security code, a
+/// calendar date, a Markdown heading number, a clock time and a window label assert
+/// no quantity, so they are masked out first. Twenty of 121 findings on a live run
+/// were raised against exactly those.
+pub fn financial_numerals(line: &str) -> Vec<ReportNumeral> {
+    let claim_text = mask_non_financial_tokens(&strip_citation_tokens(line));
+    let Ok(pattern) = numeric_pattern() else {
+        return Vec::new();
+    };
+    pattern
+        .captures_iter(&claim_text)
+        .filter_map(|claim| {
+            let matched = claim.get(0)?;
+            if identifier_adjacent(&claim_text, matched.start(), matched.end()) {
+                return None;
+            }
+            let raw = claim.name("number")?.as_str();
+            let unit = claim.name("unit").map(|value| value.as_str());
+            let negative = negative_sign_before(&claim_text, matched.start());
+            let value =
+                parse_claim_number(raw, unit).map(|value| if negative { -value } else { value })?;
+            Some(ReportNumeral {
+                raw: raw.to_owned(),
+                value,
+                unit: unit.map(str::to_owned),
+            })
+        })
+        .collect()
+}
+
+/// The quantity pattern.
+///
+/// Whitespace is allowed before the magnitude suffix. Chinese financial prose writes
+/// both `79.87亿元` and `79.87 亿元`, and requiring adjacency made the spaced form
+/// parse as `79.87` — a number three orders of magnitude from what the text says,
+/// which no evidence could reproduce. Reading the suffix makes the comparison
+/// stricter, not looser: a figure written `2,314,388 万手` is now judged as
+/// 23.1 billion rather than as 2.3 million.
+fn numeric_pattern() -> Result<Regex, regex::Error> {
+    Regex::new(r"(?P<number>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*(?P<unit>%|万亿|万|亿)?")
+}
+
 pub(super) fn verify(payload: VerifyReportPayload) -> Result<Value, ServiceError> {
     let report = payload.report.trim();
     if report.is_empty() || report.chars().count() > MAX_REPORT_CHARS {
@@ -342,9 +439,6 @@ pub(super) fn verify(payload: VerifyReportPayload) -> Result<Value, ServiceError
     collect_registries(&payload.context, &mut facts, &mut registry_conflicts);
     let mut cited = BTreeSet::new();
     let mut numeric_claims = 0usize;
-    let numeric =
-        Regex::new(r"(?P<number>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)(?P<unit>%|万|亿)?")
-            .map_err(|error| invalid(error.to_string()))?;
 
     for (line_index, line) in report.lines().enumerate() {
         let ids = citations(line);
@@ -393,16 +487,17 @@ pub(super) fn verify(payload: VerifyReportPayload) -> Result<Value, ServiceError
                 Some(_) => {}
             }
         }
-        // Citations first, then non-financial tokens: a masked date must not
-        // leave digits that a later rule mistakes for a quantity.
-        let claim_text = mask_non_financial_tokens(&strip_citation_tokens(line));
-        let claims = numeric
-            .captures_iter(&claim_text)
-            .filter(|claim| {
-                let matched = claim.get(0).unwrap();
-                !identifier_adjacent(&claim_text, matched.start(), matched.end())
-            })
-            .collect::<Vec<_>>();
+        // Extraction and matching both come from `financial_numerals` and
+        // `ReportNumeral::supported_by`, which the Runtime's report contract also
+        // uses. One implementation of "what is a financial claim" and "when is it
+        // supported" means validation and verification cannot disagree; two would
+        // drift, and the drift would show up as a report that validation accepted
+        // and verification refused.
+        //
+        // `invalid_numeric_claim` is unreachable through this path: the pattern only
+        // matches digit runs, which always parse. It is retained as a finding code
+        // because the contract may still surface one from a different source.
+        let claims = financial_numerals(line);
         if claims.is_empty() {
             continue;
         }
@@ -415,27 +510,16 @@ pub(super) fn verify(payload: VerifyReportPayload) -> Result<Value, ServiceError
             continue;
         }
         for claim in claims {
-            let raw = claim.name("number").unwrap().as_str();
-            let unit = claim.name("unit").map(|value| value.as_str());
-            let negative = negative_sign_before(&claim_text, claim.get(0).unwrap().start());
-            let Some(parsed) =
-                parse_claim_number(raw, unit).map(|value| if negative { -value } else { value })
-            else {
-                findings.insert(format!(
-                    "invalid_numeric_claim:line_{}:{raw}",
-                    line_index + 1
-                ));
-                continue;
-            };
             if !ids.iter().any(|id| {
                 facts
                     .get(id)
-                    .is_some_and(|fact| fact_supports_token(fact, raw, parsed, unit))
+                    .is_some_and(|fact| fact_supports_numeral(fact, &claim))
             }) {
                 findings.insert(format!(
-                    "numeric_claim_not_reproduced:line_{}:{}{raw}",
+                    "numeric_claim_not_reproduced:line_{}:{}{}",
                     line_index + 1,
-                    if negative { "-" } else { "" }
+                    if claim.value < 0.0 { "-" } else { "" },
+                    claim.raw
                 ));
             }
         }
@@ -624,6 +708,67 @@ mod tests {
         ));
         assert!(negative_sign_before("涨跌幅 -3.5%", "涨跌幅 -".len()));
         assert!(negative_sign_before("-15", "-".len()));
+    }
+
+    /// A reporting-period label is not a financial quantity.
+    ///
+    /// `\d{4}\s*年` only catches a year written immediately before 年. A live moderate
+    /// run was blocked because `2025 全年营业总收入`, `2026Q1 末归母权益` and `近 3 年`
+    /// were read as unsupported figures. A period names a window and asserts no
+    /// quantity, so counting one narrows what a claim is; it does not relax how a
+    /// claim is verified.
+    #[test]
+    fn reporting_period_and_horizon_labels_are_not_treated_as_figures() {
+        for label in [
+            "2025 全年营业总收入",
+            "2024 年度归母净利润",
+            "2026 上半年营业收入",
+            "2025 财年现金流",
+            "近 3 年复合增速",
+            "过去 5 年",
+            "2026Q1 末归母权益",
+        ] {
+            assert!(
+                financial_numerals(label).is_empty(),
+                "`{label}` asserts no quantity, found {:?}",
+                financial_numerals(label)
+            );
+        }
+    }
+
+    /// Narrowing must not swallow a real quantity that happens to sit near a period.
+    #[test]
+    fn a_real_quantity_beside_a_period_label_is_still_extracted() {
+        let found = financial_numerals("2025 全年营业总收入 3490.79 亿元");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].raw, "3490.79");
+        assert_eq!(found[0].unit.as_deref(), Some("亿"));
+    }
+
+    /// Lookback windows and inline enumerations assert no quantity.
+    #[test]
+    fn lookback_windows_and_inline_enumerations_are_not_treated_as_figures() {
+        for label in [
+            "基于过去 250 日 K 线的观察",
+            "60 日均线尚未转正",
+            "关键不确定性: 1) 铜价 2) 汇率 3) 项目执行",
+            "风险包括：1）商品价格；2）汇率",
+        ] {
+            assert!(
+                financial_numerals(label).is_empty(),
+                "`{label}` asserts no quantity, found {:?}",
+                financial_numerals(label)
+            );
+        }
+    }
+
+    /// A quantity inside an enumerated item is still extracted.
+    #[test]
+    fn a_quantity_inside_an_enumerated_item_is_still_extracted() {
+        let found = financial_numerals("风险: 1) 铜价下跌 15% 的情形");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].raw, "15");
+        assert_eq!(found[0].unit.as_deref(), Some("%"));
     }
 
     /// An unsigned claim still fails against negative evidence, as before.

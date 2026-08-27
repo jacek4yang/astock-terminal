@@ -27,6 +27,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Contract version. Bump when the shape changes in a way consumers must notice.
 pub const REPORT_CONTRACT_VERSION: &str = "astock-report-contract-v1";
@@ -92,9 +93,15 @@ impl ClaimKind {
     /// was accepted, so an estimate could masquerade as a measurement — the exact
     /// thing the contract exists to prevent. The mutation suite caught it.
     ///
-    /// * `ObservedFact` carries measurements only.
-    /// * `DeterministicCalculation` carries computed values only; an input worth
-    ///   stating in its own right belongs in its own observed claim.
+    /// * `ObservedFact` carries measurements only. A derived value must never be
+    ///   presentable as something a source reported.
+    /// * `DeterministicCalculation` carries computed values and the observed inputs
+    ///   they were computed from. Refusing the inputs forced a claim like
+    ///   "市盈率 = 最新价 ÷ 每股收益" to be split across claims that only make sense
+    ///   together, and a live run spent much of its repair budget on that with no
+    ///   correctness benefit: every number still declares its own provenance, the
+    ///   renderer labels each one, and the verifier still checks each against its
+    ///   own citation.
     /// * `Inference` and `Unknown` introduce no numbers; they reason over claims
     ///   that already carry provenance.
     /// * `Estimate` carries estimates only.
@@ -103,9 +110,10 @@ impl ClaimKind {
     fn permits(self, provenance: &NumericProvenance) -> bool {
         match self {
             Self::ObservedFact => matches!(provenance, NumericProvenance::Observed { .. }),
-            Self::DeterministicCalculation => {
-                matches!(provenance, NumericProvenance::Calculated { .. })
-            }
+            Self::DeterministicCalculation => matches!(
+                provenance,
+                NumericProvenance::Calculated { .. } | NumericProvenance::Observed { .. }
+            ),
             Self::Inference | Self::Unknown => false,
             Self::Estimate => matches!(provenance, NumericProvenance::Estimated { .. }),
             Self::Scenario => matches!(
@@ -341,6 +349,35 @@ pub enum DraftProblem {
         claim_id: String,
         evidence_id: String,
     },
+    /// A quantity written into a claim's prose that the claim never declared.
+    ///
+    /// The renderer places a claim's statement and its citations on the same line of
+    /// the canonical form, so the verifier checks every figure in the prose against
+    /// the evidence the claim named. A figure written only in prose therefore has no
+    /// provenance and cannot be reproduced.
+    ///
+    /// This is the residual failure of a live run that otherwise converged: `约 79.87
+    /// 亿元` as a rounded restatement of the cited `7,987,376,586`, and `单手(100 股)`
+    /// as a lot size. Both are refused here, at validation, where repair is one cheap
+    /// round rather than a verifier cycle.
+    UndeclaredNumberInStatement {
+        claim_id: String,
+        numeral: String,
+    },
+    /// A declared number that its own cited evidence does not support.
+    ///
+    /// The most dangerous shape the contract can carry: a figure with a
+    /// well-formed, existing citation that the citation does not actually contain.
+    /// Validation used to accept it because it checked that provenance was *present*,
+    /// not that it was *true*, leaving the verifier to catch it a round later — and
+    /// on a live run it produced a validation/verification disagreement, which is
+    /// exactly what the shared numeral rule exists to prevent.
+    NumberDisagreesWithEvidence {
+        claim_id: String,
+        label: String,
+        declared: f64,
+        evidence_id: String,
+    },
 }
 
 impl DraftProblem {
@@ -358,6 +395,8 @@ impl DraftProblem {
             | Self::InvalidEstimate { claim_id, .. }
             | Self::ScenarioWithoutAssumption { claim_id }
             | Self::ConflictingEvidence { claim_id, .. }
+            | Self::UndeclaredNumberInStatement { claim_id, .. }
+            | Self::NumberDisagreesWithEvidence { claim_id, .. }
             | Self::EvidenceOutsideTaskScope { claim_id, .. } => Some(claim_id),
             Self::SectionReferencesUnknownClaim { claim_id, .. } => Some(claim_id),
         }
@@ -378,6 +417,8 @@ impl DraftProblem {
             Self::InvalidEstimate { .. } => "invalid_estimate",
             Self::ScenarioWithoutAssumption { .. } => "scenario_without_assumption",
             Self::ConflictingEvidence { .. } => "conflicting_evidence",
+            Self::UndeclaredNumberInStatement { .. } => "undeclared_number_in_statement",
+            Self::NumberDisagreesWithEvidence { .. } => "number_disagrees_with_evidence",
             Self::EvidenceOutsideTaskScope { .. } => "evidence_outside_task_scope",
         }
     }
@@ -488,13 +529,20 @@ fn friendly_field(field: &str) -> String {
     let leaf = field.rsplit('/').next().unwrap_or(field);
     match leaf {
         "last" | "price" | "close" => "最新价".to_owned(),
-        "change_pct" => "涨跌幅".to_owned(),
-        "turnover" => "成交额".to_owned(),
-        "volume" => "成交量".to_owned(),
+        "pre_close" | "prev_close" | "yesterday_close" => "昨收价".to_owned(),
+        "open" => "开盘价".to_owned(),
+        "high" => "最高价".to_owned(),
+        "low" => "最低价".to_owned(),
+        "change" => "涨跌额".to_owned(),
+        "change_pct" | "pct" | "pct_chg" => "涨跌幅".to_owned(),
+        "turnover" | "turnover_rate" => "换手率".to_owned(),
+        "amount" => "成交额".to_owned(),
+        "volume" | "vol" => "成交量".to_owned(),
+        "timestamp" | "time" | "trade_time" => "行情时间".to_owned(),
         "eps" => "每股收益".to_owned(),
-        "pe" => "市盈率".to_owned(),
+        "pe" | "pe_ttm" => "市盈率".to_owned(),
         "pb" => "市净率".to_owned(),
-        "shares" => "股本".to_owned(),
+        "shares" | "total_shares" => "股本".to_owned(),
         "revenue" => "营业收入".to_owned(),
         "net_profit" => "归母净利润".to_owned(),
         other => other.to_owned(),
@@ -509,6 +557,30 @@ fn short_timestamp(raw: &str) -> Option<String> {
         Some(date.to_owned())
     } else {
         Some(format!("{date} {time}"))
+    }
+}
+
+/// Decode a submitted draft, naming the field that failed.
+///
+/// `serde_json::from_value` reports `invalid type: map, expected a string` with no
+/// indication of *where*. A live moderate run spent its entire finalization budget
+/// on exactly that: an otherwise complete report whose `limitations` entries were
+/// each wrapped in an object, six times, with nothing in the diagnostic that could
+/// have located the field. Repair is only possible if the model is told which field
+/// is wrong, so the path is part of the contract's diagnostic surface.
+pub fn decode_draft(arguments: &Value) -> Result<VerifiedReportDraft, String> {
+    let mut track = serde_path_to_error::Track::new();
+    let deserializer = serde_path_to_error::Deserializer::new(arguments, &mut track);
+    match VerifiedReportDraft::deserialize(deserializer) {
+        Ok(draft) => Ok(draft),
+        Err(error) => {
+            let path = track.path().to_string();
+            if path.is_empty() {
+                Err(error.to_string())
+            } else {
+                Err(format!("{path}: {error}"))
+            }
+        }
     }
 }
 
@@ -690,6 +762,113 @@ fn validate_claim(
     for item in &claim.numeric_items {
         validate_numeric_item(claim, item, registry, problems);
     }
+    validate_statement_numerals(claim, registry, problems);
+}
+
+/// Every quantity in a claim's prose must be one the claim actually declared.
+///
+/// The canonical form the verifier reads places the statement and the claim's
+/// citations on one line, so a figure written into prose is checked against that
+/// evidence exactly as a declared number would be. Checking it here rather than
+/// waiting for the verifier costs one cheap validation round instead of a
+/// verification cycle, and the repair is addressed to a claim.
+///
+/// The rule is the Engine verifier's own: [`astock_engine::financial_numerals`]
+/// decides what counts as a financial quantity — masking security codes, dates,
+/// headings, clock times and window labels — and `supported_by` decides when a value
+/// backs it, including the percentage convention. Reimplementing either here would
+/// let validation and verification drift, and the drift would surface as a report
+/// validation accepted and verification refused.
+///
+/// A prose figure is accepted when it matches one of the claim's own numeric items,
+/// or the value of evidence the claim cites. That is exactly as permissive as the
+/// verifier, so this rejects nothing the verifier would have passed.
+fn validate_statement_numerals(
+    claim: &Claim,
+    registry: &BTreeMap<String, EvidenceDescriptor>,
+    problems: &mut Vec<DraftProblem>,
+) {
+    let numerals = astock_engine::financial_numerals(&claim.statement);
+    if numerals.is_empty() {
+        return;
+    }
+    let cited_values: Vec<f64> = claim
+        .evidence_ids
+        .iter()
+        .filter_map(|id| registry.get(id))
+        .filter_map(|descriptor| descriptor.value.as_ref())
+        .filter_map(evidence_number)
+        .collect();
+    for numeral in numerals {
+        let declared = claim
+            .numeric_items
+            .iter()
+            .any(|item| numeral.supported_by(item.value));
+        if declared
+            || cited_values
+                .iter()
+                .any(|value| numeral.supported_by(*value))
+        {
+            continue;
+        }
+        problems.push(DraftProblem::UndeclaredNumberInStatement {
+            claim_id: claim.id.clone(),
+            numeral: numeral.raw.clone(),
+        });
+    }
+}
+
+/// Does a declared number actually appear in the evidence it cites?
+///
+/// Validation used to check that provenance was *present*, not that it was *true*,
+/// so a figure carrying a well-formed existing citation was accepted even when the
+/// citation contained something else. The verifier caught it a round later, which
+/// showed up on a live run as a validation/verification disagreement — the one thing
+/// the shared numeral rule exists to prevent.
+///
+/// The comparison is performed on the exact token the renderer will emit, run
+/// through the Engine's own extractor, so validation and verification cannot read
+/// the same figure differently. Evidence with no numeric value is not judged here: a
+/// claim may legitimately cite a document, a source name or a timestamp.
+fn check_value_against_evidence(
+    claim: &Claim,
+    item: &NumericItem,
+    evidence_id: &str,
+    registry: &BTreeMap<String, EvidenceDescriptor>,
+    problems: &mut Vec<DraftProblem>,
+) {
+    let Some(descriptor) = registry.get(evidence_id) else {
+        // A missing identifier is already reported as `unknown_evidence`.
+        return;
+    };
+    let Some(evidence_value) = descriptor.value.as_ref().and_then(evidence_number) else {
+        return;
+    };
+    let token = format!("{}{}", item.value, item.unit.as_deref().unwrap_or_default());
+    let numerals = astock_engine::financial_numerals(&token);
+    // A token the extractor does not read as a quantity cannot be checked; the
+    // verifier will not read it as a claim either, so there is nothing to disagree
+    // about.
+    let Some(numeral) = numerals.first() else {
+        return;
+    };
+    if !numeral.supported_by(evidence_value) {
+        problems.push(DraftProblem::NumberDisagreesWithEvidence {
+            claim_id: claim.id.clone(),
+            label: item.label.clone(),
+            declared: item.value,
+            evidence_id: evidence_id.to_owned(),
+        });
+    }
+}
+
+/// Read a number out of an evidence value, including one recorded as a string.
+fn evidence_number(value: &serde_json::Value) -> Option<f64> {
+    match value {
+        serde_json::Value::Number(number) => number.as_f64(),
+        serde_json::Value::String(text) => text.replace(',', "").parse::<f64>().ok(),
+        _ => None,
+    }
 }
 
 fn validate_numeric_item(
@@ -722,6 +901,7 @@ fn validate_numeric_item(
                     value: item.value,
                 });
             }
+            check_value_against_evidence(claim, item, evidence_id, registry, problems);
         }
         NumericProvenance::Calculated {
             calculation_evidence_id,
@@ -746,6 +926,7 @@ fn validate_numeric_item(
                     value: item.value,
                 });
             }
+            check_value_against_evidence(claim, item, calculation_evidence_id, registry, problems);
         }
         // The kind/provenance pairing above already rejects an assumption on a
         // non-scenario claim, and an assumption references no evidence.

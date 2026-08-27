@@ -42,7 +42,7 @@ pub use render::{
     RenderedNumber, RenderedReport, RenderedSection,
 };
 pub use report::{
-    validate_draft, Claim, ClaimKind, DraftProblem, EvidenceDescriptor, NumericItem,
+    decode_draft, validate_draft, Claim, ClaimKind, DraftProblem, EvidenceDescriptor, NumericItem,
     NumericProvenance, ReportSection, VerifiedReportDraft, MAX_CLAIMS, MAX_EVIDENCE_PER_CLAIM,
     MAX_NUMERIC_ITEMS_PER_CLAIM, MAX_SECTIONS, MAX_STATEMENT_CHARS, REPORT_CONTRACT_VERSION,
 };

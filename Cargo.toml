@@ -50,6 +50,10 @@ tokio-util = "0.7"
 # serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Names the exact field a failed deserialization stopped on. Used to tell the model
+# which field of a submitted report is malformed: `invalid type: map, expected a
+# string` is unrepairable, `limitations[0]: invalid type: map` is one edit.
+serde_path_to_error = "=0.1.20"
 schemars = "0.8"
 toml = "0.9"
 # errors & logging
