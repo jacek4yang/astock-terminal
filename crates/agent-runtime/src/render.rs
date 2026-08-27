@@ -206,16 +206,24 @@ pub fn render(
         });
     }
 
-    let markdown = render_markdown(draft, &sections, &references);
+    let report_level = report_numbers(draft);
+    let markdown = render_markdown(draft, &sections, &references, &report_level);
     let (verifier_markdown, _) = render_verifier_form(draft);
 
     RenderedReport {
         title: draft.title.clone(),
-        executive_summary: draft.executive_summary.clone(),
+        executive_summary: substitute_numbers(&draft.executive_summary, &report_level),
         sections,
         references,
-        overall_uncertainty: draft.overall_uncertainty.clone(),
-        limitations: draft.limitations.clone(),
+        overall_uncertainty: draft
+            .overall_uncertainty
+            .as_deref()
+            .map(|text| substitute_numbers(text, &report_level)),
+        limitations: draft
+            .limitations
+            .iter()
+            .map(|text| substitute_numbers(text, &report_level))
+            .collect(),
         markdown,
         verifier_markdown,
     }
@@ -300,6 +308,29 @@ fn substitute_numbers(text: &str, numbers: &[(String, f64, Option<String>)]) -> 
     out
 }
 
+/// Report-level prose fields, in the order the verifier form emits them.
+fn report_level_prose(draft: &VerifiedReportDraft) -> Vec<(String, String)> {
+    let mut out = vec![(
+        "executive_summary".to_owned(),
+        draft.executive_summary.clone(),
+    )];
+    if let Some(uncertainty) = &draft.overall_uncertainty {
+        out.push(("overall_uncertainty".to_owned(), uncertainty.clone()));
+    }
+    for (index, limitation) in draft.limitations.iter().enumerate() {
+        out.push((format!("limitations[{index}]"), limitation.clone()));
+    }
+    out
+}
+
+/// The `(label, value, unit)` triples any claim declares, for report-level prose.
+fn report_numbers(draft: &VerifiedReportDraft) -> Vec<(String, f64, Option<String>)> {
+    crate::report::report_level_numbers(draft)
+        .into_iter()
+        .map(|(label, item)| (label, item.value, item.unit))
+        .collect()
+}
+
 /// The `(label, value, unit)` triples a claim declares.
 fn declared_numbers(claim: &Claim) -> Vec<(String, f64, Option<String>)> {
     claim
@@ -325,11 +356,18 @@ fn render_markdown(
     draft: &VerifiedReportDraft,
     sections: &[RenderedSection],
     references: &[EvidenceReference],
+    report_level: &[(String, f64, Option<String>)],
 ) -> String {
     let mut out = String::new();
-    out.push_str(&format!("# {}\n\n", draft.title));
+    out.push_str(&format!(
+        "# {}\n\n",
+        substitute_numbers(&draft.title, report_level)
+    ));
     if !draft.executive_summary.trim().is_empty() {
-        out.push_str(&format!("{}\n\n", draft.executive_summary.trim()));
+        out.push_str(&format!(
+            "{}\n\n",
+            substitute_numbers(&draft.executive_summary, report_level).trim()
+        ));
     }
     for section in sections {
         out.push_str(&format!("## {}\n\n", section.heading));
@@ -420,12 +458,18 @@ fn render_markdown(
         out.push('\n');
     }
     if let Some(uncertainty) = &draft.overall_uncertainty {
-        out.push_str(&format!("## 主要不确定性\n\n{}\n\n", uncertainty.trim()));
+        out.push_str(&format!(
+            "## 主要不确定性\n\n{}\n\n",
+            substitute_numbers(uncertainty, report_level).trim()
+        ));
     }
     if !draft.limitations.is_empty() {
         out.push_str("## 局限性\n\n");
         for limitation in &draft.limitations {
-            out.push_str(&format!("- {limitation}\n"));
+            out.push_str(&format!(
+                "- {}\n",
+                substitute_numbers(limitation, report_level)
+            ));
         }
         out.push('\n');
     }
@@ -465,7 +509,36 @@ fn render_verifier_form(draft: &VerifiedReportDraft) -> (String, BTreeMap<usize,
         }
     };
 
-    push(&mut out, &draft.title, None);
+    let report_level = report_numbers(draft);
+    push(
+        &mut out,
+        &substitute_numbers(&draft.title, &report_level),
+        None,
+    );
+    // Report-level prose that references a figure is emitted with the citations of the
+    // numbers it references, so a figure substituted into a summary is reproduced
+    // against real evidence. Prose that references nothing carries no figure — the
+    // contract refuses one — so it needs no line.
+    for (field, text) in report_level_prose(draft) {
+        let labels = crate::report::placeholder_labels(&text);
+        if labels.is_empty() {
+            continue;
+        }
+        let mut line = substitute_numbers(&text, &report_level);
+        for label in &labels {
+            for claim in &draft.claims {
+                for item in &claim.numeric_items {
+                    if &item.label == label {
+                        for id in item.provenance.referenced_evidence() {
+                            line.push_str(&format!("【E:{id}】"));
+                        }
+                    }
+                }
+            }
+        }
+        let _ = field;
+        push(&mut out, &line, None);
+    }
     for section in &draft.sections {
         push(&mut out, &section.heading, None);
         for claim_id in &section.claim_ids {

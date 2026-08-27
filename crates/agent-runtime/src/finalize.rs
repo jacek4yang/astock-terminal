@@ -196,9 +196,14 @@ fn validation_action(code: &str) -> &'static str {
              prose; put the operation on the numeric_item."
         }
         "unknown_number_reference" => {
-            "This statement references a number in braces that the claim does not declare. Add a \
-             numeric_item with exactly that label, or change the reference to a label the claim \
-             already declares."
+            "This prose references a number in braces that nothing declares. In a statement the \
+             label must be one of that claim's numeric_items; in executive_summary, \
+             overall_uncertainty or limitations it may be any claim's label. Add the numeric_item \
+             or correct the label."
+        }
+        "ambiguous_number_reference" => {
+            "Two claims declare this label with different values, so a report-level reference \
+             cannot be resolved. Give the two numbers distinct labels."
         }
         "evidence_outside_task_scope" => {
             "This evidence belongs to a different security than the task covers. Remove it, or \
@@ -886,6 +891,7 @@ mod tests {
             "conflicting_evidence",
             "figure_in_free_text",
             "unknown_number_reference",
+            "ambiguous_number_reference",
             "number_disagrees_with_evidence",
             "evidence_outside_task_scope",
             "duplicate_claim_id",

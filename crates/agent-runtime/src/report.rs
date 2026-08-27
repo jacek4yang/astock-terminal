@@ -374,6 +374,13 @@ pub enum DraftProblem {
         /// The figure as written.
         numeral: String,
     },
+    /// A report-level `{label}` reference that two claims declare differently.
+    ///
+    /// Substituting either value would print a figure the reader cannot attribute, so
+    /// the reference is refused rather than resolved arbitrarily.
+    AmbiguousNumberReference {
+        label: String,
+    },
     /// A `{label}` reference in prose that names no declared number.
     ///
     /// Left unchecked the reader would see the literal braces and the verifier would
@@ -402,7 +409,9 @@ impl DraftProblem {
     /// Claim this problem concerns, when it concerns one.
     pub fn claim_id(&self) -> Option<&str> {
         match self {
-            Self::ContractVersionMismatch { .. } | Self::Oversized { .. } => None,
+            Self::ContractVersionMismatch { .. }
+            | Self::Oversized { .. }
+            | Self::AmbiguousNumberReference { .. } => None,
             Self::DuplicateClaimId { claim_id }
             | Self::ClaimNotInAnySection { claim_id }
             | Self::EmptyStatement { claim_id }
@@ -437,6 +446,7 @@ impl DraftProblem {
             Self::ScenarioWithoutAssumption { .. } => "scenario_without_assumption",
             Self::ConflictingEvidence { .. } => "conflicting_evidence",
             Self::FigureInFreeText { .. } => "figure_in_free_text",
+            Self::AmbiguousNumberReference { .. } => "ambiguous_number_reference",
             Self::UnknownNumberReference { .. } => "unknown_number_reference",
             Self::NumberDisagreesWithEvidence { .. } => "number_disagrees_with_evidence",
             Self::EvidenceOutsideTaskScope { .. } => "evidence_outside_task_scope",
@@ -853,7 +863,83 @@ pub fn strip_placeholders(text: &str) -> String {
 /// [`astock_engine::financial_numerals`], so a security code, a date, a heading number,
 /// a clock time, a reporting period, a lookback window and an inline list marker are
 /// not figures. Reimplementing that here would let validation and verification drift.
+/// Numbers a report-level field may reference: every label the claims declare.
+///
+/// A label declared by two claims with the same value and unit resolves; one declared
+/// with different values does not, because substituting either would print a figure
+/// the reader cannot attribute.
+pub fn report_level_numbers(draft: &VerifiedReportDraft) -> BTreeMap<String, NumericItem> {
+    let mut resolved: BTreeMap<String, NumericItem> = BTreeMap::new();
+    let mut ambiguous: BTreeSet<String> = BTreeSet::new();
+    for claim in &draft.claims {
+        for item in &claim.numeric_items {
+            match resolved.get(&item.label) {
+                Some(existing)
+                    if existing.value.to_bits() != item.value.to_bits()
+                        || existing.unit != item.unit =>
+                {
+                    ambiguous.insert(item.label.clone());
+                }
+                _ => {
+                    resolved.insert(item.label.clone(), item.clone());
+                }
+            }
+        }
+    }
+    for label in &ambiguous {
+        resolved.remove(label);
+    }
+    resolved
+}
+
+/// Labels a report-level field references that resolve to more than one value.
+fn ambiguous_report_labels(draft: &VerifiedReportDraft) -> BTreeSet<String> {
+    let mut seen: BTreeMap<String, (u64, Option<String>)> = BTreeMap::new();
+    let mut ambiguous = BTreeSet::new();
+    for claim in &draft.claims {
+        for item in &claim.numeric_items {
+            let key = (item.value.to_bits(), item.unit.clone());
+            match seen.get(&item.label) {
+                Some(existing) if *existing != key => {
+                    ambiguous.insert(item.label.clone());
+                }
+                _ => {
+                    seen.insert(item.label.clone(), key);
+                }
+            }
+        }
+    }
+    ambiguous
+}
+
 fn validate_free_text(draft: &VerifiedReportDraft, problems: &mut Vec<DraftProblem>) {
+    // Report-level fields resolve references against every claim's declarations, so a
+    // summary can name a figure without repeating its digits. Without this the summary
+    // could carry no number at all, which is not how a research summary is written:
+    // across 49 real submitted drafts it was the single largest source of refusals.
+    let report_numbers = report_level_numbers(draft);
+    let ambiguous = ambiguous_report_labels(draft);
+    let check_references = |field: &str, text: &str, problems: &mut Vec<DraftProblem>| {
+        for label in placeholder_labels(text) {
+            if ambiguous.contains(&label) {
+                problems.push(DraftProblem::AmbiguousNumberReference { label });
+            } else if !report_numbers.contains_key(&label) {
+                problems.push(DraftProblem::UnknownNumberReference {
+                    claim_id: field.to_owned(),
+                    label,
+                });
+            }
+        }
+    };
+    check_references("title", &draft.title, problems);
+    check_references("executive_summary", &draft.executive_summary, problems);
+    if let Some(uncertainty) = &draft.overall_uncertainty {
+        check_references("overall_uncertainty", uncertainty, problems);
+    }
+    for (index, limitation) in draft.limitations.iter().enumerate() {
+        check_references(&format!("limitations[{index}]"), limitation, problems);
+    }
+
     let mut check = |claim_id: Option<&str>, field: &str, text: &str| {
         // Placeholders are removed before extraction: `{最新价}` names a declared
         // number and is not itself a figure. Their labels are checked separately.
