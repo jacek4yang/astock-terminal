@@ -892,24 +892,69 @@ impl AgentRuntime {
         evidence_contexts: &mut Vec<Value>,
     ) -> Result<Vec<Message>, RuntimeError> {
         let mut prepared = Vec::with_capacity(calls.len());
+        let mut rejected: Vec<CompletedTool> = Vec::new();
         for call in calls {
+            // An unknown tool name stays fatal. The registry is closed, so a
+            // call to something outside it is an attempted capability escape
+            // rather than a formatting slip, and failing closed is the right
+            // response. `unknown_model_tool_fails_closed_and_never_reaches_engine`
+            // pins this.
             let definition = self
                 .tools
                 .get(&call.name)
                 .cloned()
                 .ok_or_else(|| RuntimeError::UnknownTool(call.name.clone()))?;
-            let arguments: Value = serde_json::from_str(&call.arguments).map_err(|error| {
-                RuntimeError::InvalidToolArguments {
-                    tool: call.name.clone(),
-                    message: error.to_string(),
+
+            // Malformed arguments on a *registered* tool are different: the model
+            // asked for something it is permitted to ask for and mis-encoded it.
+            // That is one bad call, not a reason to destroy a task that has
+            // already gathered evidence.
+            //
+            // A live deep-research run was lost to `invalid arguments for tool
+            // run_financial_calculation: EOF while parsing an object at line 1
+            // column 3559` — a truncated argument object, after eight tools had
+            // already succeeded. Reporting it back as a tool failure lets the
+            // model correct the call, which is how every other tool failure
+            // already behaves.
+            let arguments: Value = match serde_json::from_str::<Value>(&call.arguments) {
+                Ok(value) if value.is_object() => value,
+                Ok(_) => {
+                    let message = "tool arguments must be a JSON object".to_string();
+                    self.record(
+                        state,
+                        AgentEvent::ToolFailed {
+                            call_id: call.id.clone(),
+                            tool: call.name.clone(),
+                            message: message.clone(),
+                            retryable: true,
+                        },
+                    )
+                    .await?;
+                    rejected.push(CompletedTool::failure(call, message));
+                    continue;
                 }
-            })?;
-            if !arguments.is_object() {
-                return Err(RuntimeError::InvalidToolArguments {
-                    tool: call.name,
-                    message: "tool arguments must be a JSON object".into(),
-                });
-            }
+                Err(error) => {
+                    // Name the truncation explicitly: the model needs to know the
+                    // payload was cut off rather than semantically wrong, so it
+                    // can re-emit a smaller program instead of rewriting it.
+                    let message = format!(
+                        "arguments were not valid JSON ({error}); if the payload was truncated, \
+                         re-send a smaller argument object"
+                    );
+                    self.record(
+                        state,
+                        AgentEvent::ToolFailed {
+                            call_id: call.id.clone(),
+                            tool: call.name.clone(),
+                            message: message.clone(),
+                            retryable: true,
+                        },
+                    )
+                    .await?;
+                    rejected.push(CompletedTool::failure(call, message));
+                    continue;
+                }
+            };
             self.record(
                 state,
                 AgentEvent::ToolScheduled {
@@ -963,7 +1008,9 @@ impl AgentRuntime {
             })
             .buffer_unordered(max_parallel);
 
-        let mut completed = Vec::new();
+        // Rejected calls are already reported; carry them so the model sees a
+        // result for every call it made, including the ones we refused.
+        let mut completed = rejected;
         while let Some((prepared, result)) = executions.next().await {
             self.ensure_active(state)?;
             match result {
@@ -1701,6 +1748,50 @@ mod tests {
         assert_eq!(completed.content["ok"], json!(false));
         assert_eq!(completed.content["error"], json!("upstream 429"));
         assert!(completed.content.get("data").is_none());
+    }
+
+    /// A malformed tool call must not destroy a task that has already worked.
+    ///
+    /// An unknown *tool name* remains fatal — that is an attempted capability
+    /// escape from a closed registry, covered by the vertical suite. This is about
+    /// a registered tool whose arguments were mis-encoded.
+    ///
+    /// A live deep-research run was lost to a truncated argument object —
+    /// `EOF while parsing an object at line 1 column 3559` — after eight tools had
+    /// already succeeded. The whole task was discarded because the parse error
+    /// propagated with `?`. It is now reported as a failure of that one call, the
+    /// same way every other tool failure behaves, so the model can re-send a
+    /// smaller payload.
+    #[test]
+    fn a_rejected_tool_call_is_reported_as_a_tool_failure() {
+        let completed = CompletedTool::failure(
+            tool_call(),
+            "arguments were not valid JSON (EOF while parsing an object)".into(),
+        );
+        assert_eq!(completed.content["ok"], json!(false));
+        assert!(completed.content["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not valid JSON"));
+        assert!(
+            completed.content.get("data").is_none(),
+            "a rejected call must carry no payload"
+        );
+    }
+
+    /// The truncation hint must reach the model, not just the parse error.
+    ///
+    /// Without it the model rewrites the program semantically instead of shrinking
+    /// it, and hits the same output limit again.
+    #[test]
+    fn a_truncated_argument_message_tells_the_model_to_send_less() {
+        let message = format!(
+            "arguments were not valid JSON ({}); if the payload was truncated, \
+             re-send a smaller argument object",
+            "EOF while parsing an object at line 1 column 3559"
+        );
+        assert!(message.contains("truncated"));
+        assert!(message.contains("smaller"));
     }
 
     /// The context budget must stay far below the storage ceiling.
