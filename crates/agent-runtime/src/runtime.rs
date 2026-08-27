@@ -951,18 +951,49 @@ impl AgentRuntime {
         state: &mut RunState,
         arguments: Value,
     ) -> Result<Finalization, RuntimeError> {
-        let draft: VerifiedReportDraft = match serde_json::from_value(arguments) {
+        let draft: VerifiedReportDraft = match serde_json::from_value(arguments.clone()) {
             Ok(draft) => draft,
             Err(error) => {
-                // A shape error is one bad call, like any other malformed tool
-                // argument, and the model is told precisely what failed to decode.
-                return Ok(Finalization::Repair(json!({
+                // A shape error consumes the budget like any other rejection.
+                //
+                // It did not, and that was an unbounded loop: a live moderate run
+                // submitted 11 drafts against a budget of 6 and died on the round
+                // limit instead of failing closed, because a draft serde could not
+                // decode never reached the ledger. Provenance shape is the usual
+                // cause — `provenance: "calculated"` without
+                // `calculation_evidence_id` fails to decode rather than validating —
+                // so this path is reached by exactly the drafts most in need of
+                // bounded repair.
+                //
+                // The fingerprint is of the raw arguments, so an identical malformed
+                // resubmission is detected as no progress just like a decoded one.
+                let verdict = state
+                    .finalization
+                    .record_rejection(format!("undecodable:{arguments}"));
+                let response = json!({
                     "ok": false,
                     "stage": "decode",
                     "error": error.to_string(),
-                    "instruction": "The draft did not match the submit_report schema. Fix the \
-                                    reported field and resubmit the complete draft.",
-                })));
+                    "attempt": state.finalization.attempts(),
+                    "instruction": if verdict.is_exhausted() {
+                        "No finalization attempts remain. The report will not be published."
+                    } else {
+                        "The draft did not match the submit_report schema, so no claim was read. \
+                         A numeric item must carry every field its provenance requires: observed \
+                         needs evidence_id; calculated needs calculation_evidence_id, operation \
+                         and input_evidence_ids; estimated needs method and basis_evidence_ids. \
+                         Fix the reported field and resubmit the complete draft."
+                    },
+                });
+                return Ok(match verdict {
+                    RepairVerdict::Exhausted { .. } => Finalization::Exhausted {
+                        response,
+                        reason: format!(
+                            "the submitted report never matched the contract schema: {error}"
+                        ),
+                    },
+                    RepairVerdict::Retry { .. } => Finalization::Repair(response),
+                });
             }
         };
 
