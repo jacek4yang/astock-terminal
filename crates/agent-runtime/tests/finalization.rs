@@ -194,6 +194,18 @@ fn prose_round(text: &str) -> Turn {
     ]
 }
 
+/// A provider turn that carries nothing at all: no text, no tool call.
+fn empty_round() -> Turn {
+    vec![Ok(ModelChunk::Finished {
+        reason: Some("stop".into()),
+    })]
+}
+
+/// A turn that ends without even a termination marker.
+fn silent_round() -> Turn {
+    Vec::new()
+}
+
 /// A draft citing the mock quote evidence, valid by construction.
 fn valid_draft() -> Value {
     json!({
@@ -851,4 +863,158 @@ async fn a_structured_report_passes_the_real_engine_verifier_and_publishes() {
     // The reader sees numbered citations with human labels.
     assert!(outcome.report.contains("[1]"));
     assert!(outcome.report.contains("确定性计算"));
+}
+
+// ---------------------------------------------------------------------------
+// Empty provider turns
+//
+// A live simple-price task ended on `model returned neither visible text nor a
+// tool call` after ten successful tool calls, losing the whole task. An empty
+// turn commits nothing — no text reached the user, no tool call was assembled —
+// so re-issuing the identical request cannot repeat an effect. Recovery is
+// bounded, and it must not silently swallow a real provider fault.
+// ---------------------------------------------------------------------------
+
+/// An empty turn is replayed, and the task still publishes.
+#[tokio::test]
+async fn an_empty_provider_turn_is_replayed_and_the_task_still_publishes() {
+    let engine = ScriptedEngine::new(vec![passing()]);
+    let (events, result) = run(
+        ScriptedProvider::new(vec![
+            quote_round(),
+            empty_round(),
+            submit_round("call-good", valid_draft()),
+        ]),
+        engine.clone(),
+    )
+    .await;
+
+    let outcome = result.expect("the replayed round publishes");
+    assert!(outcome.report.contains("21.5"));
+    let replays: Vec<&AgentEvent> = events
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::ModelTurnEmpty { .. }))
+        .collect();
+    assert_eq!(replays.len(), 1, "one empty turn, one recorded replay");
+    assert!(matches!(
+        replays[0],
+        AgentEvent::ModelTurnEmpty { attempt: 1, action, .. } if action == "replay"
+    ));
+    // The recovery cost no reasoning round: the same round was re-issued.
+    let rounds: Vec<usize> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ModelStarted { round, .. } => Some(*round),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rounds, vec![1, 2], "an empty turn must not consume a round");
+}
+
+/// A stream that ends without any chunk at all is the same case.
+#[tokio::test]
+async fn a_stream_that_ends_with_no_chunks_is_recovered_as_an_empty_turn() {
+    let engine = ScriptedEngine::new(vec![passing()]);
+    let (events, result) = run(
+        ScriptedProvider::new(vec![
+            quote_round(),
+            silent_round(),
+            submit_round("call-good", valid_draft()),
+        ]),
+        engine,
+    )
+    .await;
+    result.expect("the replayed round publishes");
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::ModelTurnEmpty { .. })));
+}
+
+/// A second empty turn is answered with an instruction, not just a replay.
+#[tokio::test]
+async fn a_repeated_empty_turn_is_answered_with_a_concrete_instruction() {
+    let engine = ScriptedEngine::new(vec![passing()]);
+    let (events, result) = run(
+        ScriptedProvider::new(vec![
+            quote_round(),
+            empty_round(),
+            empty_round(),
+            submit_round("call-good", valid_draft()),
+        ]),
+        engine,
+    )
+    .await;
+    result.expect("the second replay publishes");
+    let actions: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ModelTurnEmpty { action, .. } => Some(action.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(actions, vec!["replay", "replay_with_instruction"]);
+}
+
+/// Replay is bounded: endless emptiness fails closed rather than looping.
+#[tokio::test]
+async fn endless_empty_turns_fail_closed() {
+    let engine = ScriptedEngine::new(vec![]);
+    let (events, result) = run_with_config(
+        ScriptedProvider::new(vec![
+            empty_round(),
+            empty_round(),
+            empty_round(),
+            empty_round(),
+        ]),
+        engine,
+        RuntimeConfig {
+            max_empty_turn_retries: 2,
+            ..RuntimeConfig::default()
+        },
+    )
+    .await;
+    assert!(
+        matches!(result, Err(RuntimeError::EmptyModelTurn)),
+        "an unrecoverable empty turn must fail closed, got {result:?}"
+    );
+    let actions: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ModelTurnEmpty { action, .. } => Some(action.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        actions,
+        vec!["replay", "replay_with_instruction", "exhausted"],
+        "the give-up point must be durable, not inferred from the error"
+    );
+}
+
+/// A provider error frame is a fault, not an empty turn.
+///
+/// Retrying a real fault as if it were emptiness would hide it and waste the
+/// replay budget on something a replay cannot fix.
+#[tokio::test]
+async fn a_provider_error_frame_is_not_treated_as_an_empty_turn() {
+    let engine = ScriptedEngine::new(vec![]);
+    let (events, result) = run(
+        ScriptedProvider::new(vec![vec![Err(ProviderError::new(
+            astock_agent_runtime::ProviderErrorKind::Authentication,
+            "invalid credential",
+            false,
+        ))]]),
+        engine,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(RuntimeError::Provider(_))),
+        "a provider fault must stay a provider fault, got {result:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ModelTurnEmpty { .. })),
+        "a fault must not be recorded as an empty turn"
+    );
 }

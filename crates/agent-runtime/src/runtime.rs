@@ -192,6 +192,13 @@ pub struct RuntimeConfig {
     /// verifier refusals. Exhausting them fails closed; it never publishes.
     pub max_finalization_attempts: usize,
     pub max_model_chunks_per_round: usize,
+    /// Safe replays of a provider turn that returned nothing at all.
+    ///
+    /// An empty turn commits nothing — no text reached the user and no tool call was
+    /// assembled — so re-requesting the identical round cannot duplicate an effect.
+    /// Counted separately from `max_model_rounds`, because a provider hiccup should
+    /// not consume the task's reasoning budget.
+    pub max_empty_turn_retries: usize,
     pub max_visible_chars_per_round: usize,
     pub max_tool_calls_per_round: usize,
     pub max_tool_argument_chars: usize,
@@ -213,6 +220,7 @@ impl Default for RuntimeConfig {
             max_research_rounds: 18,
             max_finalization_attempts: 4,
             max_model_chunks_per_round: 10_000,
+            max_empty_turn_retries: 2,
             max_visible_chars_per_round: 120_000,
             max_tool_calls_per_round: 32,
             max_tool_argument_chars: 256_000,
@@ -559,191 +567,56 @@ impl AgentRuntime {
             )
             .await?;
 
-            let request = ModelRequest {
-                model: selected_model.clone(),
-                messages: messages.clone(),
-                tools: self.tools.definitions(),
-                max_tokens: self.config.max_tokens,
-                temperature: self.config.temperature,
-            };
-            let effect_id = self
-                .begin_effect(
-                    state,
-                    "provider.stream",
-                    json!({
-                        "provider": self.provider.name(),
-                        "model": selected_model,
-                        "round": round,
-                        "message_count": request.messages.len(),
-                        "tool_count": request.tools.len(),
-                    }),
-                )
-                .await?;
-            let connection = tokio::select! {
-                _ = state.cancellation.cancelled() => {
-                    self.complete_effect(
-                        &effect_id,
-                        "failed",
-                        json!({"error": "cancelled during provider connection"}),
+            // One round, with bounded safe replay of an empty provider turn.
+            //
+            // A live simple-price task died on `model returned neither visible text
+            // nor a tool call` after ten successful tool calls. That turn committed
+            // nothing: no text was streamed to the user and no tool call was
+            // assembled, so re-issuing the identical request cannot repeat an
+            // effect. Each attempt opens a fresh connection, so a replay is also a
+            // reconnect. A provider *error* frame is not an empty turn — it is
+            // returned as a typed provider error before reaching this point — so a
+            // real fault is never silently retried as emptiness.
+            let mut empty_turns = 0usize;
+            let (text, calls) = loop {
+                let request = ModelRequest {
+                    model: selected_model.clone(),
+                    messages: messages.clone(),
+                    tools: self.tools.definitions(),
+                    max_tokens: self.config.max_tokens,
+                    temperature: self.config.temperature,
+                };
+                let effect_id = self
+                    .begin_effect(
+                        state,
+                        "provider.stream",
+                        json!({
+                            "provider": self.provider.name(),
+                            "model": selected_model,
+                            "round": round,
+                            "message_count": request.messages.len(),
+                            "tool_count": request.tools.len(),
+                        }),
                     )
                     .await?;
-                    return Err(RuntimeError::Cancelled);
-                }
-                result = tokio::time::timeout(
-                    self.config.provider_connect_timeout,
-                    self.provider.stream(request),
-                ) => result,
-            };
-            let mut stream = match connection {
-                Ok(Ok(stream)) => stream,
-                Ok(Err(error)) => {
-                    self.complete_effect(&effect_id, "failed", json!({"error": error.to_string()}))
-                        .await?;
-                    return Err(error.into());
-                }
-                Err(_) => {
-                    self.complete_effect(
-                        &effect_id,
-                        "failed",
-                        json!({"error": "provider connection timed out"}),
-                    )
-                    .await?;
-                    return Err(RuntimeError::Provider(crate::ProviderError::new(
-                        ProviderErrorKind::Network,
-                        "provider connection timed out",
-                        true,
-                    )));
-                }
-            };
-
-            let mut text = String::new();
-            let mut visible_chars = 0usize;
-            let mut chunk_count = 0usize;
-            let mut partial_calls = BTreeMap::<u32, PartialToolCall>::new();
-            loop {
-                self.ensure_active(state)?;
-                let next = tokio::select! {
+                let connection = tokio::select! {
                     _ = state.cancellation.cancelled() => {
                         self.complete_effect(
                             &effect_id,
                             "failed",
-                            json!({"error": "cancelled during provider stream"}),
+                            json!({"error": "cancelled during provider connection"}),
                         )
                         .await?;
                         return Err(RuntimeError::Cancelled);
                     }
                     result = tokio::time::timeout(
-                        self.config.provider_idle_timeout,
-                        stream.next(),
+                        self.config.provider_connect_timeout,
+                        self.provider.stream(request),
                     ) => result,
                 };
-                match next {
-                    Ok(Some(Ok(ModelChunk::TextDelta(delta)))) => {
-                        chunk_count = chunk_count.saturating_add(1);
-                        if chunk_count > self.config.max_model_chunks_per_round {
-                            let error = self
-                                .fail_malformed_stream(
-                                    &effect_id,
-                                    format!(
-                                        "model round exceeded {} streamed chunks",
-                                        self.config.max_model_chunks_per_round
-                                    ),
-                                )
-                                .await?;
-                            return Err(error);
-                        }
-                        if !delta.is_empty() {
-                            visible_chars = visible_chars.saturating_add(delta.chars().count());
-                            if visible_chars > self.config.max_visible_chars_per_round {
-                                let error = self
-                                    .fail_malformed_stream(
-                                        &effect_id,
-                                        format!(
-                                            "model round exceeded {} visible characters",
-                                            self.config.max_visible_chars_per_round
-                                        ),
-                                    )
-                                    .await?;
-                                return Err(error);
-                            }
-                            text.push_str(&delta);
-                            self.record(state, AgentEvent::TextDelta { text: delta })
-                                .await?;
-                        }
-                    }
-                    Ok(Some(Ok(ModelChunk::ToolCallDelta {
-                        index,
-                        id,
-                        name,
-                        arguments,
-                    }))) => {
-                        chunk_count = chunk_count.saturating_add(1);
-                        if chunk_count > self.config.max_model_chunks_per_round {
-                            let error = self
-                                .fail_malformed_stream(
-                                    &effect_id,
-                                    format!(
-                                        "model round exceeded {} streamed chunks",
-                                        self.config.max_model_chunks_per_round
-                                    ),
-                                )
-                                .await?;
-                            return Err(error);
-                        }
-                        if !partial_calls.contains_key(&index)
-                            && partial_calls.len() >= self.config.max_tool_calls_per_round
-                        {
-                            let error = self
-                                .fail_malformed_stream(
-                                    &effect_id,
-                                    format!(
-                                        "model round exceeded {} tool calls",
-                                        self.config.max_tool_calls_per_round
-                                    ),
-                                )
-                                .await?;
-                            return Err(error);
-                        }
-                        if let Err(message) = validate_tool_fragment(
-                            id.as_deref(),
-                            name.as_deref(),
-                            arguments.as_deref(),
-                            self.config.max_tool_argument_chars,
-                        ) {
-                            let error = self.fail_malformed_stream(&effect_id, message).await?;
-                            return Err(error);
-                        }
-                        let partial = partial_calls.entry(index).or_default();
-                        partial.merge(id, name, arguments);
-                        if partial.argument_chars > self.config.max_tool_argument_chars {
-                            let error = self
-                                .fail_malformed_stream(
-                                    &effect_id,
-                                    format!(
-                                        "tool call arguments exceeded {} characters",
-                                        self.config.max_tool_argument_chars
-                                    ),
-                                )
-                                .await?;
-                            return Err(error);
-                        }
-                    }
-                    Ok(Some(Ok(ModelChunk::Finished { .. }))) => {
-                        chunk_count = chunk_count.saturating_add(1);
-                        if chunk_count > self.config.max_model_chunks_per_round {
-                            let error = self
-                                .fail_malformed_stream(
-                                    &effect_id,
-                                    format!(
-                                        "model round exceeded {} streamed chunks",
-                                        self.config.max_model_chunks_per_round
-                                    ),
-                                )
-                                .await?;
-                            return Err(error);
-                        }
-                    }
-                    Ok(Some(Err(error))) => {
+                let mut stream = match connection {
+                    Ok(Ok(stream)) => stream,
+                    Ok(Err(error)) => {
                         self.complete_effect(
                             &effect_id,
                             "failed",
@@ -752,50 +625,239 @@ impl AgentRuntime {
                         .await?;
                         return Err(error.into());
                     }
-                    Ok(None) => break,
                     Err(_) => {
                         self.complete_effect(
                             &effect_id,
                             "failed",
-                            json!({"error": "provider stream idle timeout"}),
+                            json!({"error": "provider connection timed out"}),
                         )
                         .await?;
                         return Err(RuntimeError::Provider(crate::ProviderError::new(
                             ProviderErrorKind::Network,
-                            "provider stream idle timeout",
+                            "provider connection timed out",
                             true,
                         )));
                     }
+                };
+
+                let mut text = String::new();
+                let mut visible_chars = 0usize;
+                let mut chunk_count = 0usize;
+                let mut partial_calls = BTreeMap::<u32, PartialToolCall>::new();
+                loop {
+                    self.ensure_active(state)?;
+                    let next = tokio::select! {
+                        _ = state.cancellation.cancelled() => {
+                            self.complete_effect(
+                                &effect_id,
+                                "failed",
+                                json!({"error": "cancelled during provider stream"}),
+                            )
+                            .await?;
+                            return Err(RuntimeError::Cancelled);
+                        }
+                        result = tokio::time::timeout(
+                            self.config.provider_idle_timeout,
+                            stream.next(),
+                        ) => result,
+                    };
+                    match next {
+                        Ok(Some(Ok(ModelChunk::TextDelta(delta)))) => {
+                            chunk_count = chunk_count.saturating_add(1);
+                            if chunk_count > self.config.max_model_chunks_per_round {
+                                let error = self
+                                    .fail_malformed_stream(
+                                        &effect_id,
+                                        format!(
+                                            "model round exceeded {} streamed chunks",
+                                            self.config.max_model_chunks_per_round
+                                        ),
+                                    )
+                                    .await?;
+                                return Err(error);
+                            }
+                            if !delta.is_empty() {
+                                visible_chars = visible_chars.saturating_add(delta.chars().count());
+                                if visible_chars > self.config.max_visible_chars_per_round {
+                                    let error = self
+                                        .fail_malformed_stream(
+                                            &effect_id,
+                                            format!(
+                                                "model round exceeded {} visible characters",
+                                                self.config.max_visible_chars_per_round
+                                            ),
+                                        )
+                                        .await?;
+                                    return Err(error);
+                                }
+                                text.push_str(&delta);
+                                self.record(state, AgentEvent::TextDelta { text: delta })
+                                    .await?;
+                            }
+                        }
+                        Ok(Some(Ok(ModelChunk::ToolCallDelta {
+                            index,
+                            id,
+                            name,
+                            arguments,
+                        }))) => {
+                            chunk_count = chunk_count.saturating_add(1);
+                            if chunk_count > self.config.max_model_chunks_per_round {
+                                let error = self
+                                    .fail_malformed_stream(
+                                        &effect_id,
+                                        format!(
+                                            "model round exceeded {} streamed chunks",
+                                            self.config.max_model_chunks_per_round
+                                        ),
+                                    )
+                                    .await?;
+                                return Err(error);
+                            }
+                            if !partial_calls.contains_key(&index)
+                                && partial_calls.len() >= self.config.max_tool_calls_per_round
+                            {
+                                let error = self
+                                    .fail_malformed_stream(
+                                        &effect_id,
+                                        format!(
+                                            "model round exceeded {} tool calls",
+                                            self.config.max_tool_calls_per_round
+                                        ),
+                                    )
+                                    .await?;
+                                return Err(error);
+                            }
+                            if let Err(message) = validate_tool_fragment(
+                                id.as_deref(),
+                                name.as_deref(),
+                                arguments.as_deref(),
+                                self.config.max_tool_argument_chars,
+                            ) {
+                                let error = self.fail_malformed_stream(&effect_id, message).await?;
+                                return Err(error);
+                            }
+                            let partial = partial_calls.entry(index).or_default();
+                            partial.merge(id, name, arguments);
+                            if partial.argument_chars > self.config.max_tool_argument_chars {
+                                let error = self
+                                    .fail_malformed_stream(
+                                        &effect_id,
+                                        format!(
+                                            "tool call arguments exceeded {} characters",
+                                            self.config.max_tool_argument_chars
+                                        ),
+                                    )
+                                    .await?;
+                                return Err(error);
+                            }
+                        }
+                        Ok(Some(Ok(ModelChunk::Finished { .. }))) => {
+                            chunk_count = chunk_count.saturating_add(1);
+                            if chunk_count > self.config.max_model_chunks_per_round {
+                                let error = self
+                                    .fail_malformed_stream(
+                                        &effect_id,
+                                        format!(
+                                            "model round exceeded {} streamed chunks",
+                                            self.config.max_model_chunks_per_round
+                                        ),
+                                    )
+                                    .await?;
+                                return Err(error);
+                            }
+                        }
+                        Ok(Some(Err(error))) => {
+                            self.complete_effect(
+                                &effect_id,
+                                "failed",
+                                json!({"error": error.to_string()}),
+                            )
+                            .await?;
+                            return Err(error.into());
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            self.complete_effect(
+                                &effect_id,
+                                "failed",
+                                json!({"error": "provider stream idle timeout"}),
+                            )
+                            .await?;
+                            return Err(RuntimeError::Provider(crate::ProviderError::new(
+                                ProviderErrorKind::Network,
+                                "provider stream idle timeout",
+                                true,
+                            )));
+                        }
+                    }
                 }
-            }
-            let tool_call_count = partial_calls.len();
-            let calls = match partial_calls
-                .into_iter()
-                .map(|(index, call)| call.finish(index))
-                .collect::<Result<Vec<_>, _>>()
-            {
-                Ok(calls) => calls,
-                Err(error) => {
-                    self.complete_effect(&effect_id, "failed", json!({"error": error.to_string()}))
+                let tool_call_count = partial_calls.len();
+                let calls = match partial_calls
+                    .into_iter()
+                    .map(|(index, call)| call.finish(index))
+                    .collect::<Result<Vec<_>, _>>()
+                {
+                    Ok(calls) => calls,
+                    Err(error) => {
+                        self.complete_effect(
+                            &effect_id,
+                            "failed",
+                            json!({"error": error.to_string()}),
+                        )
                         .await?;
-                    return Err(error);
+                        return Err(error);
+                    }
+                };
+                if calls.is_empty() && text.trim().is_empty() {
+                    self.complete_effect(
+                        &effect_id,
+                        "failed",
+                        json!({"error": "model returned neither visible text nor a tool call"}),
+                    )
+                    .await?;
+                    empty_turns = empty_turns.saturating_add(1);
+                    let exhausted = empty_turns > self.config.max_empty_turn_retries;
+                    self.record(
+                        state,
+                        AgentEvent::ModelTurnEmpty {
+                            round,
+                            attempt: empty_turns,
+                            action: if exhausted {
+                                "exhausted".into()
+                            } else if empty_turns == 1 {
+                                "replay".into()
+                            } else {
+                                "replay_with_instruction".into()
+                            },
+                        },
+                    )
+                    .await?;
+                    if exhausted {
+                        return Err(RuntimeError::EmptyModelTurn);
+                    }
+                    if empty_turns > 1 {
+                        // An identical replay already failed once, so the emptiness is
+                        // unlikely to be a transient stream fault. Name the two things
+                        // that constitute progress; anything vaguer invites another
+                        // empty turn.
+                        messages.push(Message::text(
+                            MessageRole::System,
+                            "Your previous turn returned nothing. Respond with exactly one of: a \
+                         tool call that advances the research, or submit_report with the claims \
+                         the evidence already supports. Do not reply with an empty turn.",
+                        ));
+                    }
+                    continue;
                 }
-            };
-            if calls.is_empty() && text.trim().is_empty() {
                 self.complete_effect(
                     &effect_id,
-                    "failed",
-                    json!({"error": "model returned neither visible text nor a tool call"}),
+                    "succeeded",
+                    json!({"visible_chars": visible_chars, "tool_calls": tool_call_count}),
                 )
                 .await?;
-                return Err(RuntimeError::EmptyModelTurn);
-            }
-            self.complete_effect(
-                &effect_id,
-                "succeeded",
-                json!({"visible_chars": visible_chars, "tool_calls": tool_call_count}),
-            )
-            .await?;
+                break (text, calls);
+            };
             if !calls.is_empty() {
                 state.phase = AgentPhase::AwaitingTools;
                 messages.push(Message {
@@ -1559,6 +1621,12 @@ fn apply_session_event(session: &mut RuntimeSession, event: &AgentEvent) {
             AgentEvent::ModelStarted { round, .. } => {
                 task.phase = AgentPhase::Reasoning;
                 task.model_round = *round;
+            }
+            // An empty turn is being replayed, so the task is still reasoning at
+            // the same round. Advancing or rewinding the phase here would misreport
+            // a recovered hiccup as progress or as a fault.
+            AgentEvent::ModelTurnEmpty { .. } => {
+                task.phase = AgentPhase::Reasoning;
             }
             AgentEvent::ToolScheduled { .. } | AgentEvent::ToolStarted { .. } => {
                 task.phase = AgentPhase::AwaitingTools;
