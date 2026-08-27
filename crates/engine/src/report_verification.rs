@@ -177,11 +177,22 @@ fn mask_non_financial_tokens(line: &str) -> String {
         r"(?m)^\s{0,3}\d{1,3}[.、)]\s",
         // Chinese section numbering: 第一步, 第3节, 第二部分.
         r"第\s*[0-9一二三四五六七八九十百]+\s*[步章节条部分项]",
-        // Window and horizon labels: 6个月, 20个交易日, 5年期, 3周, 近3年.
+        // Window and horizon labels: 6个月, 20个交易日, 5年期, 3周, 近3年, 250日, 60日均线.
         //
         // A one or two digit count before 年 is a duration; a calendar year in this
-        // corpus is four digits and is masked by the date rule above.
-        r"\d+\s*(?:个月|个交易日|个季度|年期|周|天|日线|分钟)|\d{1,2}\s*年",
+        // corpus is four digits and is masked by the date rule above. A count before
+        // 日 is either a day of month or a lookback window — `250 日 K 线`,
+        // `60 日均线` — and neither asserts a quantity.
+        r"\d+\s*(?:个月|个交易日|个季度|年期|周|天|日线|分钟)|\d{1,2}\s*年|\d{1,3}\s*日",
+        // Inline enumeration markers: `关键不确定性: 1) 铜价 2) 汇率 3) 执行`.
+        //
+        // The line-start rule above only catches a list that begins a line, and
+        // Chinese research prose enumerates inline. A one or two digit number
+        // closing a bracket after a separator, a space or an opening bracket is a
+        // list marker or a footnote, not a quantity; a real quantity carries a unit
+        // or a magnitude suffix. The separator is consumed with the marker, which
+        // affects nothing: masking only decides what is read as a quantity.
+        r"[:：;；,，、（(\s]\d{1,2}[)）]",
     ];
     let mut masked = line.to_owned();
     for pattern in PATTERNS {
@@ -732,6 +743,32 @@ mod tests {
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].raw, "3490.79");
         assert_eq!(found[0].unit.as_deref(), Some("亿"));
+    }
+
+    /// Lookback windows and inline enumerations assert no quantity.
+    #[test]
+    fn lookback_windows_and_inline_enumerations_are_not_treated_as_figures() {
+        for label in [
+            "基于过去 250 日 K 线的观察",
+            "60 日均线尚未转正",
+            "关键不确定性: 1) 铜价 2) 汇率 3) 项目执行",
+            "风险包括：1）商品价格；2）汇率",
+        ] {
+            assert!(
+                financial_numerals(label).is_empty(),
+                "`{label}` asserts no quantity, found {:?}",
+                financial_numerals(label)
+            );
+        }
+    }
+
+    /// A quantity inside an enumerated item is still extracted.
+    #[test]
+    fn a_quantity_inside_an_enumerated_item_is_still_extracted() {
+        let found = financial_numerals("风险: 1) 铜价下跌 15% 的情形");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].raw, "15");
+        assert_eq!(found[0].unit.as_deref(), Some("%"));
     }
 
     /// An unsigned claim still fails against negative evidence, as before.
