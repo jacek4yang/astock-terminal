@@ -49,5 +49,6 @@ pub use session::{
 };
 pub use store::{AgentStore, EffectIntent, StoredCheckpoint};
 pub use tools::{
-    default_registry, CachePolicy, ToolDefinition, ToolExecutor, ToolRegistry, ToolRisk,
+    default_registry, CachePolicy, ToolDefinition, ToolExecutor, ToolHandler, ToolRegistry,
+    ToolRisk,
 };
