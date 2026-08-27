@@ -185,12 +185,20 @@ fn validation_action(code: &str) -> &'static str {
              holds this figure. Do not round: a rounded figure is a different figure."
         }
         "figure_in_free_text" => {
-            "Free text carries no figures. Move this number into numeric_items with its \
-             provenance and describe it in words instead: the runtime renders every declared \
-             number with its unit, provenance and citation, so nothing is lost to the reader. \
-             This applies to every free-text field, including executive_summary, limitations, \
-             assumptions and uncertainty. Write no formulas or arithmetic in prose; put the \
-             operation on the numeric_item."
+            "Do not write the digits. Declare the number as a numeric_item with its provenance \
+             and reference it from the prose by its label in braces: \
+             `statement: \"收盘价{收盘价}，成交额{成交额}\"` with numeric_items labelled `收盘价` \
+             and `成交额`. The runtime substitutes the verified value and unit, so the sentence \
+             reads normally and the figure is checked, and the number lives in exactly one \
+             place. Braces work in statements. Other free-text fields — executive_summary, \
+             overall_uncertainty, limitations, assumptions, uncertainty — take no figures at all; \
+             describe the finding and let the claims carry the numbers. Write no formulas in \
+             prose; put the operation on the numeric_item."
+        }
+        "unknown_number_reference" => {
+            "This statement references a number in braces that the claim does not declare. Add a \
+             numeric_item with exactly that label, or change the reference to a label the claim \
+             already declares."
         }
         "evidence_outside_task_scope" => {
             "This evidence belongs to a different security than the task covers. Remove it, or \
@@ -877,6 +885,7 @@ mod tests {
             "scenario_without_assumption",
             "conflicting_evidence",
             "figure_in_free_text",
+            "unknown_number_reference",
             "number_disagrees_with_evidence",
             "evidence_outside_task_scope",
             "duplicate_claim_id",

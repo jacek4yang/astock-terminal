@@ -78,7 +78,12 @@ pub struct RenderedClaim {
     pub kind: String,
     /// `事实`, `计算`, `推断`, `估算`, `情景`, `未知`.
     pub kind_label: String,
+    /// User-visible prose with every `{label}` reference replaced by its verified
+    /// value, so React and the terminal show the same sentence.
     pub text: String,
+    /// Labels the prose already presents inline, so a consumer does not repeat them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inline_numbers: Vec<String>,
     pub numbers: Vec<RenderedNumber>,
     pub evidence_numbers: Vec<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -239,11 +244,14 @@ fn render_claim(claim: &Claim, numbers_for: &impl Fn(&[&str]) -> Vec<usize>) -> 
         .iter()
         .map(String::as_str)
         .collect();
+    let declared = declared_numbers(claim);
+    let referenced = crate::report::placeholder_labels(&claim.statement);
     RenderedClaim {
         id: claim.id.clone(),
         kind: claim.kind.as_str().to_owned(),
         kind_label: claim.kind.display_label().to_owned(),
-        text: claim.statement.clone(),
+        text: substitute_numbers(&claim.statement, &declared),
+        inline_numbers: referenced,
         numbers,
         evidence_numbers: numbers_for(&evidence),
         confidence: claim.confidence.clone(),
@@ -251,6 +259,54 @@ fn render_claim(claim: &Claim, numbers_for: &impl Fn(&[&str]) -> Vec<usize>) -> 
         assumptions: claim.assumptions.clone(),
         disclosed_conflicts: numbers_for(&conflicts),
     }
+}
+
+/// Substitute `{label}` references with the declared value and unit.
+///
+/// This is what lets the model write natural prose without duplicating numeric
+/// truth. The model writes `收盘价{收盘价}`, declares `收盘价` as a numeric item with
+/// provenance, and the runtime prints the verified value — so the reader sees a
+/// normal sentence, the figure is checked, and there is exactly one place where the
+/// number lives.
+///
+/// The same substitution is applied to the verifier form, so the figure the reader
+/// sees is the figure the independent verifier reproduced against the claim's
+/// citations. Rendering one thing and verifying another would defeat the point.
+fn substitute_numbers(text: &str, numbers: &[(String, f64, Option<String>)]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else {
+            out.push_str(&rest[open..]);
+            return out;
+        };
+        let label = after[..close].trim();
+        match numbers.iter().find(|(name, _, _)| name == label) {
+            Some((_, value, unit)) => {
+                out.push_str(&format_number(*value));
+                if let Some(unit) = unit {
+                    out.push_str(unit);
+                }
+            }
+            // Validation refuses an unresolvable reference, so this is unreachable for
+            // a validated draft. Degrade to the label rather than showing braces.
+            None => out.push_str(label),
+        }
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The `(label, value, unit)` triples a claim declares.
+fn declared_numbers(claim: &Claim) -> Vec<(String, f64, Option<String>)> {
+    claim
+        .numeric_items
+        .iter()
+        .map(|item| (item.label.clone(), item.value, item.unit.clone()))
+        .collect()
 }
 
 /// Render a value the way the verifier will read it back.
@@ -303,7 +359,11 @@ fn render_markdown(
             // and the presentation disagree about what the report says, and it
             // pushed the model towards writing figures into prose instead, which is
             // exactly what has no provenance.
-            for number in &claim.numbers {
+            for number in claim
+                .numbers
+                .iter()
+                .filter(|number| !claim.inline_numbers.contains(&number.label))
+            {
                 let unit = number
                     .unit
                     .as_deref()
@@ -416,14 +476,22 @@ fn render_verifier_form(draft: &VerifiedReportDraft) -> (String, BTreeMap<usize,
             // reproduces each against the evidence the claim actually named,
             // rather than against whatever happened to share a prose line.
             let mut line = String::new();
+            let declared = declared_numbers(claim);
+            let referenced = crate::report::placeholder_labels(&claim.statement);
             line.push_str(&format!(
                 "【{}】{}",
                 claim.kind.display_label(),
-                claim.statement.trim()
+                substitute_numbers(&claim.statement, &declared).trim()
             ));
+            // Numbers the prose did not present inline are emitted explicitly. Every
+            // item's provenance is cited either way: a figure substituted into the
+            // prose still has to be reproduced against the evidence it names, so
+            // omitting its identifier would fail the very claim it supports.
             for item in &claim.numeric_items {
-                let unit = item.unit.as_deref().unwrap_or("");
-                line.push_str(&format!(" {}={}{}", item.label, item.value, unit));
+                if !referenced.contains(&item.label) {
+                    let unit = item.unit.as_deref().unwrap_or("");
+                    line.push_str(&format!(" {}={}{}", item.label, item.value, unit));
+                }
                 for id in item.provenance.referenced_evidence() {
                     line.push_str(&format!("【E:{id}】"));
                 }

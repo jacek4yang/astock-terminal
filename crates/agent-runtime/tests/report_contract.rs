@@ -1040,3 +1040,106 @@ fn an_observed_fact_still_may_not_carry_a_calculated_value() {
         "a derived value must never be presentable as an observation: {problems:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Figures are referenced, not written
+//
+// The model writes `收盘价{收盘价}` and declares `收盘价` as a numeric item; the
+// runtime substitutes the verified value. The sentence reads normally, the figure is
+// checked, and the number lives in exactly one place — which is the whole point,
+// because maintaining the same number in prose and in numeric_items is what the
+// model could not do reliably.
+// ---------------------------------------------------------------------------
+
+/// A referenced figure renders as its verified value and is not duplicated.
+#[test]
+fn a_referenced_figure_renders_as_its_verified_value() {
+    let draft = one_claim_draft(observed_claim(
+        "紫金矿业当日成交额为 {成交额}。",
+        vec![amount_item()],
+        vec!["evf_amount"],
+    ));
+    let registry = amount_registry();
+    let problems = validate_draft(&draft, &registry, &BTreeSet::new());
+    assert!(problems.is_empty(), "{problems:?}");
+
+    let rendered = render(&draft, &registry);
+    assert!(
+        rendered.markdown.contains("当日成交额为 7987376586元"),
+        "the reader must see the verified value:\n{}",
+        rendered.markdown
+    );
+    // Not repeated as a sub-bullet, because the prose already presents it.
+    assert!(
+        !rendered.markdown.contains("    - 成交额："),
+        "an inline figure must not be duplicated:\n{}",
+        rendered.markdown
+    );
+    // The verifier reads the substituted value beside the citation it must reproduce
+    // against, so what is published is what was checked.
+    assert!(rendered.verifier_markdown.contains("7987376586元"));
+    assert!(rendered.verifier_markdown.contains("【E:evf_amount】"));
+    assert!(!contains_internal_identifier(&rendered.markdown));
+}
+
+/// A number the prose does not reference is still shown and still verified.
+#[test]
+fn an_unreferenced_figure_is_still_presented_and_cited() {
+    let draft = one_claim_draft(observed_claim(
+        "当日成交额已披露。",
+        vec![amount_item()],
+        vec!["evf_amount"],
+    ));
+    let registry = amount_registry();
+    assert!(validate_draft(&draft, &registry, &BTreeSet::new()).is_empty());
+    let rendered = render(&draft, &registry);
+    assert!(rendered.markdown.contains("成交额：7987376586 元"));
+    assert!(rendered.verifier_markdown.contains("成交额=7987376586元"));
+}
+
+/// A reference to a number the claim does not declare is refused.
+#[test]
+fn a_reference_to_an_undeclared_number_is_refused() {
+    let draft = one_claim_draft(observed_claim(
+        "当日成交额为 {不存在的标签}。",
+        vec![amount_item()],
+        vec!["evf_amount"],
+    ));
+    let problems = validate_draft(&draft, &amount_registry(), &BTreeSet::new());
+    assert!(
+        problems.iter().any(|problem| matches!(
+            problem,
+            DraftProblem::UnknownNumberReference { claim_id, label }
+                if claim_id == "c1" && label == "不存在的标签"
+        )),
+        "an unresolvable reference must be refused rather than rendered: {problems:?}"
+    );
+}
+
+/// A reference is not itself a figure, so it does not trip the free-text rule.
+#[test]
+fn a_reference_is_not_read_as_a_figure() {
+    let draft = one_claim_draft(observed_claim(
+        "收盘价 {最新价}，成交额 {成交额}。",
+        vec![
+            NumericItem {
+                value: 34.47,
+                unit: Some("元".to_owned()),
+                label: "最新价".to_owned(),
+                provenance: NumericProvenance::Observed {
+                    evidence_id: "evf_price".to_owned(),
+                    field: None,
+                },
+            },
+            amount_item(),
+        ],
+        vec!["evf_price", "evf_amount"],
+    ));
+    let problems = validate_draft(&draft, &amount_registry(), &BTreeSet::new());
+    assert!(
+        !problems
+            .iter()
+            .any(|problem| problem.code() == "figure_in_free_text"),
+        "{problems:?}"
+    );
+}

@@ -374,6 +374,14 @@ pub enum DraftProblem {
         /// The figure as written.
         numeral: String,
     },
+    /// A `{label}` reference in prose that names no declared number.
+    ///
+    /// Left unchecked the reader would see the literal braces and the verifier would
+    /// check nothing, so an unresolvable reference is refused rather than rendered.
+    UnknownNumberReference {
+        claim_id: String,
+        label: String,
+    },
     /// A declared number that its own cited evidence does not support.
     ///
     /// The most dangerous shape the contract can carry: a figure with a
@@ -405,6 +413,7 @@ impl DraftProblem {
             | Self::InvalidEstimate { claim_id, .. }
             | Self::ScenarioWithoutAssumption { claim_id }
             | Self::ConflictingEvidence { claim_id, .. }
+            | Self::UnknownNumberReference { claim_id, .. }
             | Self::NumberDisagreesWithEvidence { claim_id, .. }
             | Self::EvidenceOutsideTaskScope { claim_id, .. } => Some(claim_id),
             Self::SectionReferencesUnknownClaim { claim_id, .. } => Some(claim_id),
@@ -428,6 +437,7 @@ impl DraftProblem {
             Self::ScenarioWithoutAssumption { .. } => "scenario_without_assumption",
             Self::ConflictingEvidence { .. } => "conflicting_evidence",
             Self::FigureInFreeText { .. } => "figure_in_free_text",
+            Self::UnknownNumberReference { .. } => "unknown_number_reference",
             Self::NumberDisagreesWithEvidence { .. } => "number_disagrees_with_evidence",
             Self::EvidenceOutsideTaskScope { .. } => "evidence_outside_task_scope",
         }
@@ -773,6 +783,61 @@ fn validate_claim(
     for item in &claim.numeric_items {
         validate_numeric_item(claim, item, registry, problems);
     }
+    // A placeholder must name a number this claim declares, or the reader would see
+    // the literal brace text and the verifier would check nothing.
+    for label in placeholder_labels(&claim.statement) {
+        if !claim.numeric_items.iter().any(|item| item.label == label) {
+            problems.push(DraftProblem::UnknownNumberReference {
+                claim_id: claim.id.clone(),
+                label,
+            });
+        }
+    }
+}
+
+/// Placeholder delimiters. `{label}` in a statement refers to a declared number.
+pub(crate) const PLACEHOLDER_OPEN: char = '{';
+pub(crate) const PLACEHOLDER_CLOSE: char = '}';
+
+/// Labels referenced by `{…}` in a piece of prose, in order of appearance.
+pub(crate) fn placeholder_labels(text: &str) -> Vec<String> {
+    let mut labels = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find(PLACEHOLDER_OPEN) {
+        let after = &rest[open + PLACEHOLDER_OPEN.len_utf8()..];
+        let Some(close) = after.find(PLACEHOLDER_CLOSE) else {
+            break;
+        };
+        let label = after[..close].trim();
+        if !label.is_empty() {
+            labels.push(label.to_owned());
+        }
+        rest = &after[close + PLACEHOLDER_CLOSE.len_utf8()..];
+    }
+    labels
+}
+
+/// Remove `{…}` spans so figure extraction sees prose only.
+pub(crate) fn strip_placeholders(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find(PLACEHOLDER_OPEN) {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + PLACEHOLDER_OPEN.len_utf8()..];
+        match after.find(PLACEHOLDER_CLOSE) {
+            Some(close) => {
+                out.push(' ');
+                rest = &after[close + PLACEHOLDER_CLOSE.len_utf8()..];
+            }
+            None => {
+                // An unclosed brace is left in place; the label check reports it.
+                out.push_str(&rest[open..]);
+                return out;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Refuse a financial figure anywhere in the draft's free text.
@@ -790,7 +855,10 @@ fn validate_claim(
 /// not figures. Reimplementing that here would let validation and verification drift.
 fn validate_free_text(draft: &VerifiedReportDraft, problems: &mut Vec<DraftProblem>) {
     let mut check = |claim_id: Option<&str>, field: &str, text: &str| {
-        for numeral in astock_engine::financial_numerals(text) {
+        // Placeholders are removed before extraction: `{最新价}` names a declared
+        // number and is not itself a figure. Their labels are checked separately.
+        let prose = strip_placeholders(text);
+        for numeral in astock_engine::financial_numerals(&prose) {
             problems.push(DraftProblem::FigureInFreeText {
                 claim_id: claim_id.map(str::to_owned),
                 field: field.to_owned(),
