@@ -207,6 +207,12 @@ pub struct RuntimeConfig {
     /// identical-resubmission detection long before this bound.
     pub max_finalization_attempts: usize,
     pub max_model_chunks_per_round: usize,
+    /// Calls to tools that do not exist, before the task fails closed.
+    ///
+    /// Such a call is never executed, so the capability boundary holds regardless.
+    /// This bounds how many times the model may misremember a name before the task
+    /// is judged to be making no progress.
+    pub max_unknown_tool_rejections: usize,
     /// Safe replays of a provider turn that returned nothing at all.
     ///
     /// An empty turn commits nothing — no text reached the user and no tool call was
@@ -235,6 +241,7 @@ impl Default for RuntimeConfig {
             max_research_rounds: 20,
             max_finalization_attempts: 6,
             max_model_chunks_per_round: 10_000,
+            max_unknown_tool_rejections: 3,
             max_empty_turn_retries: 2,
             max_visible_chars_per_round: 120_000,
             max_tool_calls_per_round: 32,
@@ -1196,16 +1203,45 @@ impl AgentRuntime {
         let mut runtime_calls: Vec<PreparedTool> = Vec::new();
         let mut rejected: Vec<CompletedTool> = Vec::new();
         for call in calls {
-            // An unknown tool name stays fatal. The registry is closed, so a
-            // call to something outside it is an attempted capability escape
-            // rather than a formatting slip, and failing closed is the right
-            // response. `unknown_model_tool_fails_closed_and_never_reaches_engine`
-            // pins this.
-            let definition = self
-                .tools
-                .get(&call.name)
-                .cloned()
-                .ok_or_else(|| RuntimeError::UnknownTool(call.name.clone()))?;
+            // An unknown tool name is refused, never executed — and no longer fatal
+            // on the first occurrence.
+            //
+            // Fail-closed is about capability: the call must not reach the Engine and
+            // must grant nothing. Ending the task is a separate policy, and it cost a
+            // live run everything after eight successful tool calls because the model
+            // asked for `search_news` instead of `research_news`. That is a slip, not
+            // an attempted escape, and it is the same class as the malformed argument
+            // that used to destroy a task.
+            //
+            // So: refuse, name the registered tools, and let the model correct itself
+            // — bounded, because a model that keeps calling tools that do not exist is
+            // not making progress and must not loop. Nothing is dispatched either way.
+            let definition = match self.tools.get(&call.name).cloned() {
+                Some(definition) => definition,
+                None => {
+                    state.unknown_tool_calls = state.unknown_tool_calls.saturating_add(1);
+                    if state.unknown_tool_calls > self.config.max_unknown_tool_rejections {
+                        return Err(RuntimeError::UnknownTool(call.name.clone()));
+                    }
+                    let available = self.tools.names().collect::<Vec<_>>().join(", ");
+                    let message = format!(
+                        "no such tool `{}`; it was not executed. Registered tools: {available}",
+                        call.name
+                    );
+                    self.record(
+                        state,
+                        AgentEvent::ToolFailed {
+                            call_id: call.id.clone(),
+                            tool: call.name.clone(),
+                            message: message.clone(),
+                            retryable: true,
+                        },
+                    )
+                    .await?;
+                    rejected.push(CompletedTool::failure(call, message));
+                    continue;
+                }
+            };
 
             // Malformed arguments on a *registered* tool are different: the model
             // asked for something it is permitted to ask for and mis-encoded it.
@@ -1841,6 +1877,8 @@ struct RunState {
     model_round: usize,
     completed_tool_ids: Vec<String>,
     evidence_ids: Vec<String>,
+    /// Calls to tools that do not exist, refused so far.
+    unknown_tool_calls: usize,
     /// Canonical evidence the task has seen, with the metadata a citation needs.
     ///
     /// Durable task state, not model context: the model reaches it only through
@@ -1865,6 +1903,7 @@ impl RunState {
             model_round: 0,
             completed_tool_ids: Vec::new(),
             evidence_ids: Vec::new(),
+            unknown_tool_calls: 0,
             catalog: EvidenceCatalog::default(),
             finalization: FinalizationLedger::new(max_finalization_attempts),
             sender,

@@ -250,6 +250,31 @@ fn numeric_item_schema() -> Value {
         "additionalProperties": false,
         "required": ["label", "value", "provenance"],
         "properties": Value::Object(properties),
+        // Which extra fields each provenance class requires.
+        //
+        // Listing them as optional siblings told the model nothing about valid
+        // combinations, so it repeatedly sent `provenance: "calculated"` with no
+        // `calculation_evidence_id`. That fails to decode rather than validating, and
+        // a live moderate run spent its whole finalization budget on it — six
+        // submissions, the same missing field each time. The conditional says it in
+        // the schema, where the model is already looking, instead of only in prose.
+        //
+        // A provider that ignores `allOf`/`if` loses nothing: the contract still
+        // rejects the same drafts, with a diagnostic that now names the exact field.
+        "allOf": [
+            {
+                "if": {"properties": {"provenance": {"const": "observed"}}, "required": ["provenance"]},
+                "then": {"required": ["evidence_id"]}
+            },
+            {
+                "if": {"properties": {"provenance": {"const": "calculated"}}, "required": ["provenance"]},
+                "then": {"required": ["calculation_evidence_id", "operation", "input_evidence_ids"]}
+            },
+            {
+                "if": {"properties": {"provenance": {"const": "estimated"}}, "required": ["provenance"]},
+                "then": {"required": ["method", "basis_evidence_ids"]}
+            }
+        ],
     })
 }
 
