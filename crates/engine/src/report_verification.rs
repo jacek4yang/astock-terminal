@@ -162,7 +162,11 @@ fn mask_non_financial_tokens(line: &str) -> String {
     // silently stopped masking security codes. Patterns are now asserted.
     static PATTERNS: &[&str] = &[
         // Calendar dates and fiscal periods: 2026-08-26, 2026年, 8月, 26日, 2024Q3.
-        r"\d{4}-\d{2}-\d{2}|\d{4}/\d{1,2}/\d{1,2}|\d{4}\s*年|\d{1,2}\s*月|\d{1,2}\s*日|\d{4}\s*Q[1-4]|\bQ[1-4]\b",
+        // `\d{1,3}` before 日 rather than `\d{1,2}`: a two-digit rule masks the tail of
+        // `250 日` as `50 日` and leaves a stray `2` behind, which is then read as a
+        // financial figure. A one to three digit count before 日 is a day of month or a
+        // lookback window; neither asserts a quantity.
+        r"\d{4}-\d{2}-\d{2}|\d{4}/\d{1,2}/\d{1,2}|\d{4}\s*年|\d{1,2}\s*月|\d{1,3}\s*日|\d{4}\s*Q[1-4]|\bQ[1-4]\b",
         // Reporting-period labels: 2025 全年, 2026 上半年, 2024 年度, 2025 财年.
         //
         // `\d{4}\s*年` above only catches a year written immediately before 年. A
@@ -760,6 +764,25 @@ mod tests {
                 financial_numerals(label)
             );
         }
+    }
+
+    /// A three digit lookback window leaves no stray digit behind.
+    ///
+    /// A two digit day-of-month rule masked the tail of `250 日` as `50 日`, leaving a
+    /// bare `2` that was then read as a financial figure.
+    #[test]
+    fn a_three_digit_window_does_not_leave_a_stray_digit() {
+        for label in ["近 250 日均线未转正", "过去250日", "60 日均线"] {
+            assert!(
+                financial_numerals(label).is_empty(),
+                "`{label}` asserts no quantity, found {:?}",
+                financial_numerals(label)
+            );
+        }
+        // A day of month still masks, and a real figure beside it still extracts.
+        let found = financial_numerals("8月26日成交额 79.87 亿元");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].raw, "79.87");
     }
 
     /// A quantity inside an enumerated item is still extracted.

@@ -349,19 +349,29 @@ pub enum DraftProblem {
         claim_id: String,
         evidence_id: String,
     },
-    /// A quantity written into a claim's prose that the claim never declared.
+    /// A financial figure written into free text.
     ///
-    /// The renderer places a claim's statement and its citations on the same line of
-    /// the canonical form, so the verifier checks every figure in the prose against
-    /// the evidence the claim named. A figure written only in prose therefore has no
-    /// provenance and cannot be reproduced.
+    /// Figures belong in `numeric_items`, where they carry provenance and the renderer
+    /// presents them. Free text carries meaning.
     ///
-    /// This is the residual failure of a live run that otherwise converged: `约 79.87
-    /// 亿元` as a rounded restatement of the cited `7,987,376,586`, and `单手(100 股)`
-    /// as a lot size. Both are refused here, at validation, where repair is one cheap
-    /// round rather than a verifier cycle.
-    UndeclaredNumberInStatement {
-        claim_id: String,
+    /// The earlier rule was conditional — a figure was allowed in a statement if the
+    /// same claim also declared it — and it was the single largest source of live
+    /// failure: 49 of 75 and 34 of 40 findings on two runs. A conditional rule requires
+    /// the model to cross-check every figure it writes against its own declarations,
+    /// and it reliably declared the headline numbers while dropping the incidental
+    /// ones. An absolute rule is checkable before submitting: write no figure in prose.
+    ///
+    /// It is also stricter, not looser, and it closes a hole. The verifier reads only
+    /// the title, the section headings and the claim lines, so a figure in
+    /// `executive_summary`, `overall_uncertainty`, `limitations`, `assumptions` or
+    /// `uncertainty` was **published without ever being checked**. Now no free-text
+    /// field may contain one.
+    FigureInFreeText {
+        /// The claim the text belongs to, when it belongs to one.
+        claim_id: Option<String>,
+        /// Which field, so repair is one edit.
+        field: String,
+        /// The figure as written.
         numeral: String,
     },
     /// A declared number that its own cited evidence does not support.
@@ -395,10 +405,10 @@ impl DraftProblem {
             | Self::InvalidEstimate { claim_id, .. }
             | Self::ScenarioWithoutAssumption { claim_id }
             | Self::ConflictingEvidence { claim_id, .. }
-            | Self::UndeclaredNumberInStatement { claim_id, .. }
             | Self::NumberDisagreesWithEvidence { claim_id, .. }
             | Self::EvidenceOutsideTaskScope { claim_id, .. } => Some(claim_id),
             Self::SectionReferencesUnknownClaim { claim_id, .. } => Some(claim_id),
+            Self::FigureInFreeText { claim_id, .. } => claim_id.as_deref(),
         }
     }
 
@@ -417,7 +427,7 @@ impl DraftProblem {
             Self::InvalidEstimate { .. } => "invalid_estimate",
             Self::ScenarioWithoutAssumption { .. } => "scenario_without_assumption",
             Self::ConflictingEvidence { .. } => "conflicting_evidence",
-            Self::UndeclaredNumberInStatement { .. } => "undeclared_number_in_statement",
+            Self::FigureInFreeText { .. } => "figure_in_free_text",
             Self::NumberDisagreesWithEvidence { .. } => "number_disagrees_with_evidence",
             Self::EvidenceOutsideTaskScope { .. } => "evidence_outside_task_scope",
         }
@@ -652,6 +662,7 @@ pub fn validate_draft(
     for claim in &draft.claims {
         validate_claim(claim, registry, task_symbols, &mut problems);
     }
+    validate_free_text(draft, &mut problems);
     problems
 }
 
@@ -762,59 +773,58 @@ fn validate_claim(
     for item in &claim.numeric_items {
         validate_numeric_item(claim, item, registry, problems);
     }
-    validate_statement_numerals(claim, registry, problems);
 }
 
-/// Every quantity in a claim's prose must be one the claim actually declared.
+/// Refuse a financial figure anywhere in the draft's free text.
 ///
-/// The canonical form the verifier reads places the statement and the claim's
-/// citations on one line, so a figure written into prose is checked against that
-/// evidence exactly as a declared number would be. Checking it here rather than
-/// waiting for the verifier costs one cheap validation round instead of a
-/// verification cycle, and the repair is addressed to a claim.
+/// The rule is absolute: figures live in `numeric_items`, prose carries meaning, and
+/// the renderer decides how a verified number appears. That is what makes it
+/// satisfiable — the model checks its own output without cross-referencing its
+/// declarations — and it closes a hole, because the verifier reads only the title, the
+/// section headings and the claim lines. A figure in `executive_summary`,
+/// `limitations`, `assumptions` or `uncertainty` used to be published unchecked.
 ///
-/// The rule is the Engine verifier's own: [`astock_engine::financial_numerals`]
-/// decides what counts as a financial quantity — masking security codes, dates,
-/// headings, clock times and window labels — and `supported_by` decides when a value
-/// backs it, including the percentage convention. Reimplementing either here would
-/// let validation and verification drift, and the drift would surface as a report
-/// validation accepted and verification refused.
-///
-/// A prose figure is accepted when it matches one of the claim's own numeric items,
-/// or the value of evidence the claim cites. That is exactly as permissive as the
-/// verifier, so this rejects nothing the verifier would have passed.
-fn validate_statement_numerals(
-    claim: &Claim,
-    registry: &BTreeMap<String, EvidenceDescriptor>,
-    problems: &mut Vec<DraftProblem>,
-) {
-    let numerals = astock_engine::financial_numerals(&claim.statement);
-    if numerals.is_empty() {
-        return;
-    }
-    let cited_values: Vec<f64> = claim
-        .evidence_ids
-        .iter()
-        .filter_map(|id| registry.get(id))
-        .filter_map(|descriptor| descriptor.value.as_ref())
-        .filter_map(evidence_number)
-        .collect();
-    for numeral in numerals {
-        let declared = claim
-            .numeric_items
-            .iter()
-            .any(|item| numeral.supported_by(item.value));
-        if declared
-            || cited_values
-                .iter()
-                .any(|value| numeral.supported_by(*value))
-        {
-            continue;
+/// What counts as a figure is the Engine verifier's own rule,
+/// [`astock_engine::financial_numerals`], so a security code, a date, a heading number,
+/// a clock time, a reporting period, a lookback window and an inline list marker are
+/// not figures. Reimplementing that here would let validation and verification drift.
+fn validate_free_text(draft: &VerifiedReportDraft, problems: &mut Vec<DraftProblem>) {
+    let mut check = |claim_id: Option<&str>, field: &str, text: &str| {
+        for numeral in astock_engine::financial_numerals(text) {
+            problems.push(DraftProblem::FigureInFreeText {
+                claim_id: claim_id.map(str::to_owned),
+                field: field.to_owned(),
+                numeral: numeral.raw.clone(),
+            });
         }
-        problems.push(DraftProblem::UndeclaredNumberInStatement {
-            claim_id: claim.id.clone(),
-            numeral: numeral.raw.clone(),
-        });
+    };
+    check(None, "title", &draft.title);
+    check(None, "executive_summary", &draft.executive_summary);
+    if let Some(uncertainty) = &draft.overall_uncertainty {
+        check(None, "overall_uncertainty", uncertainty);
+    }
+    for (index, limitation) in draft.limitations.iter().enumerate() {
+        check(None, &format!("limitations[{index}]"), limitation);
+    }
+    for section in &draft.sections {
+        check(
+            None,
+            &format!("sections[{}].heading", section.heading),
+            &section.heading,
+        );
+    }
+    for claim in &draft.claims {
+        check(Some(&claim.id), "statement", &claim.statement);
+        if let Some(uncertainty) = &claim.uncertainty {
+            check(Some(&claim.id), "uncertainty", uncertainty);
+        }
+        for (index, assumption) in claim.assumptions.iter().enumerate() {
+            check(
+                Some(&claim.id),
+                &format!("assumptions[{index}]"),
+                assumption,
+            );
+        }
     }
 }
 

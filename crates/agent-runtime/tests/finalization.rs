@@ -216,7 +216,7 @@ fn valid_draft() -> Value {
         "claims": [{
             "id": "c1",
             "kind": "observed_fact",
-            "statement": "最新成交价为每股 21.5 元",
+            "statement": "最新成交价见下方数值",
             "evidence_ids": ["evf_price", "evf_time", "evf_symbol", "evf_volume"],
             "numeric_items": [{
                 "label": "最新价",
@@ -284,7 +284,7 @@ async fn an_identifier_absent_from_the_catalog_is_refused_and_repair_targets_the
         json!([{
             "id": "c1",
             "kind": "observed_fact",
-            "statement": "每股净资产为 8.4 元",
+            "statement": "每股净资产见下方数值",
             "evidence_ids": ["evf_fabricated_bps"],
             "numeric_items": [{
                 "label": "每股净资产", "value": 8.4, "unit": "元",

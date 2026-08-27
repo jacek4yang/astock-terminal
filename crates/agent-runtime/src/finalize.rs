@@ -184,13 +184,13 @@ fn validation_action(code: &str) -> &'static str {
              back from search_evidence and use it exactly, or cite the identifier that actually \
              holds this figure. Do not round: a rounded figure is a different figure."
         }
-        "undeclared_number_in_statement" => {
-            "The statement writes a figure the claim does not declare, so nothing verifies it. \
-             Either add it as a numeric_item with real provenance, or remove the figure from the \
-             prose and let the rendered numbers carry it. A rounded restatement of a cited value \
-             (\"约 79.87 亿元\" for 7,987,376,586) is a separate, unverifiable figure — state the \
-             cited value or declare the rounded one. Do not write formulas or arithmetic in a \
-             statement; put the operation on the numeric_item instead."
+        "figure_in_free_text" => {
+            "Free text carries no figures. Move this number into numeric_items with its \
+             provenance and describe it in words instead: the runtime renders every declared \
+             number with its unit, provenance and citation, so nothing is lost to the reader. \
+             This applies to every free-text field, including executive_summary, limitations, \
+             assumptions and uncertainty. Write no formulas or arithmetic in prose; put the \
+             operation on the numeric_item."
         }
         "evidence_outside_task_scope" => {
             "This evidence belongs to a different security than the task covers. Remove it, or \
@@ -366,11 +366,11 @@ pub fn validation_repair(problems: &[DraftProblem], verdict: RepairVerdict) -> V
                     .or_default()
                     .insert(problem.code());
                 match problem {
-                    DraftProblem::UndeclaredNumberInStatement { numeral, .. } => {
+                    DraftProblem::FigureInFreeText { field, numeral, .. } => {
                         undeclared
                             .entry(claim_id.to_owned())
                             .or_default()
-                            .insert(numeral.clone());
+                            .insert(format!("{field}: {numeral}"));
                     }
                     DraftProblem::UnknownEvidence { supplied_id, .. } => {
                         unknown_ids
@@ -416,7 +416,7 @@ pub fn validation_repair(problems: &[DraftProblem], verdict: RepairVerdict) -> V
         };
         if let Some(numerals) = undeclared.get(&claim_id) {
             object.insert(
-                "undeclared_numerals".into(),
+                "figures_to_move".into(),
                 Value::Array(
                     numerals
                         .iter()
@@ -633,12 +633,14 @@ mod tests {
     #[test]
     fn a_repair_target_names_the_specific_offending_token() {
         let problems = vec![
-            DraftProblem::UndeclaredNumberInStatement {
-                claim_id: "c1".into(),
+            DraftProblem::FigureInFreeText {
+                claim_id: Some("c1".into()),
+                field: "statement".into(),
                 numeral: "79.87".into(),
             },
-            DraftProblem::UndeclaredNumberInStatement {
-                claim_id: "c1".into(),
+            DraftProblem::FigureInFreeText {
+                claim_id: Some("c1".into()),
+                field: "statement".into(),
                 numeral: "100".into(),
             },
             DraftProblem::UnknownEvidence {
@@ -656,12 +658,12 @@ mod tests {
         );
         let target = &response["repair"][0];
         assert_eq!(target["claim_id"], json!("c1"));
-        let numerals = target["undeclared_numerals"]
+        let numerals = target["figures_to_move"]
             .as_array()
-            .expect("numerals listed");
+            .expect("figures listed");
         assert_eq!(numerals.len(), 2);
-        assert!(numerals.contains(&json!("79.87")));
-        assert!(numerals.contains(&json!("100")));
+        assert!(numerals.contains(&json!("statement: 79.87")));
+        assert!(numerals.contains(&json!("statement: 100")));
         assert_eq!(target["unknown_evidence_ids"][0], json!("evf_made_up"));
     }
 
@@ -874,7 +876,7 @@ mod tests {
             "invalid_estimate",
             "scenario_without_assumption",
             "conflicting_evidence",
-            "undeclared_number_in_statement",
+            "figure_in_free_text",
             "number_disagrees_with_evidence",
             "evidence_outside_task_scope",
             "duplicate_claim_id",

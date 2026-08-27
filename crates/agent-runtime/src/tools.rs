@@ -562,7 +562,7 @@ pub fn default_registry() -> ToolRegistry {
         // publication path: the verifier still runs and still fails closed.
         runtime_tool(
             "submit_report",
-            "Submit the final structured research draft for validation and publication. Do not write citation markup in statements; supply canonical identifiers and the runtime renders citations. Write no figure into a statement unless the same claim declares it as a numeric_item; a rounded restatement is a separate unverifiable figure. Each numeric item declares provenance: observed (evidence_id), calculated (calculation_evidence_id, operation, input_evidence_ids), user_assumption (a scenario parameter the user supplied), or estimated (method, basis_evidence_ids, preferably a range). Never use estimated for a quantity the Engine can compute. Statements use the task output_language.",
+            "Submit the final structured research draft for validation and publication. Do not write citation markup in statements; supply canonical identifiers and the runtime renders citations. Write no financial figure in any prose field; prose carries meaning and numeric_items carry figures. Each numeric item declares provenance: observed (evidence_id), calculated (calculation_evidence_id, operation, input_evidence_ids), user_assumption (a scenario parameter the user supplied), or estimated (method, basis_evidence_ids, preferably a range). Never use estimated for a quantity the Engine can compute. Statements use the task output_language.",
             submit_report_schema(),
         ),
     ];
