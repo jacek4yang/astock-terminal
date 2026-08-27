@@ -19,6 +19,22 @@ pub enum CachePolicy {
     CanonicalRequest,
 }
 
+/// Who executes a tool.
+///
+/// Most tools are bounded read-only Engine operations. Finalization and evidence
+/// discovery are different: they act on Runtime state — the draft contract and the
+/// evidence catalog assembled during this task — and must not be reachable as
+/// Engine mutations. Keeping the distinction in the type prevents a report
+/// submission from ever being dispatched as an Engine effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolHandler {
+    /// Dispatched to the Engine through the closed request-kind allowlist.
+    Engine,
+    /// Served by the Runtime itself.
+    Runtime,
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolDefinition {
     pub name: String,
@@ -29,6 +45,7 @@ pub struct ToolDefinition {
     pub timeout: Duration,
     pub cache_policy: CachePolicy,
     pub freshness: String,
+    pub handler: ToolHandler,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -105,6 +122,25 @@ fn read_tool(
         timeout: Duration::from_secs(timeout_secs),
         cache_policy: CachePolicy::CanonicalRequest,
         freshness: freshness.into(),
+        handler: ToolHandler::Engine,
+    }
+}
+
+/// A Runtime-served tool.
+///
+/// Never dispatched to the Engine, so finalization cannot become an Engine
+/// mutation and evidence discovery stays a read of Runtime state.
+fn runtime_tool(name: &str, description: &str, input_schema: Value) -> ToolDefinition {
+    ToolDefinition {
+        name: name.into(),
+        description: description.into(),
+        input_schema,
+        engine_kind: String::new(),
+        risk: ToolRisk::ReadOnly,
+        timeout: Duration::from_secs(15),
+        cache_policy: CachePolicy::None,
+        freshness: "runtime_state".into(),
+        handler: ToolHandler::Runtime,
     }
 }
 
@@ -153,6 +189,162 @@ fn computation_program_schema(joinquant: bool) -> Value {
         );
     }
     schema
+}
+
+/// Evidence identifier pattern.
+///
+/// Constraining the shape in the schema is the first line of defence against an
+/// invented namespace such as `计算-BPS`: the model cannot even submit one. The
+/// contract still checks existence, because a well-shaped identifier can still be
+/// fabricated.
+fn evidence_id_schema() -> Value {
+    json!({"type": "string", "pattern": "^evf_[A-Za-z0-9_]+$", "maxLength": 80})
+}
+
+fn evidence_id_list_schema(max_items: usize) -> Value {
+    json!({"type": "array", "maxItems": max_items, "items": evidence_id_schema()})
+}
+
+/// One number and the provenance it must declare.
+///
+/// Assembled in pieces rather than one literal: a single nested `json!` for the
+/// whole report exceeded the macro recursion limit, and the parts are clearer read
+/// separately.
+fn numeric_item_schema() -> Value {
+    let mut properties = serde_json::Map::new();
+    properties.insert("label".into(), json!({"type": "string", "maxLength": 80}));
+    properties.insert("value".into(), json!({"type": "number"}));
+    properties.insert("unit".into(), json!({"type": "string", "maxLength": 20}));
+    properties.insert(
+        "provenance".into(),
+        json!({
+            "type": "string",
+            "enum": ["observed", "calculated", "user_assumption", "estimated"]
+        }),
+    );
+    // Observed
+    properties.insert("evidence_id".into(), evidence_id_schema());
+    properties.insert("field".into(), json!({"type": "string", "maxLength": 120}));
+    // Calculated
+    properties.insert("calculation_evidence_id".into(), evidence_id_schema());
+    properties.insert(
+        "operation".into(),
+        json!({"type": "string", "maxLength": 80}),
+    );
+    properties.insert("input_evidence_ids".into(), evidence_id_list_schema(12));
+    // User assumption
+    properties.insert(
+        "stated_in_message_id".into(),
+        json!({"type": "string", "maxLength": 64}),
+    );
+    // Estimated
+    properties.insert("method".into(), json!({"type": "string", "maxLength": 300}));
+    properties.insert("basis_evidence_ids".into(), evidence_id_list_schema(12));
+    properties.insert(
+        "range".into(),
+        json!({"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number"}}),
+    );
+
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label", "value", "provenance"],
+        "properties": Value::Object(properties),
+    })
+}
+
+fn claim_schema() -> Value {
+    let mut properties = serde_json::Map::new();
+    properties.insert("id".into(), json!({"type": "string", "maxLength": 64}));
+    properties.insert(
+        "kind".into(),
+        json!({
+            "type": "string",
+            "enum": [
+                "observed_fact",
+                "deterministic_calculation",
+                "inference",
+                "estimate",
+                "scenario",
+                "unknown"
+            ]
+        }),
+    );
+    properties.insert(
+        "statement".into(),
+        json!({"type": "string", "maxLength": 2000}),
+    );
+    properties.insert("evidence_ids".into(), evidence_id_list_schema(12));
+    properties.insert(
+        "confidence".into(),
+        json!({"type": "string", "maxLength": 40}),
+    );
+    properties.insert(
+        "uncertainty".into(),
+        json!({"type": "string", "maxLength": 600}),
+    );
+    properties.insert(
+        "assumptions".into(),
+        json!({"type": "array", "maxItems": 12, "items": {"type": "string", "maxLength": 300}}),
+    );
+    properties.insert("disclosed_conflicts".into(), evidence_id_list_schema(12));
+    properties.insert(
+        "numeric_items".into(),
+        json!({"type": "array", "maxItems": 16, "items": numeric_item_schema()}),
+    );
+
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "kind", "statement"],
+        "properties": Value::Object(properties),
+    })
+}
+
+fn submit_report_schema() -> Value {
+    let section = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["heading", "claim_ids"],
+        "properties": {
+            "heading": {"type": "string", "maxLength": 120},
+            "claim_ids": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"type": "string", "maxLength": 64}
+            }
+        }
+    });
+    let mut properties = serde_json::Map::new();
+    properties.insert("version".into(), json!({"type": "string", "maxLength": 64}));
+    properties.insert("title".into(), json!({"type": "string", "maxLength": 200}));
+    properties.insert(
+        "executive_summary".into(),
+        json!({"type": "string", "maxLength": 4000}),
+    );
+    properties.insert(
+        "overall_uncertainty".into(),
+        json!({"type": "string", "maxLength": 2000}),
+    );
+    properties.insert(
+        "limitations".into(),
+        json!({"type": "array", "maxItems": 20, "items": {"type": "string", "maxLength": 500}}),
+    );
+    properties.insert(
+        "sections".into(),
+        json!({"type": "array", "minItems": 1, "maxItems": 24, "items": section}),
+    );
+    properties.insert(
+        "claims".into(),
+        json!({"type": "array", "minItems": 1, "maxItems": 240, "items": claim_schema()}),
+    );
+
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["version", "title", "executive_summary", "sections", "claims"],
+        "properties": Value::Object(properties),
+    })
 }
 
 pub fn default_registry() -> ToolRegistry {
@@ -301,6 +493,39 @@ pub fn default_registry() -> ToolRegistry {
             ),
             120,
             "mixed_live_and_disclosed",
+        ),
+        // Bounded evidence discovery.
+        //
+        // A live task registered 6,578 distinct identifiers and the report cited
+        // 37. Putting them all in context is impossible and unnecessary; the model
+        // needs a way to ask for the canonical identifier of a fact it wants to
+        // state. Read-only over Runtime state, so it costs no upstream call.
+        runtime_tool(
+            "search_evidence",
+            "在本次研究已收集的证据中按证券、来源、字段或关键词有界检索，返回可直接引用的规范证据标识及其来源、时间、单位和质量状态。用于在撰写结论前找到应引用的证据，不要凭记忆编造标识。",
+            object_schema(
+                json!({
+                    "symbol": {"type": "string", "pattern": "^[0-9]{6}$"},
+                    "source": {"type": "string", "maxLength": 40},
+                    "field": {"type": "string", "maxLength": 120},
+                    "keyword": {"type": "string", "maxLength": 80},
+                    "only_calculations": {"type": "boolean"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50}
+                }),
+                &["limit"],
+            ),
+        ),
+        // Structured finalization.
+        //
+        // Replaces "write Markdown and hope the verifier can reconstruct it".
+        // The model supplies semantic evidence identifiers and numeric provenance;
+        // the Runtime validates, renders the citations, and only then hands the
+        // canonical form to the independent verifier. This is not an alternate
+        // publication path: the verifier still runs and still fails closed.
+        runtime_tool(
+            "submit_report",
+            "提交结构化研究报告用于校验与发布。不要在 statement 中手写【E:...】引用；只需在 evidence_ids 与 numeric_items 中给出规范证据标识，引用格式由 Runtime 渲染。每个数字必须声明来源：observed（实测，需 evidence_id）、calculated（确定性计算，需计算结果标识、运算与输入证据）、user_assumption（用户给定的情景参数）或 estimated（需方法、依据证据，尽量给区间）。可确定性计算的数值不得用 estimated。",
+            submit_report_schema(),
         ),
     ];
     for tool in tools {

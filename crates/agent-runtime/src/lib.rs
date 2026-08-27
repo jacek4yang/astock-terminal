@@ -13,6 +13,8 @@ mod minimax;
 mod model;
 mod plan;
 mod prompt;
+mod render;
+mod report;
 mod runtime;
 mod session;
 mod store;
@@ -28,6 +30,15 @@ pub use model::{
     Message, MessageRole, ModelChunk, ModelProvider, ModelRequest, ModelStream, ModelToolCall,
 };
 pub use plan::{Plan, PlanMutation, PlanStep, PlanStepStatus};
+pub use render::{
+    contains_internal_identifier, render, EvidenceReference, RenderedClaim, RenderedNumber,
+    RenderedReport, RenderedSection,
+};
+pub use report::{
+    validate_draft, Claim, ClaimKind, DraftProblem, EvidenceDescriptor, NumericItem,
+    NumericProvenance, ReportSection, VerifiedReportDraft, MAX_CLAIMS, MAX_EVIDENCE_PER_CLAIM,
+    MAX_NUMERIC_ITEMS_PER_CLAIM, MAX_SECTIONS, MAX_STATEMENT_CHARS, REPORT_CONTRACT_VERSION,
+};
 pub use runtime::{
     AgentRuntime, RunOutcome, RuntimeConfig, RuntimeTask, SessionRunOutcome, SessionTaskStream,
     TaskStream,
@@ -38,5 +49,6 @@ pub use session::{
 };
 pub use store::{AgentStore, EffectIntent, StoredCheckpoint};
 pub use tools::{
-    default_registry, CachePolicy, ToolDefinition, ToolExecutor, ToolRegistry, ToolRisk,
+    default_registry, CachePolicy, ToolDefinition, ToolExecutor, ToolHandler, ToolRegistry,
+    ToolRisk,
 };
