@@ -128,3 +128,54 @@ fn the_registry_stays_small_enough_to_advertise_in_full() {
         "the tool surface should stay compact and purposeful, found {count}"
     );
 }
+
+/// Tool descriptions are machine control surface and stay English.
+///
+/// They are re-sent on every round, so their cost is paid repeatedly, and they sit
+/// in the cacheable prefix where byte stability matters. User-visible output
+/// language is carried separately by `output_language`; nothing here dictates the
+/// language of the report.
+#[test]
+fn tool_descriptions_are_english_control_surface() {
+    let registry = default_registry();
+    for name in registry.names() {
+        let tool = registry.get(name).expect("a registered tool resolves");
+        let cjk = tool
+            .description
+            .chars()
+            .filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c))
+            .count();
+        assert_eq!(
+            cjk, 0,
+            "`{name}` description should be English control surface, found {cjk} CJK characters"
+        );
+        assert!(
+            !tool.description.is_empty() && tool.description.len() < 700,
+            "`{name}` description should be concise, found {} bytes",
+            tool.description.len()
+        );
+    }
+}
+
+/// The finalization description must not reintroduce hand-formatted citations.
+#[test]
+fn the_finalization_description_forbids_hand_written_citations() {
+    let registry = default_registry();
+    let description = &registry
+        .get("submit_report")
+        .expect("submit_report is registered")
+        .description;
+    assert!(
+        !description.contains("【E:"),
+        "the description must not show citation markup as something to write"
+    );
+    assert!(description.contains("Do not write citation markup"));
+    assert!(
+        description.contains("output_language"),
+        "statements must follow the task output language"
+    );
+    // Every provenance class is named where the model will look for it.
+    for class in ["observed", "calculated", "user_assumption", "estimated"] {
+        assert!(description.contains(class), "`{class}` must be described");
+    }
+}
