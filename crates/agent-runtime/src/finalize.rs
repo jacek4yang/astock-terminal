@@ -32,7 +32,17 @@ use crate::report::{DraftProblem, VerifiedReportDraft};
 pub const MAX_REPORTED_PROBLEMS: usize = 40;
 
 /// Claims addressed by one repair response.
-pub const MAX_REPAIR_TARGETS: usize = 24;
+///
+/// Every affected claim must appear, because a model can only fix what it is told.
+/// Measured across live runs the finding count falls 40 → 16 → 2 per submission, and
+/// part of that tail was self-inflicted: the first response listed 24 claims out of
+/// more, so the omitted ones resurfaced a round later and consumed budget. A repair
+/// target is compact — an identifier, a few codes, a short action list — so covering
+/// them all costs far less context than another round trip.
+pub const MAX_REPAIR_TARGETS: usize = 64;
+
+/// Offending tokens named per claim.
+pub const MAX_TOKENS_PER_TARGET: usize = 24;
 
 /// How a phase's budget was consumed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -433,7 +443,7 @@ pub fn validation_repair(problems: &[DraftProblem], verdict: RepairVerdict) -> V
                 Value::Array(
                     numerals
                         .iter()
-                        .take(16)
+                        .take(MAX_TOKENS_PER_TARGET)
                         .map(|n| Value::from(n.clone()))
                         .collect(),
                 ),
@@ -444,7 +454,7 @@ pub fn validation_repair(problems: &[DraftProblem], verdict: RepairVerdict) -> V
                 "unknown_evidence_ids".into(),
                 Value::Array(
                     ids.iter()
-                        .take(12)
+                        .take(MAX_TOKENS_PER_TARGET)
                         .map(|id| Value::from(id.clone()))
                         .collect(),
                 ),

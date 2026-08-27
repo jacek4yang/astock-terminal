@@ -200,11 +200,15 @@ pub struct RuntimeConfig {
     /// Total `submit_report` attempts, counting both contract rejections and
     /// verifier refusals. Exhausting them fails closed; it never publishes.
     ///
-    /// Six rather than four because a measured live run was still converging when it
-    /// ran out — 14 contract problems, then 4, 8 and 2 verifier findings — and
-    /// stopping a converging repair loop wastes the research that preceded it. The
-    /// budget still exists: a loop that is not converging is caught by
-    /// identical-resubmission detection long before this bound.
+    /// Eight, because the measured convergence needs it. Across live moderate runs the
+    /// finding count per submission falls 40 → 16 → 2, so a report typically needs four
+    /// or five submissions to become publishable and a sixth to finish. A budget set at
+    /// the edge of the measured trajectory turns a converging repair loop into a
+    /// failure and throws away the research that preceded it.
+    ///
+    /// This is not a blind increase: a loop that is *not* converging is caught by
+    /// identical-resubmission detection, which ends finalization on the second
+    /// unchanged draft regardless of how much budget remains.
     pub max_finalization_attempts: usize,
     pub max_model_chunks_per_round: usize,
     /// Calls to tools that do not exist, before the task fails closed.
@@ -239,7 +243,7 @@ impl Default for RuntimeConfig {
         Self {
             max_model_rounds: 32,
             max_research_rounds: 20,
-            max_finalization_attempts: 6,
+            max_finalization_attempts: 8,
             max_model_chunks_per_round: 10_000,
             max_unknown_tool_rejections: 3,
             max_empty_turn_retries: 2,
