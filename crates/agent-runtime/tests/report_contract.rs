@@ -967,3 +967,87 @@ fn evidence_with_no_numeric_value_is_not_judged_as_a_disagreement() {
     let problems = validate_draft(&draft, &map, &BTreeSet::new());
     assert!(problems.is_empty(), "{problems:?}");
 }
+
+/// A calculation claim may state the observed inputs it was computed from.
+///
+/// Refusing them forced a claim like "市盈率 = 最新价 ÷ 每股收益" to be split across
+/// claims that only make sense together, and a live run spent much of its repair
+/// budget on that with no correctness benefit: every number still declares its own
+/// provenance, the renderer labels each one, and the verifier still checks each
+/// against its own citation.
+#[test]
+fn a_calculation_claim_may_state_its_observed_inputs() {
+    let draft = one_claim_draft(Claim {
+        id: "c1".to_owned(),
+        kind: ClaimKind::DeterministicCalculation,
+        statement: "市盈率由最新价与每股收益计算得出。".to_owned(),
+        evidence_ids: Vec::new(),
+        numeric_items: vec![
+            NumericItem {
+                value: 28.49,
+                unit: Some("倍".to_owned()),
+                label: "市盈率".to_owned(),
+                provenance: NumericProvenance::Calculated {
+                    calculation_evidence_id: "evf_pe".to_owned(),
+                    operation: "divide".to_owned(),
+                    input_evidence_ids: vec!["evf_price".to_owned()],
+                },
+            },
+            NumericItem {
+                value: 34.47,
+                unit: Some("元".to_owned()),
+                label: "最新价".to_owned(),
+                provenance: NumericProvenance::Observed {
+                    evidence_id: "evf_price".to_owned(),
+                    field: Some("/quote/last".to_owned()),
+                },
+            },
+        ],
+        confidence: None,
+        uncertainty: None,
+        assumptions: Vec::new(),
+        disclosed_conflicts: Vec::new(),
+    });
+    let problems = validate_draft(&draft, &registry(), &BTreeSet::new());
+    assert!(
+        problems.is_empty(),
+        "a calculation may state its inputs: {problems:?}"
+    );
+    // Each number is still labelled by its own provenance, which is what makes the
+    // relaxation safe.
+    let rendered = render(&draft, &registry());
+    assert!(rendered.markdown.contains("确定性计算"));
+    assert!(rendered.markdown.contains("实测数据"));
+}
+
+/// An observed fact still may not carry a derived value.
+#[test]
+fn an_observed_fact_still_may_not_carry_a_calculated_value() {
+    let draft = one_claim_draft(Claim {
+        id: "c1".to_owned(),
+        kind: ClaimKind::ObservedFact,
+        statement: "市盈率为 28.49 倍。".to_owned(),
+        evidence_ids: vec!["evf_price".to_owned()],
+        numeric_items: vec![NumericItem {
+            value: 28.49,
+            unit: Some("倍".to_owned()),
+            label: "市盈率".to_owned(),
+            provenance: NumericProvenance::Calculated {
+                calculation_evidence_id: "evf_pe".to_owned(),
+                operation: "divide".to_owned(),
+                input_evidence_ids: vec!["evf_price".to_owned()],
+            },
+        }],
+        confidence: None,
+        uncertainty: None,
+        assumptions: Vec::new(),
+        disclosed_conflicts: Vec::new(),
+    });
+    let problems = validate_draft(&draft, &registry(), &BTreeSet::new());
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.code() == "unsupported_observed_number"),
+        "a derived value must never be presentable as an observation: {problems:?}"
+    );
+}

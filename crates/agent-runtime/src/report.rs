@@ -93,9 +93,15 @@ impl ClaimKind {
     /// was accepted, so an estimate could masquerade as a measurement — the exact
     /// thing the contract exists to prevent. The mutation suite caught it.
     ///
-    /// * `ObservedFact` carries measurements only.
-    /// * `DeterministicCalculation` carries computed values only; an input worth
-    ///   stating in its own right belongs in its own observed claim.
+    /// * `ObservedFact` carries measurements only. A derived value must never be
+    ///   presentable as something a source reported.
+    /// * `DeterministicCalculation` carries computed values and the observed inputs
+    ///   they were computed from. Refusing the inputs forced a claim like
+    ///   "市盈率 = 最新价 ÷ 每股收益" to be split across claims that only make sense
+    ///   together, and a live run spent much of its repair budget on that with no
+    ///   correctness benefit: every number still declares its own provenance, the
+    ///   renderer labels each one, and the verifier still checks each against its
+    ///   own citation.
     /// * `Inference` and `Unknown` introduce no numbers; they reason over claims
     ///   that already carry provenance.
     /// * `Estimate` carries estimates only.
@@ -104,9 +110,10 @@ impl ClaimKind {
     fn permits(self, provenance: &NumericProvenance) -> bool {
         match self {
             Self::ObservedFact => matches!(provenance, NumericProvenance::Observed { .. }),
-            Self::DeterministicCalculation => {
-                matches!(provenance, NumericProvenance::Calculated { .. })
-            }
+            Self::DeterministicCalculation => matches!(
+                provenance,
+                NumericProvenance::Calculated { .. } | NumericProvenance::Observed { .. }
+            ),
             Self::Inference | Self::Unknown => false,
             Self::Estimate => matches!(provenance, NumericProvenance::Estimated { .. }),
             Self::Scenario => matches!(
