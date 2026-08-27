@@ -29,7 +29,7 @@
 //!
 //! The catalog holds durable task state, never private reasoning.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -210,8 +210,17 @@ pub struct EvidenceQuery {
 pub struct EvidenceCatalog {
     descriptors: BTreeMap<String, EvidenceDescriptor>,
     /// Kept alongside the descriptor so a later registration can be compared
-    /// against the first without re-deriving it from presentation fields.
+    /// against the first without re-deriving it from presentation fields, and so
+    /// the exact registered form can be handed to the independent verifier.
     raw: BTreeMap<String, RawFact>,
+    /// For an identifier registered twice with a material disagreement, the
+    /// divergent registration.
+    ///
+    /// Retained so the verifier can reach its **own** conflict conclusion from the
+    /// same two registrations, rather than being told about it. Bounded to one
+    /// variant per identifier: a second disagreement adds no information the first
+    /// does not already carry.
+    conflicting_variants: BTreeMap<String, RawFact>,
     /// Facts dropped because the retention bound was reached.
     dropped: usize,
 }
@@ -248,6 +257,9 @@ impl EvidenceCatalog {
                         if let Some(descriptor) = self.descriptors.get_mut(&fact.evidence_id) {
                             descriptor.conflicting = true;
                         }
+                        self.conflicting_variants
+                            .entry(fact.evidence_id.clone())
+                            .or_insert(fact);
                     } else if fact.observed_at > existing.observed_at {
                         // Same assertion, seen more recently. Keep the freshest
                         // timestamp so a current/latest claim is judged against it.
@@ -301,6 +313,45 @@ impl EvidenceCatalog {
     /// The map `validate_draft` and `render` consume.
     pub fn descriptors(&self) -> &BTreeMap<String, EvidenceDescriptor> {
         &self.descriptors
+    }
+
+    /// The exact registered facts backing a set of citations.
+    ///
+    /// This is what the independent verifier receives, and it replaces handing it
+    /// every tool result the task produced. That mattered for two reasons.
+    ///
+    /// **It was unbounded.** The verifier context grew with every successful tool,
+    /// carrying full payload bodies it never reads — a market snapshot is megabytes
+    /// of rows around a few kilobytes of registry — against a 6 MiB ceiling that
+    /// fails the whole verification rather than producing a finding.
+    ///
+    /// **It is exactly equivalent.** Every check the verifier performs is either
+    /// per-citation (existence, quality, observation time, source version,
+    /// numeric reproduction, conflict) or derived from the report itself (distinct
+    /// citation count, presence of checkable quantities). A fact the report does
+    /// not cite cannot change any of them. So projecting to the cited set preserves
+    /// every gate while making the transfer proportional to the report rather than
+    /// to the research.
+    ///
+    /// Facts are emitted in their registered form, including `source_version_id`,
+    /// and a conflicting identifier is emitted twice — the retained registration
+    /// and the divergent one — so the verifier reaches its own conflict conclusion
+    /// from the same evidence rather than trusting this one.
+    pub fn verifier_facts(&self, cited: &BTreeSet<String>) -> Vec<Value> {
+        let mut facts = Vec::new();
+        for id in cited {
+            if let Some(fact) = self.raw.get(id) {
+                if let Ok(value) = serde_json::to_value(fact) {
+                    facts.push(value);
+                }
+            }
+            if let Some(variant) = self.conflicting_variants.get(id) {
+                if let Ok(value) = serde_json::to_value(variant) {
+                    facts.push(value);
+                }
+            }
+        }
+        facts
     }
 
     /// Run one bounded search.
@@ -432,7 +483,13 @@ fn rank_hints(counts: BTreeMap<&str, usize>) -> Vec<Value> {
 /// Conflicting and quality-blocking evidence is ranked last rather than hidden.
 /// A conflict is a research finding the model may need to disclose, so removing it
 /// from view would hide exactly what the contract requires be stated.
-fn rank_key(descriptor: &EvidenceDescriptor, field_query: Option<&str>) -> (u8, u8, u8) {
+///
+/// Undated observations rank after dated ones. The verifier refuses an observation
+/// with no time as support for a dated or current claim, so surfacing a dated
+/// identifier first avoids a repair round that a ranking decision can prevent. A
+/// calculation is exempt: it has no observation time by nature, and the verifier
+/// already treats it that way.
+fn rank_key(descriptor: &EvidenceDescriptor, field_query: Option<&str>) -> (u8, u8, u8, u8) {
     let exact = match (field_query, descriptor.field.as_deref()) {
         (Some(query), Some(path)) => {
             let leaf = path.rsplit('/').next().unwrap_or(path).to_lowercase();
@@ -444,7 +501,17 @@ fn rank_key(descriptor: &EvidenceDescriptor, field_query: Option<&str>) -> (u8, 
         exact,
         u8::from(descriptor.conflicting),
         u8::from(descriptor.quality_blocking),
+        u8::from(lacks_observation_time(descriptor)),
     )
+}
+
+/// Would the verifier refuse this evidence for want of an observation time?
+fn lacks_observation_time(descriptor: &EvidenceDescriptor) -> bool {
+    !descriptor.is_calculation()
+        && descriptor
+            .observed_at
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
 }
 
 fn matches_keyword(descriptor: &EvidenceDescriptor, keyword: &str) -> bool {
@@ -510,6 +577,11 @@ fn search_row(descriptor: &EvidenceDescriptor) -> Value {
     }
     if descriptor.quality_blocking {
         row.insert("quality_blocking".into(), Value::Bool(true));
+    }
+    // Named so the model can avoid an identifier the verifier will refuse for a
+    // dated claim, rather than discovering it a repair round later.
+    if lacks_observation_time(descriptor) {
+        row.insert("no_observation_time".into(), Value::Bool(true));
     }
     Value::Object(row)
 }
@@ -794,6 +866,7 @@ mod tests {
         let mut catalog = EvidenceCatalog {
             descriptors: BTreeMap::new(),
             raw: BTreeMap::new(),
+            conflicting_variants: BTreeMap::new(),
             dropped: 0,
         };
         // Fill to the cap with synthetic descriptors, then try to add one more.
@@ -837,6 +910,90 @@ mod tests {
         );
         assert_eq!(catalog.len(), MAX_CATALOG_ENTRIES);
         assert_eq!(catalog.dropped(), 1);
+    }
+
+    /// The verifier receives only the facts the report cites, in registered form.
+    ///
+    /// Handing it every tool result was unbounded — full payload bodies it never
+    /// reads, against a 6 MiB ceiling that fails the whole verification rather than
+    /// producing a finding.
+    #[test]
+    fn the_verifier_projection_carries_only_cited_facts_in_registered_form() {
+        let catalog = populated();
+        let mut cited = BTreeSet::new();
+        cited.insert("evf_price".to_owned());
+        cited.insert("evf_calc".to_owned());
+        let facts = catalog.verifier_facts(&cited);
+        assert_eq!(
+            facts.len(),
+            2,
+            "202 facts exist; only the cited two are sent"
+        );
+        let price = facts
+            .iter()
+            .find(|fact| fact["evidence_id"] == json!("evf_price"))
+            .expect("the cited price fact is present");
+        // Registered form, not presentation form: the verifier rejects a fact whose
+        // source version is missing, so the projection must preserve it.
+        assert_eq!(price["source"], json!("tencent"));
+        assert_eq!(price["path"], json!("/securities/0/market/quote/last"));
+        assert_eq!(price["value"], json!(34.47));
+        assert!(price.get("source_version_id").is_some());
+        assert!(price.get("quality_blocking").is_some());
+    }
+
+    /// An uncited identifier is not sent, so it cannot be reported against.
+    #[test]
+    fn an_uncited_identifier_is_absent_from_the_projection() {
+        let catalog = populated();
+        let facts = catalog.verifier_facts(&BTreeSet::new());
+        assert!(facts.is_empty());
+    }
+
+    /// A conflicting identifier is sent twice, so the verifier reaches its own
+    /// conclusion from the same two registrations rather than being told.
+    #[test]
+    fn a_conflicting_identifier_is_projected_with_its_divergent_registration() {
+        let first = json!({"evidence_registry": {"facts": [
+            fact("evf_a", "/quote/last", json!(34.47), "tencent", Some("2026-08-26T07:00:00Z")),
+        ]}});
+        let second = json!({"evidence_registry": {"facts": [
+            fact("evf_a", "/quote/last", json!(35.10), "tencent", Some("2026-08-26T07:00:00Z")),
+        ]}});
+        let mut catalog = EvidenceCatalog::default();
+        catalog.ingest(&first, None);
+        catalog.ingest(&second, None);
+        let mut cited = BTreeSet::new();
+        cited.insert("evf_a".to_owned());
+        let facts = catalog.verifier_facts(&cited);
+        assert_eq!(facts.len(), 2, "both registrations must reach the verifier");
+        let values: Vec<&Value> = facts.iter().map(|fact| &fact["value"]).collect();
+        assert!(values.contains(&&json!(34.47)));
+        assert!(values.contains(&&json!(35.10)));
+    }
+
+    /// A fact registered without an observation time is ranked after one that has
+    /// it, because the verifier refuses an undated observation as support for a
+    /// dated claim. Ranking the trap last is cheaper than repairing the report.
+    #[test]
+    fn evidence_without_an_observation_time_ranks_after_evidence_that_has_one() {
+        let result = json!({"evidence_registry": {"facts": [
+            fact("evf_undated", "/quote/last", json!(34.47), "tencent", None),
+            fact("evf_dated", "/snapshot/last", json!(34.47), "tencent", Some("2026-08-26T07:00:00Z")),
+        ]}});
+        let mut catalog = EvidenceCatalog::default();
+        catalog.ingest(&result, None);
+        let response = catalog.search(&EvidenceQuery {
+            field: Some("last".into()),
+            limit: 5,
+            ..EvidenceQuery::default()
+        });
+        assert_eq!(response["results"][0]["evidence_id"], json!("evf_dated"));
+        assert_eq!(
+            response["results"][1]["no_observation_time"],
+            json!(true),
+            "the model must be able to see why an identifier is risky"
+        );
     }
 
     /// A document title reaches the descriptor, so a citation can name the source.

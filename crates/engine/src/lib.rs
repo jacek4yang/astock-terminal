@@ -17,6 +17,11 @@ mod report_verification;
 mod scan;
 mod settings;
 
+/// The numeral rule the report verifier applies, shared with the Runtime's report
+/// contract so that "what is a financial claim" and "when is a claim supported"
+/// have exactly one implementation on both sides of the publication gate.
+pub use report_verification::{financial_numerals, ReportNumeral};
+
 use astock_core::{normalize_security_name, Adjust, Board, KlinePeriod, StockListItem, Symbol};
 use astock_fundamental::{
     apply_driver_shocks, build_earnings_driver_tree, DriverShock, EarningsDriverTree,
@@ -274,13 +279,16 @@ impl Engine {
                 let payload: SymbolPayload = decode_payload(&request.payload)?;
                 let symbol = parse_live_symbol(&payload.symbol)?;
                 let result = self.market.quote(&symbol).await.map_err(upstream)?;
-                Ok(json!({
+                let mut response = json!({
+                    "symbol": symbol.code(),
                     "quote": result.data,
                     "source": result.source,
                     "fetched_at": result.fetched_at,
                     "stale": Value::Null,
                     "quality": Value::Null
-                }))
+                });
+                agent_context::attach_evidence_registry(&mut response, "market_quote");
+                Ok(response)
             }
             "market.kline" => {
                 let payload: KlinePayload = decode_payload(&request.payload)?;
@@ -293,13 +301,18 @@ impl Engine {
                     .kline(&symbol, period, adjust, count)
                     .await
                     .map_err(upstream)?;
-                Ok(json!({
+                let mut response = json!({
+                    "symbol": symbol.code(),
+                    "period": payload.period,
+                    "adjust": payload.adjust,
                     "bars": result.data,
                     "source": result.source,
                     "fetched_at": result.fetched_at,
                     "stale": Value::Null,
                     "quality": Value::Null
-                }))
+                });
+                agent_context::attach_evidence_registry(&mut response, "market_kline");
+                Ok(response)
             }
             "market.index_kline" => {
                 let payload: IndexKlinePayload = decode_payload(&request.payload)?;
@@ -537,7 +550,9 @@ impl Engine {
                 let payload: SymbolPayload = decode_payload(&request.payload)?;
                 let symbol = parse_live_symbol(&payload.symbol)?;
                 let outcome = self.fundamental.bundle(&symbol).await;
-                Ok(fundamental_research_payload(&symbol, outcome))
+                let mut response = fundamental_research_payload(&symbol, outcome);
+                agent_context::attach_evidence_registry(&mut response, "research_fundamentals");
+                Ok(response)
             }
             "research.earnings_driver.tree" => {
                 let payload: SymbolPayload = decode_payload(&request.payload)?;
@@ -720,7 +735,7 @@ impl Engine {
                     .collect::<HashSet<_>>()
                     .into_iter()
                     .collect::<Vec<_>>();
-                Ok(json!({
+                let mut response = json!({
                     "items": items,
                     "successful_sources": successful_sources,
                     "successful_channels": successful_channels,
@@ -729,7 +744,9 @@ impl Engine {
                     "requested_source_count": sources.len(),
                     "symbol": symbol,
                     "evidence_note": "successful_sources统计采集Provider，successful_channels统计内容频道；无revision_id的实时条目只作发现证据，重要结论必须优先回链不可变归档、公告、交易所或公司原文"
-                }))
+                });
+                agent_context::attach_evidence_registry(&mut response, "research_news");
+                Ok(response)
             }
             "research.news.providers" => {
                 let providers = self.market.finance_news.provider_health().await;
@@ -1213,9 +1230,13 @@ impl Engine {
                 serde_json::to_value(self.backtest.status()).map_err(serialize_error)
             }
             "research.backtest.cancel" => Ok(json!({"cancelled": self.backtest.cancel()})),
-            "research.market.regime" => market_regime::get(&self.market)
-                .await
-                .map_err(market_regime_error),
+            "research.market.regime" => {
+                let mut response = market_regime::get(&self.market)
+                    .await
+                    .map_err(market_regime_error)?;
+                agent_context::attach_evidence_registry(&mut response, "research_market_regime");
+                Ok(response)
+            }
             "research.data_reconcile" => {
                 let payload: SymbolPayload = decode_payload(&request.payload)?;
                 let symbol = parse_live_symbol(&payload.symbol)?;

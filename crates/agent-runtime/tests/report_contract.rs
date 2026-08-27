@@ -555,3 +555,224 @@ fn a_draft_survives_a_serialization_round_trip() {
         serde_json::from_str(&encoded).expect("rendered report deserializes");
     assert_eq!(restored, rendered);
 }
+
+// ---------------------------------------------------------------------------
+// Figures written into prose
+//
+// The canonical form the verifier reads places a claim's statement and its
+// citations on one line, so a figure in the prose is checked against the
+// evidence the claim named, exactly as a declared number is. A live run that
+// otherwise converged to two findings failed on precisely this: `约 79.87 亿元`
+// as a rounded restatement of the cited `7,987,376,586`, and `单手(100 股)` as a
+// lot size. Both are refused here, at validation, where repair is one cheap
+// round instead of a verification cycle.
+// ---------------------------------------------------------------------------
+
+fn amount_registry() -> BTreeMap<String, EvidenceDescriptor> {
+    let mut map = registry();
+    let mut amount = observed("evf_amount", "tencent", "/quote/amount", 7_987_376_586.0);
+    amount.unit = Some("元".into());
+    map.insert("evf_amount".into(), amount);
+    map
+}
+
+fn one_claim_draft(claim: Claim) -> VerifiedReportDraft {
+    VerifiedReportDraft {
+        version: REPORT_CONTRACT_VERSION.to_owned(),
+        title: "紫金矿业行情".to_owned(),
+        executive_summary: "仅覆盖行情事实。".to_owned(),
+        sections: vec![ReportSection {
+            heading: "行情".to_owned(),
+            claim_ids: vec![claim.id.clone()],
+        }],
+        claims: vec![claim],
+        overall_uncertainty: None,
+        limitations: Vec::new(),
+    }
+}
+
+fn observed_claim(statement: &str, items: Vec<NumericItem>, evidence: Vec<&str>) -> Claim {
+    Claim {
+        id: "c1".to_owned(),
+        kind: ClaimKind::ObservedFact,
+        statement: statement.to_owned(),
+        evidence_ids: evidence.into_iter().map(str::to_owned).collect(),
+        numeric_items: items,
+        confidence: None,
+        uncertainty: None,
+        assumptions: Vec::new(),
+        disclosed_conflicts: Vec::new(),
+    }
+}
+
+fn amount_item() -> NumericItem {
+    NumericItem {
+        value: 7_987_376_586.0,
+        unit: Some("元".to_owned()),
+        label: "成交额".to_owned(),
+        provenance: NumericProvenance::Observed {
+            evidence_id: "evf_amount".to_owned(),
+            field: Some("/quote/amount".to_owned()),
+        },
+    }
+}
+
+/// A rounded restatement in prose is a separate, unverifiable figure.
+#[test]
+fn a_rounded_restatement_in_prose_is_refused() {
+    let draft = one_claim_draft(observed_claim(
+        "紫金矿业当日成交额为 7,987,376,586.00 元人民币(约 79.87 亿元)。",
+        vec![amount_item()],
+        vec!["evf_amount"],
+    ));
+    let problems = validate_draft(&draft, &amount_registry(), &BTreeSet::new());
+    let undeclared: Vec<&DraftProblem> = problems
+        .iter()
+        .filter(|problem| problem.code() == "undeclared_number_in_statement")
+        .collect();
+    assert_eq!(
+        undeclared.len(),
+        1,
+        "only the rounded 79.87 is undeclared: {problems:?}"
+    );
+    assert!(matches!(
+        undeclared[0],
+        DraftProblem::UndeclaredNumberInStatement { claim_id, numeral }
+            if claim_id == "c1" && numeral == "79.87"
+    ));
+}
+
+/// The exact cited figure in prose is fine: it is the value the claim declared.
+#[test]
+fn the_exact_cited_figure_may_appear_in_prose() {
+    let draft = one_claim_draft(observed_claim(
+        "紫金矿业当日成交额为 7,987,376,586.00 元人民币。",
+        vec![amount_item()],
+        vec!["evf_amount"],
+    ));
+    let problems = validate_draft(&draft, &amount_registry(), &BTreeSet::new());
+    assert!(
+        problems.is_empty(),
+        "a declared figure must be publishable: {problems:?}"
+    );
+}
+
+/// A lot size written into prose is a quantity with no provenance.
+#[test]
+fn an_incidental_quantity_in_prose_is_refused() {
+    let draft = one_claim_draft(observed_claim(
+        "流动性参考：单手(100 股)成本 3457 元。",
+        vec![NumericItem {
+            value: 3457.0,
+            unit: Some("元".to_owned()),
+            label: "单手成本".to_owned(),
+            provenance: NumericProvenance::Observed {
+                evidence_id: "evf_price".to_owned(),
+                field: None,
+            },
+        }],
+        vec!["evf_price"],
+    ));
+    let problems = validate_draft(&draft, &registry(), &BTreeSet::new());
+    let numerals: Vec<String> = problems
+        .iter()
+        .filter_map(|problem| match problem {
+            DraftProblem::UndeclaredNumberInStatement { numeral, .. } => Some(numeral.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(numerals, vec!["100".to_owned()], "{problems:?}");
+}
+
+/// A security code, a date and a window label assert no quantity.
+///
+/// The masking rule is the verifier's own, so validation cannot become stricter
+/// than the gate it is pre-checking.
+#[test]
+fn identifiers_dates_and_window_labels_are_not_treated_as_figures() {
+    let draft = one_claim_draft(observed_claim(
+        "紫金矿业(601899) 于 2026-08-26 收盘，近 6个月 处于上行结构，最新价 34.47 元。",
+        vec![NumericItem {
+            value: 34.47,
+            unit: Some("元".to_owned()),
+            label: "最新价".to_owned(),
+            provenance: NumericProvenance::Observed {
+                evidence_id: "evf_price".to_owned(),
+                field: Some("/quote/last".to_owned()),
+            },
+        }],
+        vec!["evf_price"],
+    ));
+    let problems = validate_draft(&draft, &registry(), &BTreeSet::new());
+    assert!(
+        problems.is_empty(),
+        "codes, dates and window labels are not financial claims: {problems:?}"
+    );
+}
+
+/// A figure that matches cited evidence but is not a declared item still passes,
+/// because the verifier would accept it. Validation pre-checks the gate; it does
+/// not invent a stricter one.
+#[test]
+fn a_figure_backed_by_cited_evidence_is_accepted_even_if_not_declared() {
+    let draft = one_claim_draft(observed_claim(
+        "最新价为 34.47 元。",
+        Vec::new(),
+        vec!["evf_price"],
+    ));
+    let problems = validate_draft(&draft, &registry(), &BTreeSet::new());
+    assert!(
+        problems.is_empty(),
+        "cited evidence supports the figure: {problems:?}"
+    );
+}
+
+/// A percentage written as `1.12%` is supported by evidence recording `1.12`.
+#[test]
+fn a_percentage_matches_evidence_recorded_unscaled() {
+    let mut map = registry();
+    map.insert(
+        "evf_change".into(),
+        observed("evf_change", "tencent", "/quote/change_pct", 1.12),
+    );
+    let draft = one_claim_draft(observed_claim(
+        "当日涨跌幅为 1.12%。",
+        vec![NumericItem {
+            value: 1.12,
+            unit: Some("%".to_owned()),
+            label: "涨跌幅".to_owned(),
+            provenance: NumericProvenance::Observed {
+                evidence_id: "evf_change".to_owned(),
+                field: None,
+            },
+        }],
+        vec!["evf_change"],
+    ));
+    let problems = validate_draft(&draft, &map, &BTreeSet::new());
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+/// Numbers reach the investor-facing report.
+///
+/// They did not before: the renderer emitted only claim prose, so a figure that
+/// lived in `numeric_items` — the only place a figure carries provenance — never
+/// reached the page, and the contract and the presentation disagreed about what
+/// the report said.
+#[test]
+fn declared_numbers_appear_in_the_published_report() {
+    let draft = one_claim_draft(observed_claim(
+        "紫金矿业当日成交额已披露。",
+        vec![amount_item()],
+        vec!["evf_amount"],
+    ));
+    let registry = amount_registry();
+    assert!(validate_draft(&draft, &registry, &BTreeSet::new()).is_empty());
+    let rendered = render(&draft, &registry);
+    assert!(
+        rendered.markdown.contains("成交额：7987376586 元"),
+        "a declared figure must be visible to the reader:\n{}",
+        rendered.markdown
+    );
+    assert!(rendered.markdown.contains("实测数据"));
+    assert!(!contains_internal_identifier(&rendered.markdown));
+}

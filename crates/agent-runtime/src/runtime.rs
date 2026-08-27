@@ -190,6 +190,12 @@ pub struct RuntimeConfig {
     pub max_research_rounds: usize,
     /// Total `submit_report` attempts, counting both contract rejections and
     /// verifier refusals. Exhausting them fails closed; it never publishes.
+    ///
+    /// Six rather than four because a measured live run was still converging when it
+    /// ran out — 14 contract problems, then 4, 8 and 2 verifier findings — and
+    /// stopping a converging repair loop wastes the research that preceded it. The
+    /// budget still exists: a loop that is not converging is caught by
+    /// identical-resubmission detection long before this bound.
     pub max_finalization_attempts: usize,
     pub max_model_chunks_per_round: usize,
     /// Safe replays of a provider turn that returned nothing at all.
@@ -218,7 +224,7 @@ impl Default for RuntimeConfig {
         Self {
             max_model_rounds: 24,
             max_research_rounds: 18,
-            max_finalization_attempts: 4,
+            max_finalization_attempts: 6,
             max_model_chunks_per_round: 10_000,
             max_empty_turn_retries: 2,
             max_visible_chars_per_round: 120_000,
@@ -552,7 +558,6 @@ impl AgentRuntime {
         }
         messages.extend(task.history.clone());
         messages.push(Message::text(MessageRole::User, task.objective.trim()));
-        let mut evidence_contexts = Vec::<Value>::new();
 
         for round in 1..=self.config.max_model_rounds {
             self.ensure_active(state)?;
@@ -866,9 +871,7 @@ impl AgentRuntime {
                     tool_calls: calls.clone(),
                     tool_call_id: None,
                 });
-                let batch = self
-                    .execute_tools(task, state, calls, &mut evidence_contexts)
-                    .await?;
+                let batch = self.execute_tools(task, state, calls).await?;
                 messages.extend(batch.messages);
                 // Publication is the only way out of the loop that produces a
                 // report, and it happens only after the independent verifier has
@@ -947,7 +950,6 @@ impl AgentRuntime {
         task: &RuntimeTask,
         state: &mut RunState,
         arguments: Value,
-        evidence_contexts: &[Value],
     ) -> Result<Finalization, RuntimeError> {
         let draft: VerifiedReportDraft = match serde_json::from_value(arguments) {
             Ok(draft) => draft,
@@ -1005,7 +1007,7 @@ impl AgentRuntime {
         state.phase = AgentPhase::Verifying;
         self.record(state, AgentEvent::VerificationStarted).await?;
         let verification = self
-            .verify_canonical_report(task, state, &rendered, evidence_contexts)
+            .verify_canonical_report(task, state, &draft, &rendered)
             .await?;
 
         if verification.get("passed").and_then(Value::as_bool) == Some(true) {
@@ -1057,17 +1059,40 @@ impl AgentRuntime {
     }
 
     /// Run the independent verifier over the canonical form of a rendered report.
+    ///
+    /// The context carries the registered facts the draft cites and nothing else.
+    /// See [`EvidenceCatalog::verifier_facts`] for why that is both bounded and
+    /// equivalent to handing over every tool result.
     async fn verify_canonical_report(
         &self,
         task: &RuntimeTask,
         state: &mut RunState,
+        draft: &VerifiedReportDraft,
         rendered: &RenderedReport,
-        evidence_contexts: &[Value],
     ) -> Result<Value, RuntimeError> {
+        let cited: BTreeSet<String> = draft
+            .claims
+            .iter()
+            .flat_map(|claim| {
+                claim
+                    .evidence_ids
+                    .iter()
+                    .cloned()
+                    .chain(claim.disclosed_conflicts.iter().cloned())
+                    .chain(
+                        claim
+                            .numeric_items
+                            .iter()
+                            .flat_map(|item| item.provenance.referenced_evidence())
+                            .map(str::to_owned),
+                    )
+            })
+            .collect();
+        let facts = state.catalog.verifier_facts(&cited);
         let verification_spec = task.verification_spec();
         let verification_context = json!({
             "task_spec": verification_spec,
-            "tool_results": evidence_contexts,
+            "evidence_registry": {"facts": facts},
         });
         let effect_id = self
             .begin_effect(
@@ -1077,6 +1102,7 @@ impl AgentRuntime {
                     "report_chars": rendered.verifier_markdown.chars().count(),
                     "claims": rendered.sections.iter().map(|s| s.claims.len()).sum::<usize>(),
                     "references": rendered.references.len(),
+                    "cited_facts": cited.len(),
                     "contract": "structured",
                 }),
             )
@@ -1124,7 +1150,6 @@ impl AgentRuntime {
         task: &RuntimeTask,
         state: &mut RunState,
         calls: Vec<ModelToolCall>,
-        evidence_contexts: &mut Vec<Value>,
     ) -> Result<ToolBatch, RuntimeError> {
         let mut prepared = Vec::with_capacity(calls.len());
         let mut runtime_calls: Vec<PreparedTool> = Vec::new();
@@ -1329,7 +1354,6 @@ impl AgentRuntime {
                     state.evidence_ids.extend(evidence_ids.iter().cloned());
                     state.evidence_ids.sort();
                     state.evidence_ids.dedup();
-                    evidence_contexts.push(value.clone());
                     completed.push(CompletedTool::success(prepared.call, value, evidence_ids));
                 }
                 Ok(Err(message)) => {
@@ -1403,7 +1427,7 @@ impl AgentRuntime {
                 }
                 "submit_report" => {
                     let outcome = self
-                        .finalize_report(task, state, prepared.arguments.clone(), evidence_contexts)
+                        .finalize_report(task, state, prepared.arguments.clone())
                         .await?;
                     match outcome {
                         Finalization::Published(rendered) => {

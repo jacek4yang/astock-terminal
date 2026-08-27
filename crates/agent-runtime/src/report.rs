@@ -341,6 +341,21 @@ pub enum DraftProblem {
         claim_id: String,
         evidence_id: String,
     },
+    /// A quantity written into a claim's prose that the claim never declared.
+    ///
+    /// The renderer places a claim's statement and its citations on the same line of
+    /// the canonical form, so the verifier checks every figure in the prose against
+    /// the evidence the claim named. A figure written only in prose therefore has no
+    /// provenance and cannot be reproduced.
+    ///
+    /// This is the residual failure of a live run that otherwise converged: `约 79.87
+    /// 亿元` as a rounded restatement of the cited `7,987,376,586`, and `单手(100 股)`
+    /// as a lot size. Both are refused here, at validation, where repair is one cheap
+    /// round rather than a verifier cycle.
+    UndeclaredNumberInStatement {
+        claim_id: String,
+        numeral: String,
+    },
 }
 
 impl DraftProblem {
@@ -358,6 +373,7 @@ impl DraftProblem {
             | Self::InvalidEstimate { claim_id, .. }
             | Self::ScenarioWithoutAssumption { claim_id }
             | Self::ConflictingEvidence { claim_id, .. }
+            | Self::UndeclaredNumberInStatement { claim_id, .. }
             | Self::EvidenceOutsideTaskScope { claim_id, .. } => Some(claim_id),
             Self::SectionReferencesUnknownClaim { claim_id, .. } => Some(claim_id),
         }
@@ -378,6 +394,7 @@ impl DraftProblem {
             Self::InvalidEstimate { .. } => "invalid_estimate",
             Self::ScenarioWithoutAssumption { .. } => "scenario_without_assumption",
             Self::ConflictingEvidence { .. } => "conflicting_evidence",
+            Self::UndeclaredNumberInStatement { .. } => "undeclared_number_in_statement",
             Self::EvidenceOutsideTaskScope { .. } => "evidence_outside_task_scope",
         }
     }
@@ -689,6 +706,69 @@ fn validate_claim(
 
     for item in &claim.numeric_items {
         validate_numeric_item(claim, item, registry, problems);
+    }
+    validate_statement_numerals(claim, registry, problems);
+}
+
+/// Every quantity in a claim's prose must be one the claim actually declared.
+///
+/// The canonical form the verifier reads places the statement and the claim's
+/// citations on one line, so a figure written into prose is checked against that
+/// evidence exactly as a declared number would be. Checking it here rather than
+/// waiting for the verifier costs one cheap validation round instead of a
+/// verification cycle, and the repair is addressed to a claim.
+///
+/// The rule is the Engine verifier's own: [`astock_engine::financial_numerals`]
+/// decides what counts as a financial quantity — masking security codes, dates,
+/// headings, clock times and window labels — and `supported_by` decides when a value
+/// backs it, including the percentage convention. Reimplementing either here would
+/// let validation and verification drift, and the drift would surface as a report
+/// validation accepted and verification refused.
+///
+/// A prose figure is accepted when it matches one of the claim's own numeric items,
+/// or the value of evidence the claim cites. That is exactly as permissive as the
+/// verifier, so this rejects nothing the verifier would have passed.
+fn validate_statement_numerals(
+    claim: &Claim,
+    registry: &BTreeMap<String, EvidenceDescriptor>,
+    problems: &mut Vec<DraftProblem>,
+) {
+    let numerals = astock_engine::financial_numerals(&claim.statement);
+    if numerals.is_empty() {
+        return;
+    }
+    let cited_values: Vec<f64> = claim
+        .evidence_ids
+        .iter()
+        .filter_map(|id| registry.get(id))
+        .filter_map(|descriptor| descriptor.value.as_ref())
+        .filter_map(evidence_number)
+        .collect();
+    for numeral in numerals {
+        let declared = claim
+            .numeric_items
+            .iter()
+            .any(|item| numeral.supported_by(item.value));
+        if declared
+            || cited_values
+                .iter()
+                .any(|value| numeral.supported_by(*value))
+        {
+            continue;
+        }
+        problems.push(DraftProblem::UndeclaredNumberInStatement {
+            claim_id: claim.id.clone(),
+            numeral: numeral.raw.clone(),
+        });
+    }
+}
+
+/// Read a number out of an evidence value, including one recorded as a string.
+fn evidence_number(value: &serde_json::Value) -> Option<f64> {
+    match value {
+        serde_json::Value::Number(number) => number.as_f64(),
+        serde_json::Value::String(text) => text.replace(',', "").parse::<f64>().ok(),
+        _ => None,
     }
 }
 

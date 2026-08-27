@@ -253,6 +253,17 @@ fn render_claim(claim: &Claim, numbers_for: &impl Fn(&[&str]) -> Vec<usize>) -> 
     }
 }
 
+/// Render a value the way the verifier will read it back.
+///
+/// Rust's shortest round-tripping form, so an integral value prints as `100` rather
+/// than `100.0` and a decimal keeps exactly the digits it carries. Deliberately not
+/// rounded for presentation: the published figure and the figure the deterministic
+/// verifier reproduces must be the same characters, or the report would show a
+/// number that nothing checked.
+fn format_number(value: f64) -> String {
+    format!("{value}")
+}
+
 /// Investor-facing prose. Numbered citations only; no `evf_` anywhere.
 fn render_markdown(
     draft: &VerifiedReportDraft,
@@ -284,6 +295,50 @@ fn render_markdown(
                 claim.text.trim(),
                 citations
             ));
+            // Numbers must appear in the report the investor reads.
+            //
+            // They previously did not: the renderer emitted only the claim's prose,
+            // so a figure that lived in `numeric_items` — the only place a figure
+            // carries provenance — never reached the page. That made the contract
+            // and the presentation disagree about what the report says, and it
+            // pushed the model towards writing figures into prose instead, which is
+            // exactly what has no provenance.
+            for number in &claim.numbers {
+                let unit = number
+                    .unit
+                    .as_deref()
+                    .map(|unit| format!(" {unit}"))
+                    .unwrap_or_default();
+                let citations = if number.evidence_numbers.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " {}",
+                        number
+                            .evidence_numbers
+                            .iter()
+                            .map(|n| format!("[{n}]"))
+                            .collect::<Vec<_>>()
+                            .join("")
+                    )
+                };
+                // The operation is shown for a calculation so a reader can see how
+                // the figure was derived rather than taking it on trust.
+                let derivation = number
+                    .operation
+                    .as_deref()
+                    .map(|operation| format!(" · {operation}"))
+                    .unwrap_or_default();
+                out.push_str(&format!(
+                    "    - {}：{}{}（{}{}{}）\n",
+                    number.label,
+                    format_number(number.value),
+                    unit,
+                    number.provenance_label,
+                    derivation,
+                    citations
+                ));
+            }
             // Surface an assumption inline so a scenario parameter can never read
             // as something a data source reported.
             for assumption in &claim.assumptions {

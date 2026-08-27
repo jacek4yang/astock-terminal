@@ -316,7 +316,20 @@ fn submit_report_schema() -> Value {
         }
     });
     let mut properties = serde_json::Map::new();
-    properties.insert("version".into(), json!({"type": "string", "maxLength": 64}));
+    // A const, not a free string.
+    //
+    // A live run's first submission failed on `contract_version_mismatch`, which is
+    // a pure formality: the model had to reproduce a version string from memory with
+    // nothing constraining it. Pinning it in the schema makes that failure
+    // unrepresentable instead of merely diagnosed.
+    properties.insert(
+        "version".into(),
+        json!({
+            "type": "string",
+            "enum": [crate::report::REPORT_CONTRACT_VERSION],
+            "description": "Send exactly this value.",
+        }),
+    );
     properties.insert("title".into(), json!({"type": "string", "maxLength": 200}));
     properties.insert(
         "executive_summary".into(),
@@ -524,7 +537,7 @@ pub fn default_registry() -> ToolRegistry {
         // publication path: the verifier still runs and still fails closed.
         runtime_tool(
             "submit_report",
-            "Submit the final structured research draft for validation and publication. Do not write citation markup in statements; supply canonical identifiers in evidence_ids and numeric_items and the runtime renders citations. Every numeric item declares provenance: observed (needs evidence_id), calculated (needs calculation_evidence_id, operation and input_evidence_ids), user_assumption (a scenario parameter the user supplied), or estimated (needs method and basis_evidence_ids, preferably a range). Never use estimated for a quantity the Engine can compute. Statements are written in the task output_language.",
+            "Submit the final structured research draft for validation and publication. Do not write citation markup in statements; supply canonical identifiers and the runtime renders citations. Write no figure into a statement unless the same claim declares it as a numeric_item; a rounded restatement is a separate unverifiable figure. Each numeric item declares provenance: observed (evidence_id), calculated (calculation_evidence_id, operation, input_evidence_ids), user_assumption (a scenario parameter the user supplied), or estimated (method, basis_evidence_ids, preferably a range). Never use estimated for a quantity the Engine can compute. Statements use the task output_language.",
             submit_report_schema(),
         ),
     ];

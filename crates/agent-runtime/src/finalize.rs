@@ -179,6 +179,13 @@ fn validation_action(code: &str) -> &'static str {
              identifiers in disclosed_conflicts and say in the statement what disagrees. Do not \
              silently pick one side."
         }
+        "undeclared_number_in_statement" => {
+            "The statement writes a figure the claim does not declare, so nothing verifies it. \
+             Either add it as a numeric_item with real provenance, or remove the figure from the \
+             prose and let the rendered numbers carry it. A rounded restatement of a cited value \
+             (\"约 79.87 亿元\" for 7,987,376,586) is a separate, unverifiable figure — state the \
+             cited value or declare the rounded one."
+        }
         "evidence_outside_task_scope" => {
             "This evidence belongs to a different security than the task covers. Remove it, or \
              cite evidence for the security under research."
@@ -764,6 +771,7 @@ mod tests {
             "invalid_estimate",
             "scenario_without_assumption",
             "conflicting_evidence",
+            "undeclared_number_in_statement",
             "evidence_outside_task_scope",
             "duplicate_claim_id",
             "section_references_unknown_claim",
