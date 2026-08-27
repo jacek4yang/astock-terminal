@@ -45,6 +45,16 @@ pub struct SessionTaskState {
     pub completed_tool_ids: Vec<String>,
     #[serde(default)]
     pub evidence_ids: Vec<String>,
+    /// When a suspended task may be resumed, when the provider said.
+    ///
+    /// Persisted on the session so `astock sessions` can show it and a resume can be
+    /// decided without replaying the event log. `default` keeps sessions written by
+    /// earlier versions readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_at: Option<String>,
+    /// Typed fault that caused a suspension, so recovery need not parse prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspended_by: Option<String>,
     /// User-visible research plan. Persisted so an interrupted task can be
     /// resumed with its plan intact instead of silently losing the work
     /// breakdown the user was watching. `default` keeps sessions written by
