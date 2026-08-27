@@ -48,20 +48,28 @@ CLI           -> domain crates directly    forbidden
 React         -> native calls outside the generated bridge   forbidden
 ```
 
-### Status of the previous Proton/MoonBit production path
+### The Proton/MoonBit path is retired, and Git is its archive
 
-The v6 Proton/CEF host and the MoonBit Agent worker are no longer the
-production runtime. They remain in tree as historical and specification
-assets while the Rust replacement accumulates evidence:
+The v6 Proton/CEF host and the MoonBit Agent worker are no longer the production
+runtime, and they are no longer in the active tree. `app-moon`, `desktop-moon`,
+`packaging-moon`, the v6 Proton/CEF release workflows and the v6 Windows
+PowerShell build suite were removed from `main`.
 
-- `app-moon`, `desktop-moon`, `packaging-moon`, Proton patches and the v6
-  publication scripts are preserved, not deleted.
-- MoonBit models, the TLA+ `formal/` specifications and `docs/formal-
-  verification.md` remain useful for specification and model checking. Keep
-  recording every `proof_axiomatized` use; never add an axiom only to make CI
-  pass.
-- Removal of a Proton/MoonBit production gate is permitted only after the
-  Rust replacement has equivalent evidence for that specific behavior.
+- Every v6 source remains recoverable from the immutable `v6.0.0` tag and from
+  Git history. Git is the archive; dead implementation code is not kept in the
+  working tree to serve as one.
+- Nothing in the v7 production path may require MoonBit, Proton or CEF — not to
+  build, test, generate protocols, verify architecture, release or pass CI.
+  `scripts/release-architecture-check.mjs` enforces this in both directions: the
+  retired trees must not reappear, and no workflow may require the retired
+  toolchain.
+- The TLA+ `formal/` specifications and `docs/formal-verification.md` stay:
+  language-independent specification is not an implementation of a retired
+  runtime. Keep recording every `proof_axiomatized` use; never add an axiom only
+  to make CI pass.
+- The Agent capability surface is projected from the Rust registry into
+  `protocol/agent-tool-manifest.json`, and a Rust test fails if it drifts. A
+  retired implementation must never be the oracle for what the product can do.
 - Tag `v6.0.0` and all published history are immutable. Never move a released
   tag, rewrite published history or force-push `main`.
 
@@ -102,9 +110,9 @@ adapters consume the same plan events.
 
 ## Contracts and durability
 
-- `protocol/schema` is the source of truth. Generated Rust, MoonBit and
-  TypeScript contracts are refreshed together and `protocol-codegen --check`
-  must pass.
+- `protocol/schema` is the source of truth. Generated Rust and TypeScript
+  contracts are refreshed together and `node protocol/codegen.mjs --check` must
+  pass. There are no MoonBit outputs.
 - IPC uses 4-byte little-endian length-prefixed UTF-8 JSON. stdout is
   protocol-only; diagnostics use stderr JSONL.
 - Persist Agent events and tool intent before performing effects. Process
@@ -149,13 +157,6 @@ adapters consume the same plan events.
 - Keep tests deterministic by default. Live provider tests stay ignored and
   require explicit opt-in.
 
-## MoonBit
-
-- The archived Agent reducer must remain pure: `State + Event -> State +
-  Effects`, with effects in the imperative shell.
-- Pin MoonBit dependencies. Verify current APIs from installed package sources
-  before adopting examples.
-
 ## Security and credentials
 
 - Secrets belong in an OS credential store: Windows Credential Manager, or the
@@ -177,12 +178,12 @@ adapters consume the same plan events.
 ## Build and verification
 
 - Linux is the reference development platform for the CLI and requires no
-  Proton, CEF, Tauri, React, Node.js, MoonBit or graphical session.
-- On a local Windows workstation use `scripts/*.ps1`; build products and
-  intermediates stay under `ASTOCK_BUILD_ROOT` (default
-  `D:\astock-build\astock-terminal`). Do not silently fall back to `C:`. CI
-  overrides build roots with runner temporary storage. Shared Cargo
-  configuration must not impose a Windows drive on Linux or macOS.
+  Tauri, React, Node.js or graphical session.
+- Windows and macOS build through plain `cargo` and, for the desktop adapter,
+  the Tauri CLI. CI overrides build roots with runner temporary storage via
+  `CARGO_TARGET_DIR`. Shared Cargo configuration must not impose a Windows drive
+  on Linux or macOS. The v6 `scripts/*.ps1` Proton build suite is retired; it is
+  recoverable from `v6.0.0` if v6 ever needs rebuilding.
 - Rust gates:
 
 ```bash
@@ -195,7 +196,8 @@ cargo test --locked --workspace
   artifacts, and never describe an unsigned binary as Authenticode-signed. If
   Authenticode is unavailable, label it `NOT PROVIDED` and use the explicit
   unsigned release policy.
-- `scripts/publish-v6.ps1` remains the historical v6 publication entry and its
-  evidence stays valid for v6. A new release pipeline must produce its own
-  equivalent evidence: SHA-256 sums, CycloneDX SBOM, third-party notices,
-  build metadata, verification report and OIDC provenance/attestations.
+- The v6 publication evidence stays valid for v6 and is recoverable from
+  `v6.0.0`. The v7 release pipeline is v7-native and must produce its own
+  equivalent evidence: SHA-256 sums, CycloneDX SBOM, third-party notices, build
+  metadata, verification report and OIDC provenance/attestations. It must not
+  reuse the Proton/CEF/MoonBit pipeline.

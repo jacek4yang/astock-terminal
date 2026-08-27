@@ -1,0 +1,78 @@
+{
+  "note": "Generated from astock_agent_runtime::default_registry(). Regenerate with ASTOCK_WRITE_TOOL_MANIFEST=1 cargo test -p astock-agent-runtime --test tool_manifest",
+  "runtime": "astock-agent-runtime",
+  "tools": [
+    {
+      "engine_kind": "research.fundamentals",
+      "freshness": "latest_disclosed",
+      "handler": "engine",
+      "name": "get_fundamentals"
+    },
+    {
+      "engine_kind": "research.joinquant_context",
+      "freshness": "explicit_joinquant_research_session",
+      "handler": "engine",
+      "name": "get_joinquant_context"
+    },
+    {
+      "engine_kind": "market.kline",
+      "freshness": "market_close_or_live",
+      "handler": "engine",
+      "name": "get_kline"
+    },
+    {
+      "engine_kind": "research.market.regime",
+      "freshness": "latest_market_data",
+      "handler": "engine",
+      "name": "get_market_regime"
+    },
+    {
+      "engine_kind": "market.quote",
+      "freshness": "live",
+      "handler": "engine",
+      "name": "get_quote"
+    },
+    {
+      "engine_kind": "research.agent_prepare_context",
+      "freshness": "live",
+      "handler": "engine",
+      "name": "prepare_market_research"
+    },
+    {
+      "engine_kind": "research.news",
+      "freshness": "live",
+      "handler": "engine",
+      "name": "research_news"
+    },
+    {
+      "engine_kind": "research.agent_security_context",
+      "freshness": "mixed_live_and_disclosed",
+      "handler": "engine",
+      "name": "research_securities"
+    },
+    {
+      "engine_kind": "research.compute",
+      "freshness": "deterministic_input_snapshot",
+      "handler": "engine",
+      "name": "run_financial_calculation"
+    },
+    {
+      "engine_kind": "research.joinquant_compute",
+      "freshness": "explicit_joinquant_qfq_snapshot_then_deterministic_compute",
+      "handler": "engine",
+      "name": "run_joinquant_calculation"
+    },
+    {
+      "engine_kind": "",
+      "freshness": "runtime_state",
+      "handler": "runtime",
+      "name": "search_evidence"
+    },
+    {
+      "engine_kind": "",
+      "freshness": "runtime_state",
+      "handler": "runtime",
+      "name": "submit_report"
+    }
+  ]
+}

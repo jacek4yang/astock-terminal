@@ -189,7 +189,8 @@ minimal JSON containing only `gate`, `status` and `commit` is deliberately
 rejected.
 
 After a `PASSED` report exists on a clean `main` identical to `origin/main`,
-`scripts/publish-v6.ps1` is the only supported publication entry. It rechecks
+`scripts/publish-v6.ps1` was the v6 publication entry, retired from `main` with
+the Proton/CEF/MoonBit suite and recoverable from `v6.0.0`. For v6 it rechecked
 the report and manifests, the actual Authenticode state and signer certificate,
 private-repository visibility, the exact Actions disclosure, signed tag target
 and release assets. Publication requires the explicit

@@ -21,5 +21,7 @@ hardening, exact interrupted-task replay, remaining fault coverage, platform
 CI evidence and the shared Tauri adapter remain incomplete. Durable
 conversation continuation, branching and bounded context compaction are
 integration tested but do not by themselves satisfy the release gate. The old
-`scripts/publish-v6.ps1` remains the only entry for the immutable v6 product
+The v6 publication entry (`scripts/publish-v6.ps1`) was retired from `main` with
+the rest of the Proton/CEF/MoonBit suite and is recoverable from the immutable
+`v6.0.0` tag. It remains the record for the immutable v6 product
 until a separately reviewed next-version release workflow replaces it.

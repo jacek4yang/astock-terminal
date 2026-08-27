@@ -8,7 +8,12 @@ cleanup and evidence-gated publication. Temporal properties additionally check
 monotonic sequence numbers, terminal-state absorption and finite-range progress
 to a terminal state or the explicit sequence bound.
 
-`app-moon/agent_formal` contains executable MoonBit functions with real
+> **v7 note.** The MoonBit implementation trees were retired from `main` with the
+> Proton/CEF architecture and are recoverable from the immutable `v6.0.0` tag. The
+> TLA+ specifications in this directory stay: a language-independent specification
+> is not an implementation of a retired runtime.
+
+`app-moon/agent_formal` contained executable MoonBit functions with real
 `proof_require`/`proof_ensure` obligations. They separately name sequence and
 round bounds, pending correspondence, one-time completion/result uniqueness,
 cancellation, evidence-gated publication, terminal rejection, deterministic
