@@ -10,12 +10,31 @@ const globalCatalogPath = path.join(root, "crates", "global-intelligence", "src"
 const engineSchemaPath = path.join(root, "protocol", "schema", "engine.schema.json");
 const engineDispatchPath = path.join(root, "crates", "engine", "src", "lib.rs");
 const engineFramingPath = path.join(root, "crates", "engine", "src", "main.rs");
-const agentDispatchPath = path.join(root, "app-moon", "agent_worker", "main.mbt");
+// The Agent capability surface, projected from the Rust runtime's tool registry.
+//
+// This used to read `app-moon/agent_worker/main.mbt`: a retired implementation was
+// the live oracle for what the product can do. A removed architecture cannot answer
+// that, and grepping source text for `"kind" =>` was brittle regardless. The
+// manifest is generated from `default_registry()` and a Rust test fails if it
+// drifts, so this reads a canonical registry rather than scanning code.
+const agentToolManifestPath = path.join(root, "protocol", "agent-tool-manifest.json");
 const legacyCapabilityMapPath = path.join(root, "protocol", "legacy-capability-map.json");
 
 const expectedLegacyHandlerCount = 127;
 const expectedLegacyHandlerHash = "b55ed6504d2c97ab3463274cf826e8b34b1f60257e8447a79b43baab26a8e700";
-const expectedLegacyMappingHash = "97f5ee6a6a198e296202d4c55bf14865e295b8a85047778363c6592900613c13";
+// The mapping is the migration record, so it changes when the architecture does.
+//
+// Two rows named request kinds that only ever existed in the retired MoonBit Agent
+// worker — `agent.research.workflow` and `agent.restore` — and were "reachable" only
+// because the check grepped that worker's source. In v7 asking the Agent creates a
+// durable task (`agent.task.create`) and resuming loads one
+// (`agent.task.load`, `agent.conversation.load`), so the rows now name what actually
+// serves the capability.
+//
+// The immutable fact is the *legacy inventory*: all 127 v5 handler names, pinned by
+// `expectedLegacyHandlerCount` and `frozen_legacy_sha256`, both unchanged. Those still
+// have to be fully accounted for.
+const expectedLegacyMappingHash = "360e02d28310430649a0af4e9afda46cb187d4f8ae4dcf1ff836229ac7526bc2";
 
 // Exact legacy capabilities that are reachable through the new coarse Engine
 // contract. Before cutover, everything else in the frozen 127-command registry
@@ -236,7 +255,15 @@ if (unknownDataBearing.length) {
 const engineSchema = fs.readFileSync(engineSchemaPath, "utf8");
 const engineDispatch = fs.readFileSync(engineDispatchPath, "utf8");
 const engineFraming = fs.readFileSync(engineFramingPath, "utf8");
-const agentDispatch = fs.readFileSync(agentDispatchPath, "utf8");
+const agentToolManifest = JSON.parse(fs.readFileSync(agentToolManifestPath, "utf8"));
+if (!Array.isArray(agentToolManifest.tools) || agentToolManifest.tools.length === 0) {
+  fail("the Agent tool manifest is empty; regenerate it from the runtime registry");
+}
+const agentDispatchKinds = new Set(
+  agentToolManifest.tools
+    .filter((tool) => tool.handler === "engine" && typeof tool.engine_kind === "string")
+    .map((tool) => tool.engine_kind),
+);
 const engineKinds = new Set(
   JSON.parse(engineSchema).properties.request_kinds.prefixItems.map((item) => item.const),
 );
@@ -279,7 +306,7 @@ for (const row of capabilityRows) {
     }
     const engineReachable = engineKinds.has(replacement) &&
       (engineDispatch.includes(`"${replacement}"`) || engineFraming.includes(`"${replacement}"`));
-    const agentReachable = agentDispatch.includes(`"${replacement}" =>`);
+    const agentReachable = agentDispatchKinds.has(replacement);
     if (!engineReachable && !agentReachable) {
       fail(`${legacy} maps to unreachable request kind ${replacement}`);
     }

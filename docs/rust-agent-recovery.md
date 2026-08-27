@@ -84,7 +84,9 @@ requires replacement evidence and preserved Git history.
 - Tag `v6.0.0` and its existing Git history are the immutable Proton/MoonBit
   production snapshot. A separate archival branch/tag is optional; no reset,
   tag move or history rewrite is needed to preserve it.
-- `app-moon`, `desktop-moon`, Proton patches and v6 release scripts remain in
+- `app-moon`, `desktop-moon`, Proton patches and the v6 release scripts were
+  removed from `main` and are recoverable from the immutable `v6.0.0` tag. They
+  are no longer in
   tree until the Rust CLI and later Tauri paths cover their useful behavior.
 - v5.0.3 remains the differential oracle for prompts, clarification, tool
   descriptions, provider behavior and user flows—not a source tree to restore

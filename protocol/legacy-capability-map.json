@@ -2,135 +2,904 @@
   "schema_version": 1,
   "frozen_legacy_count": 127,
   "frozen_legacy_sha256": "b55ed6504d2c97ab3463274cf826e8b34b1f60257e8447a79b43baab26a8e700",
-  "frozen_mapping_sha256": "97f5ee6a6a198e296202d4c55bf14865e295b8a85047778363c6592900613c13",
-  "row_format": ["legacy_capability", "replacement_request_kinds", "status"],
+  "frozen_mapping_sha256": "360e02d28310430649a0af4e9afda46cb187d4f8ae4dcf1ff836229ac7526bc2",
+  "row_format": [
+    "legacy_capability",
+    "replacement_request_kinds",
+    "status"
+  ],
   "capabilities": [
-    ["market.get_quote", ["market.quote"], "ENRICHED"],
-    ["market.get_order_book", ["market.order_book"], "ENRICHED"],
-    ["market.get_kline", ["market.kline"], "ENRICHED"],
-    ["market.get_minute", ["market.minute"], "READY"],
-    ["market.search_stocks", ["market.search"], "ENRICHED"],
-    ["market.get_market_breadth", ["market.overview"], "ENRICHED"],
-    ["market.get_all_a_shares", ["market.shares.page"], "ENRICHED"],
-    ["market.get_fund_flow", ["market.fund_flow.daily"], "READY"],
-    ["market.get_realtime_flow", ["market.fund_flow.realtime"], "READY"],
-    ["market.get_index_kline", ["market.index_kline"], "READY"],
-    ["market.get_provider_health", ["diagnostics.status"], "ENRICHED"],
-    ["market.get_news_provider_health", ["research.news.providers"], "ENRICHED"],
-    ["market.set_news_provider_enabled", ["research.news.provider.set"], "READY"],
-    ["market.get_news_archive_recent", ["research.news.archive.recent"], "READY"],
-    ["market.get_news_archive_revisions", ["research.news.archive.revisions"], "READY"],
-    ["market.check_news_archive_integrity", ["research.news.archive.integrity"], "READY"],
-    ["market.get_news_ingest_observations", ["research.news.archive.observations"], "READY"],
-    ["news.query_news_center", ["research.news.center"], "ENRICHED"],
-    ["news.refresh_news_center", ["research.news.center"], "ENRICHED"],
-    ["news.set_news_item_state", ["research.news.user_state"], "READY"],
-    ["news.get_news_event_clusters", ["research.news.clusters.list"], "READY"],
-    ["news.get_news_event_cluster_detail", ["research.news.clusters.detail"], "READY"],
-    ["news.merge_news_event_clusters", ["research.news.clusters.merge"], "READY"],
-    ["news.split_news_event_revision", ["research.news.clusters.split"], "READY"],
-    ["news.get_pending_news_evidence_reviews", ["research.news.reviews.list"], "READY"],
-    ["news.resolve_news_evidence_review", ["research.news.reviews.resolve"], "READY"],
-    ["entities.get_news_entity_links", ["research.entities.links"], "READY"],
-    ["entities.get_entity_link_reviews", ["research.entities.reviews"], "READY"],
-    ["entities.resolve_entity_link_review", ["research.entities.resolve"], "READY"],
-    ["event.event_analysis_start", ["research.events.analysis.start"], "READY"],
-    ["event.event_analysis_status", ["research.events.analysis.status"], "READY"],
-    ["event.event_analysis_cancel", ["research.events.analysis.cancel"], "READY"],
-    ["relations.query_relation_reviews", ["research.relations.reviews"], "READY"],
-    ["relations.relation_extraction_cancel", ["research.relations.extraction.cancel"], "READY"],
-    ["relations.relation_extraction_start", ["research.relations.extraction.start"], "READY"],
-    ["relations.relation_extraction_status", ["research.relations.extraction.status"], "READY"],
-    ["relations.retract_relation_candidate", ["research.relations.retract"], "READY"],
-    ["relations.review_relation_candidate", ["research.relations.review"], "READY"],
-    ["deep.graph_as_of", ["research.graph.as_of"], "ENRICHED"],
-    ["deep.graph_edge_timeline", ["research.graph.edge_timeline"], "READY"],
-    ["deep.graph_history_bounds", ["research.graph.history_bounds"], "READY"],
-    ["deep.graph_snapshot_diff", ["research.graph.snapshot.diff"], "READY"],
-    ["deep.graph_snapshot_get", ["research.graph.snapshot.get"], "READY"],
-    ["deep.graph_subgraph", ["research.graph.subgraph"], "READY"],
-    ["deep.relationship_graph", ["research.market.relationship"], "ENRICHED"],
-    ["deep.supply_chain_shock", ["research.graph.shock"], "READY"],
-    ["deep.quant_research_cancel", ["research.quant.cancel"], "READY"],
-    ["deep.quant_research_snapshot_get", ["research.quant.snapshots.get"], "READY"],
-    ["deep.quant_research_snapshot_list", ["research.quant.snapshots.list"], "READY"],
-    ["deep.quant_research_start", ["research.quant.start"], "ENRICHED"],
-    ["deep.quant_research_status", ["research.quant.status"], "READY"],
-    ["deep.backtest_cancel", ["research.backtest.cancel"], "READY"],
-    ["deep.backtest_start", ["research.backtest.start"], "ENRICHED"],
-    ["deep.backtest_status", ["research.backtest.status"], "READY"],
-    ["deep.get_market_regime", ["research.market.regime"], "ENRICHED"],
-    ["deep.list_strategies", ["research.backtest.strategies"], "ENRICHED"],
-    ["deep.run_backtest", ["research.backtest.run"], "ENRICHED"],
-    ["source_evidence.fetch_source_document", ["research.sources.fetch"], "ENRICHED"],
-    ["source_evidence.get_source_documents", ["research.sources.list"], "READY"],
-    ["source_evidence.get_source_document", ["research.sources.get"], "READY"],
-    ["source_evidence.compare_source_evidence", ["research.sources.compare"], "ENRICHED"],
-    ["disclosure.query_disclosures", ["research.disclosures.list"], "ENRICHED"],
-    ["disclosure.get_disclosure_detail", ["research.disclosures.detail"], "READY"],
-    ["disclosure.disclosure_sync_start", ["research.disclosures.sync.start"], "ENRICHED"],
-    ["disclosure.disclosure_sync_status", ["research.disclosures.sync.status"], "READY"],
-    ["disclosure.disclosure_sync_cancel", ["research.disclosures.sync.cancel"], "READY"],
-    ["disclosure.get_disclosure_provider_health", ["research.disclosures.providers"], "ENRICHED"],
-    ["data_quality.reconcile_quote_sources", ["research.quote_reconcile"], "ENRICHED"],
-    ["data_quality.reconcile_valuation_sources", ["research.valuation_reconcile"], "ENRICHED"],
-    ["data_quality.get_data_quality_slo", ["diagnostics.data_quality"], "ENRICHED"],
-    ["data_quality.get_data_quality_observations", ["diagnostics.data_quality"], "ENRICHED"],
-    ["data_quality.get_field_lineage", ["diagnostics.data_quality"], "ENRICHED"],
-    ["data_quality.get_data_reconciliations", ["diagnostics.data_quality"], "ENRICHED"],
-    ["data_quality.get_data_health_report", ["diagnostics.data_quality"], "ENRICHED"],
-    ["bundle.get_stock_bundle", ["market.security_snapshot"], "ENRICHED"],
-    ["analysis.analyze", ["market.security_snapshot"], "READY"],
-    ["analysis.chanlun_daily", ["market.security_snapshot"], "READY"],
-    ["analysis.chanlun_minute", ["analysis.chanlun.minute"], "READY"],
-    ["fundamental.get_fundamentals", ["research.fundamentals"], "ENRICHED"],
-    ["fundamental.get_valuation", ["research.fundamentals"], "ENRICHED"],
-    ["fundamental.get_earnings_driver_tree", ["research.earnings_driver.tree"], "ENRICHED"],
-    ["fundamental.run_earnings_driver_shock", ["research.earnings_driver.shock"], "ENRICHED"],
-    ["fundamental.get_earnings_driver_snapshot", ["research.earnings_driver.snapshot"], "READY"],
-    ["datacenter.get_zt_pool", ["research.market_pool"], "ENRICHED"],
-    ["datacenter.get_pool", ["research.market_pool"], "ENRICHED"],
-    ["datacenter.get_billboard", ["research.market_context"], "ENRICHED"],
-    ["datacenter.get_margin_daily", ["research.market_context"], "ENRICHED"],
-    ["datacenter.get_org_survey", ["research.security_events"], "ENRICHED"],
-    ["datacenter.get_holder_num", ["research.security_events"], "ENRICHED"],
-    ["datacenter.get_earnings_predict", ["research.security_events"], "ENRICHED"],
-    ["datacenter.get_lift_stage", ["research.security_events"], "ENRICHED"],
-    ["datacenter.get_suspensions", ["research.security_events"], "ENRICHED"],
-    ["datacenter.get_notices", ["research.security_events"], "ENRICHED"],
-    ["datacenter.get_boards", ["research.market_context"], "ENRICHED"],
-    ["datacenter.get_board_cons", ["research.board.constituents"], "ENRICHED"],
-    ["watchlist.watchlist_list", ["workspace.watchlist.list"], "READY"],
-    ["watchlist.watchlist_add", ["workspace.watchlist.add"], "READY"],
-    ["watchlist.watchlist_remove", ["workspace.watchlist.remove"], "READY"],
-    ["watchlist.watchlist_pin", ["workspace.watchlist.pin"], "READY"],
-    ["settings.minimax_set_key", ["credentials.minimax.set"], "ENRICHED"],
-    ["settings.minimax_status", ["credentials.status"], "ENRICHED"],
-    ["settings.minimax_quota", ["credentials.minimax.quota"], "ENRICHED"],
-    ["settings.cache_stats", ["storage.cache.stats"], "ENRICHED"],
-    ["settings.cache_cleanup", ["storage.cache.cleanup"], "ENRICHED"],
-    ["settings.get_data_dir", ["diagnostics.status"], "ENRICHED"],
-    ["settings.set_data_dir", ["storage.data_root.migrate"], "ENRICHED"],
-    ["global.global_sync_start", ["research.global.sync.start"], "ENRICHED"],
-    ["global.global_sync_status", ["research.global.sync.status"], "READY"],
-    ["global.global_sync_cancel", ["research.global.sync.cancel"], "READY"],
-    ["global.get_global_provider_health", ["research.global.providers"], "ENRICHED"],
-    ["global.query_global_documents", ["research.global.documents"], "ENRICHED"],
-    ["global.get_global_golden_chains", ["research.global.chains"], "ENRICHED"],
-    ["global.get_global_transmission_paths", ["research.global.transmission"], "ENRICHED"],
-    ["agent.agent_ask", ["agent.research.workflow", "agent.task.create"], "ENRICHED"],
-    ["agent.agent_conversation_delete", ["agent.conversation.delete"], "ENRICHED"],
-    ["agent.agent_conversation_load", ["agent.conversation.load"], "ENRICHED"],
-    ["agent.agent_conversations", ["agent.conversation.list"], "ENRICHED"],
-    ["agent.agent_resume", ["agent.restore", "agent.task.load"], "ENRICHED"],
-    ["agent.agent_tasks", ["agent.task.list"], "ENRICHED"],
-    ["agent.agent_cancel", ["system.cancel", "agent.event.append"], "ENRICHED"],
-    ["scan.scan_start", ["quant.scan.start"], "ENRICHED"],
-    ["scan.scan_status", ["quant.scan.status"], "READY"],
-    ["scan.scan_cancel", ["quant.scan.cancel"], "READY"],
-    ["settings.settings_get_provider_status", ["credentials.status"], "ENRICHED"],
-    ["settings.settings_set_provider_credentials", ["credentials.provider.set", "credentials.joinquant.set"], "ENRICHED"],
-    ["settings.settings_get_agent_model_routing", ["settings.agent_models.get"], "ENRICHED"],
-    ["settings.settings_set_agent_model_routing", ["settings.agent_models.set"], "ENRICHED"]
+    [
+      "market.get_quote",
+      [
+        "market.quote"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "market.get_order_book",
+      [
+        "market.order_book"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "market.get_kline",
+      [
+        "market.kline"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "market.get_minute",
+      [
+        "market.minute"
+      ],
+      "READY"
+    ],
+    [
+      "market.search_stocks",
+      [
+        "market.search"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "market.get_market_breadth",
+      [
+        "market.overview"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "market.get_all_a_shares",
+      [
+        "market.shares.page"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "market.get_fund_flow",
+      [
+        "market.fund_flow.daily"
+      ],
+      "READY"
+    ],
+    [
+      "market.get_realtime_flow",
+      [
+        "market.fund_flow.realtime"
+      ],
+      "READY"
+    ],
+    [
+      "market.get_index_kline",
+      [
+        "market.index_kline"
+      ],
+      "READY"
+    ],
+    [
+      "market.get_provider_health",
+      [
+        "diagnostics.status"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "market.get_news_provider_health",
+      [
+        "research.news.providers"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "market.set_news_provider_enabled",
+      [
+        "research.news.provider.set"
+      ],
+      "READY"
+    ],
+    [
+      "market.get_news_archive_recent",
+      [
+        "research.news.archive.recent"
+      ],
+      "READY"
+    ],
+    [
+      "market.get_news_archive_revisions",
+      [
+        "research.news.archive.revisions"
+      ],
+      "READY"
+    ],
+    [
+      "market.check_news_archive_integrity",
+      [
+        "research.news.archive.integrity"
+      ],
+      "READY"
+    ],
+    [
+      "market.get_news_ingest_observations",
+      [
+        "research.news.archive.observations"
+      ],
+      "READY"
+    ],
+    [
+      "news.query_news_center",
+      [
+        "research.news.center"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "news.refresh_news_center",
+      [
+        "research.news.center"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "news.set_news_item_state",
+      [
+        "research.news.user_state"
+      ],
+      "READY"
+    ],
+    [
+      "news.get_news_event_clusters",
+      [
+        "research.news.clusters.list"
+      ],
+      "READY"
+    ],
+    [
+      "news.get_news_event_cluster_detail",
+      [
+        "research.news.clusters.detail"
+      ],
+      "READY"
+    ],
+    [
+      "news.merge_news_event_clusters",
+      [
+        "research.news.clusters.merge"
+      ],
+      "READY"
+    ],
+    [
+      "news.split_news_event_revision",
+      [
+        "research.news.clusters.split"
+      ],
+      "READY"
+    ],
+    [
+      "news.get_pending_news_evidence_reviews",
+      [
+        "research.news.reviews.list"
+      ],
+      "READY"
+    ],
+    [
+      "news.resolve_news_evidence_review",
+      [
+        "research.news.reviews.resolve"
+      ],
+      "READY"
+    ],
+    [
+      "entities.get_news_entity_links",
+      [
+        "research.entities.links"
+      ],
+      "READY"
+    ],
+    [
+      "entities.get_entity_link_reviews",
+      [
+        "research.entities.reviews"
+      ],
+      "READY"
+    ],
+    [
+      "entities.resolve_entity_link_review",
+      [
+        "research.entities.resolve"
+      ],
+      "READY"
+    ],
+    [
+      "event.event_analysis_start",
+      [
+        "research.events.analysis.start"
+      ],
+      "READY"
+    ],
+    [
+      "event.event_analysis_status",
+      [
+        "research.events.analysis.status"
+      ],
+      "READY"
+    ],
+    [
+      "event.event_analysis_cancel",
+      [
+        "research.events.analysis.cancel"
+      ],
+      "READY"
+    ],
+    [
+      "relations.query_relation_reviews",
+      [
+        "research.relations.reviews"
+      ],
+      "READY"
+    ],
+    [
+      "relations.relation_extraction_cancel",
+      [
+        "research.relations.extraction.cancel"
+      ],
+      "READY"
+    ],
+    [
+      "relations.relation_extraction_start",
+      [
+        "research.relations.extraction.start"
+      ],
+      "READY"
+    ],
+    [
+      "relations.relation_extraction_status",
+      [
+        "research.relations.extraction.status"
+      ],
+      "READY"
+    ],
+    [
+      "relations.retract_relation_candidate",
+      [
+        "research.relations.retract"
+      ],
+      "READY"
+    ],
+    [
+      "relations.review_relation_candidate",
+      [
+        "research.relations.review"
+      ],
+      "READY"
+    ],
+    [
+      "deep.graph_as_of",
+      [
+        "research.graph.as_of"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "deep.graph_edge_timeline",
+      [
+        "research.graph.edge_timeline"
+      ],
+      "READY"
+    ],
+    [
+      "deep.graph_history_bounds",
+      [
+        "research.graph.history_bounds"
+      ],
+      "READY"
+    ],
+    [
+      "deep.graph_snapshot_diff",
+      [
+        "research.graph.snapshot.diff"
+      ],
+      "READY"
+    ],
+    [
+      "deep.graph_snapshot_get",
+      [
+        "research.graph.snapshot.get"
+      ],
+      "READY"
+    ],
+    [
+      "deep.graph_subgraph",
+      [
+        "research.graph.subgraph"
+      ],
+      "READY"
+    ],
+    [
+      "deep.relationship_graph",
+      [
+        "research.market.relationship"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "deep.supply_chain_shock",
+      [
+        "research.graph.shock"
+      ],
+      "READY"
+    ],
+    [
+      "deep.quant_research_cancel",
+      [
+        "research.quant.cancel"
+      ],
+      "READY"
+    ],
+    [
+      "deep.quant_research_snapshot_get",
+      [
+        "research.quant.snapshots.get"
+      ],
+      "READY"
+    ],
+    [
+      "deep.quant_research_snapshot_list",
+      [
+        "research.quant.snapshots.list"
+      ],
+      "READY"
+    ],
+    [
+      "deep.quant_research_start",
+      [
+        "research.quant.start"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "deep.quant_research_status",
+      [
+        "research.quant.status"
+      ],
+      "READY"
+    ],
+    [
+      "deep.backtest_cancel",
+      [
+        "research.backtest.cancel"
+      ],
+      "READY"
+    ],
+    [
+      "deep.backtest_start",
+      [
+        "research.backtest.start"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "deep.backtest_status",
+      [
+        "research.backtest.status"
+      ],
+      "READY"
+    ],
+    [
+      "deep.get_market_regime",
+      [
+        "research.market.regime"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "deep.list_strategies",
+      [
+        "research.backtest.strategies"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "deep.run_backtest",
+      [
+        "research.backtest.run"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "source_evidence.fetch_source_document",
+      [
+        "research.sources.fetch"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "source_evidence.get_source_documents",
+      [
+        "research.sources.list"
+      ],
+      "READY"
+    ],
+    [
+      "source_evidence.get_source_document",
+      [
+        "research.sources.get"
+      ],
+      "READY"
+    ],
+    [
+      "source_evidence.compare_source_evidence",
+      [
+        "research.sources.compare"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "disclosure.query_disclosures",
+      [
+        "research.disclosures.list"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "disclosure.get_disclosure_detail",
+      [
+        "research.disclosures.detail"
+      ],
+      "READY"
+    ],
+    [
+      "disclosure.disclosure_sync_start",
+      [
+        "research.disclosures.sync.start"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "disclosure.disclosure_sync_status",
+      [
+        "research.disclosures.sync.status"
+      ],
+      "READY"
+    ],
+    [
+      "disclosure.disclosure_sync_cancel",
+      [
+        "research.disclosures.sync.cancel"
+      ],
+      "READY"
+    ],
+    [
+      "disclosure.get_disclosure_provider_health",
+      [
+        "research.disclosures.providers"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "data_quality.reconcile_quote_sources",
+      [
+        "research.quote_reconcile"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "data_quality.reconcile_valuation_sources",
+      [
+        "research.valuation_reconcile"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "data_quality.get_data_quality_slo",
+      [
+        "diagnostics.data_quality"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "data_quality.get_data_quality_observations",
+      [
+        "diagnostics.data_quality"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "data_quality.get_field_lineage",
+      [
+        "diagnostics.data_quality"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "data_quality.get_data_reconciliations",
+      [
+        "diagnostics.data_quality"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "data_quality.get_data_health_report",
+      [
+        "diagnostics.data_quality"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "bundle.get_stock_bundle",
+      [
+        "market.security_snapshot"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "analysis.analyze",
+      [
+        "market.security_snapshot"
+      ],
+      "READY"
+    ],
+    [
+      "analysis.chanlun_daily",
+      [
+        "market.security_snapshot"
+      ],
+      "READY"
+    ],
+    [
+      "analysis.chanlun_minute",
+      [
+        "analysis.chanlun.minute"
+      ],
+      "READY"
+    ],
+    [
+      "fundamental.get_fundamentals",
+      [
+        "research.fundamentals"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "fundamental.get_valuation",
+      [
+        "research.fundamentals"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "fundamental.get_earnings_driver_tree",
+      [
+        "research.earnings_driver.tree"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "fundamental.run_earnings_driver_shock",
+      [
+        "research.earnings_driver.shock"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "fundamental.get_earnings_driver_snapshot",
+      [
+        "research.earnings_driver.snapshot"
+      ],
+      "READY"
+    ],
+    [
+      "datacenter.get_zt_pool",
+      [
+        "research.market_pool"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "datacenter.get_pool",
+      [
+        "research.market_pool"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "datacenter.get_billboard",
+      [
+        "research.market_context"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "datacenter.get_margin_daily",
+      [
+        "research.market_context"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "datacenter.get_org_survey",
+      [
+        "research.security_events"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "datacenter.get_holder_num",
+      [
+        "research.security_events"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "datacenter.get_earnings_predict",
+      [
+        "research.security_events"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "datacenter.get_lift_stage",
+      [
+        "research.security_events"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "datacenter.get_suspensions",
+      [
+        "research.security_events"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "datacenter.get_notices",
+      [
+        "research.security_events"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "datacenter.get_boards",
+      [
+        "research.market_context"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "datacenter.get_board_cons",
+      [
+        "research.board.constituents"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "watchlist.watchlist_list",
+      [
+        "workspace.watchlist.list"
+      ],
+      "READY"
+    ],
+    [
+      "watchlist.watchlist_add",
+      [
+        "workspace.watchlist.add"
+      ],
+      "READY"
+    ],
+    [
+      "watchlist.watchlist_remove",
+      [
+        "workspace.watchlist.remove"
+      ],
+      "READY"
+    ],
+    [
+      "watchlist.watchlist_pin",
+      [
+        "workspace.watchlist.pin"
+      ],
+      "READY"
+    ],
+    [
+      "settings.minimax_set_key",
+      [
+        "credentials.minimax.set"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "settings.minimax_status",
+      [
+        "credentials.status"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "settings.minimax_quota",
+      [
+        "credentials.minimax.quota"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "settings.cache_stats",
+      [
+        "storage.cache.stats"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "settings.cache_cleanup",
+      [
+        "storage.cache.cleanup"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "settings.get_data_dir",
+      [
+        "diagnostics.status"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "settings.set_data_dir",
+      [
+        "storage.data_root.migrate"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "global.global_sync_start",
+      [
+        "research.global.sync.start"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "global.global_sync_status",
+      [
+        "research.global.sync.status"
+      ],
+      "READY"
+    ],
+    [
+      "global.global_sync_cancel",
+      [
+        "research.global.sync.cancel"
+      ],
+      "READY"
+    ],
+    [
+      "global.get_global_provider_health",
+      [
+        "research.global.providers"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "global.query_global_documents",
+      [
+        "research.global.documents"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "global.get_global_golden_chains",
+      [
+        "research.global.chains"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "global.get_global_transmission_paths",
+      [
+        "research.global.transmission"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "agent.agent_ask",
+      [
+        "agent.task.create"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "agent.agent_conversation_delete",
+      [
+        "agent.conversation.delete"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "agent.agent_conversation_load",
+      [
+        "agent.conversation.load"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "agent.agent_conversations",
+      [
+        "agent.conversation.list"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "agent.agent_resume",
+      [
+        "agent.task.load",
+        "agent.conversation.load"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "agent.agent_tasks",
+      [
+        "agent.task.list"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "agent.agent_cancel",
+      [
+        "system.cancel",
+        "agent.event.append"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "scan.scan_start",
+      [
+        "quant.scan.start"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "scan.scan_status",
+      [
+        "quant.scan.status"
+      ],
+      "READY"
+    ],
+    [
+      "scan.scan_cancel",
+      [
+        "quant.scan.cancel"
+      ],
+      "READY"
+    ],
+    [
+      "settings.settings_get_provider_status",
+      [
+        "credentials.status"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "settings.settings_set_provider_credentials",
+      [
+        "credentials.provider.set",
+        "credentials.joinquant.set"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "settings.settings_get_agent_model_routing",
+      [
+        "settings.agent_models.get"
+      ],
+      "ENRICHED"
+    ],
+    [
+      "settings.settings_set_agent_model_routing",
+      [
+        "settings.agent_models.set"
+      ],
+      "ENRICHED"
+    ]
   ]
 }

@@ -141,15 +141,64 @@ if (!generatedTs.includes(`RELEASE_VERSION = "${expectedVersion}"`)) {
 }
 
 // ---------------------------------------------------------------------------
-// Archived assets are preserved, not required as production.
+// v7 must not depend on the retired architecture.
 // ---------------------------------------------------------------------------
+//
+// This check previously required `app-moon`, `desktop-moon` and `packaging-moon` to
+// be *present*, which pinned a retired implementation into the active tree forever.
+// It also made a moving third-party nightly download a hard release dependency: the
+// `moonbit-agent` job fetched `cli.moonbitlang.com/binaries/latest` and verified it
+// against one build's SHA-256, so upstream publishing a nightly turned every branch
+// red for a reason unrelated to its contents.
+//
+// The v6 sources are recoverable from the immutable `v6.0.0` tag and from Git
+// history. What matters now is the inverse invariant: nothing in the v7 production
+// path may require MoonBit, Proton or CEF. Anti-regression, because re-adding such a
+// dependency is easy and its cost is not visible until a release is blocked.
 
-const archived = ["app-moon", "desktop-moon", "packaging-moon", "formal"];
-const missingArchives = archived.filter((entry) => !exists(entry));
-if (missingArchives.length) {
+const retiredTrees = ["app-moon", "desktop-moon", "packaging-moon"];
+const revived = retiredTrees.filter((entry) => exists(entry));
+if (revived.length) {
   failures.push(
-    `historical/specification assets were removed rather than preserved: ${missingArchives.join(", ")}`,
+    `retired implementation trees reappeared in the v7 production tree: ${revived.join(", ")}`,
   );
+}
+
+// Language-independent specification and evidence stay: they are not an
+// implementation of a retired runtime.
+const preserved = ["formal", "protocol/schema"];
+const missingSpecifications = preserved.filter((entry) => !exists(entry));
+if (missingSpecifications.length) {
+  failures.push(
+    `language-independent specifications were removed: ${missingSpecifications.join(", ")}`,
+  );
+}
+
+const workflowFiles = exists(".github/workflows")
+  ? fs.readdirSync(path.join(root, ".github/workflows")).filter((name) => name.endsWith(".yml"))
+  : [];
+if (workflowFiles.length === 0) {
+  failures.push("no CI workflows found; the v7 quality gates must exist");
+}
+const retiredToolchain = /moonbit|moon\s+-C|proton|\bcef\b/i;
+for (const name of workflowFiles) {
+  const body = read(`.github/workflows/${name}`);
+  if (retiredToolchain.test(body)) {
+    failures.push(
+      `.github/workflows/${name}: v7 CI must not require the MoonBit, Proton or CEF toolchain`,
+    );
+  }
+}
+// The Agent capability surface must come from the Rust runtime, not from a retired
+// implementation's source text.
+const toolManifest = "protocol/agent-tool-manifest.json";
+if (!exists(toolManifest)) {
+  failures.push(`${toolManifest}: the Agent tool manifest must be generated from the Rust registry`);
+} else {
+  const manifest = JSON.parse(read(toolManifest));
+  if (manifest.runtime !== "astock-agent-runtime" || !Array.isArray(manifest.tools) || manifest.tools.length === 0) {
+    failures.push(`${toolManifest}: manifest is not a projection of the Rust runtime registry`);
+  }
 }
 
 console.log(
@@ -164,7 +213,8 @@ console.log(
         renderer: "ui (React, presentation only)",
       },
       application_version: expectedVersion,
-      preserved_assets: archived.filter((entry) => exists(entry)),
+      preserved_specifications: preserved.filter((entry) => exists(entry)),
+      workflows_checked: workflowFiles.length,
       renderer_files_checked: rendererSources.length,
       failures,
     },

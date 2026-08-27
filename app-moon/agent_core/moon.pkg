@@ -1,6 +1,0 @@
-import {
-  "astock/terminal/protocol",
-  "moonbitlang/core/json",
-}
-
-supported_targets = "native"
