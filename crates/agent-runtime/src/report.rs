@@ -357,6 +357,20 @@ pub enum DraftProblem {
         claim_id: String,
         numeral: String,
     },
+    /// A declared number that its own cited evidence does not support.
+    ///
+    /// The most dangerous shape the contract can carry: a figure with a
+    /// well-formed, existing citation that the citation does not actually contain.
+    /// Validation used to accept it because it checked that provenance was *present*,
+    /// not that it was *true*, leaving the verifier to catch it a round later — and
+    /// on a live run it produced a validation/verification disagreement, which is
+    /// exactly what the shared numeral rule exists to prevent.
+    NumberDisagreesWithEvidence {
+        claim_id: String,
+        label: String,
+        declared: f64,
+        evidence_id: String,
+    },
 }
 
 impl DraftProblem {
@@ -375,6 +389,7 @@ impl DraftProblem {
             | Self::ScenarioWithoutAssumption { claim_id }
             | Self::ConflictingEvidence { claim_id, .. }
             | Self::UndeclaredNumberInStatement { claim_id, .. }
+            | Self::NumberDisagreesWithEvidence { claim_id, .. }
             | Self::EvidenceOutsideTaskScope { claim_id, .. } => Some(claim_id),
             Self::SectionReferencesUnknownClaim { claim_id, .. } => Some(claim_id),
         }
@@ -396,6 +411,7 @@ impl DraftProblem {
             Self::ScenarioWithoutAssumption { .. } => "scenario_without_assumption",
             Self::ConflictingEvidence { .. } => "conflicting_evidence",
             Self::UndeclaredNumberInStatement { .. } => "undeclared_number_in_statement",
+            Self::NumberDisagreesWithEvidence { .. } => "number_disagrees_with_evidence",
             Self::EvidenceOutsideTaskScope { .. } => "evidence_outside_task_scope",
         }
     }
@@ -795,6 +811,50 @@ fn validate_statement_numerals(
     }
 }
 
+/// Does a declared number actually appear in the evidence it cites?
+///
+/// Validation used to check that provenance was *present*, not that it was *true*,
+/// so a figure carrying a well-formed existing citation was accepted even when the
+/// citation contained something else. The verifier caught it a round later, which
+/// showed up on a live run as a validation/verification disagreement — the one thing
+/// the shared numeral rule exists to prevent.
+///
+/// The comparison is performed on the exact token the renderer will emit, run
+/// through the Engine's own extractor, so validation and verification cannot read
+/// the same figure differently. Evidence with no numeric value is not judged here: a
+/// claim may legitimately cite a document, a source name or a timestamp.
+fn check_value_against_evidence(
+    claim: &Claim,
+    item: &NumericItem,
+    evidence_id: &str,
+    registry: &BTreeMap<String, EvidenceDescriptor>,
+    problems: &mut Vec<DraftProblem>,
+) {
+    let Some(descriptor) = registry.get(evidence_id) else {
+        // A missing identifier is already reported as `unknown_evidence`.
+        return;
+    };
+    let Some(evidence_value) = descriptor.value.as_ref().and_then(evidence_number) else {
+        return;
+    };
+    let token = format!("{}{}", item.value, item.unit.as_deref().unwrap_or_default());
+    let numerals = astock_engine::financial_numerals(&token);
+    // A token the extractor does not read as a quantity cannot be checked; the
+    // verifier will not read it as a claim either, so there is nothing to disagree
+    // about.
+    let Some(numeral) = numerals.first() else {
+        return;
+    };
+    if !numeral.supported_by(evidence_value) {
+        problems.push(DraftProblem::NumberDisagreesWithEvidence {
+            claim_id: claim.id.clone(),
+            label: item.label.clone(),
+            declared: item.value,
+            evidence_id: evidence_id.to_owned(),
+        });
+    }
+}
+
 /// Read a number out of an evidence value, including one recorded as a string.
 fn evidence_number(value: &serde_json::Value) -> Option<f64> {
     match value {
@@ -834,6 +894,7 @@ fn validate_numeric_item(
                     value: item.value,
                 });
             }
+            check_value_against_evidence(claim, item, evidence_id, registry, problems);
         }
         NumericProvenance::Calculated {
             calculation_evidence_id,
@@ -858,6 +919,7 @@ fn validate_numeric_item(
                     value: item.value,
                 });
             }
+            check_value_against_evidence(claim, item, calculation_evidence_id, registry, problems);
         }
         // The kind/provenance pairing above already rejects an assumption on a
         // non-scenario claim, and an assumption references no evidence.

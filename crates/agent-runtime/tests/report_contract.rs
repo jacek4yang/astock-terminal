@@ -858,3 +858,112 @@ fn a_well_formed_draft_decodes() {
     assert_eq!(draft.claims.len(), 1);
     assert_eq!(draft.limitations.len(), 1);
 }
+
+/// A declared number must actually appear in the evidence it cites.
+///
+/// The most dangerous shape the contract can carry: a figure with a well-formed,
+/// existing citation that the citation does not contain. Validation used to check
+/// that provenance was *present*, not that it was *true*, which showed up on a live
+/// run as a validation/verification disagreement — the one thing the shared numeral
+/// rule exists to prevent.
+#[test]
+fn a_declared_number_that_its_evidence_does_not_contain_is_refused() {
+    let draft = one_claim_draft(observed_claim(
+        "最新价已披露。",
+        vec![NumericItem {
+            // The registry records 34.47 for `evf_price`.
+            value: 34.99,
+            unit: Some("元".to_owned()),
+            label: "最新价".to_owned(),
+            provenance: NumericProvenance::Observed {
+                evidence_id: "evf_price".to_owned(),
+                field: Some("/quote/last".to_owned()),
+            },
+        }],
+        vec!["evf_price"],
+    ));
+    let problems = validate_draft(&draft, &registry(), &BTreeSet::new());
+    assert!(
+        problems.iter().any(|problem| matches!(
+            problem,
+            DraftProblem::NumberDisagreesWithEvidence { claim_id, declared, evidence_id, .. }
+                if claim_id == "c1" && (*declared - 34.99).abs() < 1e-9 && evidence_id == "evf_price"
+        )),
+        "a figure its citation does not contain must be refused: {problems:?}"
+    );
+}
+
+/// A rounded declared value is a different value.
+#[test]
+fn a_rounded_declared_value_is_refused() {
+    let draft = one_claim_draft(observed_claim(
+        "当日成交额已披露。",
+        vec![NumericItem {
+            // The registry records 7_987_376_586.
+            value: 7_987_000_000.0,
+            unit: Some("元".to_owned()),
+            label: "成交额".to_owned(),
+            provenance: NumericProvenance::Observed {
+                evidence_id: "evf_amount".to_owned(),
+                field: None,
+            },
+        }],
+        vec!["evf_amount"],
+    ));
+    let problems = validate_draft(&draft, &amount_registry(), &BTreeSet::new());
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.code() == "number_disagrees_with_evidence"),
+        "{problems:?}"
+    );
+}
+
+/// A percentage declared unscaled matches evidence recorded unscaled.
+#[test]
+fn a_declared_percentage_matches_its_evidence() {
+    let mut map = registry();
+    map.insert(
+        "evf_change".into(),
+        observed("evf_change", "tencent", "/quote/change_pct", 1.12),
+    );
+    let draft = one_claim_draft(observed_claim(
+        "当日涨跌幅已披露。",
+        vec![NumericItem {
+            value: 1.12,
+            unit: Some("%".to_owned()),
+            label: "涨跌幅".to_owned(),
+            provenance: NumericProvenance::Observed {
+                evidence_id: "evf_change".to_owned(),
+                field: None,
+            },
+        }],
+        vec!["evf_change"],
+    ));
+    let problems = validate_draft(&draft, &map, &BTreeSet::new());
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+/// Citing a document, a source name or a timestamp is not a numeric disagreement.
+#[test]
+fn evidence_with_no_numeric_value_is_not_judged_as_a_disagreement() {
+    let mut map = registry();
+    let mut timestamp = observed("evf_time", "tencent", "/fetched_at", 0.0);
+    timestamp.value = Some(json!("2026-08-26T07:00:00Z"));
+    map.insert("evf_time".into(), timestamp);
+    let draft = one_claim_draft(observed_claim(
+        "报价时间已披露。",
+        vec![NumericItem {
+            value: 34.47,
+            unit: Some("元".to_owned()),
+            label: "最新价".to_owned(),
+            provenance: NumericProvenance::Observed {
+                evidence_id: "evf_price".to_owned(),
+                field: None,
+            },
+        }],
+        vec!["evf_price", "evf_time"],
+    ));
+    let problems = validate_draft(&draft, &map, &BTreeSet::new());
+    assert!(problems.is_empty(), "{problems:?}");
+}

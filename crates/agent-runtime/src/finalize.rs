@@ -179,6 +179,11 @@ fn validation_action(code: &str) -> &'static str {
              identifiers in disclosed_conflicts and say in the statement what disagrees. Do not \
              silently pick one side."
         }
+        "number_disagrees_with_evidence" => {
+            "The value you declared is not the value the cited evidence contains. Read the value \
+             back from search_evidence and use it exactly, or cite the identifier that actually \
+             holds this figure. Do not round: a rounded figure is a different figure."
+        }
         "undeclared_number_in_statement" => {
             "The statement writes a figure the claim does not declare, so nothing verifies it. \
              Either add it as a numeric_item with real provenance, or remove the figure from the \
@@ -869,6 +874,7 @@ mod tests {
             "scenario_without_assumption",
             "conflicting_evidence",
             "undeclared_number_in_statement",
+            "number_disagrees_with_evidence",
             "evidence_outside_task_scope",
             "duplicate_claim_id",
             "section_references_unknown_claim",

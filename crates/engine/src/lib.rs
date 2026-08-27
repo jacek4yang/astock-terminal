@@ -737,6 +737,7 @@ impl Engine {
                     .collect::<Vec<_>>();
                 let mut response = json!({
                     "items": items,
+                    "retrieved_at": astock_core::time::utc_now(),
                     "successful_sources": successful_sources,
                     "successful_channels": successful_channels,
                     "stale_sources": stale_sources,
@@ -3873,6 +3874,15 @@ fn fundamental_research_payload(
     let bundle = outcome.bundle;
     json!({
         "symbol": symbol.code(),
+        // Retrieval time, so every registered fact inherits an observation time.
+        //
+        // Without it the whole bundle registered facts with `observed_at: null`, and
+        // the verifier refuses an undated observation as support for a dated claim —
+        // so a live run that cited fundamentals was blocked by `evidence_time_missing`
+        // on evidence that was perfectly good. The reporting period of each statement
+        // row is carried separately by the rows themselves; this records when the
+        // snapshot was taken, which is what observation time means here.
+        "retrieved_at": astock_core::time::utc_now(),
         "profile": bundle.profile,
         "income": tail_value(&bundle.income, 12),
         "balance": tail_value(&bundle.balance, 12),
