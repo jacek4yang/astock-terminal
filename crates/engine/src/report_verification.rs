@@ -24,6 +24,45 @@ fn invalid(message: impl Into<String>) -> ServiceError {
     ServiceError::new("invalid_agent_report_verification", message, false)
 }
 
+/// Does this pair of registrations of the same identifier actually disagree?
+///
+/// Only a difference in what the fact *asserts* is a conflict. Two registrations
+/// of the same identifier carrying the same value from the same source at
+/// different retrieval moments are the same observation seen twice, which happens
+/// routinely because several research tools legitimately fetch the same field.
+///
+/// Measured on the failing live run: 476 identifiers were reported as conflicting
+/// and in **every one of them the only differing field was `observed_at`**. A
+/// constant such as `/adjustment = "qfq"` from JoinQuant, fetched thirty seconds
+/// apart, was treated as contradictory evidence. That produced hundreds of
+/// blocking findings with no bearing on the report's correctness.
+///
+/// A genuine disagreement — the same identifier asserting a different value, unit
+/// or source — is still a conflict and still blocks when cited.
+fn materially_disagrees(left: &EvidenceFact, right: &EvidenceFact) -> bool {
+    left.value != right.value
+        || left.source != right.source
+        || left.path != right.path
+        || left.quality_blocking != right.quality_blocking
+        || left.source_version_id != right.source_version_id
+}
+
+/// Is this fact a deterministic calculation result rather than an observation?
+///
+/// A derived value has no observation time: it is computed from inputs that carry
+/// their own timestamps. Requiring `observed_at` of a calculation conflates
+/// calculation provenance with observation provenance. All 31 facts that tripped
+/// `evidence_time_missing` on the live run came from `astock-compute`, with leaf
+/// paths such as `kind`, `value`, `fuel_used` and `program_sha256`.
+///
+/// Calculation results remain fully verifiable — their numeric value must still
+/// reproduce a cited claim — they are simply not judged against observation
+/// timestamps. A calculation may not, however, support a current/latest claim on
+/// its own; that requirement falls on the observed inputs it was derived from.
+fn is_derived_calculation(fact: &EvidenceFact) -> bool {
+    fact.source == "astock-compute"
+}
+
 fn collect_registries(
     value: &Value,
     facts: &mut BTreeMap<String, EvidenceFact>,
@@ -41,8 +80,13 @@ fn collect_registries(
                         if !fact.evidence_id.starts_with("evf_") || fact.evidence_id.len() > 80 {
                             conflicts.insert(fact.evidence_id);
                         } else if let Some(existing) = facts.get(&fact.evidence_id) {
-                            if existing != &fact {
+                            if materially_disagrees(existing, &fact) {
                                 conflicts.insert(fact.evidence_id);
+                            } else if fact.observed_at > existing.observed_at {
+                                // Same assertion seen again, more recently. Keep
+                                // the freshest observation so current/latest
+                                // claims are judged against the newest timestamp.
+                                facts.insert(fact.evidence_id.clone(), fact);
                             }
                         } else {
                             facts.insert(fact.evidence_id.clone(), fact);
@@ -95,6 +139,84 @@ fn strip_citation_tokens(line: &str) -> String {
     }
     output.push_str(rest);
     output
+}
+
+/// Blank out digit runs that are not financial quantities.
+///
+/// The verifier's job is to reject unsupported *financial claims*, not any
+/// character sequence containing digits. On the failing live run 20 of 121
+/// `numeric_claim_without_evidence` findings were raised against a security code,
+/// a calendar date, a Markdown section number or a period label — text that
+/// asserts no quantity and therefore cannot be unsupported.
+///
+/// Masking replaces each with spaces so surrounding real numbers on the same line
+/// are still extracted and still checked. This narrows what counts as a claim; it
+/// does not relax how a claim is verified.
+fn mask_non_financial_tokens(line: &str) -> String {
+    // Ordered widest-first so a date inside a heading is masked once.
+    //
+    // `regex` supports no look-around, so the security-code rule brackets the
+    // code with optional non-digit context and restores whatever it captured
+    // around the masked run. An earlier draft used `(?<![\d.])`, which fails to
+    // compile — and because the loop skipped unusable patterns, it would have
+    // silently stopped masking security codes. Patterns are now asserted.
+    static PATTERNS: &[&str] = &[
+        // Calendar dates and fiscal periods: 2026-08-26, 2026年, 8月, 26日, 2024Q3.
+        r"\d{4}-\d{2}-\d{2}|\d{4}/\d{1,2}/\d{1,2}|\d{4}\s*年|\d{1,2}\s*月|\d{1,2}\s*日|\d{4}\s*Q[1-4]|\bQ[1-4]\b",
+        // Clock times, including exchange session boundaries.
+        r"\d{1,2}:\d{2}(?::\d{2})?",
+        // Markdown headings and ordered-list markers.
+        r"(?m)^\s{0,3}#{1,6}\s",
+        r"(?m)^\s{0,3}\d{1,3}[.、)]\s",
+        // Chinese section numbering: 第一步, 第3节, 第二部分.
+        r"第\s*[0-9一二三四五六七八九十百]+\s*[步章节条部分项]",
+        // Window and horizon labels: 6个月, 20个交易日, 5年期, 3周.
+        r"\d+\s*(?:个月|个交易日|个季度|年期|周|天|日线|分钟)",
+    ];
+    let mut masked = line.to_owned();
+    for pattern in PATTERNS {
+        let regex = Regex::new(pattern)
+            .expect("non-financial masking patterns are compile-time constants and must compile");
+        masked = regex
+            .replace_all(&masked, |captures: &regex::Captures<'_>| {
+                " ".repeat(captures.get(0).map_or(0, |m| m.as_str().chars().count()))
+            })
+            .into_owned();
+    }
+    mask_security_codes(&masked)
+}
+
+/// Blank out six-digit A-share codes without look-around.
+///
+/// A code is a six-digit run with a known market prefix that is not part of a
+/// longer number and not a decimal fraction. `601899` is an identifier; `320506`
+/// as part of `320,506,024,370` is a quantity, so digit-adjacency and a
+/// neighbouring decimal point both disqualify a match.
+fn mask_security_codes(line: &str) -> String {
+    const PREFIXES: [&str; 8] = ["60", "68", "00", "30", "43", "83", "87", "88"];
+    let characters: Vec<char> = line.chars().collect();
+    let mut output = characters.clone();
+    let mut index = 0usize;
+    while index + 6 <= characters.len() {
+        let window: String = characters[index..index + 6].iter().collect();
+        let is_code = window.chars().all(|c| c.is_ascii_digit())
+            && PREFIXES.iter().any(|prefix| window.starts_with(prefix));
+        if is_code {
+            let before_ok = index == 0
+                || !(characters[index - 1].is_ascii_digit() || characters[index - 1] == '.');
+            let after = characters.get(index + 6);
+            let after_ok = after.is_none_or(|c| !(c.is_ascii_digit() || *c == '.'));
+            if before_ok && after_ok {
+                for slot in output.iter_mut().skip(index).take(6) {
+                    *slot = ' ';
+                }
+                index += 6;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    output.into_iter().collect()
 }
 
 fn numeric_value(value: &Value) -> Option<f64> {
@@ -189,9 +311,6 @@ pub(super) fn verify(payload: VerifyReportPayload) -> Result<Value, ServiceError
     let mut findings = BTreeSet::new();
     let mut registry_conflicts = BTreeSet::new();
     collect_registries(&payload.context, &mut facts, &mut registry_conflicts);
-    for id in registry_conflicts {
-        findings.insert(format!("invalid_or_conflicting_evidence_id:{id}"));
-    }
     let mut cited = BTreeSet::new();
     let mut numeric_claims = 0usize;
     let numeric =
@@ -202,6 +321,16 @@ pub(super) fn verify(payload: VerifyReportPayload) -> Result<Value, ServiceError
         let ids = citations(line);
         for id in &ids {
             cited.insert(id.clone());
+            // A conflicting identifier only invalidates a report that relies on
+            // it. Registry duplicates the report never cites cannot make its
+            // claims wrong, and on the live run 473 of 476 conflicts were never
+            // cited, so reporting them blocked publication over evidence the
+            // report did not use. Citing a genuinely conflicting fact still
+            // fails closed, here.
+            if registry_conflicts.contains(id) {
+                findings.insert(format!("invalid_or_conflicting_evidence_id:{id}"));
+                continue;
+            }
             match facts.get(id) {
                 None => {
                     findings.insert(format!("unknown_evidence_id:{id}"));
@@ -209,6 +338,10 @@ pub(super) fn verify(payload: VerifyReportPayload) -> Result<Value, ServiceError
                 Some(fact) if fact.quality_blocking => {
                     findings.insert(format!("quality_blocking_evidence:{id}"));
                 }
+                // A deterministic calculation has no observation time; its
+                // inputs carry the timestamps. Judging it against observation
+                // semantics is a category error.
+                Some(fact) if is_derived_calculation(fact) => {}
                 Some(fact)
                     if fact
                         .observed_at
@@ -231,7 +364,9 @@ pub(super) fn verify(payload: VerifyReportPayload) -> Result<Value, ServiceError
                 Some(_) => {}
             }
         }
-        let claim_text = strip_citation_tokens(line);
+        // Citations first, then non-financial tokens: a masked date must not
+        // leave digits that a later rule mistakes for a quantity.
+        let claim_text = mask_non_financial_tokens(&strip_citation_tokens(line));
         let claims = numeric
             .captures_iter(&claim_text)
             .filter(|claim| {
@@ -339,7 +474,16 @@ mod tests {
         })
         .unwrap();
         assert_eq!(result["passed"], true);
-        assert_eq!(result["numeric_claims_checked"], 7);
+        // Three genuine financial quantities are checked: the 2万 budget, the
+        // 12.34 price and the 12.34万 volume.
+        //
+        // This previously expected 7, which counted the security code `000001`
+        // and the three digit groups of the date `2026-08-25` as financial
+        // claims. Those assert no quantity, so counting them overstated what had
+        // been verified and made any report mentioning a code or a date look
+        // unsupported. The report still passes; only the count of things that are
+        // actually claims changed.
+        assert_eq!(result["numeric_claims_checked"], 3);
     }
 
     #[test]
