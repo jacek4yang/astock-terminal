@@ -239,12 +239,8 @@ async fn run_with_config(
     engine: ScriptedEngine,
     config: RuntimeConfig,
 ) -> (Vec<AgentEvent>, Result<RunOutcome, RuntimeError>) {
-    let runtime = AgentRuntime::new(
-        Arc::new(provider),
-        Arc::new(engine),
-        Arc::new(NullStore),
-    )
-    .with_config(config);
+    let runtime = AgentRuntime::new(Arc::new(provider), Arc::new(engine), Arc::new(NullStore))
+        .with_config(config);
     let mut task = RuntimeTask::ask("紫金矿业最新价格是多少？");
     task.symbol = Some("601899".into());
     let mut stream = runtime.start(task);
