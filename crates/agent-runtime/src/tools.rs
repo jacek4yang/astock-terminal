@@ -352,7 +352,7 @@ pub fn default_registry() -> ToolRegistry {
     let tools = [
         read_tool(
             "get_quote",
-            "获取一只A股的最新行情；返回来源、观测时间和质量信息。",
+            "Latest quote for one A-share security, with source, observation time and quality metadata.",
             "market.quote",
             object_schema(
                 json!({"symbol": {"type": "string", "pattern": "^[0-9]{6}$"}}),
@@ -363,7 +363,7 @@ pub fn default_registry() -> ToolRegistry {
         ),
         read_tool(
             "get_kline",
-            "获取有界历史K线，用于趋势、波动和结构分析。",
+            "Bounded historical K-line series for trend, volatility and structure analysis.",
             "market.kline",
             object_schema(
                 json!({
@@ -379,7 +379,7 @@ pub fn default_registry() -> ToolRegistry {
         ),
         read_tool(
             "get_fundamentals",
-            "获取财务报表、关键比率、估值和股本等基本面证据。",
+            "Fundamental evidence: statements, key ratios, valuation and share counts.",
             "research.fundamentals",
             object_schema(
                 json!({"symbol": {"type": "string", "pattern": "^[0-9]{6}$"}}),
@@ -390,7 +390,7 @@ pub fn default_registry() -> ToolRegistry {
         ),
         read_tool(
             "run_financial_calculation",
-            "执行受限、可复现、带燃料上限的金融计算 AST。支持顺序 let 绑定、序列算术、收益率、均线、波动率、Z-score、RSI、相关性、最大回撤和归约；禁止代码字符串、文件、进程、任意网络、时钟和随机数。",
+            "Run a bounded, reproducible, fuel-metered financial calculation AST in the Engine. Supports sequential let bindings, series arithmetic, returns, moving averages, volatility, z-score, RSI, correlation, max drawdown and reductions. No code strings, files, processes, network, clock or randomness. Use this for material arithmetic instead of computing in prose.",
             "research.compute",
             object_schema(
                 json!({"program": computation_program_schema(false)}),
@@ -401,7 +401,7 @@ pub fn default_registry() -> ToolRegistry {
         ),
         read_tool(
             "research_news",
-            "从多类财经资讯源获取有界的近期证据；单源失败应保留为降级状态。",
+            "Bounded recent news evidence from multiple financial sources. A single failed source is reported as degraded coverage, not silently dropped.",
             "research.news",
             object_schema(
                 json!({
@@ -415,7 +415,7 @@ pub fn default_registry() -> ToolRegistry {
         ),
         read_tool(
             "get_market_regime",
-            "用确定性引擎计算当前市场状态。",
+            "Deterministic current market-regime assessment.",
             "research.market.regime",
             object_schema(json!({}), &[]),
             30,
@@ -423,7 +423,7 @@ pub fn default_registry() -> ToolRegistry {
         ),
         read_tool(
             "get_joinquant_context",
-            "从用户授权的聚宽研究环境获取前复权日线、估值、基准成分和宏观CPI；仅在聚宽会话已配置时使用。",
+            "Forward-adjusted daily bars, valuation, benchmark constituents and macro CPI from the user-authorised JoinQuant research environment. Use only when a JoinQuant session is configured.",
             "research.joinquant_context",
             object_schema(
                 json!({
@@ -439,7 +439,7 @@ pub fn default_registry() -> ToolRegistry {
         ),
         read_tool(
             "run_joinquant_calculation",
-            "从已授权聚宽会话获取有界前复权日线，将 open/high/low/close/volume/amount/turnover/pct 注入受限金融计算 AST，并在本地 Rust Engine 中确定性执行；绝不向远端提交模型生成的任意代码。",
+            "Fetch bounded forward-adjusted daily bars from an authorised JoinQuant session, inject open/high/low/close/volume/amount/turnover/pct into the bounded calculation AST, and evaluate deterministically in the local Engine. Model-generated code is never sent to any remote environment.",
             "research.joinquant_compute",
             object_schema(
                 json!({
@@ -455,7 +455,7 @@ pub fn default_registry() -> ToolRegistry {
         ),
         read_tool(
             "prepare_market_research",
-            "并行获取市场广度、宏观、资讯和候选池的有界研究快照。",
+            "Bounded parallel research snapshot: market breadth, macro context, news and candidate pool.",
             "research.agent_prepare_context",
             object_schema(
                 json!({
@@ -469,7 +469,7 @@ pub fn default_registry() -> ToolRegistry {
         ),
         read_tool(
             "research_securities",
-            "并行获取1至5只证券的行情、基本面、公告、资讯、交叉核验及选定高级分析。",
+            "Parallel research for 1 to 5 securities: quotes, fundamentals, disclosures, news, cross-source checks and selected advanced analysis.",
             "research.agent_security_context",
             object_schema(
                 json!({
@@ -502,7 +502,7 @@ pub fn default_registry() -> ToolRegistry {
         // state. Read-only over Runtime state, so it costs no upstream call.
         runtime_tool(
             "search_evidence",
-            "在本次研究已收集的证据中按证券、来源、字段或关键词有界检索，返回可直接引用的规范证据标识及其来源、时间、单位和质量状态。用于在撰写结论前找到应引用的证据，不要凭记忆编造标识。",
+            "Search this task's bounded evidence catalog for canonical evidence identifiers, with source, time, unit and quality state. Use before finalization whenever a claim needs provenance. Never invent an identifier.",
             object_schema(
                 json!({
                     "symbol": {"type": "string", "pattern": "^[0-9]{6}$"},
@@ -524,7 +524,7 @@ pub fn default_registry() -> ToolRegistry {
         // publication path: the verifier still runs and still fails closed.
         runtime_tool(
             "submit_report",
-            "提交结构化研究报告用于校验与发布。不要在 statement 中手写【E:...】引用；只需在 evidence_ids 与 numeric_items 中给出规范证据标识，引用格式由 Runtime 渲染。每个数字必须声明来源：observed（实测，需 evidence_id）、calculated（确定性计算，需计算结果标识、运算与输入证据）、user_assumption（用户给定的情景参数）或 estimated（需方法、依据证据，尽量给区间）。可确定性计算的数值不得用 estimated。",
+            "Submit the final structured research draft for validation and publication. Do not write citation markup in statements; supply canonical identifiers in evidence_ids and numeric_items and the runtime renders citations. Every numeric item declares provenance: observed (needs evidence_id), calculated (needs calculation_evidence_id, operation and input_evidence_ids), user_assumption (a scenario parameter the user supplied), or estimated (needs method and basis_evidence_ids, preferably a range). Never use estimated for a quantity the Engine can compute. Statements are written in the task output_language.",
             submit_report_schema(),
         ),
     ];
