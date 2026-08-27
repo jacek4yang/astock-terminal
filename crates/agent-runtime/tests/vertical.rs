@@ -238,7 +238,7 @@ fn submit_round() -> Vec<Result<ModelChunk, ProviderError>> {
             {
                 "id": "c1",
                 "kind": "observed_fact",
-                "statement": "最新成交价为每股 21.5 元",
+                "statement": "最新成交价见下方数值",
                 "evidence_ids": ["evf_price", "evf_time", "evf_symbol", "evf_source"],
                 "numeric_items": [{
                     "label": "最新价",

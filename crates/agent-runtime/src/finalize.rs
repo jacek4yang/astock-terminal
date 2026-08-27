@@ -32,7 +32,17 @@ use crate::report::{DraftProblem, VerifiedReportDraft};
 pub const MAX_REPORTED_PROBLEMS: usize = 40;
 
 /// Claims addressed by one repair response.
-pub const MAX_REPAIR_TARGETS: usize = 24;
+///
+/// Every affected claim must appear, because a model can only fix what it is told.
+/// Measured across live runs the finding count falls 40 → 16 → 2 per submission, and
+/// part of that tail was self-inflicted: the first response listed 24 claims out of
+/// more, so the omitted ones resurfaced a round later and consumed budget. A repair
+/// target is compact — an identifier, a few codes, a short action list — so covering
+/// them all costs far less context than another round trip.
+pub const MAX_REPAIR_TARGETS: usize = 64;
+
+/// Offending tokens named per claim.
+pub const MAX_TOKENS_PER_TARGET: usize = 24;
 
 /// How a phase's budget was consumed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,13 +194,27 @@ fn validation_action(code: &str) -> &'static str {
              back from search_evidence and use it exactly, or cite the identifier that actually \
              holds this figure. Do not round: a rounded figure is a different figure."
         }
-        "undeclared_number_in_statement" => {
-            "The statement writes a figure the claim does not declare, so nothing verifies it. \
-             Either add it as a numeric_item with real provenance, or remove the figure from the \
-             prose and let the rendered numbers carry it. A rounded restatement of a cited value \
-             (\"约 79.87 亿元\" for 7,987,376,586) is a separate, unverifiable figure — state the \
-             cited value or declare the rounded one. Do not write formulas or arithmetic in a \
-             statement; put the operation on the numeric_item instead."
+        "figure_in_free_text" => {
+            "This figure is not declared by the claim and is not in the evidence it cites, so \
+             nothing verifies it. Declare it as a numeric_item with its provenance, or reference \
+             an existing one by label in braces: \
+             `statement: \"收盘价{收盘价}，成交额{成交额}\"` with numeric_items labelled `收盘价` \
+             and `成交额`. The runtime substitutes the verified value and unit, so the sentence \
+             reads normally and the figure is checked, and the number lives in exactly one \
+             place. Braces work in statements, and in executive_summary, overall_uncertainty and \
+             limitations where a label may come from any claim. Do not delete the figure: a \
+             report that states no checkable quantity is refused as well. Write no formulas in \
+             prose; put the operation on the numeric_item."
+        }
+        "unknown_number_reference" => {
+            "This prose references a number in braces that nothing declares. In a statement the \
+             label must be one of that claim's numeric_items; in executive_summary, \
+             overall_uncertainty or limitations it may be any claim's label. Add the numeric_item \
+             or correct the label."
+        }
+        "ambiguous_number_reference" => {
+            "Two claims declare this label with different values, so a report-level reference \
+             cannot be resolved. Give the two numbers distinct labels."
         }
         "evidence_outside_task_scope" => {
             "This evidence belongs to a different security than the task covers. Remove it, or \
@@ -253,8 +277,9 @@ fn verification_action(code: &str) -> &'static str {
              Cite the evidence the research actually used rather than summarising it away."
         }
         "report_contains_no_verifiable_numeric_claims" => {
-            "The report states no checkable quantity. A research conclusion needs the figures it \
-             rests on, as numeric_items with provenance."
+            "The report states no checkable quantity. If a previous round asked you to stop \
+             writing digits in prose, the answer was to declare the figure and reference it by \
+             label, not to remove it. A research conclusion needs the figures it rests on."
         }
         _ => "Resolve this finding before resubmitting.",
     }
@@ -366,11 +391,11 @@ pub fn validation_repair(problems: &[DraftProblem], verdict: RepairVerdict) -> V
                     .or_default()
                     .insert(problem.code());
                 match problem {
-                    DraftProblem::UndeclaredNumberInStatement { numeral, .. } => {
+                    DraftProblem::FigureInFreeText { field, numeral, .. } => {
                         undeclared
                             .entry(claim_id.to_owned())
                             .or_default()
-                            .insert(numeral.clone());
+                            .insert(format!("{field}: {numeral}"));
                     }
                     DraftProblem::UnknownEvidence { supplied_id, .. } => {
                         unknown_ids
@@ -416,11 +441,11 @@ pub fn validation_repair(problems: &[DraftProblem], verdict: RepairVerdict) -> V
         };
         if let Some(numerals) = undeclared.get(&claim_id) {
             object.insert(
-                "undeclared_numerals".into(),
+                "figures_to_move".into(),
                 Value::Array(
                     numerals
                         .iter()
-                        .take(16)
+                        .take(MAX_TOKENS_PER_TARGET)
                         .map(|n| Value::from(n.clone()))
                         .collect(),
                 ),
@@ -431,7 +456,7 @@ pub fn validation_repair(problems: &[DraftProblem], verdict: RepairVerdict) -> V
                 "unknown_evidence_ids".into(),
                 Value::Array(
                     ids.iter()
-                        .take(12)
+                        .take(MAX_TOKENS_PER_TARGET)
                         .map(|id| Value::from(id.clone()))
                         .collect(),
                 ),
@@ -633,12 +658,14 @@ mod tests {
     #[test]
     fn a_repair_target_names_the_specific_offending_token() {
         let problems = vec![
-            DraftProblem::UndeclaredNumberInStatement {
-                claim_id: "c1".into(),
+            DraftProblem::FigureInFreeText {
+                claim_id: Some("c1".into()),
+                field: "statement".into(),
                 numeral: "79.87".into(),
             },
-            DraftProblem::UndeclaredNumberInStatement {
-                claim_id: "c1".into(),
+            DraftProblem::FigureInFreeText {
+                claim_id: Some("c1".into()),
+                field: "statement".into(),
                 numeral: "100".into(),
             },
             DraftProblem::UnknownEvidence {
@@ -656,12 +683,12 @@ mod tests {
         );
         let target = &response["repair"][0];
         assert_eq!(target["claim_id"], json!("c1"));
-        let numerals = target["undeclared_numerals"]
+        let numerals = target["figures_to_move"]
             .as_array()
-            .expect("numerals listed");
+            .expect("figures listed");
         assert_eq!(numerals.len(), 2);
-        assert!(numerals.contains(&json!("79.87")));
-        assert!(numerals.contains(&json!("100")));
+        assert!(numerals.contains(&json!("statement: 79.87")));
+        assert!(numerals.contains(&json!("statement: 100")));
         assert_eq!(target["unknown_evidence_ids"][0], json!("evf_made_up"));
     }
 
@@ -874,7 +901,9 @@ mod tests {
             "invalid_estimate",
             "scenario_without_assumption",
             "conflicting_evidence",
-            "undeclared_number_in_statement",
+            "figure_in_free_text",
+            "unknown_number_reference",
+            "ambiguous_number_reference",
             "number_disagrees_with_evidence",
             "evidence_outside_task_scope",
             "duplicate_claim_id",

@@ -349,20 +349,45 @@ pub enum DraftProblem {
         claim_id: String,
         evidence_id: String,
     },
-    /// A quantity written into a claim's prose that the claim never declared.
+    /// A financial figure written into free text.
     ///
-    /// The renderer places a claim's statement and its citations on the same line of
-    /// the canonical form, so the verifier checks every figure in the prose against
-    /// the evidence the claim named. A figure written only in prose therefore has no
-    /// provenance and cannot be reproduced.
+    /// Figures belong in `numeric_items`, where they carry provenance and the renderer
+    /// presents them. Free text carries meaning.
     ///
-    /// This is the residual failure of a live run that otherwise converged: `约 79.87
-    /// 亿元` as a rounded restatement of the cited `7,987,376,586`, and `单手(100 股)`
-    /// as a lot size. Both are refused here, at validation, where repair is one cheap
-    /// round rather than a verifier cycle.
-    UndeclaredNumberInStatement {
-        claim_id: String,
+    /// The earlier rule was conditional — a figure was allowed in a statement if the
+    /// same claim also declared it — and it was the single largest source of live
+    /// failure: 49 of 75 and 34 of 40 findings on two runs. A conditional rule requires
+    /// the model to cross-check every figure it writes against its own declarations,
+    /// and it reliably declared the headline numbers while dropping the incidental
+    /// ones. An absolute rule is checkable before submitting: write no figure in prose.
+    ///
+    /// It is also stricter, not looser, and it closes a hole. The verifier reads only
+    /// the title, the section headings and the claim lines, so a figure in
+    /// `executive_summary`, `overall_uncertainty`, `limitations`, `assumptions` or
+    /// `uncertainty` was **published without ever being checked**. Now no free-text
+    /// field may contain one.
+    FigureInFreeText {
+        /// The claim the text belongs to, when it belongs to one.
+        claim_id: Option<String>,
+        /// Which field, so repair is one edit.
+        field: String,
+        /// The figure as written.
         numeral: String,
+    },
+    /// A report-level `{label}` reference that two claims declare differently.
+    ///
+    /// Substituting either value would print a figure the reader cannot attribute, so
+    /// the reference is refused rather than resolved arbitrarily.
+    AmbiguousNumberReference {
+        label: String,
+    },
+    /// A `{label}` reference in prose that names no declared number.
+    ///
+    /// Left unchecked the reader would see the literal braces and the verifier would
+    /// check nothing, so an unresolvable reference is refused rather than rendered.
+    UnknownNumberReference {
+        claim_id: String,
+        label: String,
     },
     /// A declared number that its own cited evidence does not support.
     ///
@@ -384,7 +409,9 @@ impl DraftProblem {
     /// Claim this problem concerns, when it concerns one.
     pub fn claim_id(&self) -> Option<&str> {
         match self {
-            Self::ContractVersionMismatch { .. } | Self::Oversized { .. } => None,
+            Self::ContractVersionMismatch { .. }
+            | Self::Oversized { .. }
+            | Self::AmbiguousNumberReference { .. } => None,
             Self::DuplicateClaimId { claim_id }
             | Self::ClaimNotInAnySection { claim_id }
             | Self::EmptyStatement { claim_id }
@@ -395,10 +422,11 @@ impl DraftProblem {
             | Self::InvalidEstimate { claim_id, .. }
             | Self::ScenarioWithoutAssumption { claim_id }
             | Self::ConflictingEvidence { claim_id, .. }
-            | Self::UndeclaredNumberInStatement { claim_id, .. }
+            | Self::UnknownNumberReference { claim_id, .. }
             | Self::NumberDisagreesWithEvidence { claim_id, .. }
             | Self::EvidenceOutsideTaskScope { claim_id, .. } => Some(claim_id),
             Self::SectionReferencesUnknownClaim { claim_id, .. } => Some(claim_id),
+            Self::FigureInFreeText { claim_id, .. } => claim_id.as_deref(),
         }
     }
 
@@ -417,7 +445,9 @@ impl DraftProblem {
             Self::InvalidEstimate { .. } => "invalid_estimate",
             Self::ScenarioWithoutAssumption { .. } => "scenario_without_assumption",
             Self::ConflictingEvidence { .. } => "conflicting_evidence",
-            Self::UndeclaredNumberInStatement { .. } => "undeclared_number_in_statement",
+            Self::FigureInFreeText { .. } => "figure_in_free_text",
+            Self::AmbiguousNumberReference { .. } => "ambiguous_number_reference",
+            Self::UnknownNumberReference { .. } => "unknown_number_reference",
             Self::NumberDisagreesWithEvidence { .. } => "number_disagrees_with_evidence",
             Self::EvidenceOutsideTaskScope { .. } => "evidence_outside_task_scope",
         }
@@ -652,6 +682,7 @@ pub fn validate_draft(
     for claim in &draft.claims {
         validate_claim(claim, registry, task_symbols, &mut problems);
     }
+    validate_free_text(draft, registry, &mut problems);
     problems
 }
 
@@ -762,59 +793,240 @@ fn validate_claim(
     for item in &claim.numeric_items {
         validate_numeric_item(claim, item, registry, problems);
     }
-    validate_statement_numerals(claim, registry, problems);
+    // A placeholder must name a number this claim declares, or the reader would see
+    // the literal brace text and the verifier would check nothing.
+    for label in placeholder_labels(&claim.statement) {
+        if !claim.numeric_items.iter().any(|item| item.label == label) {
+            problems.push(DraftProblem::UnknownNumberReference {
+                claim_id: claim.id.clone(),
+                label,
+            });
+        }
+    }
 }
 
-/// Every quantity in a claim's prose must be one the claim actually declared.
+/// Placeholder delimiters. `{label}` in a statement refers to a declared number.
+pub(crate) const PLACEHOLDER_OPEN: char = '{';
+pub(crate) const PLACEHOLDER_CLOSE: char = '}';
+
+/// Labels referenced by `{…}` in a piece of prose, in order of appearance.
+pub fn placeholder_labels(text: &str) -> Vec<String> {
+    let mut labels = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find(PLACEHOLDER_OPEN) {
+        let after = &rest[open + PLACEHOLDER_OPEN.len_utf8()..];
+        let Some(close) = after.find(PLACEHOLDER_CLOSE) else {
+            break;
+        };
+        let label = after[..close].trim();
+        if !label.is_empty() {
+            labels.push(label.to_owned());
+        }
+        rest = &after[close + PLACEHOLDER_CLOSE.len_utf8()..];
+    }
+    labels
+}
+
+/// Remove `{…}` spans so figure extraction sees prose only.
+pub fn strip_placeholders(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find(PLACEHOLDER_OPEN) {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + PLACEHOLDER_OPEN.len_utf8()..];
+        match after.find(PLACEHOLDER_CLOSE) {
+            Some(close) => {
+                out.push(' ');
+                rest = &after[close + PLACEHOLDER_CLOSE.len_utf8()..];
+            }
+            None => {
+                // An unclosed brace is left in place; the label check reports it.
+                out.push_str(&rest[open..]);
+                return out;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Refuse a financial figure anywhere in the draft's free text.
 ///
-/// The canonical form the verifier reads places the statement and the claim's
-/// citations on one line, so a figure written into prose is checked against that
-/// evidence exactly as a declared number would be. Checking it here rather than
-/// waiting for the verifier costs one cheap validation round instead of a
-/// verification cycle, and the repair is addressed to a claim.
+/// The rule is absolute: figures live in `numeric_items`, prose carries meaning, and
+/// the renderer decides how a verified number appears. That is what makes it
+/// satisfiable — the model checks its own output without cross-referencing its
+/// declarations — and it closes a hole, because the verifier reads only the title, the
+/// section headings and the claim lines. A figure in `executive_summary`,
+/// `limitations`, `assumptions` or `uncertainty` used to be published unchecked.
 ///
-/// The rule is the Engine verifier's own: [`astock_engine::financial_numerals`]
-/// decides what counts as a financial quantity — masking security codes, dates,
-/// headings, clock times and window labels — and `supported_by` decides when a value
-/// backs it, including the percentage convention. Reimplementing either here would
-/// let validation and verification drift, and the drift would surface as a report
-/// validation accepted and verification refused.
+/// What counts as a figure is the Engine verifier's own rule,
+/// [`astock_engine::financial_numerals`], so a security code, a date, a heading number,
+/// a clock time, a reporting period, a lookback window and an inline list marker are
+/// not figures. Reimplementing that here would let validation and verification drift.
+/// Numbers a report-level field may reference: every label the claims declare.
 ///
-/// A prose figure is accepted when it matches one of the claim's own numeric items,
-/// or the value of evidence the claim cites. That is exactly as permissive as the
-/// verifier, so this rejects nothing the verifier would have passed.
-fn validate_statement_numerals(
-    claim: &Claim,
+/// A label declared by two claims with the same value and unit resolves; one declared
+/// with different values does not, because substituting either would print a figure
+/// the reader cannot attribute.
+pub fn report_level_numbers(draft: &VerifiedReportDraft) -> BTreeMap<String, NumericItem> {
+    let mut resolved: BTreeMap<String, NumericItem> = BTreeMap::new();
+    let mut ambiguous: BTreeSet<String> = BTreeSet::new();
+    for claim in &draft.claims {
+        for item in &claim.numeric_items {
+            match resolved.get(&item.label) {
+                Some(existing)
+                    if existing.value.to_bits() != item.value.to_bits()
+                        || existing.unit != item.unit =>
+                {
+                    ambiguous.insert(item.label.clone());
+                }
+                _ => {
+                    resolved.insert(item.label.clone(), item.clone());
+                }
+            }
+        }
+    }
+    for label in &ambiguous {
+        resolved.remove(label);
+    }
+    resolved
+}
+
+/// Labels a report-level field references that resolve to more than one value.
+fn ambiguous_report_labels(draft: &VerifiedReportDraft) -> BTreeSet<String> {
+    let mut seen: BTreeMap<String, (u64, Option<String>)> = BTreeMap::new();
+    let mut ambiguous = BTreeSet::new();
+    for claim in &draft.claims {
+        for item in &claim.numeric_items {
+            let key = (item.value.to_bits(), item.unit.clone());
+            match seen.get(&item.label) {
+                Some(existing) if *existing != key => {
+                    ambiguous.insert(item.label.clone());
+                }
+                _ => {
+                    seen.insert(item.label.clone(), key);
+                }
+            }
+        }
+    }
+    ambiguous
+}
+
+fn validate_free_text(
+    draft: &VerifiedReportDraft,
     registry: &BTreeMap<String, EvidenceDescriptor>,
     problems: &mut Vec<DraftProblem>,
 ) {
-    let numerals = astock_engine::financial_numerals(&claim.statement);
-    if numerals.is_empty() {
-        return;
-    }
-    let cited_values: Vec<f64> = claim
-        .evidence_ids
-        .iter()
-        .filter_map(|id| registry.get(id))
-        .filter_map(|descriptor| descriptor.value.as_ref())
-        .filter_map(evidence_number)
-        .collect();
-    for numeral in numerals {
-        let declared = claim
-            .numeric_items
-            .iter()
-            .any(|item| numeral.supported_by(item.value));
-        if declared
-            || cited_values
-                .iter()
-                .any(|value| numeral.supported_by(*value))
-        {
-            continue;
+    // Report-level fields resolve references against every claim's declarations, so a
+    // summary can name a figure without repeating its digits. Without this the summary
+    // could carry no number at all, which is not how a research summary is written:
+    // across 49 real submitted drafts it was the single largest source of refusals.
+    let report_numbers = report_level_numbers(draft);
+    let ambiguous = ambiguous_report_labels(draft);
+    let check_references = |field: &str, text: &str, problems: &mut Vec<DraftProblem>| {
+        for label in placeholder_labels(text) {
+            if ambiguous.contains(&label) {
+                problems.push(DraftProblem::AmbiguousNumberReference { label });
+            } else if !report_numbers.contains_key(&label) {
+                problems.push(DraftProblem::UnknownNumberReference {
+                    claim_id: field.to_owned(),
+                    label,
+                });
+            }
         }
-        problems.push(DraftProblem::UndeclaredNumberInStatement {
-            claim_id: claim.id.clone(),
-            numeral: numeral.raw.clone(),
-        });
+    };
+    check_references("title", &draft.title, problems);
+    check_references("executive_summary", &draft.executive_summary, problems);
+    if let Some(uncertainty) = &draft.overall_uncertainty {
+        check_references("overall_uncertainty", uncertainty, problems);
+    }
+    for (index, limitation) in draft.limitations.iter().enumerate() {
+        check_references(&format!("limitations[{index}]"), limitation, problems);
+    }
+
+    // A literal figure is refused only when nothing in the draft backs it.
+    //
+    // Forbidding literal figures outright was measured across many live moderate runs
+    // and did not improve convergence — it reduced it. The model writes prose as an
+    // analyst does, and a rule it will not follow produces refusals rather than better
+    // reports.
+    //
+    // What is kept is the part that was a real defect: a figure with no backing. The
+    // verifier reads only the title, the section headings and the claim lines, so a
+    // figure in `executive_summary`, `limitations`, `assumptions` or `uncertainty` used
+    // to be published with no check at all. Those fields are checked here now, and the
+    // ones that reference a number are emitted into the verifier form too, so this is
+    // strictly stricter than the original contract while remaining satisfiable.
+    //
+    // Placeholders stay the better path — one numeric truth, presented by the runtime —
+    // and remain what the control plane asks for. They are simply no longer the only one.
+    let mut check = |claim_id: Option<&str>, field: &str, text: &str, backing: &[f64]| {
+        // Placeholders are removed before extraction: `{最新价}` names a declared
+        // number and is not itself a figure. Their labels are checked separately.
+        let prose = strip_placeholders(text);
+        for numeral in astock_engine::financial_numerals(&prose) {
+            if backing.iter().any(|value| numeral.supported_by(*value)) {
+                continue;
+            }
+            problems.push(DraftProblem::FigureInFreeText {
+                claim_id: claim_id.map(str::to_owned),
+                field: field.to_owned(),
+                numeral: numeral.raw.clone(),
+            });
+        }
+    };
+    // Report-level prose is backed by any declared number.
+    let report_backing: Vec<f64> = report_numbers.values().map(|item| item.value).collect();
+    check(None, "title", &draft.title, &report_backing);
+    check(
+        None,
+        "executive_summary",
+        &draft.executive_summary,
+        &report_backing,
+    );
+    if let Some(uncertainty) = &draft.overall_uncertainty {
+        check(None, "overall_uncertainty", uncertainty, &report_backing);
+    }
+    for (index, limitation) in draft.limitations.iter().enumerate() {
+        check(
+            None,
+            &format!("limitations[{index}]"),
+            limitation,
+            &report_backing,
+        );
+    }
+    for section in &draft.sections {
+        check(
+            None,
+            &format!("sections[{}].heading", section.heading),
+            &section.heading,
+            &report_backing,
+        );
+    }
+    for claim in &draft.claims {
+        // A claim's prose is backed by what it declares and by what it cites, which is
+        // exactly what the verifier compares that line against.
+        let mut backing: Vec<f64> = claim.numeric_items.iter().map(|item| item.value).collect();
+        backing.extend(
+            claim
+                .evidence_ids
+                .iter()
+                .filter_map(|id| registry.get(id))
+                .filter_map(|descriptor| descriptor.value.as_ref())
+                .filter_map(evidence_number),
+        );
+        check(Some(&claim.id), "statement", &claim.statement, &backing);
+        if let Some(uncertainty) = &claim.uncertainty {
+            check(Some(&claim.id), "uncertainty", uncertainty, &backing);
+        }
+        for (index, assumption) in claim.assumptions.iter().enumerate() {
+            check(
+                Some(&claim.id),
+                &format!("assumptions[{index}]"),
+                assumption,
+                &backing,
+            );
+        }
     }
 }
 

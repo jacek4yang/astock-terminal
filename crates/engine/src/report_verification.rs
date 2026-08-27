@@ -162,14 +162,29 @@ fn mask_non_financial_tokens(line: &str) -> String {
     // silently stopped masking security codes. Patterns are now asserted.
     static PATTERNS: &[&str] = &[
         // Calendar dates and fiscal periods: 2026-08-26, 2026年, 8月, 26日, 2024Q3.
-        r"\d{4}-\d{2}-\d{2}|\d{4}/\d{1,2}/\d{1,2}|\d{4}\s*年|\d{1,2}\s*月|\d{1,2}\s*日|\d{4}\s*Q[1-4]|\bQ[1-4]\b",
+        // `\d{1,3}` before 日 rather than `\d{1,2}`: a two-digit rule masks the tail of
+        // `250 日` as `50 日` and leaves a stray `2` behind, which is then read as a
+        // financial figure. A one to three digit count before 日 is a day of month or a
+        // lookback window; neither asserts a quantity.
+        r"\d{4}-\d{2}-\d{2}|\d{4}/\d{1,2}/\d{1,2}|\d{4}-\d{2}\b|\d{4}\s*年|\d{1,2}\s*月|\d{1,3}\s*日|\d{4}\s*Q[1-4]|\bQ[1-4]\b",
         // Reporting-period labels: 2025 全年, 2026 上半年, 2024 年度, 2025 财年.
         //
         // `\d{4}\s*年` above only catches a year written immediately before 年. A
         // reporting period names a window, asserts no quantity, and appears in
         // almost every fundamentals claim; a live moderate run was blocked by
         // `2025 全年营业总收入` and `2026Q1 末归母权益` being read as figures.
-        r"\d{4}\s*(?:全年|年度|年报|中报|季报|上半年|下半年|财年|财报)",
+        r"\d{4}\s*(?:全年|年度|年报|中报|季报|中期|报告期|上半年|下半年|财年|财报)",
+        // Chinese counters: 命中 2 项, 覆盖 3 家, 持有 5 只, 分 2 次.
+        //
+        // A count of things is not a financial amount. A live run was blocked by
+        // `可用信号命中 2 项`, which asserts no quantity at all. A real amount carries a
+        // currency, a percentage or a magnitude suffix, none of which are counters.
+        r"\d+\s*(?:项|个|只|家|次|条|种|档|层|类|户|席|票|信号|样本|维度)",
+        // Distribution-ratio denominators: 每 10 股派 …, 每 10 股转增 ….
+        //
+        // The share count in a dividend ratio is a convention, not a claimed figure;
+        // the payout beside it is the figure, and it stays extractable.
+        r"每\s*\d+\s*股",
         // Clock times, including exchange session boundaries.
         r"\d{1,2}:\d{2}(?::\d{2})?",
         // Markdown headings and ordered-list markers.
@@ -760,6 +775,57 @@ mod tests {
                 financial_numerals(label)
             );
         }
+    }
+
+    /// Chinese counters and distribution ratios assert no financial amount.
+    ///
+    /// A live run was blocked by `可用信号命中 2 项` and `每 10 股派 …`. Neither claims a
+    /// quantity; the payout beside the ratio does, and it stays extractable.
+    #[test]
+    fn counters_and_distribution_ratios_are_not_treated_as_figures() {
+        for label in [
+            "可用信号命中 2 项",
+            "覆盖 3 家同业",
+            "持有 5 只标的",
+            "2026 中期分红",
+            "分 2 次派息",
+            "窗口 2026-03 至 2026-08",
+            "各投 ±1 票",
+            "4 信号评分体系",
+            "21 个样本",
+        ] {
+            assert!(
+                financial_numerals(label).is_empty(),
+                "`{label}` asserts no quantity, found {:?}",
+                financial_numerals(label)
+            );
+        }
+        // The payout in a distribution ratio is still a figure.
+        let found = financial_numerals("每 10 股派 3.5 元");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].raw, "3.5");
+        // A currency amount is never a counter.
+        let amount = financial_numerals("净利润 517.77 亿元");
+        assert_eq!(amount.len(), 1, "{amount:?}");
+    }
+
+    /// A three digit lookback window leaves no stray digit behind.
+    ///
+    /// A two digit day-of-month rule masked the tail of `250 日` as `50 日`, leaving a
+    /// bare `2` that was then read as a financial figure.
+    #[test]
+    fn a_three_digit_window_does_not_leave_a_stray_digit() {
+        for label in ["近 250 日均线未转正", "过去250日", "60 日均线"] {
+            assert!(
+                financial_numerals(label).is_empty(),
+                "`{label}` asserts no quantity, found {:?}",
+                financial_numerals(label)
+            );
+        }
+        // A day of month still masks, and a real figure beside it still extracts.
+        let found = financial_numerals("8月26日成交额 79.87 亿元");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].raw, "79.87");
     }
 
     /// A quantity inside an enumerated item is still extracted.

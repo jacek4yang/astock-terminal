@@ -42,9 +42,10 @@ pub use render::{
     RenderedNumber, RenderedReport, RenderedSection,
 };
 pub use report::{
-    decode_draft, validate_draft, Claim, ClaimKind, DraftProblem, EvidenceDescriptor, NumericItem,
-    NumericProvenance, ReportSection, VerifiedReportDraft, MAX_CLAIMS, MAX_EVIDENCE_PER_CLAIM,
-    MAX_NUMERIC_ITEMS_PER_CLAIM, MAX_SECTIONS, MAX_STATEMENT_CHARS, REPORT_CONTRACT_VERSION,
+    decode_draft, placeholder_labels, strip_placeholders, validate_draft, Claim, ClaimKind,
+    DraftProblem, EvidenceDescriptor, NumericItem, NumericProvenance, ReportSection,
+    VerifiedReportDraft, MAX_CLAIMS, MAX_EVIDENCE_PER_CLAIM, MAX_NUMERIC_ITEMS_PER_CLAIM,
+    MAX_SECTIONS, MAX_STATEMENT_CHARS, REPORT_CONTRACT_VERSION,
 };
 pub use runtime::{
     AgentRuntime, RunOutcome, RuntimeConfig, RuntimeTask, SessionRunOutcome, SessionTaskStream,

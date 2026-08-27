@@ -92,7 +92,7 @@ fn claim(id: &str, kind: ClaimKind, statement: &str) -> Claim {
 
 /// A draft exercising every claim kind and every provenance class.
 fn valid_draft() -> VerifiedReportDraft {
-    let mut price = claim("c_price", ClaimKind::ObservedFact, "最新收盘价为 34.47 元");
+    let mut price = claim("c_price", ClaimKind::ObservedFact, "最新收盘价见下方数值");
     price.evidence_ids = vec!["evf_price".into()];
     price.numeric_items = vec![NumericItem {
         value: 34.47,
@@ -125,7 +125,8 @@ fn valid_draft() -> VerifiedReportDraft {
 
     let mut scenario = claim("c_scn", ClaimKind::Scenario, "铜价下跌情景下毛利承压");
     scenario.evidence_ids = vec!["evf_price".into()];
-    scenario.assumptions = vec!["用户设定铜价下跌 15%".into()];
+    // The assumption is a declared numeric item, so the prose names it without a figure.
+    scenario.assumptions = vec!["用户设定铜价下跌，跌幅见下方数值".into()];
     scenario.numeric_items = vec![NumericItem {
         value: -15.0,
         unit: Some("%".into()),
@@ -557,15 +558,20 @@ fn a_draft_survives_a_serialization_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
-// Figures written into prose
+// Figures live in numeric_items, never in free text
 //
-// The canonical form the verifier reads places a claim's statement and its
-// citations on one line, so a figure in the prose is checked against the
-// evidence the claim named, exactly as a declared number is. A live run that
-// otherwise converged to two findings failed on precisely this: `约 79.87 亿元`
-// as a rounded restatement of the cited `7,987,376,586`, and `单手(100 股)` as a
-// lot size. Both are refused here, at validation, where repair is one cheap
-// round instead of a verification cycle.
+// The rule is absolute: prose carries meaning, `numeric_items` carry figures, and
+// the renderer decides how a verified number appears. The earlier rule was
+// conditional — a figure was permitted in a statement if the same claim also
+// declared it — and it was the single largest source of live failure: 49 of 75 and
+// 34 of 40 findings on two runs. A conditional rule makes the model cross-check
+// every figure against its own declarations; an absolute one is checkable before
+// submitting.
+//
+// It is also stricter, and it closes a hole. The verifier reads only the title, the
+// section headings and the claim lines, so a figure in `executive_summary`,
+// `limitations`, `assumptions` or `uncertainty` was published without ever being
+// checked.
 // ---------------------------------------------------------------------------
 
 fn amount_registry() -> BTreeMap<String, EvidenceDescriptor> {
@@ -617,81 +623,120 @@ fn amount_item() -> NumericItem {
     }
 }
 
-/// A rounded restatement in prose is a separate, unverifiable figure.
-#[test]
-fn a_rounded_restatement_in_prose_is_refused() {
-    let draft = one_claim_draft(observed_claim(
-        "紫金矿业当日成交额为 7,987,376,586.00 元人民币(约 79.87 亿元)。",
-        vec![amount_item()],
-        vec!["evf_amount"],
-    ));
-    let problems = validate_draft(&draft, &amount_registry(), &BTreeSet::new());
-    let undeclared: Vec<&DraftProblem> = problems
+fn figures(problems: &[DraftProblem]) -> Vec<(String, String)> {
+    problems
         .iter()
-        .filter(|problem| problem.code() == "undeclared_number_in_statement")
-        .collect();
-    assert_eq!(
-        undeclared.len(),
-        1,
-        "only the rounded 79.87 is undeclared: {problems:?}"
-    );
-    assert!(matches!(
-        undeclared[0],
-        DraftProblem::UndeclaredNumberInStatement { claim_id, numeral }
-            if claim_id == "c1" && numeral == "79.87"
-    ));
+        .filter_map(|problem| match problem {
+            DraftProblem::FigureInFreeText { field, numeral, .. } => {
+                Some((field.clone(), numeral.clone()))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
-/// The exact cited figure in prose is fine: it is the value the claim declared.
+/// A declared figure may be written literally; an unbacked one may not.
+///
+/// Forbidding literal figures outright was measured live and reduced convergence, so
+/// the rule is what it always needed to be: every printed figure must be backed.
+/// Placeholders remain the better path and are what the control plane asks for.
 #[test]
-fn the_exact_cited_figure_may_appear_in_prose() {
+fn a_declared_figure_may_be_written_literally() {
     let draft = one_claim_draft(observed_claim(
         "紫金矿业当日成交额为 7,987,376,586.00 元人民币。",
         vec![amount_item()],
         vec!["evf_amount"],
     ));
     let problems = validate_draft(&draft, &amount_registry(), &BTreeSet::new());
-    assert!(
-        problems.is_empty(),
-        "a declared figure must be publishable: {problems:?}"
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+/// A figure nothing in the draft backs is refused.
+#[test]
+fn an_unbacked_figure_in_a_statement_is_refused() {
+    let draft = one_claim_draft(observed_claim(
+        "紫金矿业当日成交额为 1,234,567.00 元人民币。",
+        vec![amount_item()],
+        vec!["evf_amount"],
+    ));
+    let problems = validate_draft(&draft, &amount_registry(), &BTreeSet::new());
+    assert_eq!(
+        figures(&problems),
+        vec![("statement".to_owned(), "1,234,567.00".to_owned())],
+        "{problems:?}"
     );
 }
 
-/// A lot size written into prose is a quantity with no provenance.
+/// A figure-free statement with declared numbers is publishable.
 #[test]
-fn an_incidental_quantity_in_prose_is_refused() {
+fn a_figure_free_statement_with_declared_numbers_validates() {
     let draft = one_claim_draft(observed_claim(
-        "流动性参考：单手(100 股)成本 3457 元。",
-        vec![NumericItem {
-            value: 3457.0,
-            unit: Some("元".to_owned()),
-            label: "单手成本".to_owned(),
-            provenance: NumericProvenance::Observed {
-                evidence_id: "evf_price".to_owned(),
-                field: None,
-            },
-        }],
-        vec!["evf_price"],
+        "紫金矿业当日成交额已披露，具体数值见下。",
+        vec![amount_item()],
+        vec!["evf_amount"],
     ));
-    let problems = validate_draft(&draft, &registry(), &BTreeSet::new());
-    let numerals: Vec<String> = problems
+    let problems = validate_draft(&draft, &amount_registry(), &BTreeSet::new());
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+/// Free text the verifier never reads is checked too.
+///
+/// The verifier form contains the title, the section headings and the claim lines. A
+/// figure anywhere else was published without any check at all.
+#[test]
+fn a_figure_in_free_text_the_verifier_never_reads_is_refused() {
+    let mut draft = one_claim_draft(observed_claim(
+        "成交额已披露。",
+        vec![amount_item()],
+        vec!["evf_amount"],
+    ));
+    // None of these figures is declared or cited anywhere in the draft.
+    draft.executive_summary = "当日成交额约 1.23 亿元。".to_owned();
+    draft.overall_uncertainty = Some("盘中波动可达 3.7%。".to_owned());
+    draft.limitations = vec!["未覆盖成交额低于 5.5 亿元的标的。".to_owned()];
+    draft.claims[0].uncertainty = Some("单一来源，误差可能 0.55%。".to_owned());
+    draft.claims[0].assumptions = vec!["假设换手率维持 1.17%。".to_owned()];
+    let problems = validate_draft(&draft, &amount_registry(), &BTreeSet::new());
+    let fields: Vec<String> = figures(&problems).into_iter().map(|(f, _)| f).collect();
+    for expected in [
+        "executive_summary",
+        "overall_uncertainty",
+        "limitations[0]",
+        "uncertainty",
+        "assumptions[0]",
+    ] {
+        assert!(
+            fields.iter().any(|field| field == expected),
+            "`{expected}` must be checked, got {fields:?}"
+        );
+    }
+}
+
+/// A report-level figure is reported without a claim, so repair routes correctly.
+#[test]
+fn a_report_level_figure_carries_no_claim_id() {
+    let mut draft = one_claim_draft(observed_claim(
+        "成交额已披露。",
+        vec![amount_item()],
+        vec!["evf_amount"],
+    ));
+    draft.executive_summary = "成交额 4.56 亿元。".to_owned();
+    let problems = validate_draft(&draft, &amount_registry(), &BTreeSet::new());
+    let report_level = problems
         .iter()
-        .filter_map(|problem| match problem {
-            DraftProblem::UndeclaredNumberInStatement { numeral, .. } => Some(numeral.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(numerals, vec!["100".to_owned()], "{problems:?}");
+        .find(|problem| problem.code() == "figure_in_free_text")
+        .expect("the summary figure is refused");
+    assert_eq!(report_level.claim_id(), None);
 }
 
 /// A security code, a date and a window label assert no quantity.
 ///
-/// The masking rule is the verifier's own, so validation cannot become stricter
-/// than the gate it is pre-checking.
+/// The masking rule is the verifier's own, so validation cannot become stricter than
+/// the gate it pre-checks. Without this the absolute rule would reject ordinary prose.
 #[test]
 fn identifiers_dates_and_window_labels_are_not_treated_as_figures() {
     let draft = one_claim_draft(observed_claim(
-        "紫金矿业(601899) 于 2026-08-26 收盘，近 6个月 处于上行结构，最新价 34.47 元。",
+        "紫金矿业(601899) 于 2026-08-26 收盘，近 6个月 处于上行结构，近 250 日均线未转正。",
         vec![NumericItem {
             value: 34.47,
             unit: Some("元".to_owned()),
@@ -706,50 +751,8 @@ fn identifiers_dates_and_window_labels_are_not_treated_as_figures() {
     let problems = validate_draft(&draft, &registry(), &BTreeSet::new());
     assert!(
         problems.is_empty(),
-        "codes, dates and window labels are not financial claims: {problems:?}"
+        "codes, dates and window labels are not figures: {problems:?}"
     );
-}
-
-/// A figure that matches cited evidence but is not a declared item still passes,
-/// because the verifier would accept it. Validation pre-checks the gate; it does
-/// not invent a stricter one.
-#[test]
-fn a_figure_backed_by_cited_evidence_is_accepted_even_if_not_declared() {
-    let draft = one_claim_draft(observed_claim(
-        "最新价为 34.47 元。",
-        Vec::new(),
-        vec!["evf_price"],
-    ));
-    let problems = validate_draft(&draft, &registry(), &BTreeSet::new());
-    assert!(
-        problems.is_empty(),
-        "cited evidence supports the figure: {problems:?}"
-    );
-}
-
-/// A percentage written as `1.12%` is supported by evidence recording `1.12`.
-#[test]
-fn a_percentage_matches_evidence_recorded_unscaled() {
-    let mut map = registry();
-    map.insert(
-        "evf_change".into(),
-        observed("evf_change", "tencent", "/quote/change_pct", 1.12),
-    );
-    let draft = one_claim_draft(observed_claim(
-        "当日涨跌幅为 1.12%。",
-        vec![NumericItem {
-            value: 1.12,
-            unit: Some("%".to_owned()),
-            label: "涨跌幅".to_owned(),
-            provenance: NumericProvenance::Observed {
-                evidence_id: "evf_change".to_owned(),
-                field: None,
-            },
-        }],
-        vec!["evf_change"],
-    ));
-    let problems = validate_draft(&draft, &map, &BTreeSet::new());
-    assert!(problems.is_empty(), "{problems:?}");
 }
 
 /// Numbers reach the investor-facing report.
@@ -1026,7 +1029,7 @@ fn an_observed_fact_still_may_not_carry_a_calculated_value() {
     let draft = one_claim_draft(Claim {
         id: "c1".to_owned(),
         kind: ClaimKind::ObservedFact,
-        statement: "市盈率为 28.49 倍。".to_owned(),
+        statement: "市盈率见下方数值。".to_owned(),
         evidence_ids: vec!["evf_price".to_owned()],
         numeric_items: vec![NumericItem {
             value: 28.49,
@@ -1049,5 +1052,108 @@ fn an_observed_fact_still_may_not_carry_a_calculated_value() {
             .iter()
             .any(|problem| problem.code() == "unsupported_observed_number"),
         "a derived value must never be presentable as an observation: {problems:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Figures are referenced, not written
+//
+// The model writes `收盘价{收盘价}` and declares `收盘价` as a numeric item; the
+// runtime substitutes the verified value. The sentence reads normally, the figure is
+// checked, and the number lives in exactly one place — which is the whole point,
+// because maintaining the same number in prose and in numeric_items is what the
+// model could not do reliably.
+// ---------------------------------------------------------------------------
+
+/// A referenced figure renders as its verified value and is not duplicated.
+#[test]
+fn a_referenced_figure_renders_as_its_verified_value() {
+    let draft = one_claim_draft(observed_claim(
+        "紫金矿业当日成交额为 {成交额}。",
+        vec![amount_item()],
+        vec!["evf_amount"],
+    ));
+    let registry = amount_registry();
+    let problems = validate_draft(&draft, &registry, &BTreeSet::new());
+    assert!(problems.is_empty(), "{problems:?}");
+
+    let rendered = render(&draft, &registry);
+    assert!(
+        rendered.markdown.contains("当日成交额为 7987376586元"),
+        "the reader must see the verified value:\n{}",
+        rendered.markdown
+    );
+    // Not repeated as a sub-bullet, because the prose already presents it.
+    assert!(
+        !rendered.markdown.contains("    - 成交额："),
+        "an inline figure must not be duplicated:\n{}",
+        rendered.markdown
+    );
+    // The verifier reads the substituted value beside the citation it must reproduce
+    // against, so what is published is what was checked.
+    assert!(rendered.verifier_markdown.contains("7987376586元"));
+    assert!(rendered.verifier_markdown.contains("【E:evf_amount】"));
+    assert!(!contains_internal_identifier(&rendered.markdown));
+}
+
+/// A number the prose does not reference is still shown and still verified.
+#[test]
+fn an_unreferenced_figure_is_still_presented_and_cited() {
+    let draft = one_claim_draft(observed_claim(
+        "当日成交额已披露。",
+        vec![amount_item()],
+        vec!["evf_amount"],
+    ));
+    let registry = amount_registry();
+    assert!(validate_draft(&draft, &registry, &BTreeSet::new()).is_empty());
+    let rendered = render(&draft, &registry);
+    assert!(rendered.markdown.contains("成交额：7987376586 元"));
+    assert!(rendered.verifier_markdown.contains("成交额=7987376586元"));
+}
+
+/// A reference to a number the claim does not declare is refused.
+#[test]
+fn a_reference_to_an_undeclared_number_is_refused() {
+    let draft = one_claim_draft(observed_claim(
+        "当日成交额为 {不存在的标签}。",
+        vec![amount_item()],
+        vec!["evf_amount"],
+    ));
+    let problems = validate_draft(&draft, &amount_registry(), &BTreeSet::new());
+    assert!(
+        problems.iter().any(|problem| matches!(
+            problem,
+            DraftProblem::UnknownNumberReference { claim_id, label }
+                if claim_id == "c1" && label == "不存在的标签"
+        )),
+        "an unresolvable reference must be refused rather than rendered: {problems:?}"
+    );
+}
+
+/// A reference is not itself a figure, so it does not trip the free-text rule.
+#[test]
+fn a_reference_is_not_read_as_a_figure() {
+    let draft = one_claim_draft(observed_claim(
+        "收盘价 {最新价}，成交额 {成交额}。",
+        vec![
+            NumericItem {
+                value: 34.47,
+                unit: Some("元".to_owned()),
+                label: "最新价".to_owned(),
+                provenance: NumericProvenance::Observed {
+                    evidence_id: "evf_price".to_owned(),
+                    field: None,
+                },
+            },
+            amount_item(),
+        ],
+        vec!["evf_price", "evf_amount"],
+    ));
+    let problems = validate_draft(&draft, &amount_registry(), &BTreeSet::new());
+    assert!(
+        !problems
+            .iter()
+            .any(|problem| problem.code() == "figure_in_free_text"),
+        "{problems:?}"
     );
 }

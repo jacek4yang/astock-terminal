@@ -200,11 +200,15 @@ pub struct RuntimeConfig {
     /// Total `submit_report` attempts, counting both contract rejections and
     /// verifier refusals. Exhausting them fails closed; it never publishes.
     ///
-    /// Six rather than four because a measured live run was still converging when it
-    /// ran out — 14 contract problems, then 4, 8 and 2 verifier findings — and
-    /// stopping a converging repair loop wastes the research that preceded it. The
-    /// budget still exists: a loop that is not converging is caught by
-    /// identical-resubmission detection long before this bound.
+    /// Eight, because the measured convergence needs it. Across live moderate runs the
+    /// finding count per submission falls 40 → 16 → 2, so a report typically needs four
+    /// or five submissions to become publishable and a sixth to finish. A budget set at
+    /// the edge of the measured trajectory turns a converging repair loop into a
+    /// failure and throws away the research that preceded it.
+    ///
+    /// This is not a blind increase: a loop that is *not* converging is caught by
+    /// identical-resubmission detection, which ends finalization on the second
+    /// unchanged draft regardless of how much budget remains.
     pub max_finalization_attempts: usize,
     pub max_model_chunks_per_round: usize,
     /// Calls to tools that do not exist, before the task fails closed.
@@ -239,7 +243,7 @@ impl Default for RuntimeConfig {
         Self {
             max_model_rounds: 32,
             max_research_rounds: 20,
-            max_finalization_attempts: 6,
+            max_finalization_attempts: 8,
             max_model_chunks_per_round: 10_000,
             max_unknown_tool_rejections: 3,
             max_empty_turn_retries: 2,
@@ -598,12 +602,41 @@ impl AgentRuntime {
             // reconnect. A provider *error* frame is not an empty turn — it is
             // returned as a typed provider error before reaching this point — so a
             // real fault is never silently retried as emptiness.
+            // Once the research budget is spent, retrieval tools are withdrawn.
+            //
+            // The budget used to be a request in a system message, and a model that
+            // kept researching simply ignored it: two live moderate runs reached the
+            // 32-round ceiling having never submitted a report at all, one after 26
+            // tool calls. A budget the model can decline is not a budget.
+            //
+            // Withdrawing the tools makes it a mechanism. `search_evidence` stays,
+            // because finalization needs identifiers, and the deterministic
+            // calculation tool stays, because a figure may still need to be computed
+            // to be citable — neither reaches an upstream. The one-time prompt-cache
+            // invalidation at the phase boundary is worth a task that finishes.
+            let finalization_only = round
+                > self
+                    .config
+                    .max_research_rounds
+                    .min(self.config.max_model_rounds);
+            let offered_tools = if finalization_only {
+                self.tools
+                    .definitions()
+                    .into_iter()
+                    .filter(|tool| {
+                        tool.handler == ToolHandler::Runtime
+                            || tool.name == "run_financial_calculation"
+                    })
+                    .collect()
+            } else {
+                self.tools.definitions()
+            };
             let mut empty_turns = 0usize;
             let (text, calls) = loop {
                 let request = ModelRequest {
                     model: selected_model.clone(),
                     messages: messages.clone(),
-                    tools: self.tools.definitions(),
+                    tools: offered_tools.clone(),
                     max_tokens: self.config.max_tokens,
                     temperature: self.config.temperature,
                 };
@@ -909,10 +942,11 @@ impl AgentRuntime {
                 {
                     messages.push(Message::text(
                         MessageRole::System,
-                        "Research budget for this task is spent. Do not call any further \
-                         retrieval tool. Use search_evidence if you need identifiers, then call \
-                         submit_report with what the evidence supports. State remaining gaps as \
-                         limitations or as claims of kind=unknown rather than asserting them.",
+                        "The research budget for this task is spent, so the retrieval tools have \
+                         been withdrawn. Only search_evidence, run_financial_calculation and \
+                         submit_report remain. Finalize with the evidence already gathered and \
+                         state remaining gaps as limitations or as claims of kind=unknown rather \
+                         than asserting them.",
                     ));
                 }
                 continue;
