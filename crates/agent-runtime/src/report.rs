@@ -598,7 +598,19 @@ fn short_timestamp(raw: &str) -> Option<String> {
 /// each wrapped in an object, six times, with nothing in the diagnostic that could
 /// have located the field. Repair is only possible if the model is told which field
 /// is wrong, so the path is part of the contract's diagnostic surface.
+///
+/// A *missing* field is the harder case, because serde stops at the first one. The
+/// same live run lost **5 of 8 finalization attempts to decode** — a stub claim
+/// without `id`, an observed item without `evidence_id`, a calculated item without
+/// `value` — while its validation findings were falling 142 → 40 → 20 → 8. One
+/// field named per attempt is precisely the loop that consumed the budget: the
+/// model fixes it, resubmits, and is told about the next. Before decoding, a
+/// structural scan collects every missing required field at the report, claim and
+/// numeric-item level, so one round names them all.
 pub fn decode_draft(arguments: &Value) -> Result<VerifiedReportDraft, String> {
+    if let Some(missing) = missing_required_fields(arguments) {
+        return Err(missing);
+    }
     let mut track = serde_path_to_error::Track::new();
     let deserializer = serde_path_to_error::Deserializer::new(arguments, &mut track);
     match VerifiedReportDraft::deserialize(deserializer) {
@@ -611,6 +623,121 @@ pub fn decode_draft(arguments: &Value) -> Result<VerifiedReportDraft, String> {
                 Err(format!("{path}: {error}"))
             }
         }
+    }
+}
+
+/// Every required field absent from a submitted draft, at any depth.
+///
+/// Only *absence* is scanned. Type errors, unknown provenance tags and bad enum
+/// values are left to serde, which names them with a path; duplicating that here
+/// risks two drift-prone type checkers. The scanned structure is the contract's
+/// own: required fields of `VerifiedReportDraft`, `Claim` and `NumericItem`, and
+/// the per-provenance requirements of `NumericProvenance`.
+fn missing_required_fields(arguments: &Value) -> Option<String> {
+    let object = arguments.as_object()?;
+    let mut missing: Vec<String> = Vec::new();
+
+    let required_top: &[(&str, bool)] = &[
+        ("title", true),
+        ("executive_summary", true),
+        ("sections", true),
+        ("claims", true),
+    ];
+    for (field, _) in required_top {
+        if !object.contains_key(*field) {
+            missing.push(field.to_string());
+        }
+    }
+
+    if let Some(claims) = object.get("claims").and_then(Value::as_array) {
+        for (index, claim) in claims.iter().enumerate() {
+            let Some(claim) = claim.as_object() else {
+                continue;
+            };
+            for field in ["id", "kind", "statement"] {
+                if !claim.contains_key(field) {
+                    missing.push(format!("claims[{index}].{field}"));
+                }
+            }
+            if let Some(items) = claim.get("numeric_items").and_then(Value::as_array) {
+                for (item_index, item) in items.iter().enumerate() {
+                    missing_item_fields(claim, index, item_index, item, &mut missing);
+                }
+            }
+        }
+    }
+
+    if missing.is_empty() {
+        None
+    } else {
+        let fields = missing.join(", ");
+        Some(format!(
+            "missing required fields: {fields}. Add every named field and \
+             resubmit the complete draft."
+        ))
+    }
+}
+
+/// Fields a numeric item must carry given its provenance tag.
+fn missing_item_fields(
+    claim: &serde_json::Map<String, Value>,
+    claim_index: usize,
+    item_index: usize,
+    item: &Value,
+    missing: &mut Vec<String>,
+) {
+    let Some(item) = item.as_object() else {
+        return;
+    };
+    let at = |field: &str| {
+        format!(
+            "claims[{claim_index}].numeric_items[{item_index}].{field}{}",
+            claim
+                .get("id")
+                .and_then(Value::as_str)
+                .map(|id| format!(" (claim {id})"))
+                .unwrap_or_default()
+        )
+    };
+    for field in ["value", "label"] {
+        if !item.contains_key(field) {
+            missing.push(at(field));
+        }
+    }
+    let Some(provenance) = item.get("provenance").and_then(Value::as_str) else {
+        // Without the tag the per-tag requirements are unknowable, so name the
+        // tag and the branch the item's own keys already suggest.
+        missing.push(at("provenance"));
+        if item.contains_key("calculation_evidence_id") {
+            missing.push(at("operation"));
+        } else if item.contains_key("method") {
+            missing.push(at("basis_evidence_ids"));
+        }
+        return;
+    };
+    match provenance {
+        "observed" => {
+            if !item.contains_key("evidence_id") {
+                missing.push(at("evidence_id"));
+            }
+        }
+        "calculated" => {
+            for field in ["calculation_evidence_id", "operation", "input_evidence_ids"] {
+                if !item.contains_key(field) {
+                    missing.push(at(field));
+                }
+            }
+        }
+        "estimated" => {
+            for field in ["method", "basis_evidence_ids"] {
+                if !item.contains_key(field) {
+                    missing.push(at(field));
+                }
+            }
+        }
+        // `user_assumption` requires nothing beyond the item itself; an unknown
+        // tag is a type error for serde to name with its path.
+        _ => {}
     }
 }
 
