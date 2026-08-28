@@ -3270,11 +3270,25 @@ struct TaskListPayload {
     limit: Option<usize>,
 }
 
+/// Decode a request payload, naming the field that failed.
+///
+/// Nested calculation ASTs are deep: a live Case C run burned six research rounds
+/// on `missing field \`window\`` with no path, so the model could not tell which
+/// of a dozen bindings was incomplete. The path is part of the diagnostic surface
+/// the same way it is for `submit_report`.
 fn decode_payload<T: serde::de::DeserializeOwned>(value: &Value) -> Result<T, ServiceError> {
-    serde_json::from_value(value.clone()).map_err(|error| {
+    let mut track = serde_path_to_error::Track::new();
+    let deserializer = serde_path_to_error::Deserializer::new(value, &mut track);
+    T::deserialize(deserializer).map_err(|error| {
+        let path = track.path().to_string();
+        let detail = if path.is_empty() {
+            error.to_string()
+        } else {
+            format!("{path}: {error}")
+        };
         ServiceError::new(
             "invalid_payload",
-            format!("invalid request payload: {error}"),
+            format!("invalid request payload: {detail}"),
             false,
         )
     })
