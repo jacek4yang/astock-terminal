@@ -222,7 +222,7 @@ fn computation_program_schema(joinquant: bool) -> Value {
                 "additionalProperties": {"type": "object"}
             }
         },
-        "description": "AST operators use an `op` discriminator. Sources: scalar{value}, var{name}. Arithmetic: add/sub/mul/div{left,right}, neg/abs{input}, clip{input,min,max}. Series: lag{input,periods}, diff/returns/log_returns/cumulative_return{input}, sma/ema/zscore/rsi{input,window}, rolling_std{input,window,annualization?}, tail{input,count}. Reductions: mean/std/sum/min/max/last/count/max_drawdown{input}, correlation{left,right}. Expressions are nested JSON objects; no code strings."
+        "description": "AST operators use an `op` discriminator and are always nested JSON objects — never a string, never a bare number. Sources: {\"op\":\"scalar\",\"value\":1.95}, {\"op\":\"var\",\"name\":\"price\"}. Arithmetic: add/sub/mul/div{left,right}, neg/abs{input}, clip{input,min,max}. Series: lag{input,periods}, diff/returns/log_returns/cumulative_return{input}, sma/ema/zscore/rsi{input,window}, rolling_std{input,window,annualization?}, tail{input,count}. Reductions: mean/std/sum/min/max/last/count/max_drawdown{input}, correlation{left,right}. Inputs are arrays of numbers (or null), never strings: {\"price\":[34.63],\"eps\":[1.95]}. Worked PE example: {\"version\":1,\"inputs\":{\"price\":[34.63],\"eps\":[1.95]},\"outputs\":{\"pe\":{\"op\":\"div\",\"left\":{\"op\":\"var\",\"name\":\"price\"},\"right\":{\"op\":\"var\",\"name\":\"eps\"}}}}. Prefer one-element scalar inputs for ratios (PE, PB, market_cap, YoY); do not paste a 250-day close series unless a rolling operator needs it."
     });
     if joinquant {
         schema["properties"]["inputs"]["description"] = json!(

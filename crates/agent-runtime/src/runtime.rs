@@ -1331,9 +1331,12 @@ impl AgentRuntime {
                     // Name the truncation explicitly: the model needs to know the
                     // payload was cut off rather than semantically wrong, so it
                     // can re-emit a smaller program instead of rewriting it.
-                    let message = format!(
-                        "arguments were not valid JSON ({error}); if the payload was truncated, \
-                         re-send a smaller argument object"
+                    let message = enrich_calculation_error(
+                        &call.name,
+                        format!(
+                            "arguments were not valid JSON ({error}); if the payload was truncated, \
+                             re-send a smaller argument object"
+                        ),
                     );
                     self.record(
                         state,
@@ -1491,6 +1494,7 @@ impl AgentRuntime {
                     completed.push(CompletedTool::success(prepared.call, value, evidence_ids));
                 }
                 Ok(Err(message)) => {
+                    let message = enrich_calculation_error(&prepared.call.name, message);
                     self.complete_effect(&prepared.effect_id, "failed", json!({"error": message}))
                         .await?;
                     self.record(
@@ -2261,6 +2265,35 @@ async fn execute_possibly_batched(
 /// Calculation programs answerable in one call.
 const MAX_BATCHED_PROGRAMS: usize = 12;
 
+/// Append a worked scalar example when a calculation payload is the wrong shape.
+///
+/// A live Case C run burned sixteen research rounds on malformed ASTs after research
+/// coverage was already complete: strings in `inputs`, bare numbers as `expr`, truncated
+/// payloads. Naming the field path (Engine) is necessary but not sufficient — the model
+/// also needs one correct shape to copy. The example is only attached to shape errors so
+/// a real compute failure (`unknown variable`, fuel exhausted) stays uncluttered.
+fn enrich_calculation_error(tool: &str, message: String) -> String {
+    if !tool.contains("calculation") {
+        return message;
+    }
+    let shape_error = message.contains("invalid type")
+        || message.contains("missing field")
+        || message.contains("unknown field")
+        || message.contains("invalid request payload")
+        || message.contains("not valid JSON");
+    if !shape_error {
+        return message;
+    }
+    format!(
+        "{message}. Copy this scalar PE shape: \
+         {{\"program\":{{\"version\":1,\"inputs\":{{\"price\":[34.63],\"eps\":[1.95]}},\
+\"outputs\":{{\"pe\":{{\"op\":\"div\",\"left\":{{\"op\":\"var\",\"name\":\"price\"}},\
+\"right\":{{\"op\":\"var\",\"name\":\"eps\"}}}}}}}}}}. \
+         Inputs are arrays of numbers (never strings); every expr is a JSON object with \
+         an `op` field (never a string or bare number)."
+    )
+}
+
 fn evidence_ids(value: &Value) -> Vec<String> {
     fn collect(value: &Value, ids: &mut BTreeSet<String>) {
         match value {
@@ -2441,6 +2474,38 @@ mod tests {
         );
         assert!(message.contains("truncated"));
         assert!(message.contains("smaller"));
+    }
+
+    /// A calculation shape error carries a worked scalar example the model can copy.
+    ///
+    /// Measured: sixteen research rounds on malformed ASTs after coverage was already
+    /// complete. Naming the field path alone left the model without a correct shape.
+    #[test]
+    fn a_calculation_shape_error_includes_a_worked_scalar_example() {
+        let enriched = enrich_calculation_error(
+            "run_financial_calculation",
+            "invalid_payload: invalid request payload: program.bindings[0].expr: invalid type: string \"2.0\", expected struct"
+                .into(),
+        );
+        assert!(
+            enriched.contains("Scalar PE shape")
+                || enriched.contains("scalar PE shape")
+                || enriched.contains("Copy this scalar PE shape"),
+            "{enriched}"
+        );
+        assert!(enriched.contains("\"op\":\"div\""), "{enriched}");
+        assert!(
+            !enrich_calculation_error(
+                "run_financial_calculation",
+                "compute: unknown calculation variable `market_cap`".into(),
+            )
+            .contains("Copy this scalar PE shape"),
+            "a real compute failure must not be cluttered with the shape example"
+        );
+        assert_eq!(
+            enrich_calculation_error("get_quote", "upstream 429".into()),
+            "upstream 429"
+        );
     }
 
     /// The context budget must stay far below the storage ceiling.
