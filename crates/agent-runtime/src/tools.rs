@@ -651,7 +651,7 @@ pub fn default_registry() -> ToolRegistry {
         // publication path: the verifier still runs and still fails closed.
         runtime_tool(
             "submit_report",
-            "Submit the final structured research draft for validation and publication. Do not write citation markup; supply canonical identifiers and the runtime renders citations. Every printed figure must be declared as a numeric_item or contained in cited evidence. Prefer referencing by label in braces anywhere in prose, so `close {close}` prints the verified value. Provenance per item: observed (evidence_id), calculated (calculation_evidence_id, operation, input_evidence_ids), user_assumption (a user-supplied scenario parameter), or estimated (method, basis_evidence_ids, ideally a range). Never estimate a quantity the Engine can compute. Prefer compute_from_evidence for PE, market_cap and YoY rather than authoring a calculation AST. Prose uses the task output_language.",
+            "Submit the final structured research draft for validation and publication. Do not write citation markup; supply canonical identifiers and the runtime renders citations. Every printed figure must be declared as a numeric_item or contained in cited evidence. Prefer `{label}` references so the runtime prints the verified value. Provenance: observed (evidence_id), calculated (calculation_evidence_id, operation, input_evidence_ids), user_assumption, or estimated (method, basis_evidence_ids). Never estimate a quantity the Engine can compute — use compute_from_evidence for PE, market_cap and YoY. Prose uses the task output_language.",
             submit_report_schema(),
         ),
     ];
