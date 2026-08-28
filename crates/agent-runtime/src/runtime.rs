@@ -1404,7 +1404,8 @@ impl AgentRuntime {
                 async move {
                     let result = tokio::time::timeout(
                         prepared.definition.timeout,
-                        executor.execute(
+                        execute_possibly_batched(
+                            executor.as_ref(),
                             &prepared.definition.engine_kind,
                             prepared.arguments.clone(),
                             cancellation,
@@ -2208,6 +2209,57 @@ impl CompletedTool {
         ))
     }
 }
+
+/// Run one Engine call, or a batch of calculation programs, as a single tool result.
+///
+/// The calculation tool has always accepted a program with many named outputs, and the
+/// model did not use it: measured live it issued 12, 13 and 24 separate calculation
+/// calls in three balanced tasks, one per figure, at one model round each. Asking it to
+/// batch in the tool description changed nothing, so the batch is now something the
+/// schema offers rather than something the prose requests.
+///
+/// Programs run sequentially and the first failure is returned, because a later program
+/// often depends on an earlier one's result being correct; reporting the first real
+/// error is more useful than a list of consequences. Each result is returned under its
+/// index so the model can attribute outputs.
+async fn execute_possibly_batched(
+    executor: &dyn ToolExecutor,
+    engine_kind: &str,
+    arguments: Value,
+    cancellation: CancellationToken,
+) -> Result<Value, String> {
+    let Some(programs) = arguments.get("programs").and_then(Value::as_array) else {
+        return executor.execute(engine_kind, arguments, cancellation).await;
+    };
+    if programs.len() > MAX_BATCHED_PROGRAMS {
+        return Err(format!(
+            "a calculation batch may contain at most {MAX_BATCHED_PROGRAMS} programs, received {}",
+            programs.len()
+        ));
+    }
+    // Everything except `programs` is shared by each call, so a batched JoinQuant
+    // calculation keeps its symbol and window.
+    let mut shared = arguments.clone();
+    if let Some(object) = shared.as_object_mut() {
+        object.remove("programs");
+    }
+    let mut results = Vec::with_capacity(programs.len());
+    for (index, program) in programs.iter().enumerate() {
+        let mut payload = shared.clone();
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("program".into(), program.clone());
+        }
+        let outcome = executor
+            .execute(engine_kind, payload, cancellation.child_token())
+            .await
+            .map_err(|error| format!("program {index}: {error}"))?;
+        results.push(outcome);
+    }
+    Ok(json!({"programs": results.len(), "results": results}))
+}
+
+/// Calculation programs answerable in one call.
+const MAX_BATCHED_PROGRAMS: usize = 12;
 
 fn evidence_ids(value: &Value) -> Vec<String> {
     fn collect(value: &Value, ids: &mut BTreeSet<String>) {

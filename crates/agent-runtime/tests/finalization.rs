@@ -1281,3 +1281,127 @@ async fn an_authentication_failure_is_terminal_rather_than_suspended() {
         .iter()
         .any(|event| matches!(event, AgentEvent::Failed { .. })));
 }
+
+// ---------------------------------------------------------------------------
+// Batched calculation
+//
+// The calculation tool always accepted a program with many named outputs and the
+// model did not use it: measured live it issued 12, 13 and 24 separate calculation
+// calls in three balanced tasks, one per figure, at one model round each. Asking it
+// to batch in prose changed nothing, so the batch is now in the schema.
+// ---------------------------------------------------------------------------
+
+/// A batch of programs is one Engine dispatch per program, one tool result.
+#[tokio::test]
+async fn a_batch_of_calculation_programs_runs_in_one_tool_call() {
+    #[derive(Clone)]
+    struct CountingEngine {
+        calls: Arc<Mutex<Vec<Value>>>,
+    }
+    #[async_trait]
+    impl ToolExecutor for CountingEngine {
+        async fn execute(
+            &self,
+            engine_kind: &str,
+            payload: Value,
+            _cancellation: CancellationToken,
+        ) -> Result<Value, String> {
+            if engine_kind == "research.agent_report_verify" {
+                return Ok(passing());
+            }
+            self.calls.lock().unwrap().push(payload.clone());
+            Ok(json!({"execution": {"outputs": {"x": {"value": 1.0}}}}))
+        }
+    }
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let engine = CountingEngine {
+        calls: calls.clone(),
+    };
+    let program = json!({
+        "version": 1,
+        "outputs": {"x": {"op": "scalar", "value": 1.0}}
+    });
+    let batch = vec![
+        Ok(ModelChunk::ToolCallDelta {
+            index: 0,
+            id: Some("call-calc".into()),
+            name: Some("run_financial_calculation".into()),
+            arguments: Some(
+                json!({"programs": [program.clone(), program.clone(), program]}).to_string(),
+            ),
+        }),
+        Ok(ModelChunk::Finished {
+            reason: Some("tool_calls".into()),
+        }),
+    ];
+    let runtime = AgentRuntime::new(
+        Arc::new(ScriptedProvider::new(vec![batch, prose_round("完成。")])),
+        Arc::new(engine),
+        Arc::new(NullStore),
+    )
+    .with_config(RuntimeConfig {
+        max_finalization_attempts: 1,
+        ..RuntimeConfig::default()
+    });
+    let mut stream = runtime.start(RuntimeTask::ask("批量计算"));
+    let mut completions = 0usize;
+    while let Some(event) = stream.recv().await {
+        if let AgentEvent::ToolCompleted { tool, .. } = &event {
+            if tool == "run_financial_calculation" {
+                completions += 1;
+            }
+        }
+    }
+    let _ = stream.finish().await;
+
+    // Three programs, three Engine dispatches, but exactly one tool call and one
+    // tool result — which is the point: three figures cost one model round.
+    assert_eq!(calls.lock().unwrap().len(), 3, "each program is dispatched");
+    assert_eq!(completions, 1, "the batch is a single tool call");
+    for payload in calls.lock().unwrap().iter() {
+        assert!(
+            payload.get("program").is_some() && payload.get("programs").is_none(),
+            "each dispatch carries one program: {payload}"
+        );
+    }
+}
+
+/// An oversized batch is refused rather than dispatched.
+#[tokio::test]
+async fn an_oversized_calculation_batch_is_refused() {
+    let program = json!({"version": 1, "outputs": {"x": {"op": "scalar", "value": 1.0}}});
+    let programs: Vec<Value> = (0..40).map(|_| program.clone()).collect();
+    let batch = vec![
+        Ok(ModelChunk::ToolCallDelta {
+            index: 0,
+            id: Some("call-calc".into()),
+            name: Some("run_financial_calculation".into()),
+            arguments: Some(json!({"programs": programs}).to_string()),
+        }),
+        Ok(ModelChunk::Finished {
+            reason: Some("tool_calls".into()),
+        }),
+    ];
+    let runtime = AgentRuntime::new(
+        Arc::new(ScriptedProvider::new(vec![batch, prose_round("完成。")])),
+        Arc::new(ScriptedEngine::new(vec![])),
+        Arc::new(NullStore),
+    )
+    .with_config(RuntimeConfig {
+        max_finalization_attempts: 1,
+        ..RuntimeConfig::default()
+    });
+    let mut stream = runtime.start(RuntimeTask::ask("批量计算"));
+    let mut refusal = None;
+    while let Some(event) = stream.recv().await {
+        if let AgentEvent::ToolFailed { tool, message, .. } = &event {
+            if tool == "run_financial_calculation" {
+                refusal = Some(message.clone());
+            }
+        }
+    }
+    let _ = stream.finish().await;
+    let refusal = refusal.expect("an oversized batch is refused");
+    assert!(refusal.contains("at most"), "{refusal}");
+}

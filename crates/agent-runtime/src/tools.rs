@@ -471,10 +471,21 @@ pub fn default_registry() -> ToolRegistry {
             "run_financial_calculation",
             "Run a bounded, reproducible, fuel-metered financial calculation AST in the Engine. One program may declare many named outputs; compute everything you need in ONE call rather than one call per figure. Supports sequential let bindings, series arithmetic, returns, moving averages, volatility, z-score, RSI, correlation, max drawdown and reductions. No code strings, files, processes, network, clock or randomness. Use this for material arithmetic instead of computing in prose.",
             "research.compute",
-            object_schema(
-                json!({"program": computation_program_schema(false)}),
-                &["program"],
-            ),
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Supply `programs` to compute several figures in one call, or `program` for one.",
+                "properties": {
+                    "program": computation_program_schema(false),
+                    "programs": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 12,
+                        "items": computation_program_schema(false),
+                        "description": "Preferred: one call, one program per figure."
+                    }
+                }
+            }),
             20,
             "deterministic_input_snapshot",
         ),
