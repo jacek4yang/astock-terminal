@@ -1167,8 +1167,9 @@ fn validate_free_text(
 ///
 /// The comparison is performed on the exact token the renderer will emit, run
 /// through the Engine's own extractor, so validation and verification cannot read
-/// the same figure differently. Evidence with no numeric value is not judged here: a
-/// claim may legitimately cite a document, a source name or a timestamp.
+/// the same figure differently. An observed quantity whose cited evidence carries
+/// no number is refused: skipping used to let a declared `24.93` cite a boolean
+/// provenance flag, pass validation, and die at the independent verifier.
 fn check_value_against_evidence(
     claim: &Claim,
     item: &NumericItem,
@@ -1181,6 +1182,19 @@ fn check_value_against_evidence(
         return;
     };
     let Some(evidence_value) = descriptor.value.as_ref().and_then(evidence_number) else {
+        // An observed quantity must cite evidence that carries a number. Citing a
+        // boolean, a document title or a timestamp as the provenance of `24.93` is
+        // exactly the validation/verification disagreement this check exists to
+        // catch: validation used to skip non-numeric evidence, the renderer printed
+        // the declared figure, and the independent verifier could not reproduce it.
+        // Live Case C run 3 died on that shape — `low_60d = 24.93` cited a quote
+        // provenance flag whose value was `false`.
+        problems.push(DraftProblem::NumberDisagreesWithEvidence {
+            claim_id: claim.id.clone(),
+            label: item.label.clone(),
+            declared: item.value,
+            evidence_id: evidence_id.to_owned(),
+        });
         return;
     };
     let token = format!("{}{}", item.value, item.unit.as_deref().unwrap_or_default());

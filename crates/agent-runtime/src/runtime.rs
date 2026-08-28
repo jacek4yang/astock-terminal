@@ -2232,8 +2232,13 @@ async fn execute_possibly_batched(
     arguments: Value,
     cancellation: CancellationToken,
 ) -> Result<Value, String> {
-    let Some(programs) = arguments.get("programs").and_then(Value::as_array) else {
+    let Some(programs) = arguments.get("programs") else {
         return executor.execute(engine_kind, arguments, cancellation).await;
+    };
+    let Some(programs) = programs.as_array() else {
+        return Err("`programs` must be a JSON array of program objects; \
+             for one program use `program` instead"
+            .into());
     };
     if programs.len() > MAX_BATCHED_PROGRAMS {
         return Err(format!(

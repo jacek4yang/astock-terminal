@@ -971,6 +971,53 @@ fn evidence_with_no_numeric_value_is_not_judged_as_a_disagreement() {
     assert!(problems.is_empty(), "{problems:?}");
 }
 
+/// An observed quantity whose own evidence carries no number is refused.
+///
+/// Companion citations (a timestamp next to a price) remain fine: the numeric item
+/// still points at evidence that holds the number. What is refused is inventing a
+/// figure and hanging it on a boolean provenance flag — live Case C run 3 printed
+/// `low_60d = 24.93` from an evidence id whose value was `false`, passed validation,
+/// and died at the independent verifier.
+#[test]
+fn an_observed_number_cannot_cite_non_numeric_evidence() {
+    let mut map = registry();
+    let mut flag = observed(
+        "evf_stale",
+        "tencent",
+        "/quote/field_provenance/change/stale",
+        0.0,
+    );
+    flag.value = Some(json!(false));
+    map.insert("evf_stale".into(), flag);
+    let draft = one_claim_draft(observed_claim(
+        "期间最低价见下方数值。",
+        vec![NumericItem {
+            value: 24.93,
+            unit: Some("元".to_owned()),
+            label: "low_60d".to_owned(),
+            provenance: NumericProvenance::Observed {
+                evidence_id: "evf_stale".to_owned(),
+                field: None,
+            },
+        }],
+        vec!["evf_stale"],
+    ));
+    let problems = validate_draft(&draft, &map, &BTreeSet::new());
+    assert!(
+        problems.iter().any(|problem| {
+            matches!(
+                problem,
+                DraftProblem::NumberDisagreesWithEvidence {
+                    evidence_id,
+                    declared,
+                    ..
+                } if evidence_id == "evf_stale" && (*declared - 24.93).abs() < f64::EPSILON
+            )
+        }),
+        "expected number_disagrees_with_evidence, got {problems:?}"
+    );
+}
+
 /// A calculation claim may state the observed inputs it was computed from.
 ///
 /// Refusing them forced a claim like "市盈率 = 最新价 ÷ 每股收益" to be split across
