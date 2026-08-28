@@ -23,7 +23,10 @@ mod session;
 mod store;
 mod tools;
 
-pub use catalog::{EvidenceCatalog, EvidenceQuery, MAX_CATALOG_ENTRIES, MAX_SEARCH_RESULTS};
+pub use catalog::{
+    EvidenceCatalog, EvidenceQuery, EvidenceSearchRequest, MAX_BATCH_QUERIES, MAX_CATALOG_ENTRIES,
+    MAX_SEARCH_RESULTS,
+};
 pub use clarify::{ClarificationAnswer, ClarificationOption, ClarificationRequest};
 pub use engine::EngineGateway;
 pub use error::{ProviderError, ProviderErrorKind, RuntimeError};

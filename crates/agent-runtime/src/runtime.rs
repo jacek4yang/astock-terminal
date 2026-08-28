@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use astock_protocol::TaskSpec;
 
-use crate::catalog::{EvidenceCatalog, EvidenceQuery};
+use crate::catalog::{EvidenceCatalog, EvidenceSearchRequest};
 use crate::error::{ProviderErrorKind, RuntimeError};
 use crate::events::{AgentEvent, AgentPhase, VerificationFinding};
 use crate::finalize::{
@@ -1536,15 +1536,17 @@ impl AgentRuntime {
             self.ensure_active(state)?;
             let completed = match prepared.definition.name.as_str() {
                 "search_evidence" => {
-                    let response =
-                        match serde_json::from_value::<EvidenceQuery>(prepared.arguments.clone()) {
-                            Ok(query) => state.catalog.search(&query),
-                            Err(error) => json!({
-                                "ok": false,
-                                "error": error.to_string(),
-                                "instruction": "Correct the search arguments and try again.",
-                            }),
-                        };
+                    let response = match serde_json::from_value::<EvidenceSearchRequest>(
+                        prepared.arguments.clone(),
+                    ) {
+                        Ok(request) => state.catalog.search_batch(&request.queries()),
+                        Err(error) => json!({
+                            "ok": false,
+                            "error": error.to_string(),
+                            "instruction": "Correct the search arguments and try again. Prefer \
+                                            the batch form: {\"queries\": [{…}, {…}]}.",
+                        }),
+                    };
                     self.complete_effect(&prepared.effect_id, "succeeded", response.clone())
                         .await?;
                     self.record(

@@ -144,6 +144,47 @@ fn runtime_tool(name: &str, description: &str, input_schema: Value) -> ToolDefin
     }
 }
 
+/// One or many queries in a single call.
+///
+/// A moderate report declares ten to twenty figures and each needs an identifier. With
+/// one question per call the model spent one model round per figure — a live balanced
+/// task issued 42 distinct searches and never reached a publishable report. The single
+/// form stays accepted so nothing that already works breaks.
+fn evidence_search_schema() -> Value {
+    let query = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "symbol": {"type": "string", "pattern": "^[0-9]{6}$"},
+            "source": {"type": "string", "maxLength": 40},
+            "field": {"type": "string", "maxLength": 120},
+            "keyword": {"type": "string", "maxLength": 80},
+            "only_calculations": {"type": "boolean"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50}
+        }
+    });
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Prefer the batch form: one call, one entry per figure you need an identifier for.",
+        "properties": {
+            "queries": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": crate::catalog::MAX_BATCH_QUERIES,
+                "items": query.clone(),
+                "description": "Answer many lookups in one round."
+            },
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            "symbol": query["properties"]["symbol"].clone(),
+            "source": query["properties"]["source"].clone(),
+            "field": query["properties"]["field"].clone(),
+            "keyword": query["properties"]["keyword"].clone(),
+            "only_calculations": query["properties"]["only_calculations"].clone()
+        }
+    })
+}
+
 fn computation_program_schema(joinquant: bool) -> Value {
     let mut schema = json!({
         "type": "object",
@@ -428,7 +469,7 @@ pub fn default_registry() -> ToolRegistry {
         ),
         read_tool(
             "run_financial_calculation",
-            "Run a bounded, reproducible, fuel-metered financial calculation AST in the Engine. Supports sequential let bindings, series arithmetic, returns, moving averages, volatility, z-score, RSI, correlation, max drawdown and reductions. No code strings, files, processes, network, clock or randomness. Use this for material arithmetic instead of computing in prose.",
+            "Run a bounded, reproducible, fuel-metered financial calculation AST in the Engine. One program may declare many named outputs; compute everything you need in ONE call rather than one call per figure. Supports sequential let bindings, series arithmetic, returns, moving averages, volatility, z-score, RSI, correlation, max drawdown and reductions. No code strings, files, processes, network, clock or randomness. Use this for material arithmetic instead of computing in prose.",
             "research.compute",
             object_schema(
                 json!({"program": computation_program_schema(false)}),
@@ -540,18 +581,8 @@ pub fn default_registry() -> ToolRegistry {
         // state. Read-only over Runtime state, so it costs no upstream call.
         runtime_tool(
             "search_evidence",
-            "Search this task's bounded evidence catalog for canonical evidence identifiers, with source, time, unit and quality state. Use before finalization whenever a claim needs provenance. Never invent an identifier.",
-            object_schema(
-                json!({
-                    "symbol": {"type": "string", "pattern": "^[0-9]{6}$"},
-                    "source": {"type": "string", "maxLength": 40},
-                    "field": {"type": "string", "maxLength": 120},
-                    "keyword": {"type": "string", "maxLength": 80},
-                    "only_calculations": {"type": "boolean"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 50}
-                }),
-                &["limit"],
-            ),
+            "Search this task's bounded evidence catalog for canonical evidence identifiers, with source, time, unit and quality state. Ask for everything you need in ONE call: pass `queries` as a list, one entry per figure you intend to cite. Use before finalization whenever a claim needs provenance. Never invent an identifier.",
+            evidence_search_schema(),
         ),
         // Structured finalization.
         //
