@@ -1306,6 +1306,35 @@ impl AgentRuntime {
                 }
             };
 
+            // Calculation tools withdrawn after consecutive shape failures must not
+            // run even if the provider still forwards a call for a tool that was
+            // removed from the offer. Live Case C run 5 withdrew at round 7, then
+            // the model called run_financial_calculation again at rounds 11 and 14
+            // and each call was still executed. Omitting from the offer is not
+            // enough when the provider does not enforce the list.
+            if state.calc_shape_failures >= MAX_CALC_SHAPE_FAILURES
+                && call.name.contains("calculation")
+            {
+                let message = format!(
+                    "calculation tools are withdrawn after {MAX_CALC_SHAPE_FAILURES} consecutive \
+                     shape failures; `{name}` was not executed. Cite observed evidence or declare \
+                     remaining figures as estimated, then submit_report.",
+                    name = call.name
+                );
+                self.record(
+                    state,
+                    AgentEvent::ToolFailed {
+                        call_id: call.id.clone(),
+                        tool: call.name.clone(),
+                        message: message.clone(),
+                        retryable: false,
+                    },
+                )
+                .await?;
+                rejected.push(CompletedTool::failure(call, message));
+                continue;
+            }
+
             // Malformed arguments on a *registered* tool are different: the model
             // asked for something it is permitted to ask for and mis-encoded it.
             // That is one bad call, not a reason to destroy a task that has

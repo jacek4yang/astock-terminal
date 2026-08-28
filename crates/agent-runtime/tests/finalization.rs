@@ -1414,29 +1414,6 @@ async fn an_oversized_calculation_batch_is_refused() {
 /// the tools are gone and the model must finalize with what it has.
 #[tokio::test]
 async fn calculation_tools_are_withdrawn_after_consecutive_shape_failures() {
-    #[derive(Clone)]
-    struct ShapeFailingEngine;
-    #[async_trait]
-    impl ToolExecutor for ShapeFailingEngine {
-        async fn execute(
-            &self,
-            engine_kind: &str,
-            _payload: Value,
-            _cancellation: CancellationToken,
-        ) -> Result<Value, String> {
-            match engine_kind {
-                "market.quote" => Ok(quote_result()),
-                "research.compute" => Err(
-                    "invalid_payload: invalid request payload: program.bindings[0].expr: \
-                     invalid type: string \"2.0\", expected struct"
-                        .into(),
-                ),
-                "research.agent_report_verify" => Ok(passing()),
-                other => Err(format!("unexpected Engine operation: {other}")),
-            }
-        }
-    }
-
     fn calc_round(id: &str) -> Turn {
         vec![
             Ok(ModelChunk::ToolCallDelta {
@@ -1454,16 +1431,48 @@ async fn calculation_tools_are_withdrawn_after_consecutive_shape_failures() {
         ]
     }
 
+    #[derive(Clone)]
+    struct CountingFailEngine {
+        compute_calls: Arc<Mutex<usize>>,
+    }
+    #[async_trait]
+    impl ToolExecutor for CountingFailEngine {
+        async fn execute(
+            &self,
+            engine_kind: &str,
+            _payload: Value,
+            _cancellation: CancellationToken,
+        ) -> Result<Value, String> {
+            match engine_kind {
+                "market.quote" => Ok(quote_result()),
+                "research.compute" => {
+                    *self.compute_calls.lock().unwrap() += 1;
+                    Err(
+                        "invalid_payload: invalid request payload: program.bindings[0].expr:                          invalid type: string \"2.0\", expected struct"
+                            .into(),
+                    )
+                }
+                "research.agent_report_verify" => Ok(passing()),
+                other => Err(format!("unexpected Engine operation: {other}")),
+            }
+        }
+    }
+
+    let compute_calls = Arc::new(Mutex::new(0usize));
     let provider = ScriptedProvider::new(vec![
         calc_round("c1"),
         calc_round("c2"),
         calc_round("c3"),
+        // Provider may still forward a calc call even after the offer omits it.
+        calc_round("c4-should-be-refused"),
         submit_round("s1", valid_draft()),
     ]);
     let offered = provider.offered_tool_names.clone();
     let runtime = AgentRuntime::new(
         Arc::new(provider),
-        Arc::new(ShapeFailingEngine),
+        Arc::new(CountingFailEngine {
+            compute_calls: compute_calls.clone(),
+        }),
         Arc::new(NullStore),
     );
     let mut task = RuntimeTask::ask("紫金矿业估值");
@@ -1492,9 +1501,9 @@ async fn calculation_tools_are_withdrawn_after_consecutive_shape_failures() {
         "after three shape failures calculation must be withdrawn: {:?}",
         rounds[3]
     );
-    assert!(
-        rounds[3].iter().any(|name| name == "submit_report"),
-        "submit_report must remain: {:?}",
-        rounds[3]
+    assert_eq!(
+        *compute_calls.lock().unwrap(),
+        3,
+        "a calc call after withdrawal must not reach the Engine"
     );
 }
