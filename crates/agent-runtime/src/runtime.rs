@@ -972,8 +972,8 @@ impl AgentRuntime {
                     messages.push(Message::text(
                         MessageRole::System,
                         "The research budget for this task is spent, so the retrieval tools have \
-                         been withdrawn. Only search_evidence, run_financial_calculation and \
-                         submit_report remain. Finalize with the evidence already gathered and \
+                         been withdrawn. Only search_evidence, compute_from_evidence, run_financial_calculation and \
+                         submit_report remain. Prefer compute_from_evidence for ratios. Finalize with the evidence already gathered and \
                          state remaining gaps as limitations or as claims of kind=unknown rather \
                          than asserting them.",
                     ));
@@ -1256,6 +1256,85 @@ impl AgentRuntime {
         }
     }
 
+    /// Compute ratios/products from catalog evidence without asking the model for an AST.
+    ///
+    /// Live Case C burned research rounds on malformed `run_financial_calculation`
+    /// programs after coverage was already complete. This path looks up operand
+    /// values in the catalog (or accepts a scalar), builds a one-output Program, and
+    /// dispatches it to the Engine so evidence registration stays the Engine's job.
+    async fn compute_from_evidence(
+        &self,
+        task: &RuntimeTask,
+        state: &RunState,
+        arguments: Value,
+    ) -> Result<Value, String> {
+        let calculations = arguments
+            .get("calculations")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "missing calculations array".to_owned())?;
+        if calculations.is_empty() || calculations.len() > MAX_BATCHED_PROGRAMS {
+            return Err(format!(
+                "calculations must contain 1 to {MAX_BATCHED_PROGRAMS} entries"
+            ));
+        }
+        let mut results = Vec::with_capacity(calculations.len());
+        for (index, calc) in calculations.iter().enumerate() {
+            let label = calc
+                .get("label")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("calculations[{index}]: missing label"))?;
+            let op = calc
+                .get("op")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("calculations[{index}]: missing op"))?;
+            if !matches!(op, "div" | "mul" | "add" | "sub") {
+                return Err(format!(
+                    "calculations[{index}]: op must be div, mul, add or sub"
+                ));
+            }
+            let (left_value, left_id) =
+                resolve_compute_operand(state, calc.get("left"), index, "left")?;
+            let (right_value, right_id) =
+                resolve_compute_operand(state, calc.get("right"), index, "right")?;
+            let program = json!({
+                "version": 1,
+                "inputs": {
+                    "left": [left_value],
+                    "right": [right_value]
+                },
+                "outputs": {
+                    label: {
+                        "op": op,
+                        "left": {"op": "var", "name": "left"},
+                        "right": {"op": "var", "name": "right"}
+                    }
+                }
+            });
+            let outcome = self
+                .executor
+                .execute(
+                    "research.compute",
+                    json!({"program": program}),
+                    state.cancellation.child_token(),
+                )
+                .await
+                .map_err(|error| format!("calculations[{index}] ({label}): {error}"))?;
+            results.push(json!({
+                "label": label,
+                "op": op,
+                "left_evidence_id": left_id,
+                "right_evidence_id": right_id,
+                "result": outcome
+            }));
+        }
+        Ok(json!({
+            "ok": true,
+            "symbol": task.symbol,
+            "calculations": results.len(),
+            "results": results
+        }))
+    }
+
     async fn execute_tools(
         &self,
         task: &RuntimeTask,
@@ -1317,8 +1396,7 @@ impl AgentRuntime {
             {
                 let message = format!(
                     "calculation tools are withdrawn after {MAX_CALC_SHAPE_FAILURES} consecutive \
-                     shape failures; `{name}` was not executed. Cite observed evidence or declare \
-                     remaining figures as estimated, then submit_report.",
+                     shape failures; `{name}` was not executed. Use compute_from_evidence for PE/market_cap/YoY (no AST), or cite observed evidence, then submit_report.",
                     name = call.name
                 );
                 self.record(
@@ -1380,8 +1458,8 @@ impl AgentRuntime {
                             message = format!(
                                 "{message} Calculation tools are now withdrawn after \
                                  {MAX_CALC_SHAPE_FAILURES} consecutive shape failures. \
-                                 Cite observed evidence or declare remaining figures as \
-                                 estimated, then submit_report — do not keep rewriting the AST."
+                                 Use compute_from_evidence for PE/market_cap/YoY (no AST), or cite observed \
+                                 evidence, then submit_report — do not keep rewriting the AST."
                             );
                         }
                     }
@@ -1551,8 +1629,8 @@ impl AgentRuntime {
                             message = format!(
                                 "{message} Calculation tools are now withdrawn after \
                                  {MAX_CALC_SHAPE_FAILURES} consecutive shape failures. \
-                                 Cite observed evidence or declare remaining figures as \
-                                 estimated, then submit_report — do not keep rewriting the AST."
+                                 Use compute_from_evidence for PE/market_cap/YoY (no AST), or cite observed \
+                                 evidence, then submit_report — do not keep rewriting the AST."
                             );
                         }
                     }
@@ -1625,6 +1703,55 @@ impl AgentRuntime {
                     )
                     .await?;
                     CompletedTool::runtime(prepared.call, response)
+                }
+                "compute_from_evidence" => {
+                    match self
+                        .compute_from_evidence(task, state, prepared.arguments.clone())
+                        .await
+                    {
+                        Ok(value) => {
+                            let evidence = evidence_ids(&value);
+                            state.catalog.ingest(&value, task.symbol.as_deref());
+                            state.evidence_ids.extend(evidence.iter().cloned());
+                            state.evidence_ids.sort();
+                            state.evidence_ids.dedup();
+                            self.complete_effect(&prepared.effect_id, "succeeded", value.clone())
+                                .await?;
+                            self.record(
+                                state,
+                                AgentEvent::ToolCompleted {
+                                    call_id: prepared.call.id.clone(),
+                                    tool: prepared.call.name.clone(),
+                                    evidence_ids: evidence.clone(),
+                                },
+                            )
+                            .await?;
+                            CompletedTool::runtime(prepared.call, value)
+                        }
+                        Err(error) => {
+                            let response = json!({
+                                "ok": false,
+                                "error": error,
+                                "instruction": "Each calculation needs label, op (div|mul|add|sub), \
+                                                 and left/right as {\"evidence_id\":\"evf_…\"} or \
+                                                 {\"value\":34.63}. Look up identifiers with \
+                                                 search_evidence first."
+                            });
+                            self.complete_effect(&prepared.effect_id, "failed", response.clone())
+                                .await?;
+                            self.record(
+                                state,
+                                AgentEvent::ToolFailed {
+                                    call_id: prepared.call.id.clone(),
+                                    tool: prepared.call.name.clone(),
+                                    message: error.clone(),
+                                    retryable: true,
+                                },
+                            )
+                            .await?;
+                            CompletedTool::runtime(prepared.call, response)
+                        }
+                    }
                 }
                 "submit_report" => {
                     let outcome = self
@@ -2388,6 +2515,41 @@ fn is_calculation_shape_error(tool: &str, message: &str) -> bool {
             || message.contains("not valid JSON")
             || message.contains("must be a JSON array")
             || message.contains("Copy this scalar PE shape"))
+}
+
+/// Resolve one operand of `compute_from_evidence` to a numeric value.
+fn resolve_compute_operand(
+    state: &RunState,
+    operand: Option<&Value>,
+    index: usize,
+    side: &str,
+) -> Result<(f64, Option<String>), String> {
+    let Some(operand) = operand.and_then(Value::as_object) else {
+        return Err(format!("calculations[{index}]: missing {side} operand"));
+    };
+    if let Some(value) = operand.get("value").and_then(Value::as_f64) {
+        return Ok((value, None));
+    }
+    let Some(evidence_id) = operand.get("evidence_id").and_then(Value::as_str) else {
+        return Err(format!(
+            "calculations[{index}].{side}: provide evidence_id or value"
+        ));
+    };
+    let Some(descriptor) = state.catalog.descriptors().get(evidence_id) else {
+        return Err(format!(
+            "calculations[{index}].{side}: unknown evidence_id `{evidence_id}`; search_evidence first"
+        ));
+    };
+    let Some(value) = descriptor.value.as_ref().and_then(|raw| match raw {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.replace(',', "").parse::<f64>().ok(),
+        _ => None,
+    }) else {
+        return Err(format!(
+            "calculations[{index}].{side}: evidence `{evidence_id}` has no numeric value"
+        ));
+    };
+    Ok((value, Some(evidence_id.to_owned())))
 }
 
 fn evidence_ids(value: &Value) -> Vec<String> {

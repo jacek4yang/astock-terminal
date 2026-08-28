@@ -1153,6 +1153,7 @@ async fn retrieval_tools_are_withdrawn_once_the_research_budget_is_spent() {
     // Finalization still needs identifiers and deterministic arithmetic.
     for required in [
         "search_evidence",
+        "compute_from_evidence",
         "submit_report",
         "run_financial_calculation",
     ] {
@@ -1505,5 +1506,120 @@ async fn calculation_tools_are_withdrawn_after_consecutive_shape_failures() {
         *compute_calls.lock().unwrap(),
         3,
         "a calc call after withdrawal must not reach the Engine"
+    );
+}
+
+/// compute_from_evidence builds the AST itself and registers Engine evidence.
+#[tokio::test]
+async fn compute_from_evidence_dispatches_a_program_built_by_the_runtime() {
+    #[derive(Clone)]
+    struct CaptureEngine {
+        payloads: Arc<Mutex<Vec<Value>>>,
+    }
+    #[async_trait]
+    impl ToolExecutor for CaptureEngine {
+        async fn execute(
+            &self,
+            engine_kind: &str,
+            payload: Value,
+            _cancellation: CancellationToken,
+        ) -> Result<Value, String> {
+            match engine_kind {
+                "market.quote" => Ok(quote_result()),
+                "research.compute" => {
+                    self.payloads.lock().unwrap().push(payload.clone());
+                    Ok(json!({
+                        "source": "astock-compute",
+                        "execution": {"outputs": {"pe": {"kind": "scalar", "value": 28.49}}},
+                        "evidence_registry": {"facts": [{
+                            "evidence_id": "evf_pe_calc",
+                            "path": "/value",
+                            "value": 28.49,
+                            "source": "astock-compute",
+                            "source_version_id": "calc-v1",
+                            "quality_blocking": false
+                        }]}
+                    }))
+                }
+                "research.agent_report_verify" => Ok(passing()),
+                other => Err(format!("unexpected: {other}")),
+            }
+        }
+    }
+
+    let payloads = Arc::new(Mutex::new(Vec::new()));
+    let compute = vec![
+        Ok(ModelChunk::ToolCallDelta {
+            index: 0,
+            id: Some("call-quote".into()),
+            name: Some("get_quote".into()),
+            arguments: Some(json!({"symbol": "601899"}).to_string()),
+        }),
+        Ok(ModelChunk::Finished {
+            reason: Some("tool_calls".into()),
+        }),
+    ];
+    let ratio = vec![
+        Ok(ModelChunk::ToolCallDelta {
+            index: 0,
+            id: Some("call-ratio".into()),
+            name: Some("compute_from_evidence".into()),
+            arguments: Some(
+                json!({
+                    "calculations": [{
+                        "label": "pe",
+                        "op": "div",
+                        "left": {"evidence_id": "evf_price"},
+                        "right": {"value": 0.755}
+                    }]
+                })
+                .to_string(),
+            ),
+        }),
+        Ok(ModelChunk::Finished {
+            reason: Some("tool_calls".into()),
+        }),
+    ];
+    let runtime = AgentRuntime::new(
+        Arc::new(ScriptedProvider::new(vec![
+            compute,
+            ratio,
+            prose_round("完成。"),
+        ])),
+        Arc::new(CaptureEngine {
+            payloads: payloads.clone(),
+        }),
+        Arc::new(NullStore),
+    );
+    let mut task = RuntimeTask::ask("算一下市盈率");
+    task.symbol = Some("601899".into());
+    let mut stream = runtime.start(task);
+    let mut saw = false;
+    while let Some(event) = stream.recv().await {
+        if let AgentEvent::ToolCompleted {
+            tool, evidence_ids, ..
+        } = &event
+        {
+            if tool == "compute_from_evidence" {
+                saw = true;
+                assert!(
+                    evidence_ids.iter().any(|id| id == "evf_pe_calc"),
+                    "calculation evidence must be recorded: {evidence_ids:?}"
+                );
+            }
+        }
+    }
+    let _ = stream.finish().await;
+    assert!(saw, "compute_from_evidence must complete");
+    let captured = payloads.lock().unwrap().clone();
+    assert_eq!(captured.len(), 1, "one Engine compute dispatch");
+    let program = &captured[0]["program"];
+    assert_eq!(program["version"], json!(1));
+    assert_eq!(program["inputs"]["left"], json!([21.5]));
+    assert_eq!(program["inputs"]["right"], json!([0.755]));
+    assert_eq!(
+        program["outputs"]["pe"]["op"],
+        json!("div"),
+        "the Runtime authored the AST, not the model"
     );
 }

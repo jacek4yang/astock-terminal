@@ -595,6 +595,53 @@ pub fn default_registry() -> ToolRegistry {
             "Search this task's bounded evidence catalog for canonical evidence identifiers, with source, time, unit and quality state. Ask for everything you need in ONE call: pass `queries` as a list, one entry per figure you intend to cite. Use before finalization whenever a claim needs provenance. Never invent an identifier.",
             evidence_search_schema(),
         ),
+        // Foolproof arithmetic over already-gathered evidence.
+        //
+        // Live Case C runs burned up to sixteen rounds on malformed calculation
+        // ASTs after coverage was complete. This tool never asks the model to
+        // author an AST: it names an op and two operands (evidence ids or
+        // scalars), and the Runtime builds the program and dispatches it.
+        runtime_tool(
+            "compute_from_evidence",
+            "Compute a ratio or product from evidence already in this task's catalog, or from a scalar. Preferred for PE, PB, market_cap, YoY and similar figures. Pass every figure you need in ONE call via `calculations`. Do not author a calculation AST — name the op and the operands. Operands are either {\"evidence_id\":\"evf_…\"} or {\"value\":34.63}. Ops: div, mul, add, sub.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["calculations"],
+                "properties": {
+                    "calculations": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 12,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["label", "op", "left", "right"],
+                            "properties": {
+                                "label": {"type": "string", "maxLength": 80},
+                                "op": {"type": "string", "enum": ["div", "mul", "add", "sub"]},
+                                "left": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "properties": {
+                                        "evidence_id": {"type": "string", "pattern": "^evf_[A-Za-z0-9_]+$", "maxLength": 80},
+                                        "value": {"type": "number"}
+                                    }
+                                },
+                                "right": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "properties": {
+                                        "evidence_id": {"type": "string", "pattern": "^evf_[A-Za-z0-9_]+$", "maxLength": 80},
+                                        "value": {"type": "number"}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }),
+        ),
         // Structured finalization.
         //
         // Replaces "write Markdown and hope the verifier can reconstruct it".
@@ -604,7 +651,7 @@ pub fn default_registry() -> ToolRegistry {
         // publication path: the verifier still runs and still fails closed.
         runtime_tool(
             "submit_report",
-            "Submit the final structured research draft for validation and publication. Do not write citation markup; supply canonical identifiers and the runtime renders citations. Every printed figure must be declared as a numeric_item or contained in cited evidence. Prefer referencing by label in braces anywhere in prose, so `close {close}` prints the verified value. Provenance per item: observed (evidence_id), calculated (calculation_evidence_id, operation, input_evidence_ids), user_assumption (a user-supplied scenario parameter), or estimated (method, basis_evidence_ids, ideally a range). Never estimate a quantity the Engine can compute. Prose uses the task output_language.",
+            "Submit the final structured research draft for validation and publication. Do not write citation markup; supply canonical identifiers and the runtime renders citations. Every printed figure must be declared as a numeric_item or contained in cited evidence. Prefer referencing by label in braces anywhere in prose, so `close {close}` prints the verified value. Provenance per item: observed (evidence_id), calculated (calculation_evidence_id, operation, input_evidence_ids), user_assumption (a user-supplied scenario parameter), or estimated (method, basis_evidence_ids, ideally a range). Never estimate a quantity the Engine can compute. Prefer compute_from_evidence for PE, market_cap and YoY rather than authoring a calculation AST. Prose uses the task output_language.",
             submit_report_schema(),
         ),
     ];
