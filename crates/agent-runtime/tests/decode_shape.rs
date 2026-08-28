@@ -145,4 +145,3 @@ fn a_complete_draft_still_decodes() {
     });
     decode_draft(&arguments).expect("a complete draft decodes");
 }
-
