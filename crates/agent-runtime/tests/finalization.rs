@@ -1405,3 +1405,96 @@ async fn an_oversized_calculation_batch_is_refused() {
     let refusal = refusal.expect("an oversized batch is refused");
     assert!(refusal.contains("at most"), "{refusal}");
 }
+
+/// Calculation tools are withdrawn after consecutive shape failures.
+///
+/// A budget the model can decline is not a budget: live Case C runs burned 16
+/// rounds on malformed ASTs after coverage was already complete. Three shape
+/// failures is enough to deliver the worked example twice; on the fourth round
+/// the tools are gone and the model must finalize with what it has.
+#[tokio::test]
+async fn calculation_tools_are_withdrawn_after_consecutive_shape_failures() {
+    #[derive(Clone)]
+    struct ShapeFailingEngine;
+    #[async_trait]
+    impl ToolExecutor for ShapeFailingEngine {
+        async fn execute(
+            &self,
+            engine_kind: &str,
+            _payload: Value,
+            _cancellation: CancellationToken,
+        ) -> Result<Value, String> {
+            match engine_kind {
+                "market.quote" => Ok(quote_result()),
+                "research.compute" => Err(
+                    "invalid_payload: invalid request payload: program.bindings[0].expr: \
+                     invalid type: string \"2.0\", expected struct"
+                        .into(),
+                ),
+                "research.agent_report_verify" => Ok(passing()),
+                other => Err(format!("unexpected Engine operation: {other}")),
+            }
+        }
+    }
+
+    fn calc_round(id: &str) -> Turn {
+        vec![
+            Ok(ModelChunk::ToolCallDelta {
+                index: 0,
+                id: Some(id.to_owned()),
+                name: Some("run_financial_calculation".into()),
+                arguments: Some(
+                    json!({"program": {"version": 1, "outputs": {"x": {"op": "scalar", "value": 1}}}})
+                        .to_string(),
+                ),
+            }),
+            Ok(ModelChunk::Finished {
+                reason: Some("tool_calls".into()),
+            }),
+        ]
+    }
+
+    let provider = ScriptedProvider::new(vec![
+        calc_round("c1"),
+        calc_round("c2"),
+        calc_round("c3"),
+        submit_round("s1", valid_draft()),
+    ]);
+    let offered = provider.offered_tool_names.clone();
+    let runtime = AgentRuntime::new(
+        Arc::new(provider),
+        Arc::new(ShapeFailingEngine),
+        Arc::new(NullStore),
+    );
+    let mut task = RuntimeTask::ask("紫金矿业估值");
+    task.symbol = Some("601899".into());
+    let mut stream = runtime.start(task);
+    while stream.recv().await.is_some() {}
+    let _ = stream.finish().await;
+
+    let rounds = offered.lock().unwrap().clone();
+    assert!(
+        rounds.len() >= 4,
+        "expected at least four model rounds, got {}",
+        rounds.len()
+    );
+    assert!(
+        rounds[0]
+            .iter()
+            .any(|name| name == "run_financial_calculation"),
+        "first round offers calculation: {:?}",
+        rounds[0]
+    );
+    assert!(
+        !rounds[3]
+            .iter()
+            .any(|name| name == "run_financial_calculation"),
+        "after three shape failures calculation must be withdrawn: {:?}",
+        rounds[3]
+    );
+    assert!(
+        rounds[3].iter().any(|name| name == "submit_report"),
+        "submit_report must remain: {:?}",
+        rounds[3]
+    );
+}

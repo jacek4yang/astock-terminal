@@ -641,14 +641,21 @@ impl AgentRuntime {
                     .config
                     .max_research_rounds
                     .min(self.config.max_model_rounds);
+            let calc_withdrawn = state.calc_shape_failures >= MAX_CALC_SHAPE_FAILURES;
             let offered_tools = if finalization_only {
                 self.tools
                     .definitions()
                     .into_iter()
                     .filter(|tool| {
                         tool.handler == ToolHandler::Runtime
-                            || tool.name == "run_financial_calculation"
+                            || (!calc_withdrawn && tool.name == "run_financial_calculation")
                     })
+                    .collect()
+            } else if calc_withdrawn {
+                self.tools
+                    .definitions()
+                    .into_iter()
+                    .filter(|tool| !tool.name.contains("calculation"))
                     .collect()
             } else {
                 self.tools.definitions()
@@ -1331,13 +1338,24 @@ impl AgentRuntime {
                     // Name the truncation explicitly: the model needs to know the
                     // payload was cut off rather than semantically wrong, so it
                     // can re-emit a smaller program instead of rewriting it.
-                    let message = enrich_calculation_error(
+                    let mut message = enrich_calculation_error(
                         &call.name,
                         format!(
                             "arguments were not valid JSON ({error}); if the payload was truncated, \
                              re-send a smaller argument object"
                         ),
                     );
+                    if is_calculation_shape_error(&call.name, &message) {
+                        state.calc_shape_failures = state.calc_shape_failures.saturating_add(1);
+                        if state.calc_shape_failures >= MAX_CALC_SHAPE_FAILURES {
+                            message = format!(
+                                "{message} Calculation tools are now withdrawn after \
+                                 {MAX_CALC_SHAPE_FAILURES} consecutive shape failures. \
+                                 Cite observed evidence or declare remaining figures as \
+                                 estimated, then submit_report — do not keep rewriting the AST."
+                            );
+                        }
+                    }
                     self.record(
                         state,
                         AgentEvent::ToolFailed {
@@ -1427,6 +1445,9 @@ impl AgentRuntime {
             self.ensure_active(state)?;
             match result {
                 Ok(Ok(value)) => {
+                    if prepared.call.name.contains("calculation") {
+                        state.calc_shape_failures = 0;
+                    }
                     let encoded = serde_json::to_vec(&value)?;
                     if encoded.len() > self.config.max_tool_result_bytes {
                         let message = RuntimeError::ToolResultTooLarge {
@@ -1494,7 +1515,18 @@ impl AgentRuntime {
                     completed.push(CompletedTool::success(prepared.call, value, evidence_ids));
                 }
                 Ok(Err(message)) => {
-                    let message = enrich_calculation_error(&prepared.call.name, message);
+                    let mut message = enrich_calculation_error(&prepared.call.name, message);
+                    if is_calculation_shape_error(&prepared.call.name, &message) {
+                        state.calc_shape_failures = state.calc_shape_failures.saturating_add(1);
+                        if state.calc_shape_failures >= MAX_CALC_SHAPE_FAILURES {
+                            message = format!(
+                                "{message} Calculation tools are now withdrawn after \
+                                 {MAX_CALC_SHAPE_FAILURES} consecutive shape failures. \
+                                 Cite observed evidence or declare remaining figures as \
+                                 estimated, then submit_report — do not keep rewriting the AST."
+                            );
+                        }
+                    }
                     self.complete_effect(&prepared.effect_id, "failed", json!({"error": message}))
                         .await?;
                     self.record(
@@ -1948,6 +1980,16 @@ struct RunState {
     evidence_ids: Vec<String>,
     /// Calls to tools that do not exist, refused so far.
     unknown_tool_calls: usize,
+    /// Consecutive calculation shape failures in this task.
+    ///
+    /// A live Case C run finished research coverage in four rounds, then burned
+    /// sixteen more on malformed ASTs (strings in inputs, bare numbers as expr,
+    /// truncated payloads). The worked example helps intermittently; a model that
+    /// keeps thrashing simply declines it. After
+    /// [`MAX_CALC_SHAPE_FAILURES`] consecutive shape failures the calculation
+    /// tools are withdrawn, the same way retrieval tools are withdrawn when the
+    /// research budget is spent — a budget the model can decline is not a budget.
+    calc_shape_failures: usize,
     /// Canonical evidence the task has seen, with the metadata a citation needs.
     ///
     /// Durable task state, not model context: the model reaches it only through
@@ -1973,6 +2015,7 @@ impl RunState {
             completed_tool_ids: Vec::new(),
             evidence_ids: Vec::new(),
             unknown_tool_calls: 0,
+            calc_shape_failures: 0,
             catalog: EvidenceCatalog::default(),
             finalization: FinalizationLedger::new(max_finalization_attempts),
             sender,
@@ -2270,6 +2313,13 @@ async fn execute_possibly_batched(
 /// Calculation programs answerable in one call.
 const MAX_BATCHED_PROGRAMS: usize = 12;
 
+/// Consecutive calculation shape failures before the tools are withdrawn.
+///
+/// Measured: one Case C run spent 16 rounds on malformed ASTs after coverage was
+/// already complete; another spent 2 and reached the verifier. Three is enough to
+/// deliver the worked example twice and still leave finalization budget.
+const MAX_CALC_SHAPE_FAILURES: usize = 3;
+
 /// Append a worked scalar example when a calculation payload is the wrong shape.
 ///
 /// A live Case C run burned sixteen research rounds on malformed ASTs after research
@@ -2285,7 +2335,8 @@ fn enrich_calculation_error(tool: &str, message: String) -> String {
         || message.contains("missing field")
         || message.contains("unknown field")
         || message.contains("invalid request payload")
-        || message.contains("not valid JSON");
+        || message.contains("not valid JSON")
+        || message.contains("must be a JSON array");
     if !shape_error {
         return message;
     }
@@ -2297,6 +2348,17 @@ fn enrich_calculation_error(tool: &str, message: String) -> String {
          Inputs are arrays of numbers (never strings); every expr is a JSON object with \
          an `op` field (never a string or bare number)."
     )
+}
+
+fn is_calculation_shape_error(tool: &str, message: &str) -> bool {
+    tool.contains("calculation")
+        && (message.contains("invalid type")
+            || message.contains("missing field")
+            || message.contains("unknown field")
+            || message.contains("invalid request payload")
+            || message.contains("not valid JSON")
+            || message.contains("must be a JSON array")
+            || message.contains("Copy this scalar PE shape"))
 }
 
 fn evidence_ids(value: &Value) -> Vec<String> {
