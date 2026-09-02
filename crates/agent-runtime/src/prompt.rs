@@ -33,25 +33,27 @@ Produce evidence-grounded research using registered tools and the deterministic 
 
 OPERATING RULES
 - Use registered capabilities only. Never request shell, arbitrary code, files, processes or unregistered tools.
-- For current/latest/recent questions, fetch fresh market data or current disclosures before asserting a current fact, and state the data time.
-- Prefer primary disclosures for company facts. Preserve conflicts, stale data, missing coverage and failed sources rather than smoothing them over.
+- For current questions, fetch fresh market data or current disclosures before asserting a current fact, and state the data time.
+- Prefer primary disclosures. Preserve conflicts, stale data, missing coverage and failed sources rather than smoothing them over.
 - Never invent a market, financial, news, valuation or backtest number. When evidence is insufficient, say so.
 - Use the deterministic calculation tool for material arithmetic. Do not derive a material financial number in prose.
-- Use search_evidence to obtain canonical evidence identifiers, asking for every figure you intend to cite in ONE batched call. Never invent an identifier.
-- Compute every figure you need in one calculation program with several named outputs, not one program per figure. Model rounds are finite and finalization needs them.
+- Use search_evidence to obtain canonical evidence identifiers, batching every figure you will cite into ONE call. Never invent an identifier.
+- Compute every figure in one calculation program with several named outputs, not one program per figure; model rounds are finite.
 - Publish only through submit_report. Do not write citation markup; the runtime renders citations from the identifiers you supply.
-- Every figure you print must be one you declared as a numeric_item or one your cited evidence contains. Prefer referencing it by label in braces — `close {close}` prints the verified value and unit — which works in every prose field and keeps one numeric truth. This applies to executive_summary, overall_uncertainty, limitations, assumptions and uncertainty as well as statements.
+- Every printed figure must be one you declared as a numeric_item or one your cited evidence contains. Prefer referencing it by label in braces — `close {close}` prints the verified value and unit — in every prose field: statements, executive_summary, overall_uncertainty, limitations, assumptions, uncertainty.
 - Choose the claim kind that is actually true: an observed fact, a deterministic calculation, an inference, an estimate, a scenario, or unknown. An estimate is not a substitute for a computation the Engine can perform.
 - Seek material counter-evidence. State uncertainty and the conditions that would invalidate a conclusion.
-- Graph output is seed data plus industry enrichment, not full-market coverage, and its magnitudes are documented heuristics. Distinguish "no relation collected" from "no relation exists". Never present an edge weight as measured revenue exposure.
-- Backtests are research evidence only. They have not passed point-in-time, survivorship or tradability audits, so never present one as proof of profitability.
+- Graph output is seed data plus industry enrichment, not full-market coverage; magnitudes are documented heuristics. Distinguish "no relation collected" from "no relation exists". Never present an edge weight as measured revenue exposure.
+- Backtests are research evidence only: not point-in-time, survivorship or tradability audited, so never present one as proof of profitability.
 - Never place an order, route a trade, or claim a trade was executed. A trading plan is a research artifact requiring human action.
 
 REASONING
-Match effort to the task. A simple factual question needs the smallest sufficient tool path. Complex research, conflicting evidence, calculations and scenarios warrant deeper investigation. Keep private reasoning private; publish only the plan, tool actions, evidence judgements and conclusions.
+Match effort to the task: a simple factual question needs the smallest sufficient tool path; complex research, conflicting evidence, calculations and scenarios warrant deeper investigation. Keep private reasoning private; publish only plans, tool actions, evidence judgements and conclusions.
 
 FINALIZATION
-When evidence is sufficient, call submit_report. Every material number must carry valid typed provenance: observed, calculated, user_assumption or estimated."#;
+When evidence is sufficient, call submit_report. Every material number must carry valid typed provenance: observed, calculated, user_assumption or estimated.
+Match report size to depth: fast ≈ 2-4 claims, balanced ≈ 5-9, deep ≈ 10-16. A bigger draft spends finalization attempts on its own shape.
+Before submitting, check the draft once: every required field present, every numeric value a number, every evidence id one search_evidence returned, every section claim id defined."#;
 
 /// Render the prompt for one task.
 ///
@@ -108,6 +110,28 @@ mod tests {
         assert!(
             rendered.contains("observed, calculated, user_assumption or estimated"),
             "the provenance classes must be named"
+        );
+    }
+
+    /// Report size is matched to depth and the draft is self-checked once before
+    /// submission.
+    ///
+    /// Measured live: finalization attempts spent on the draft's own shape —
+    /// `claims` sent as a map, text in a numeric `value`, a missing `statement` —
+    /// consumed 5 of 8 attempts in one balanced run and 2 in another, while
+    /// research itself took five rounds. A fifteen-claim draft for a "简单分析"
+    /// prompt is also over-sized. Both rules are model cooperation, not schema:
+    /// the type system enforces shape only after an attempt is spent.
+    #[test]
+    fn the_prompt_matches_report_size_to_depth_and_requires_a_self_check() {
+        let rendered = prompt();
+        assert!(
+            rendered.contains("balanced ≈ 5-9"),
+            "size must be bounded per depth"
+        );
+        assert!(
+            rendered.contains("Before submitting, check the draft once"),
+            "the self-check must be required"
         );
     }
 
@@ -212,11 +236,19 @@ mod tests {
     }
 
     /// The whole point of the rewrite is a smaller, stabler control plane.
+    ///
+    /// The bound moved from 3,000 to 3,200 once, deliberately, for the
+    /// finalization size and self-check rules: live balanced runs were spending
+    /// 2–5 of 8 finalization attempts on the draft's own shape, each costing a
+    /// full model round and a ~10–15 KB regeneration, while research itself had
+    /// fallen to five rounds. ~25 static tokens per round, cache-priced after
+    /// the first, against one saved attempt is not a close trade. Every other
+    /// growth still has to pay for itself here.
     #[test]
     fn the_static_prompt_stays_compact() {
         let static_part = SYSTEM_PROMPT.chars().count();
         assert!(
-            static_part < 3_000,
+            static_part < 3_200,
             "the control plane should stay a few hundred tokens, got {static_part} chars"
         );
     }

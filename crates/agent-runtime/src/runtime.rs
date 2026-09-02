@@ -1059,10 +1059,14 @@ impl AgentRuntime {
                     } else {
                         "The draft did not match the submit_report schema, so no claim was read. \
                          The error names the exact field: fix that field and resubmit the complete \
-                         draft. A numeric item must carry every field its provenance requires: \
-                         observed needs evidence_id; calculated needs calculation_evidence_id, \
-                         operation and input_evidence_ids; estimated needs method and \
-                         basis_evidence_ids."
+                         draft. Shape rules the live failures keep hitting: `claims` and \
+                         `sections` are arrays of objects; a numeric item's `value` is a number, \
+                         never text; every claim needs `id`, `kind` and `statement`; `kind` is \
+                         one of observed_fact, deterministic_calculation, inference, estimate, \
+                         scenario, unknown. A numeric item must carry every field its provenance \
+                         requires: observed needs evidence_id; calculated needs \
+                         calculation_evidence_id, operation and input_evidence_ids; estimated \
+                         needs method and basis_evidence_ids."
                     },
                 });
                 return Ok(match verdict {

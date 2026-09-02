@@ -103,6 +103,41 @@ fail-closed with evidence intact. Metrics from the JSONL stream:
   convergence within the remaining finalization budget); outcome recorded
   below when available.
 
+### Run 2 on the #87 branch (2026-09-02, live MiniMax M3 + market upstreams)
+
+Fresh session, balanced, 601899. **Failed at round 19** — finalization budget
+(8 attempts) exhausted, 3 residual problems, 65 blocking findings total across
+submissions, 631→458 s elapsed class. Trajectory 30 → decode → 23 → 3 → 3 → 3
+→ exhausted. Tool profile: 6 data/research tools in rounds 1–3, 6
+run_financial_calculation (3 shape failures), 6 search_evidence (4 sequential
+single-query rounds — batch form only partially adopted), 7 submit_report.
+
+Root causes extracted from the durable draft record (agent_effects_v2 holds
+the full submitted arguments):
+
+1. Attempt 1 was a skeleton (1 claim defined, 14 referenced by sections) —
+   the model submitted early; 30 findings.
+2. Attempt 2 died at decode: `kind: "calculated"` (right name:
+   `deterministic_calculation`) — serde names it in one round.
+3. The persistent `conflicting_evidence×1`: claim_market_regime cited
+   evf_50e6…/evf_1ed2…/evf_2fd6… but disclosed conflicts for three
+   different registrations of the same facts. The repair target named no
+   identifiers, so the model guessed wrong ids for four straight attempts.
+4. Whack-a-mole on claim_valuation_summary (kind=inference cannot carry
+   numbers): unknown_number_reference×2 → unsupported_observed_number×2 →
+   figure_in_free_text×2 across attempts 5–7.
+
+Fixes landed on the branch (commits b79acf2, fe61d0d), both verified by
+deterministic tests:
+
+- Refusal events name the stage (decode error / validation histogram) — the
+  run-2 trajectory above was read from the new events.
+- Repair targets carry `conflicting_evidence_ids` (the exact cited ids to
+  disclose) and the action says to copy them verbatim.
+- The 7 run-2 drafts joined the offline replay fixture (56 total).
+
+Run 3 (with both fixes) started 2026-09-02; outcome recorded below.
+
 ## Next exact step
 
 1. Finish deterministic gates on the #87 branch (workspace tests, clippy
