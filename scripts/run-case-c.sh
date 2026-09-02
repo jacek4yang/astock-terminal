@@ -32,73 +32,15 @@ for i in $(seq 1 "$COUNT"); do
   elapsed=$(( $(date +%s) - start ))
   echo "=== RUN $i/$COUNT exit=$exit_code elapsed=${elapsed}s"
 
-  python3 - "$run_jsonl" "$exit_code" "$elapsed" <<'PY'
-import json, sys, collections
-path, exit_code, elapsed = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-rounds = 0
-tools = collections.Counter()
-tool_fail = collections.Counter()
-empty_turns = 0
-verifications = 0
-blocking = 0
-findings = collections.Counter()
-submit_attempts = 0
-outcome = "no_terminal_event"
-citations = 0
-for line in open(path, encoding="utf-8", errors="replace"):
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        ev = json.loads(line)
-    except json.JSONDecodeError:
-        continue
-    t = ev.get("type")
-    if t == "model_started":
-        rounds = max(rounds, ev.get("round", 0))
-    elif t == "tool_scheduled":
-        tools[ev.get("tool", "?")] += 1
-        if ev.get("tool") == "submit_report":
-            submit_attempts += 1
-    elif t == "tool_failed":
-        tool_fail[ev.get("tool", "?")] += 1
-    elif t == "model_turn_empty":
-        empty_turns += 1
-    elif t == "verification_started":
-        verifications += 1
-    elif t == "verification_finding":
-        f = ev.get("finding", {})
-        findings[f.get("code", "?")] += 1
-        if f.get("blocking"):
-            blocking += 1
-    elif t == "completed":
-        outcome = "completed"
-        citations = len(ev.get("evidence_ids", []))
-    elif t == "failed":
-        outcome = "failed"
-    elif t == "suspended":
-        outcome = "suspended"
-    elif t == "cancelled":
-        outcome = "cancelled"
-summary = {
-    "exit_code": exit_code,
-    "elapsed_s": elapsed,
-    "outcome": outcome,
-    "model_rounds": rounds,
-    "tool_calls_total": sum(tools.values()),
-    "tool_calls": dict(sorted(tools.items())),
-    "tool_failures": dict(sorted(tool_fail.items())),
-    "empty_turns": empty_turns,
-    "independent_verifications": verifications,
-    "blocking_findings": blocking,
-    "finding_codes": dict(sorted(findings.items())),
-    "submit_report_attempts": submit_attempts,
-    "citations_in_report": citations,
-}
-out = path.replace(".jsonl", ".summary.json")
-json.dump(summary, open(out, "w"), ensure_ascii=False, indent=2)
+  python3 "$(dirname "$0")/analyze-case-c.py" "$run_jsonl" | python3 -c "
+import json, sys
+summary = json.load(sys.stdin)
+summary['exit_code'] = $exit_code
+summary['elapsed_s'] = $elapsed
+out = '$run_jsonl'.replace('.jsonl', '.summary.json')
+json.dump(summary, open(out, 'w'), ensure_ascii=False, indent=2)
 print(json.dumps(summary, ensure_ascii=False))
-PY
+"
   echo
 done
 

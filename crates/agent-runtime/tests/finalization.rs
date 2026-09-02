@@ -332,9 +332,82 @@ async fn an_identifier_absent_from_the_catalog_is_refused_and_repair_targets_the
         )),
         "the refusal must be recorded as a blocking finding"
     );
+    // The refusal event names the invented identifier, so a headless consumer
+    // can classify the failure without the model's context.
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::VerificationFinding { finding }
+            if finding.code == "unknown_evidence"
+                && finding.message.contains("evf_fabricated_bps")
+    )));
     assert!(tool_result_payloads(&events)
         .iter()
-        .any(|message| message.contains("结构化修复指引")));
+        .any(|message| message.contains("unknown_evidence")));
+}
+
+/// A refused submission says why in the event stream, at both stages.
+///
+/// The model receives the full structured guidance; a headless consumer of the
+/// typed events previously saw one fixed refusal string, so a decode failure was
+/// invisible — a live moderate run lost two finalization rounds to undecodable
+/// drafts and the event stream showed zero findings for them.
+#[tokio::test]
+async fn a_refused_submission_names_its_stage_and_problems_in_the_event_stream() {
+    // A draft that cannot decode: no title, no sections.
+    let undecodable = json!({
+        "claims": [{"id": "c1", "kind": "observed_fact", "statement": "见下方数值"}]
+    });
+    // A draft that decodes but cites an identifier the registry never held.
+    let invented = with_claims(
+        json!([{
+            "id": "c1",
+            "kind": "observed_fact",
+            "statement": "股价见下方数值。",
+            "numeric_items": [{
+                "label": "最新价",
+                "value": 21.5,
+                "provenance": "observed",
+                "evidence_id": "evf_invented"
+            }],
+            "evidence_ids": ["evf_invented"]
+        }]),
+        json!(["c1"]),
+    );
+    let (events, result) = run(
+        ScriptedProvider::new(vec![
+            quote_round(),
+            submit_round("call-undecodable", undecodable),
+            submit_round("call-invented", invented),
+            submit_round("call-good", valid_draft()),
+        ]),
+        ScriptedEngine::new(vec![passing(), passing()]),
+    )
+    .await;
+    result.expect("the corrected submission publishes");
+
+    let failures: Vec<&AgentEvent> = events
+        .iter()
+        .filter(
+            |event| matches!(event, AgentEvent::ToolFailed { tool, .. } if tool == "submit_report"),
+        )
+        .collect();
+    assert_eq!(failures.len(), 2, "two refusals before the publish");
+    let decode = match failures[0] {
+        AgentEvent::ToolFailed { message, .. } => message.clone(),
+        _ => unreachable!("filtered above"),
+    };
+    assert!(
+        decode.contains("decode") && decode.contains("title"),
+        "the decode refusal must name the stage and the missing field: {decode}"
+    );
+    let validation = match failures[1] {
+        AgentEvent::ToolFailed { message, .. } => message.clone(),
+        _ => unreachable!("filtered above"),
+    };
+    assert!(
+        validation.contains("validation") && validation.contains("unknown_evidence"),
+        "the validation refusal must carry the problem histogram: {validation}"
+    );
 }
 
 /// An estimate must not stand in for arithmetic the Engine can perform.

@@ -79,6 +79,30 @@ Never ask for secret values in chat.
 See docs/releases/v7.0.0-live-acceptance.md (authoritative). Case A stable;
 Case C intermittent pre-#87; B and D–J unmeasured.
 
+### Run 1 on the #87 branch (2026-09-02, live MiniMax M3 + market upstreams)
+
+Fresh session, balanced, 601899. **Suspended at round 13** by a provider
+network fault ("error decoding response body") after 631 s; the runtime
+fail-closed with evidence intact. Metrics from the JSONL stream:
+
+- Research rounds 1–7: get_quote/get_fundamentals/get_kline/get_market_regime/
+  research_news in round 1 (parallel), 7 search_evidence calls, 3
+  compute_from_evidence (43 registered calculation evidence ids each), 2
+  run_financial_calculation shape failures (strings in scalar values) after
+  which the model self-corrected to compute_from_evidence — **the #87
+  fallback path worked live**. Pre-#87 baseline was 42 search_evidence calls
+  and 12–24 calculation calls.
+- Finalization rounds 8–13: submit attempts 1–2 failed at decode (no findings
+  emitted), attempts 3–4 each returned 40 findings (35 figure_in_free_text,
+  4 number_disagrees_with_evidence, 1 other); the model began a full rewrite
+  at round 13 and the stream died mid-generation.
+- Verdict: **#87's research-phase objective (round consumption) is fixed
+  live**. The residual Case C blocker is finalization convergence:
+  figure_in_free_text repair burden (~35/attempt) and decode friction.
+- Resume of the suspended task started 2026-09-02 (tests durable resume +
+  convergence within the remaining finalization budget); outcome recorded
+  below when available.
+
 ## Next exact step
 
 1. Finish deterministic gates on the #87 branch (workspace tests, clippy

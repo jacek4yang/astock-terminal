@@ -1088,12 +1088,13 @@ impl AgentRuntime {
                         finding: VerificationFinding {
                             code: problem.code().to_owned(),
                             message: format!(
-                                "报告契约校验未通过：{}{}",
+                                "报告契约校验未通过：{}{}{}",
                                 problem.code(),
                                 problem
                                     .claim_id()
                                     .map(|id| format!("（结论 {id}）"))
-                                    .unwrap_or_default()
+                                    .unwrap_or_default(),
+                                problem.event_detail(),
                             ),
                             blocking: true,
                         },
@@ -1783,6 +1784,7 @@ impl AgentRuntime {
                             break;
                         }
                         Finalization::Repair(response) => {
+                            let summary = repair_event_summary(&response);
                             self.complete_effect(
                                 &prepared.effect_id,
                                 "failed",
@@ -1794,7 +1796,7 @@ impl AgentRuntime {
                                 AgentEvent::ToolFailed {
                                     call_id: prepared.call.id.clone(),
                                     tool: prepared.call.name.clone(),
-                                    message: "报告未通过发布前校验，已返回结构化修复指引".into(),
+                                    message: summary,
                                     retryable: true,
                                 },
                             )
@@ -2504,6 +2506,49 @@ fn enrich_calculation_error(tool: &str, message: String) -> String {
          Inputs are arrays of numbers (never strings); every expr is a JSON object with \
          an `op` field (never a string or bare number)."
     )
+}
+
+/// One line of event-stream diagnosis for a refused submission.
+///
+/// The model receives the full structured repair guidance as its tool result;
+/// a headless consumer watching the typed event stream saw only a fixed refusal
+/// string, so a decode failure was invisible — a live moderate run lost two
+/// finalization rounds to undecodable drafts and the event stream showed zero
+/// findings for them, leaving the cause only in the model's ephemeral context.
+/// The stage, the decode error, or the validation problem histogram is enough
+/// to classify every refusal offline.
+fn repair_event_summary(response: &Value) -> String {
+    if response.get("stage").and_then(Value::as_str) == Some("decode") {
+        let error = response
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let bounded: String = error.chars().take(400).collect();
+        format!("报告未通过发布前校验（decode）：{bounded}")
+    } else {
+        let count = response
+            .get("problem_count")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        let mut codes: BTreeMap<String, usize> = BTreeMap::new();
+        if let Some(problems) = response.get("problems").and_then(Value::as_array) {
+            for problem in problems {
+                if let Some(code) = problem.get("problem").and_then(Value::as_str) {
+                    *codes.entry(code.to_owned()).or_default() += 1;
+                }
+            }
+        }
+        let histogram = codes
+            .iter()
+            .map(|(code, count)| format!("{code}×{count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if histogram.is_empty() {
+            format!("报告未通过发布前校验（validation）：{count} 个问题")
+        } else {
+            format!("报告未通过发布前校验（validation）：{count} 个问题：{histogram}")
+        }
+    }
 }
 
 fn is_calculation_shape_error(tool: &str, message: &str) -> bool {

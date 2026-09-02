@@ -452,6 +452,35 @@ impl DraftProblem {
             Self::EvidenceOutsideTaskScope { .. } => "evidence_outside_task_scope",
         }
     }
+
+    /// The specifics a reader needs to locate the offending text, for the event
+    /// stream. The repair guidance the model receives is richer (per-claim
+    /// actions, every offending token); this is the one line a headless
+    /// consumer of the typed events reads, so the variants that dominate live
+    /// repair loops carry their distinguishing detail.
+    pub fn event_detail(&self) -> String {
+        match self {
+            Self::FigureInFreeText { field, numeral, .. } => {
+                format!("：{field} 中的数字「{numeral}」未声明")
+            }
+            Self::UnknownEvidence { supplied_id, .. } => {
+                format!("：未知标识 {supplied_id}")
+            }
+            Self::NumberDisagreesWithEvidence {
+                label,
+                declared,
+                evidence_id,
+                ..
+            } => format!("：{label}={declared} 与证据 {evidence_id} 不符"),
+            Self::UnknownNumberReference { label, .. } => {
+                format!("：引用 {label} 未声明")
+            }
+            Self::MissingCalculationProvenance { label, .. } => {
+                format!("：{label} 缺少计算溯源")
+            }
+            _ => String::new(),
+        }
+    }
 }
 
 /// What the Runtime knows about one piece of evidence, for validation and display.
