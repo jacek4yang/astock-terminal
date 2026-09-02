@@ -739,10 +739,23 @@ impl AgentRuntime {
                             .await?;
                             return Err(RuntimeError::Cancelled);
                         }
-                        result = tokio::time::timeout(
-                            self.config.provider_idle_timeout,
-                            stream.next(),
-                        ) => result,
+                        result = async {
+                            if self.provider.manages_stream_liveness() {
+                                // MiniMax resets its watchdog on every raw SSE
+                                // chunk, including private reasoning, and owns its
+                                // bounded pre-commit reconnects. The adapter hides
+                                // those chunks correctly; timing only its visible
+                                // output here caused false idles and multiplied the
+                                // provider retry budget.
+                                Ok(stream.next().await)
+                            } else {
+                                tokio::time::timeout(
+                                    self.config.provider_idle_timeout,
+                                    stream.next(),
+                                )
+                                .await
+                            }
+                        } => result,
                     };
                     match next {
                         Ok(Some(Ok(ModelChunk::TextDelta(delta)))) => {

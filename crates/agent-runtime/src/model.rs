@@ -86,6 +86,16 @@ pub type ModelStream =
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
     fn name(&self) -> &'static str;
+    /// Whether the returned stream owns first-chunk/inter-chunk liveness.
+    ///
+    /// The Runtime supplies a watchdog for simple providers. A resilient adapter
+    /// may instead watch the raw upstream stream, where private reasoning and
+    /// reconnect activity are visible even though they must never become
+    /// ModelChunks. In that case a second Runtime watchdog would measure only
+    /// filtered output, race the provider recovery and multiply retry attempts.
+    fn manages_stream_liveness(&self) -> bool {
+        false
+    }
     async fn selected_model(&self) -> Result<String, ProviderError>;
     async fn stream(&self, request: ModelRequest) -> Result<ModelStream, ProviderError>;
     async fn quota(&self) -> Result<Option<Value>, ProviderError> {
