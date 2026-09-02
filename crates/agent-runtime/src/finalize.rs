@@ -185,9 +185,11 @@ fn validation_action(code: &str) -> &'static str {
              number with provenance=user_assumption."
         }
         "conflicting_evidence" => {
-            "This evidence conflicts with another registration of the same fact. List the \
-             identifiers in disclosed_conflicts and say in the statement what disagrees. Do not \
-             silently pick one side."
+            "This evidence conflicts with another registration of the same fact. Copy the \
+             conflicting_evidence_ids listed for this claim into its disclosed_conflicts field \
+             verbatim — the identifiers to disclose are the ones the claim already cites, not \
+             other registrations of the same fact — and say in the statement what disagrees. Do \
+             not silently pick one side."
         }
         "number_disagrees_with_evidence" => {
             "The value you declared is not the value the cited evidence contains. Read the value \
@@ -383,6 +385,16 @@ pub fn validation_repair(problems: &[DraftProblem], verdict: RepairVerdict) -> V
     // it which. The token is the actionable part.
     let mut undeclared: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut unknown_ids: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // The exact identifiers a claim must list in disclosed_conflicts.
+    //
+    // A live run oscillated three finalization attempts away from publishing on
+    // one unresolved conflict: told to "list the identifiers in
+    // disclosed_conflicts", the model listed three identifiers it had *not*
+    // cited — different registrations of the same facts it had seen in a search
+    // — while the finding concerns the ones the claim actually references. The
+    // ids are in the problems array, but the per-claim repair target is what the
+    // model acts on, and it named no identifiers.
+    let mut conflicting_ids: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for problem in problems {
         match problem.claim_id() {
             Some(claim_id) => {
@@ -402,6 +414,12 @@ pub fn validation_repair(problems: &[DraftProblem], verdict: RepairVerdict) -> V
                             .entry(claim_id.to_owned())
                             .or_default()
                             .insert(supplied_id.clone());
+                    }
+                    DraftProblem::ConflictingEvidence { evidence_ids, .. } => {
+                        conflicting_ids
+                            .entry(claim_id.to_owned())
+                            .or_default()
+                            .extend(evidence_ids.iter().cloned());
                     }
                     _ => {}
                 }
@@ -454,6 +472,17 @@ pub fn validation_repair(problems: &[DraftProblem], verdict: RepairVerdict) -> V
         if let Some(ids) = unknown_ids.get(&claim_id) {
             object.insert(
                 "unknown_evidence_ids".into(),
+                Value::Array(
+                    ids.iter()
+                        .take(MAX_TOKENS_PER_TARGET)
+                        .map(|id| Value::from(id.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(ids) = conflicting_ids.get(&claim_id) {
+            object.insert(
+                "conflicting_evidence_ids".into(),
                 Value::Array(
                     ids.iter()
                         .take(MAX_TOKENS_PER_TARGET)

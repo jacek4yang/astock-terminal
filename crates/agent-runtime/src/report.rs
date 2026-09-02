@@ -475,6 +475,9 @@ impl DraftProblem {
             Self::UnknownNumberReference { label, .. } => {
                 format!("：引用 {label} 未声明")
             }
+            Self::ConflictingEvidence { evidence_ids, .. } => {
+                format!("：未披露冲突证据 {}", evidence_ids.join("、"))
+            }
             Self::MissingCalculationProvenance { label, .. } => {
                 format!("：{label} 缺少计算溯源")
             }

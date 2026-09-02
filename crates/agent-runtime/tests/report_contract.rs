@@ -351,6 +351,60 @@ fn undisclosed_conflicting_evidence_is_refused() {
     );
 }
 
+/// Disclosing *other* registrations of the same facts does not discharge the
+/// conflict on the identifiers the claim cites.
+///
+/// A live moderate run oscillated three finalization attempts away from
+/// publishing on exactly this shape: `claim_market_regime` cited
+/// `evf_50e6…`, `evf_1ed2…`, `evf_2fd6…`, and its `disclosed_conflicts`
+/// listed `evf_4a36…`, `evf_5617…`, `evf_4813…` — different registrations it
+/// had seen in a search — so the finding fired again on every resubmission
+/// until the budget was spent.
+#[test]
+fn disclosing_different_registrations_does_not_discharge_the_conflict() {
+    let mut map = registry();
+    map.get_mut("evf_price").unwrap().conflicting = true;
+    let mut draft = valid_draft();
+    for c in &mut draft.claims {
+        if c.evidence_ids.iter().any(|id| id == "evf_price") {
+            // The live mistake: disclose some other id entirely.
+            c.disclosed_conflicts.push("evf_other_registration".into());
+        }
+    }
+    let problems = validate_draft(&draft, &map, &symbols());
+    assert!(
+        has(&problems, "conflicting_evidence"),
+        "a disclosure of unrelated identifiers must not discharge the conflict: {problems:?}"
+    );
+    // The repair target names the exact identifiers to disclose, so the model
+    // does not have to guess which registrations the finding concerns.
+    let response = astock_agent_runtime::validation_repair(
+        &problems,
+        astock_agent_runtime::RepairVerdict::Retry {
+            attempt: 1,
+            remaining: 1,
+            unchanged: false,
+        },
+    );
+    let target = response["repair"]
+        .as_array()
+        .expect("repair targets")
+        .iter()
+        .find(|target| {
+            target["codes"]
+                .as_array()
+                .is_some_and(|codes| codes.iter().any(|code| code == "conflicting_evidence"))
+        })
+        .expect("a conflicting-evidence target");
+    let ids = target["conflicting_evidence_ids"]
+        .as_array()
+        .expect("the exact ids");
+    assert!(
+        ids.iter().any(|id| id == "evf_price"),
+        "the disclosed list must name the cited identifier: {ids:?}"
+    );
+}
+
 #[test]
 fn evidence_from_another_security_is_refused() {
     let mut map = registry();
