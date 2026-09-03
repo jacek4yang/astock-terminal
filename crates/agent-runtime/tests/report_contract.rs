@@ -1133,10 +1133,66 @@ fn evidence_with_no_numeric_value_is_not_judged_as_a_disagreement() {
 /// An observed quantity whose own evidence carries no number is refused.
 ///
 /// Companion citations (a timestamp next to a price) remain fine: the numeric item
-/// still points at evidence that holds the number. What is refused is inventing a
-/// figure and hanging it on a boolean provenance flag — live Case C run 3 printed
-/// `low_60d = 24.93` from an evidence id whose value was `false`, passed validation,
-/// and died at the independent verifier.
+/// A dividend-plan description string carries its per-10-share amount in the
+/// last embedded number.
+///
+/// A live run exhausted all ten finalization attempts on
+/// `div_10_v = 3.8` citing evidence `10派3.80元(含税)`: the value is true, the
+/// source publishes it as prose, and validation refused it because the string
+/// did not parse as a bare float. The verifier's digit-segment matching
+/// already accepts this shape; validation now extracts the same number.
+#[test]
+fn a_descriptive_financial_string_supports_its_payload_number() {
+    let mut map = registry();
+    let mut plan = observed("evf_div_plan", "eastmoney_f10", "/dividends/10/plan", 0.0);
+    plan.value = Some(json!("10派3.80元(含税)"));
+    map.insert("evf_div_plan".into(), plan);
+    let draft = one_claim_draft(observed_claim(
+        "分红方案见下方数值。",
+        vec![NumericItem {
+            value: 3.8,
+            unit: Some("元".to_owned()),
+            label: "div_10_v".to_owned(),
+            provenance: NumericProvenance::Observed {
+                evidence_id: "evf_div_plan".to_owned(),
+                field: None,
+            },
+        }],
+        vec!["evf_div_plan"],
+    ));
+    let problems = validate_draft(&draft, &map, &BTreeSet::new());
+    assert!(
+        !problems
+            .iter()
+            .any(|p| p.code() == "number_disagrees_with_evidence"),
+        "the payload number is supported: {problems:?}"
+    );
+    // A different figure is still refused.
+    let wrong = one_claim_draft(observed_claim(
+        "分红方案见下方数值。",
+        vec![NumericItem {
+            value: 10.0,
+            unit: Some("元".to_owned()),
+            label: "div_10_v".to_owned(),
+            provenance: NumericProvenance::Observed {
+                evidence_id: "evf_div_plan".to_owned(),
+                field: None,
+            },
+        }],
+        vec!["evf_div_plan"],
+    ));
+    let problems = validate_draft(&wrong, &map, &BTreeSet::new());
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.code() == "number_disagrees_with_evidence"),
+        "the share count is not the payout: {problems:?}"
+    );
+}
+
+/// A number hung on boolean evidence is refused: companion citations aside,
+/// an observed quantity must cite evidence that holds a number. Live Case C
+/// run 3 printed `low_60d = 24.93` from an evidence id whose value was `false`.
 #[test]
 fn an_observed_number_cannot_cite_non_numeric_evidence() {
     let mut map = registry();

@@ -1297,10 +1297,28 @@ fn check_value_against_evidence(
 }
 
 /// Read a number out of an evidence value, including one recorded as a string.
+///
+/// A bare numeric string parses directly. A descriptive financial string —
+/// `10派3.80元(含税)`, a dividend plan a source publishes as prose — carries its
+/// payload in the *last* embedded number (the per-10-share amount, not the
+/// share count), which is exactly the value the verifier's digit-segment
+/// matching already accepts. Parsing it keeps validation and verification
+/// agreed instead of refusing a true figure.
 fn evidence_number(value: &serde_json::Value) -> Option<f64> {
     match value {
         serde_json::Value::Number(number) => number.as_f64(),
-        serde_json::Value::String(text) => text.replace(',', "").parse::<f64>().ok(),
+        serde_json::Value::String(text) => {
+            let normalized = text.replace(',', "");
+            if let Ok(value) = normalized.parse::<f64>() {
+                return Some(value);
+            }
+            // The last number embedded in a descriptive string.
+            normalized
+                .split(|character: char| !character.is_ascii_digit() && character != '.')
+                .filter(|segment| !segment.is_empty())
+                .filter_map(|segment| segment.parse::<f64>().ok())
+                .rfind(|value| value.is_finite())
+        }
         _ => None,
     }
 }
