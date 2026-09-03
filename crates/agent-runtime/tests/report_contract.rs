@@ -674,6 +674,34 @@ fn an_altered_number_is_presented_to_the_verifier_beside_its_own_evidence() {
     );
 }
 
+/// A multi-block report-level prose field stays one physical line in the
+/// verifier form.
+///
+/// The verifier reads the form line by line and attaches citations to the line
+/// a figure appears on. A summary written as Markdown blocks contains embedded
+/// newlines; emitted raw it split into several physical lines, stranding the
+/// substituted figures of a continuation line with no citation marker. A live
+/// run's clean draft — zero validation problems — was refused twice on exactly
+/// that shape (`numeric_claim_without_evidence:line_4`), and its repair loop
+/// had nothing to repair because the contract was satisfied.
+#[test]
+fn a_multi_block_summary_stays_one_line_with_its_citations() {
+    let mut draft = valid_draft();
+    draft.executive_summary =
+        "第一段引用收盘价 {最新价}。\n\n**当前行情**：收盘 {最新价} 元。".to_owned();
+    let rendered = render(&draft, &registry());
+    // Every physical line that carries the substituted figure also carries a
+    // citation marker.
+    for line in rendered.verifier_markdown.lines() {
+        if line.contains("34.47") {
+            assert!(
+                line.contains("【E:evf_price】"),
+                "a figure and its citation share a line: {line}"
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // High cardinality
 // ---------------------------------------------------------------------------

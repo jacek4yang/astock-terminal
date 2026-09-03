@@ -500,12 +500,22 @@ fn render_verifier_form(draft: &VerifiedReportDraft) -> (String, BTreeMap<usize,
     let mut out = String::new();
     let mut index = BTreeMap::new();
     let mut line_number = 0usize;
-    let mut push = |out: &mut String, text: &str, claim: Option<&str>| {
-        line_number += 1;
-        out.push_str(text);
+    // One logical entry must be one physical line: the verifier reads the form
+    // line by line and attaches citations to the line a figure appears on. A
+    // multi-block summary or statement — Markdown prose legitimately contains
+    // embedded newlines — would split into several physical lines, stranding
+    // figures on lines with no citation marker. A live run's clean draft was
+    // refused twice on exactly that (`numeric_claim_without_evidence:line_4`:
+    // a summary continuation line carrying substituted figures while the
+    // citations sat on the block's last line). Newlines become spaces here;
+    // rendering for the reader is unaffected.
+    let mut push = |out: &mut String, text: &str, claim: Option<&str>, line_number: &mut usize| {
+        *line_number += 1;
+        let single_line = text.replace(['\n', '\r'], " ");
+        out.push_str(&single_line);
         out.push('\n');
         if let Some(claim) = claim {
-            index.insert(line_number, claim.to_owned());
+            index.insert(*line_number, claim.to_owned());
         }
     };
 
@@ -514,6 +524,7 @@ fn render_verifier_form(draft: &VerifiedReportDraft) -> (String, BTreeMap<usize,
         &mut out,
         &substitute_numbers(&draft.title, &report_level),
         None,
+        &mut line_number,
     );
     // Report-level prose that references a figure is emitted with the citations of the
     // numbers it references, so a figure substituted into a summary is reproduced
@@ -537,10 +548,10 @@ fn render_verifier_form(draft: &VerifiedReportDraft) -> (String, BTreeMap<usize,
             }
         }
         let _ = field;
-        push(&mut out, &line, None);
+        push(&mut out, &line, None, &mut line_number);
     }
     for section in &draft.sections {
-        push(&mut out, &section.heading, None);
+        push(&mut out, &section.heading, None, &mut line_number);
         for claim_id in &section.claim_ids {
             let Some(claim) = draft.claims.iter().find(|c| &c.id == claim_id) else {
                 continue;
@@ -572,7 +583,7 @@ fn render_verifier_form(draft: &VerifiedReportDraft) -> (String, BTreeMap<usize,
             for id in &claim.evidence_ids {
                 line.push_str(&format!("【E:{id}】"));
             }
-            push(&mut out, &line, Some(&claim.id));
+            push(&mut out, &line, Some(&claim.id), &mut line_number);
         }
     }
     (out, index)
