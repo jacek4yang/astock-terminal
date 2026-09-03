@@ -102,26 +102,32 @@ impl ClaimKind {
     ///   correctness benefit: every number still declares its own provenance, the
     ///   renderer labels each one, and the verifier still checks each against its
     ///   own citation.
-    /// * `Inference` and `Unknown` introduce no numbers; they reason over claims
-    ///   that already carry provenance.
+    /// * `Inference` reasons over figures the evidence already carries. A live run
+    ///   spent its whole finalization budget on the refusal of a financial-
+    ///   structure commentary claim whose figures were observed disclosures
+    ///   (`capex`, `lt_debt`, …), nine attempts running: the statement is an
+    ///   inference, its numbers are individually provenance-labelled, checked and
+    ///   verified, and no epistemic status is gained by forcing the claim apart.
+    ///   `Unknown` stays number-free — it exists to state that nothing is known.
     /// * `Estimate` carries estimates only.
-    /// * `Scenario` may carry the user's assumption plus whatever is computed or
-    ///   estimated from it, which is what makes a scenario a scenario.
+    /// * `Scenario` may carry the user's assumption, the observed baseline it
+    ///   conditions on, and whatever is computed or estimated from it.
     fn permits(self, provenance: &NumericProvenance) -> bool {
         match self {
             Self::ObservedFact => matches!(provenance, NumericProvenance::Observed { .. }),
-            Self::DeterministicCalculation => matches!(
+            Self::DeterministicCalculation | Self::Inference => matches!(
                 provenance,
                 NumericProvenance::Calculated { .. } | NumericProvenance::Observed { .. }
             ),
-            Self::Inference | Self::Unknown => false,
             Self::Estimate => matches!(provenance, NumericProvenance::Estimated { .. }),
             Self::Scenario => matches!(
                 provenance,
                 NumericProvenance::UserAssumption { .. }
+                    | NumericProvenance::Observed { .. }
                     | NumericProvenance::Calculated { .. }
                     | NumericProvenance::Estimated { .. }
             ),
+            Self::Unknown => false,
         }
     }
 }

@@ -525,14 +525,26 @@ fn every_inappropriate_mutation_of_a_valid_draft_is_refused() {
         ("fake evidence id", |d| {
             d.claims[0].evidence_ids = vec!["evf_does_not_exist".into()];
         }),
-        ("observed number on an inference", |d| {
+        ("number on an unknown claim", |d| {
+            d.claims[5].numeric_items = vec![NumericItem {
+                value: 12.0,
+                unit: None,
+                label: "未知数值".into(),
+                provenance: NumericProvenance::Observed {
+                    evidence_id: "evf_price".into(),
+                    field: None,
+                },
+            }];
+        }),
+        ("estimated number on an inference", |d| {
             d.claims[2].numeric_items = vec![NumericItem {
                 value: 12.0,
                 unit: None,
                 label: "推断数值".into(),
-                provenance: NumericProvenance::Observed {
-                    evidence_id: "evf_price".into(),
-                    field: None,
+                provenance: NumericProvenance::Estimated {
+                    method: "按历史区间推算".into(),
+                    basis_evidence_ids: vec!["evf_price".into()],
+                    range: None,
                 },
             }];
         }),

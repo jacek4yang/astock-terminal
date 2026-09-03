@@ -166,9 +166,10 @@ fn validation_action(code: &str) -> &'static str {
         }
         "unsupported_observed_number" => {
             "The claim kind does not permit this number's provenance. An observed_fact carries \
-             only observed numbers, a deterministic_calculation only calculated ones, an estimate \
-             only estimated ones; inference and unknown carry no numbers at all. Change the kind \
-             or change how the number is sourced."
+             only observed numbers, a deterministic_calculation or an inference carries observed \
+             and calculated ones, a scenario carries its assumption plus observed, calculated or \
+             estimated figures, an estimate only estimated ones; unknown carries no numbers at \
+             all. Change the kind or change how the number is sourced."
         }
         "missing_calculation_provenance" => {
             "A calculated number needs the calculation that produced it. Run \
