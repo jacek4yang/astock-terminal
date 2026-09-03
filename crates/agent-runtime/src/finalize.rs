@@ -208,6 +208,13 @@ fn validation_action(code: &str) -> &'static str {
              report that states no checkable quantity is refused as well. Write no formulas in \
              prose; put the operation on the numeric_item."
         }
+        "report_contains_no_verifiable_numeric_claims" => {
+            "The draft declares no quantity at all — this is what deleting figures produces. \
+             Restore every material figure as a numeric_item with real provenance (observed \
+             evidence_id, or calculated with calculation_evidence_id, operation and inputs), \
+             reference it by label in braces, and put the operation on the item. A research \
+             conclusion without checkable quantities is refused, not published."
+        }
         "unknown_number_reference" => {
             "This prose references a number in braces that nothing declares. In a statement the \
              label must be one of that claim's numeric_items; in executive_summary, \
@@ -931,6 +938,7 @@ mod tests {
             "scenario_without_assumption",
             "conflicting_evidence",
             "figure_in_free_text",
+            "report_contains_no_verifiable_numeric_claims",
             "unknown_number_reference",
             "ambiguous_number_reference",
             "number_disagrees_with_evidence",

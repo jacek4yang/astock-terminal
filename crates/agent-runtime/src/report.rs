@@ -349,6 +349,13 @@ pub enum DraftProblem {
         claim_id: String,
         evidence_id: String,
     },
+    /// No claim in the draft declares any numeric item.
+    ///
+    /// The verifier's `report_contains_no_verifiable_numeric_claims`, surfaced at
+    /// validation: repair pressure under the free-text rule produced exactly this
+    /// shape live — a model that "fixed" its last undeclared figure by deleting
+    /// the figures, passed validation, and was refused twice by the verifier.
+    NoVerifiableNumbers,
     /// A financial figure written into free text.
     ///
     /// Figures belong in `numeric_items`, where they carry provenance and the renderer
@@ -411,7 +418,8 @@ impl DraftProblem {
         match self {
             Self::ContractVersionMismatch { .. }
             | Self::Oversized { .. }
-            | Self::AmbiguousNumberReference { .. } => None,
+            | Self::AmbiguousNumberReference { .. }
+            | Self::NoVerifiableNumbers => None,
             Self::DuplicateClaimId { claim_id }
             | Self::ClaimNotInAnySection { claim_id }
             | Self::EmptyStatement { claim_id }
@@ -450,6 +458,7 @@ impl DraftProblem {
             Self::UnknownNumberReference { .. } => "unknown_number_reference",
             Self::NumberDisagreesWithEvidence { .. } => "number_disagrees_with_evidence",
             Self::EvidenceOutsideTaskScope { .. } => "evidence_outside_task_scope",
+            Self::NoVerifiableNumbers => "report_contains_no_verifiable_numeric_claims",
         }
     }
 
@@ -842,6 +851,22 @@ pub fn validate_draft(
         validate_claim(claim, registry, task_symbols, &mut problems);
     }
     validate_free_text(draft, registry, &mut problems);
+
+    // A draft that declares no quantity at all is the verifier's
+    // `report_contains_no_verifiable_numeric_claims` refusal, caught here
+    // instead of one independent-verification round later. This is the shape
+    // repair pressure produces: a live moderate run converged to one
+    // figure_in_free_text problem, "fixed" it by deleting the figures, passed
+    // this validation, and was refused twice by the verifier before the budget
+    // ran out. The check moves the refusal forward; the repair action names the
+    // restore-the-figures fix.
+    if draft
+        .claims
+        .iter()
+        .all(|claim| claim.numeric_items.is_empty())
+    {
+        problems.push(DraftProblem::NoVerifiableNumbers);
+    }
     problems
 }
 

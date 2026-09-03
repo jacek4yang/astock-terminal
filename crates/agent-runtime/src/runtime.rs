@@ -243,7 +243,14 @@ impl Default for RuntimeConfig {
         Self {
             max_model_rounds: 32,
             max_research_rounds: 20,
-            max_finalization_attempts: 8,
+            // Finalization repair attempts. Measured live trajectories run
+            // 49 → 22 → 14 → 2 → publish-class within six to eight repairs
+            // when the first draft starts clean, but a draft that opens with a
+            // large undeclared-figure count needs the tail rounds too — one
+            // live run converged to one problem at attempt 7 and exhausted at
+            // 8. Identical-resubmission detection still ends a non-converging
+            // loop regardless of budget.
+            max_finalization_attempts: 10,
             max_model_chunks_per_round: 10_000,
             max_unknown_tool_rejections: 3,
             max_empty_turn_retries: 2,

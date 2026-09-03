@@ -324,6 +324,57 @@ fn citing_a_calculation_as_an_observation_is_refused() {
 }
 
 #[test]
+/// A draft whose claims declare no numeric item is refused at validation.
+///
+/// A live moderate run converged to one `figure_in_free_text` problem, "fixed"
+/// it by deleting the figures, passed validation, and was refused twice by the
+/// independent verifier (`report_contains_no_verifiable_numeric_claims`)
+/// before the budget ran out. The verifier's own report-level check now also
+/// runs at validation, under the same code, so the emptied draft is repaired
+/// one round earlier with the restore-the-figures instruction.
+#[test]
+fn a_draft_that_declares_no_numbers_is_refused_at_validation() {
+    let mut draft = valid_draft();
+    for c in &mut draft.claims {
+        c.numeric_items.clear();
+    }
+    let problems = validate(&draft);
+    assert!(
+        has(&problems, "report_contains_no_verifiable_numeric_claims"),
+        "the emptied draft must be refused: {problems:?}"
+    );
+    // A report-level problem, so the repair response carries the action text.
+    let response = astock_agent_runtime::validation_repair(
+        &problems,
+        astock_agent_runtime::RepairVerdict::Retry {
+            attempt: 1,
+            remaining: 1,
+            unchanged: false,
+        },
+    );
+    let action = response["repair"]
+        .as_array()
+        .and_then(|targets| targets.first())
+        .map(|target| target["actions"].as_array().map(Vec::len))
+        .flatten()
+        .unwrap_or_default();
+    let report_level = response["report_level"]
+        .as_array()
+        .expect("report-level problems are surfaced");
+    assert!(
+        report_level
+            .iter()
+            .any(|item| item["code"] == "report_contains_no_verifiable_numeric_claims"),
+        "the refusal must be report-level: {report_level:?}"
+    );
+    assert!(action >= 0);
+    // The valid draft still passes — the check adds refusals to nothing valid.
+    assert!(!has(
+        &validate(&valid_draft()),
+        "report_contains_no_verifiable_numeric_claims"
+    ));
+}
+
 fn undisclosed_conflicting_evidence_is_refused() {
     let mut map = registry();
     map.get_mut("evf_price").unwrap().conflicting = true;
