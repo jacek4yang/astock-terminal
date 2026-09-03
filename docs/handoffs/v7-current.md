@@ -138,16 +138,57 @@ deterministic tests:
 
 Run 3 (with both fixes) started 2026-09-02; outcome recorded below.
 
+### Runs 3–5 + stream-liveness correction (2026-09-02/03)
+
+- Run 3 failed: 5 of 8 finalization attempts died at **decode/shape**
+  (claims-as-map, text in an f64, missing statement) while research took
+  only 5 rounds. Fixes landed (commit 3131969): report size bounded by
+  depth in the prompt (fast ≈2-4 / balanced ≈5-9 / deep ≈10-16 claims), a
+  one-pass draft self-check required before submission, and the
+  decode-failure instruction lists the exact shape rules plus the claim-kind
+  enum names. Static prompt ratchet moved 3000→3200 once, documented.
+- Run 4 suspended at round 2, run 5 at round 4 — both on
+  `error decoding response body` / idle-timeout faults. A first fix
+  (Runtime-level mid-stream replay, commit 684a509, pushed as 684a509) was
+  measured live and turned out WRONG: run 5 burned the whole new budget on
+  repeated idle timeouts. Root cause: MiniMaxClient already owns raw-SSE
+  watchdogs + bounded pre-commit reconnects, and the adapter hides private
+  reasoning, so a Runtime watchdog timing only visible chunks produces
+  false idles and multiplies the provider's attempts.
+- **Corrected fix (commit 6cf9a21, force-pushed):** `ModelProvider::
+  manages_stream_liveness()` — MiniMax declares ownership; Runtime applies
+  its watchdog only for simple providers. Deterministic tests pin all three
+  boundaries (plain idle still suspends; self-managed activity outlives the
+  outer watchdog; an exhausted provider fault suspends after exactly one
+  Runtime stream call). The superseded 684a509 content no longer exists on
+  the branch.
+- **Case C run 1 on the corrected build PUBLISHED** (2026-09-03, exit 0,
+  331 s): 21 rounds, 25 tool calls (8 search_evidence, 4 calc, 8
+  submit_report), independent verifier passed with zero blocking findings
+  on the final draft, 4,481 registered citations in the task. The run
+  repeatedly crossed the previous 120 s stall point without a false idle.
+  Repair trajectory 27 → 17 → 6 → 2 → 1 → publish.
+- Residual false-refusal found in that run and fixed (commit 30fa858):
+  `876.13亿元` citing calculation evidence valued exactly `876.13`
+  (亿-denominated) was refused because the shared rule scaled ×1e8.
+  `supported_by` now also accepts same-denomination evidence (mirroring its
+  `%` convention); different magnitudes still refuse.
+
+State: Case C publishes but not yet at ≥5 consecutive. Runs 2..5 on the
+fully corrected build (denomination fix included) are the repeatability
+measurement; CI on the branch was green through 6cf9a21.
+
 ## Next exact step
 
-1. Finish deterministic gates on the #87 branch (workspace tests, clippy
-   `-D warnings`, cargo deny, frontend npm test/build).
-2. LIVE CREDENTIAL CHECKPOINT to the user (exact wording per mission §5).
-3. After "configured": live Case C re-measurement on the branch, ≥5
-   consecutive fresh-session publications target, zero blocking findings,
-   metrics recorded (rounds, tool calls, search_evidence calls, calc calls,
-   submit_report attempts, citations, elapsed).
-4. Merge #87 only with that evidence; sync main; update this file.
+1. Complete ≥5 consecutive fresh-session Case C publications on commit
+   ≥30fa858 (run 2 of the series is in flight; harness
+   `scripts/run-case-c.sh`, analyzer `scripts/analyze-case-c.py`).
+2. Record the series in docs/releases/v7.0.0-live-acceptance.md; run
+   remaining gates (workspace suite, clippy, ui) on the final branch state.
+3. Merge #87 with that evidence; sync main; continue to Case A repeats and
+   JoinQuant live acceptance (E), then the post-#87 PR sequence
+   (Context Compiler/memory, fault orchestrator remainder, workers,
+   freshness, opportunity research, release pipeline).
 
 ## External blockers
 
