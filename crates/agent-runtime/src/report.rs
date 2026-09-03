@@ -102,27 +102,48 @@ impl ClaimKind {
     ///   correctness benefit: every number still declares its own provenance, the
     ///   renderer labels each one, and the verifier still checks each against its
     ///   own citation.
-    /// * `Inference` and `Unknown` introduce no numbers; they reason over claims
-    ///   that already carry provenance.
+    /// * `Inference` reasons over figures the evidence already carries. A live run
+    ///   spent its whole finalization budget on the refusal of a financial-
+    ///   structure commentary claim whose figures were observed disclosures
+    ///   (`capex`, `lt_debt`, …), nine attempts running: the statement is an
+    ///   inference, its numbers are individually provenance-labelled, checked and
+    ///   verified, and no epistemic status is gained by forcing the claim apart.
+    ///   `Unknown` stays number-free — it exists to state that nothing is known.
     /// * `Estimate` carries estimates only.
-    /// * `Scenario` may carry the user's assumption plus whatever is computed or
-    ///   estimated from it, which is what makes a scenario a scenario.
+    /// * `Scenario` may carry the user's assumption, the observed baseline it
+    ///   conditions on, and whatever is computed or estimated from it.
     fn permits(self, provenance: &NumericProvenance) -> bool {
         match self {
             Self::ObservedFact => matches!(provenance, NumericProvenance::Observed { .. }),
-            Self::DeterministicCalculation => matches!(
+            Self::DeterministicCalculation | Self::Inference => matches!(
                 provenance,
                 NumericProvenance::Calculated { .. } | NumericProvenance::Observed { .. }
             ),
-            Self::Inference | Self::Unknown => false,
             Self::Estimate => matches!(provenance, NumericProvenance::Estimated { .. }),
             Self::Scenario => matches!(
                 provenance,
                 NumericProvenance::UserAssumption { .. }
+                    | NumericProvenance::Observed { .. }
                     | NumericProvenance::Calculated { .. }
                     | NumericProvenance::Estimated { .. }
             ),
+            Self::Unknown => false,
         }
+    }
+
+    /// Which claim kinds would accept this provenance as-is, for repair.
+    fn kinds_permitting(self, provenance: &NumericProvenance) -> Vec<ClaimKind> {
+        [
+            Self::ObservedFact,
+            Self::DeterministicCalculation,
+            Self::Inference,
+            Self::Estimate,
+            Self::Scenario,
+            Self::Unknown,
+        ]
+        .into_iter()
+        .filter(|kind| kind.permits(provenance))
+        .collect()
     }
 }
 
@@ -317,11 +338,14 @@ pub enum DraftProblem {
         claim_id: String,
         statement: String,
     },
-    /// A number asserted as observed on a claim that may not assert observations.
+    /// A number whose provenance its claim kind does not permit.
     UnsupportedObservedNumber {
         claim_id: String,
         label: String,
         value: f64,
+        /// The kinds that would accept this provenance as-is.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        permitted_kinds: Vec<String>,
     },
     /// A calculated figure whose calculation provenance is absent or incomplete.
     MissingCalculationProvenance {
@@ -349,6 +373,13 @@ pub enum DraftProblem {
         claim_id: String,
         evidence_id: String,
     },
+    /// No claim in the draft declares any numeric item.
+    ///
+    /// The verifier's `report_contains_no_verifiable_numeric_claims`, surfaced at
+    /// validation: repair pressure under the free-text rule produced exactly this
+    /// shape live — a model that "fixed" its last undeclared figure by deleting
+    /// the figures, passed validation, and was refused twice by the verifier.
+    NoVerifiableNumbers,
     /// A financial figure written into free text.
     ///
     /// Figures belong in `numeric_items`, where they carry provenance and the renderer
@@ -411,7 +442,8 @@ impl DraftProblem {
         match self {
             Self::ContractVersionMismatch { .. }
             | Self::Oversized { .. }
-            | Self::AmbiguousNumberReference { .. } => None,
+            | Self::AmbiguousNumberReference { .. }
+            | Self::NoVerifiableNumbers => None,
             Self::DuplicateClaimId { claim_id }
             | Self::ClaimNotInAnySection { claim_id }
             | Self::EmptyStatement { claim_id }
@@ -450,6 +482,39 @@ impl DraftProblem {
             Self::UnknownNumberReference { .. } => "unknown_number_reference",
             Self::NumberDisagreesWithEvidence { .. } => "number_disagrees_with_evidence",
             Self::EvidenceOutsideTaskScope { .. } => "evidence_outside_task_scope",
+            Self::NoVerifiableNumbers => "report_contains_no_verifiable_numeric_claims",
+        }
+    }
+
+    /// The specifics a reader needs to locate the offending text, for the event
+    /// stream. The repair guidance the model receives is richer (per-claim
+    /// actions, every offending token); this is the one line a headless
+    /// consumer of the typed events reads, so the variants that dominate live
+    /// repair loops carry their distinguishing detail.
+    pub fn event_detail(&self) -> String {
+        match self {
+            Self::FigureInFreeText { field, numeral, .. } => {
+                format!("：{field} 中的数字「{numeral}」未声明")
+            }
+            Self::UnknownEvidence { supplied_id, .. } => {
+                format!("：未知标识 {supplied_id}")
+            }
+            Self::NumberDisagreesWithEvidence {
+                label,
+                declared,
+                evidence_id,
+                ..
+            } => format!("：{label}={declared} 与证据 {evidence_id} 不符"),
+            Self::UnknownNumberReference { label, .. } => {
+                format!("：引用 {label} 未声明")
+            }
+            Self::ConflictingEvidence { evidence_ids, .. } => {
+                format!("：未披露冲突证据 {}", evidence_ids.join("、"))
+            }
+            Self::MissingCalculationProvenance { label, .. } => {
+                format!("：{label} 缺少计算溯源")
+            }
+            _ => String::new(),
         }
     }
 }
@@ -598,7 +663,19 @@ fn short_timestamp(raw: &str) -> Option<String> {
 /// each wrapped in an object, six times, with nothing in the diagnostic that could
 /// have located the field. Repair is only possible if the model is told which field
 /// is wrong, so the path is part of the contract's diagnostic surface.
+///
+/// A *missing* field is the harder case, because serde stops at the first one. The
+/// same live run lost **5 of 8 finalization attempts to decode** — a stub claim
+/// without `id`, an observed item without `evidence_id`, a calculated item without
+/// `value` — while its validation findings were falling 142 → 40 → 20 → 8. One
+/// field named per attempt is precisely the loop that consumed the budget: the
+/// model fixes it, resubmits, and is told about the next. Before decoding, a
+/// structural scan collects every missing required field at the report, claim and
+/// numeric-item level, so one round names them all.
 pub fn decode_draft(arguments: &Value) -> Result<VerifiedReportDraft, String> {
+    if let Some(missing) = missing_required_fields(arguments) {
+        return Err(missing);
+    }
     let mut track = serde_path_to_error::Track::new();
     let deserializer = serde_path_to_error::Deserializer::new(arguments, &mut track);
     match VerifiedReportDraft::deserialize(deserializer) {
@@ -611,6 +688,121 @@ pub fn decode_draft(arguments: &Value) -> Result<VerifiedReportDraft, String> {
                 Err(format!("{path}: {error}"))
             }
         }
+    }
+}
+
+/// Every required field absent from a submitted draft, at any depth.
+///
+/// Only *absence* is scanned. Type errors, unknown provenance tags and bad enum
+/// values are left to serde, which names them with a path; duplicating that here
+/// risks two drift-prone type checkers. The scanned structure is the contract's
+/// own: required fields of `VerifiedReportDraft`, `Claim` and `NumericItem`, and
+/// the per-provenance requirements of `NumericProvenance`.
+fn missing_required_fields(arguments: &Value) -> Option<String> {
+    let object = arguments.as_object()?;
+    let mut missing: Vec<String> = Vec::new();
+
+    let required_top: &[(&str, bool)] = &[
+        ("title", true),
+        ("executive_summary", true),
+        ("sections", true),
+        ("claims", true),
+    ];
+    for (field, _) in required_top {
+        if !object.contains_key(*field) {
+            missing.push(field.to_string());
+        }
+    }
+
+    if let Some(claims) = object.get("claims").and_then(Value::as_array) {
+        for (index, claim) in claims.iter().enumerate() {
+            let Some(claim) = claim.as_object() else {
+                continue;
+            };
+            for field in ["id", "kind", "statement"] {
+                if !claim.contains_key(field) {
+                    missing.push(format!("claims[{index}].{field}"));
+                }
+            }
+            if let Some(items) = claim.get("numeric_items").and_then(Value::as_array) {
+                for (item_index, item) in items.iter().enumerate() {
+                    missing_item_fields(claim, index, item_index, item, &mut missing);
+                }
+            }
+        }
+    }
+
+    if missing.is_empty() {
+        None
+    } else {
+        let fields = missing.join(", ");
+        Some(format!(
+            "missing required fields: {fields}. Add every named field and \
+             resubmit the complete draft."
+        ))
+    }
+}
+
+/// Fields a numeric item must carry given its provenance tag.
+fn missing_item_fields(
+    claim: &serde_json::Map<String, Value>,
+    claim_index: usize,
+    item_index: usize,
+    item: &Value,
+    missing: &mut Vec<String>,
+) {
+    let Some(item) = item.as_object() else {
+        return;
+    };
+    let at = |field: &str| {
+        format!(
+            "claims[{claim_index}].numeric_items[{item_index}].{field}{}",
+            claim
+                .get("id")
+                .and_then(Value::as_str)
+                .map(|id| format!(" (claim {id})"))
+                .unwrap_or_default()
+        )
+    };
+    for field in ["value", "label"] {
+        if !item.contains_key(field) {
+            missing.push(at(field));
+        }
+    }
+    let Some(provenance) = item.get("provenance").and_then(Value::as_str) else {
+        // Without the tag the per-tag requirements are unknowable, so name the
+        // tag and the branch the item's own keys already suggest.
+        missing.push(at("provenance"));
+        if item.contains_key("calculation_evidence_id") {
+            missing.push(at("operation"));
+        } else if item.contains_key("method") {
+            missing.push(at("basis_evidence_ids"));
+        }
+        return;
+    };
+    match provenance {
+        "observed" => {
+            if !item.contains_key("evidence_id") {
+                missing.push(at("evidence_id"));
+            }
+        }
+        "calculated" => {
+            for field in ["calculation_evidence_id", "operation", "input_evidence_ids"] {
+                if !item.contains_key(field) {
+                    missing.push(at(field));
+                }
+            }
+        }
+        "estimated" => {
+            for field in ["method", "basis_evidence_ids"] {
+                if !item.contains_key(field) {
+                    missing.push(at(field));
+                }
+            }
+        }
+        // `user_assumption` requires nothing beyond the item itself; an unknown
+        // tag is a type error for serde to name with its path.
+        _ => {}
     }
 }
 
@@ -683,6 +875,22 @@ pub fn validate_draft(
         validate_claim(claim, registry, task_symbols, &mut problems);
     }
     validate_free_text(draft, registry, &mut problems);
+
+    // A draft that declares no quantity at all is the verifier's
+    // `report_contains_no_verifiable_numeric_claims` refusal, caught here
+    // instead of one independent-verification round later. This is the shape
+    // repair pressure produces: a live moderate run converged to one
+    // figure_in_free_text problem, "fixed" it by deleting the figures, passed
+    // this validation, and was refused twice by the verifier before the budget
+    // ran out. The check moves the refusal forward; the repair action names the
+    // restore-the-figures fix.
+    if draft
+        .claims
+        .iter()
+        .all(|claim| claim.numeric_items.is_empty())
+    {
+        problems.push(DraftProblem::NoVerifiableNumbers);
+    }
     problems
 }
 
@@ -1040,8 +1248,9 @@ fn validate_free_text(
 ///
 /// The comparison is performed on the exact token the renderer will emit, run
 /// through the Engine's own extractor, so validation and verification cannot read
-/// the same figure differently. Evidence with no numeric value is not judged here: a
-/// claim may legitimately cite a document, a source name or a timestamp.
+/// the same figure differently. An observed quantity whose cited evidence carries
+/// no number is refused: skipping used to let a declared `24.93` cite a boolean
+/// provenance flag, pass validation, and die at the independent verifier.
 fn check_value_against_evidence(
     claim: &Claim,
     item: &NumericItem,
@@ -1054,6 +1263,19 @@ fn check_value_against_evidence(
         return;
     };
     let Some(evidence_value) = descriptor.value.as_ref().and_then(evidence_number) else {
+        // An observed quantity must cite evidence that carries a number. Citing a
+        // boolean, a document title or a timestamp as the provenance of `24.93` is
+        // exactly the validation/verification disagreement this check exists to
+        // catch: validation used to skip non-numeric evidence, the renderer printed
+        // the declared figure, and the independent verifier could not reproduce it.
+        // Live Case C run 3 died on that shape — `low_60d = 24.93` cited a quote
+        // provenance flag whose value was `false`.
+        problems.push(DraftProblem::NumberDisagreesWithEvidence {
+            claim_id: claim.id.clone(),
+            label: item.label.clone(),
+            declared: item.value,
+            evidence_id: evidence_id.to_owned(),
+        });
         return;
     };
     let token = format!("{}{}", item.value, item.unit.as_deref().unwrap_or_default());
@@ -1075,10 +1297,28 @@ fn check_value_against_evidence(
 }
 
 /// Read a number out of an evidence value, including one recorded as a string.
+///
+/// A bare numeric string parses directly. A descriptive financial string —
+/// `10派3.80元(含税)`, a dividend plan a source publishes as prose — carries its
+/// payload in the *last* embedded number (the per-10-share amount, not the
+/// share count), which is exactly the value the verifier's digit-segment
+/// matching already accepts. Parsing it keeps validation and verification
+/// agreed instead of refusing a true figure.
 fn evidence_number(value: &serde_json::Value) -> Option<f64> {
     match value {
         serde_json::Value::Number(number) => number.as_f64(),
-        serde_json::Value::String(text) => text.replace(',', "").parse::<f64>().ok(),
+        serde_json::Value::String(text) => {
+            let normalized = text.replace(',', "");
+            if let Ok(value) = normalized.parse::<f64>() {
+                return Some(value);
+            }
+            // The last number embedded in a descriptive string.
+            normalized
+                .split(|character: char| !character.is_ascii_digit() && character != '.')
+                .filter(|segment| !segment.is_empty())
+                .filter_map(|segment| segment.parse::<f64>().ok())
+                .rfind(|value| value.is_finite())
+        }
         _ => None,
     }
 }
@@ -1097,6 +1337,18 @@ fn validate_numeric_item(
             claim_id: claim.id.clone(),
             label: item.label.clone(),
             value: item.value,
+            // The kinds that would accept this item's provenance as-is, so the
+            // repair can be a mechanical relabel rather than recalled from the
+            // matrix. A live run exhausted its finalization budget with this
+            // exact refusal: a trend claim of kind=observed_fact carrying two
+            // calculated figures (drawdown, volatility) that the model never
+            // relabelled across three attempts.
+            permitted_kinds: claim
+                .kind
+                .kinds_permitting(&item.provenance)
+                .iter()
+                .map(|kind| kind.as_str().to_owned())
+                .collect(),
         });
     }
 
@@ -1175,6 +1427,29 @@ fn validate_numeric_item(
                     label: item.label.clone(),
                     reason: "this quantity is deterministically computable; use a calculation \
                              rather than an estimate"
+                        .to_owned(),
+                });
+            }
+            // A method that names an arithmetic operation is a calculation in
+            // disguise, whatever its label. A live run passed eleven percentage
+            // restatements as estimates with `method: "div(最新归母, 上一年归母)-1"`
+            // — the operation written out — through validation, and the verifier
+            // refused all eleven as unreproducible, one independent round too
+            // late. Refusing the disguise here names the fix one round earlier.
+            const OPERATIONS: [&str; 10] = [
+                "div", "mul", "add(", "sub(", "÷", "×", "yoy", "returns", "pct", "ratio",
+            ];
+            let method_lower = method.to_lowercase();
+            if OPERATIONS
+                .iter()
+                .any(|needle| method_lower.contains(needle))
+            {
+                problems.push(DraftProblem::InvalidEstimate {
+                    claim_id: claim.id.clone(),
+                    label: item.label.clone(),
+                    reason: "the method names an arithmetic operation; compute it with \
+                             run_financial_calculation or compute_from_evidence and cite the \
+                             calculation, do not present arithmetic as an estimate"
                         .to_owned(),
                 });
             }

@@ -202,7 +202,57 @@ pub struct EvidenceQuery {
     pub keyword: Option<String>,
     #[serde(default)]
     pub only_calculations: Option<bool>,
+    #[serde(default = "default_limit")]
     pub limit: usize,
+}
+
+fn default_limit() -> usize {
+    10
+}
+
+/// Queries answerable in one call.
+///
+/// A moderate report declares ten to twenty figures, and each needs a canonical
+/// identifier. When one call answered one question the model had to spend a model round
+/// per figure: measured live, a single balanced task issued **42 distinct**
+/// `search_evidence` calls — `pe_ttm`, then `pb_mrq`, then `net_profit`, then `revenue`,
+/// then `roe`, then `eps` — and ran out of rounds before it could finish repairing the
+/// report. None were duplicates, so no amount of caching or loop detection would have
+/// helped: the interface itself forced the serialization.
+pub const MAX_BATCH_QUERIES: usize = 16;
+
+/// One or more queries. A bare query object is still accepted.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum EvidenceSearchRequest {
+    /// `{"queries": [ … ]}` — answered in a single call.
+    Batch {
+        queries: Vec<EvidenceQuery>,
+        /// Applied to any query that does not set its own.
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    /// A single query, as before.
+    Single(EvidenceQuery),
+}
+
+impl EvidenceSearchRequest {
+    /// Flatten into the queries to run, bounded.
+    pub fn queries(self) -> Vec<EvidenceQuery> {
+        match self {
+            Self::Batch { queries, limit } => queries
+                .into_iter()
+                .take(MAX_BATCH_QUERIES)
+                .map(|mut query| {
+                    if let Some(limit) = limit {
+                        query.limit = query.limit.max(limit);
+                    }
+                    query
+                })
+                .collect(),
+            Self::Single(query) => vec![query],
+        }
+    }
 }
 
 /// Evidence identifiers accumulated for one task.
@@ -352,6 +402,47 @@ impl EvidenceCatalog {
             }
         }
         facts
+    }
+
+    /// Answer a batch of queries in one call.
+    ///
+    /// Each query keeps its own bounded result set and is reported under the terms that
+    /// produced it, so a model can tell which lookup matched nothing. The total row
+    /// count is bounded by `MAX_BATCH_QUERIES × MAX_SEARCH_RESULTS`, and the shared
+    /// catalog metadata is reported once rather than repeated per query.
+    pub fn search_batch(&self, queries: &[EvidenceQuery]) -> Value {
+        if queries.len() == 1 {
+            return self.search(&queries[0]);
+        }
+        let mut results = Vec::new();
+        let mut matched_total = 0usize;
+        let mut returned_total = 0usize;
+        for query in queries {
+            let mut answer = self.search(query);
+            matched_total += answer
+                .get("matched")
+                .and_then(Value::as_u64)
+                .unwrap_or_default() as usize;
+            returned_total += answer
+                .get("returned")
+                .and_then(Value::as_u64)
+                .unwrap_or_default() as usize;
+            if let Some(object) = answer.as_object_mut() {
+                // Shared facts belong once, at the top.
+                object.remove("catalog_size");
+                object.remove("ok");
+                object.insert("query".into(), describe_query(query));
+            }
+            results.push(answer);
+        }
+        serde_json::json!({
+            "ok": true,
+            "catalog_size": self.descriptors.len(),
+            "queries": results.len(),
+            "matched": matched_total,
+            "returned": returned_total,
+            "results": results,
+        })
     }
 
     /// Run one bounded search.
@@ -538,6 +629,25 @@ fn render_value(value: &Value) -> String {
     }
     let truncated: String = rendered.chars().take(MAX_VALUE_CHARS).collect();
     format!("{truncated}…")
+}
+
+/// Echo the terms of a query, so a batch answer is self-describing.
+fn describe_query(query: &EvidenceQuery) -> Value {
+    let mut out = serde_json::Map::new();
+    for (key, value) in [
+        ("symbol", query.symbol.as_deref()),
+        ("source", query.source.as_deref()),
+        ("field", query.field.as_deref()),
+        ("keyword", query.keyword.as_deref()),
+    ] {
+        if let Some(value) = value {
+            out.insert(key.into(), Value::from(value));
+        }
+    }
+    if query.only_calculations == Some(true) {
+        out.insert("only_calculations".into(), Value::Bool(true));
+    }
+    Value::Object(out)
 }
 
 fn search_row(descriptor: &EvidenceDescriptor) -> Value {
@@ -777,6 +887,84 @@ mod tests {
         assert!(response["note"]
             .as_str()
             .is_some_and(|n| n.contains("Narrow")));
+    }
+
+    /// Many lookups are answered in one call.
+    ///
+    /// This is the measured defect: a live balanced task issued **42 distinct**
+    /// `search_evidence` calls — `pe_ttm`, `pb_mrq`, `net_profit`, `revenue`, `roe`,
+    /// `eps` — one model round each, and ran out of rounds before it could finish
+    /// repairing the report. None were duplicates, so caching or loop detection could
+    /// not have helped; the interface forced the serialization.
+    #[test]
+    fn a_batch_answers_every_lookup_in_one_call() {
+        let catalog = populated();
+        let request: EvidenceSearchRequest = serde_json::from_value(json!({
+            "limit": 3,
+            "queries": [
+                {"field": "last"},
+                {"field": "close"},
+                {"only_calculations": true},
+                {"field": "nonexistent"}
+            ]
+        }))
+        .expect("the batch form parses");
+        let queries = request.queries();
+        assert_eq!(queries.len(), 4);
+        let response = catalog.search_batch(&queries);
+        assert_eq!(response["queries"], json!(4));
+        let results = response["results"].as_array().expect("per-query results");
+        assert_eq!(results.len(), 4);
+        // Each answer echoes the terms that produced it, so a model can tell which
+        // lookup matched nothing.
+        assert_eq!(results[0]["query"]["field"], json!("last"));
+        assert_eq!(results[2]["query"]["only_calculations"], json!(true));
+        assert_eq!(results[3]["matched"], json!(0));
+        // Shared catalog metadata is reported once, not per query.
+        assert!(response["catalog_size"].is_number());
+        assert!(results[0].get("catalog_size").is_none());
+    }
+
+    /// The single-query form still works, unchanged.
+    #[test]
+    fn a_single_query_is_still_accepted_and_shaped_as_before() {
+        let catalog = populated();
+        let request: EvidenceSearchRequest =
+            serde_json::from_value(json!({"field": "last", "limit": 2}))
+                .expect("the single form parses");
+        let response = catalog.search_batch(&request.queries());
+        // Not wrapped in `results`: the previous shape is preserved exactly.
+        assert!(response.get("results").is_some());
+        assert!(response.get("queries").is_none());
+        assert_eq!(response["returned"], json!(1));
+        assert_eq!(response["results"][0]["evidence_id"], json!("evf_price"));
+    }
+
+    /// A batch is bounded, so it cannot become an unbounded transfer.
+    #[test]
+    fn a_batch_is_bounded_in_queries_and_rows() {
+        let catalog = populated();
+        let queries: Vec<Value> = (0..40).map(|_| json!({"limit": 50})).collect();
+        let request: EvidenceSearchRequest =
+            serde_json::from_value(json!({"queries": queries})).expect("parses");
+        let resolved = request.queries();
+        assert_eq!(resolved.len(), MAX_BATCH_QUERIES);
+        let response = catalog.search_batch(&resolved);
+        let returned = response["returned"].as_u64().unwrap_or_default() as usize;
+        assert!(
+            returned <= MAX_BATCH_QUERIES * MAX_SEARCH_RESULTS,
+            "a batch must stay bounded, returned {returned}"
+        );
+    }
+
+    /// A query without an explicit limit gets a sane default.
+    #[test]
+    fn a_query_without_a_limit_uses_a_default() {
+        let catalog = populated();
+        let request: EvidenceSearchRequest =
+            serde_json::from_value(json!({"queries": [{"field": "last"}]})).expect("parses");
+        let response = catalog.search_batch(&request.queries());
+        assert!(response["returned"].as_u64().unwrap_or_default() > 0);
     }
 
     /// A limit above the cap is clamped, not honoured.

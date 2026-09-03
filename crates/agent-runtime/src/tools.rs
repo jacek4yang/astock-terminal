@@ -144,6 +144,47 @@ fn runtime_tool(name: &str, description: &str, input_schema: Value) -> ToolDefin
     }
 }
 
+/// One or many queries in a single call.
+///
+/// A moderate report declares ten to twenty figures and each needs an identifier. With
+/// one question per call the model spent one model round per figure — a live balanced
+/// task issued 42 distinct searches and never reached a publishable report. The single
+/// form stays accepted so nothing that already works breaks.
+fn evidence_search_schema() -> Value {
+    let query = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "symbol": {"type": "string", "pattern": "^[0-9]{6}$"},
+            "source": {"type": "string", "maxLength": 40},
+            "field": {"type": "string", "maxLength": 120},
+            "keyword": {"type": "string", "maxLength": 80},
+            "only_calculations": {"type": "boolean"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50}
+        }
+    });
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Prefer the batch form: one call, one entry per figure you need an identifier for.",
+        "properties": {
+            "queries": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": crate::catalog::MAX_BATCH_QUERIES,
+                "items": query.clone(),
+                "description": "Answer many lookups in one round."
+            },
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            "symbol": query["properties"]["symbol"].clone(),
+            "source": query["properties"]["source"].clone(),
+            "field": query["properties"]["field"].clone(),
+            "keyword": query["properties"]["keyword"].clone(),
+            "only_calculations": query["properties"]["only_calculations"].clone()
+        }
+    })
+}
+
 fn computation_program_schema(joinquant: bool) -> Value {
     let mut schema = json!({
         "type": "object",
@@ -181,7 +222,7 @@ fn computation_program_schema(joinquant: bool) -> Value {
                 "additionalProperties": {"type": "object"}
             }
         },
-        "description": "AST operators use an `op` discriminator. Sources: scalar{value}, var{name}. Arithmetic: add/sub/mul/div{left,right}, neg/abs{input}, clip{input,min,max}. Series: lag{input,periods}, diff/returns/log_returns/cumulative_return{input}, sma/ema/zscore/rsi{input,window}, rolling_std{input,window,annualization?}, tail{input,count}. Reductions: mean/std/sum/min/max/last/count/max_drawdown{input}, correlation{left,right}. Expressions are nested JSON objects; no code strings."
+        "description": "AST operators use an `op` discriminator and are always nested JSON objects — never a string, never a bare number. Sources: {\"op\":\"scalar\",\"value\":1.95}, {\"op\":\"var\",\"name\":\"price\"}. Arithmetic: add/sub/mul/div{left,right}, neg/abs{input}, clip{input,min,max}. Series: lag{input,periods}, diff/returns/log_returns/cumulative_return{input}, sma/ema/zscore/rsi{input,window}, rolling_std{input,window,annualization?}, tail{input,count}. Reductions: mean/std/sum/min/max/last/count/max_drawdown{input}, correlation{left,right}. Inputs are arrays of numbers (or null), never strings: {\"price\":[34.63],\"eps\":[1.95]}. Worked PE example: {\"version\":1,\"inputs\":{\"price\":[34.63],\"eps\":[1.95]},\"outputs\":{\"pe\":{\"op\":\"div\",\"left\":{\"op\":\"var\",\"name\":\"price\"},\"right\":{\"op\":\"var\",\"name\":\"eps\"}}}}. Prefer one-element scalar inputs for ratios (PE, PB, market_cap, YoY); do not paste a 250-day close series unless a rolling operator needs it."
     });
     if joinquant {
         schema["properties"]["inputs"]["description"] = json!(
@@ -428,12 +469,23 @@ pub fn default_registry() -> ToolRegistry {
         ),
         read_tool(
             "run_financial_calculation",
-            "Run a bounded, reproducible, fuel-metered financial calculation AST in the Engine. Supports sequential let bindings, series arithmetic, returns, moving averages, volatility, z-score, RSI, correlation, max drawdown and reductions. No code strings, files, processes, network, clock or randomness. Use this for material arithmetic instead of computing in prose.",
+            "Run a bounded, reproducible, fuel-metered financial calculation AST in the Engine. One program may declare many named outputs; compute everything you need in ONE call rather than one call per figure. Supports sequential let bindings, series arithmetic, returns, moving averages, volatility, z-score, RSI, correlation, max drawdown and reductions. No code strings, files, processes, network, clock or randomness. Use this for material arithmetic instead of computing in prose.",
             "research.compute",
-            object_schema(
-                json!({"program": computation_program_schema(false)}),
-                &["program"],
-            ),
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Supply `programs` to compute several figures in one call, or `program` for one.",
+                "properties": {
+                    "program": computation_program_schema(false),
+                    "programs": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 12,
+                        "items": computation_program_schema(false),
+                        "description": "Preferred: one call, one program per figure."
+                    }
+                }
+            }),
             20,
             "deterministic_input_snapshot",
         ),
@@ -540,18 +592,55 @@ pub fn default_registry() -> ToolRegistry {
         // state. Read-only over Runtime state, so it costs no upstream call.
         runtime_tool(
             "search_evidence",
-            "Search this task's bounded evidence catalog for canonical evidence identifiers, with source, time, unit and quality state. Use before finalization whenever a claim needs provenance. Never invent an identifier.",
-            object_schema(
-                json!({
-                    "symbol": {"type": "string", "pattern": "^[0-9]{6}$"},
-                    "source": {"type": "string", "maxLength": 40},
-                    "field": {"type": "string", "maxLength": 120},
-                    "keyword": {"type": "string", "maxLength": 80},
-                    "only_calculations": {"type": "boolean"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 50}
-                }),
-                &["limit"],
-            ),
+            "Search this task's bounded evidence catalog for canonical evidence identifiers, with source, time, unit and quality state. Ask for everything you need in ONE call: pass `queries` as a list, one entry per figure you intend to cite. Use before finalization whenever a claim needs provenance. Never invent an identifier.",
+            evidence_search_schema(),
+        ),
+        // Foolproof arithmetic over already-gathered evidence.
+        //
+        // Live Case C runs burned up to sixteen rounds on malformed calculation
+        // ASTs after coverage was complete. This tool never asks the model to
+        // author an AST: it names an op and two operands (evidence ids or
+        // scalars), and the Runtime builds the program and dispatches it.
+        runtime_tool(
+            "compute_from_evidence",
+            "Compute a ratio or product from evidence already in this task's catalog, or from a scalar. Preferred for PE, PB, market_cap, YoY and similar figures. Pass every figure you need in ONE call via `calculations`. Do not author a calculation AST — name the op and the operands. Operands are either {\"evidence_id\":\"evf_…\"} or {\"value\":34.63}. Ops: div, mul, add, sub.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["calculations"],
+                "properties": {
+                    "calculations": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 12,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["label", "op", "left", "right"],
+                            "properties": {
+                                "label": {"type": "string", "maxLength": 80},
+                                "op": {"type": "string", "enum": ["div", "mul", "add", "sub"]},
+                                "left": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "properties": {
+                                        "evidence_id": {"type": "string", "pattern": "^evf_[A-Za-z0-9_]+$", "maxLength": 80},
+                                        "value": {"type": "number"}
+                                    }
+                                },
+                                "right": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "properties": {
+                                        "evidence_id": {"type": "string", "pattern": "^evf_[A-Za-z0-9_]+$", "maxLength": 80},
+                                        "value": {"type": "number"}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }),
         ),
         // Structured finalization.
         //
@@ -562,7 +651,7 @@ pub fn default_registry() -> ToolRegistry {
         // publication path: the verifier still runs and still fails closed.
         runtime_tool(
             "submit_report",
-            "Submit the final structured research draft for validation and publication. Do not write citation markup; supply canonical identifiers and the runtime renders citations. Every printed figure must be declared as a numeric_item or contained in cited evidence. Prefer referencing by label in braces anywhere in prose, so `close {close}` prints the verified value. Provenance per item: observed (evidence_id), calculated (calculation_evidence_id, operation, input_evidence_ids), user_assumption (a user-supplied scenario parameter), or estimated (method, basis_evidence_ids, ideally a range). Never estimate a quantity the Engine can compute. Prose uses the task output_language.",
+            "Submit the final structured research draft for validation and publication. Do not write citation markup; supply canonical identifiers and the runtime renders citations. Every printed figure must be declared as a numeric_item or contained in cited evidence. Prefer `{label}` references so the runtime prints the verified value. Provenance: observed (evidence_id), calculated (calculation_evidence_id, operation, input_evidence_ids), user_assumption, or estimated (method, basis_evidence_ids). Never estimate a quantity the Engine can compute — use compute_from_evidence for PE, market_cap and YoY. Prose uses the task output_language.",
             submit_report_schema(),
         ),
     ];

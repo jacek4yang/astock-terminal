@@ -323,6 +323,99 @@ fn citing_a_calculation_as_an_observation_is_refused() {
     assert!(has(&validate(&draft), "missing_calculation_provenance"));
 }
 
+/// A kind/provenance refusal names the kinds that would accept the item.
+///
+/// A live run exhausted its finalization budget on exactly this shape: a trend
+/// claim of kind=observed_fact carrying two calculated figures (drawdown,
+/// annualized volatility), never relabelled across three attempts because the
+/// repair guidance described the matrix in prose. The refusal now carries, per
+/// label, the kinds that accept the provenance as-is, so the fix is mechanical.
+#[test]
+fn a_kind_provenance_refusal_names_the_accepting_kinds() {
+    let mut draft = valid_draft();
+    // c_price is observed_fact; give it a calculated item (the live shape).
+    draft.claims[0].numeric_items[0].provenance = NumericProvenance::Calculated {
+        calculation_evidence_id: "evf_pe".into(),
+        operation: "max_drawdown".into(),
+        input_evidence_ids: vec!["evf_price".into()],
+    };
+    let problems = validate(&draft);
+    let problem = problems
+        .iter()
+        .find(|p| p.code() == "unsupported_observed_number")
+        .expect("the kind/provenance mismatch is refused");
+    let response = astock_agent_runtime::validation_repair(
+        &problems,
+        astock_agent_runtime::RepairVerdict::Retry {
+            attempt: 1,
+            remaining: 1,
+            unchanged: false,
+        },
+    );
+    let target = response["repair"]
+        .as_array()
+        .expect("repair targets")
+        .iter()
+        .find(|t| t["claim_id"] == json!("c_price"))
+        .expect("the affected claim's target");
+    let fixes = target["kind_fixes"].as_array().expect("mechanical fixes");
+    assert!(
+        fixes.iter().any(|f| f
+            .as_str()
+            .is_some_and(|f| f.contains("deterministic_calculation"))),
+        "the relabel is named: {fixes:?}"
+    );
+    let _ = problem;
+}
+
+#[test]
+/// A draft whose claims declare no numeric item is refused at validation.
+///
+/// A live moderate run converged to one `figure_in_free_text` problem, "fixed"
+/// it by deleting the figures, passed validation, and was refused twice by the
+/// independent verifier (`report_contains_no_verifiable_numeric_claims`)
+/// before the budget ran out. The verifier's own report-level check now also
+/// runs at validation, under the same code, so the emptied draft is repaired
+/// one round earlier with the restore-the-figures instruction.
+fn a_draft_that_declares_no_numbers_is_refused_at_validation() {
+    let mut draft = valid_draft();
+    for c in &mut draft.claims {
+        c.numeric_items.clear();
+    }
+    let problems = validate(&draft);
+    assert!(
+        has(&problems, "report_contains_no_verifiable_numeric_claims"),
+        "the emptied draft must be refused: {problems:?}"
+    );
+    // A report-level problem, so the repair response carries the action text.
+    let response = astock_agent_runtime::validation_repair(
+        &problems,
+        astock_agent_runtime::RepairVerdict::Retry {
+            attempt: 1,
+            remaining: 1,
+            unchanged: false,
+        },
+    );
+    let report_level = response["report_level"]
+        .as_array()
+        .expect("report-level problems are surfaced");
+    let entry = report_level
+        .iter()
+        .find(|item| item["code"] == "report_contains_no_verifiable_numeric_claims")
+        .expect("the refusal must be report-level");
+    assert!(
+        entry["action"]
+            .as_str()
+            .is_some_and(|action| action.contains("Restore every material figure")),
+        "the restore-the-figures action is carried: {response}"
+    );
+    // The valid draft still passes — the check adds refusals to nothing valid.
+    assert!(!has(
+        &validate(&valid_draft()),
+        "report_contains_no_verifiable_numeric_claims"
+    ));
+}
+
 #[test]
 fn undisclosed_conflicting_evidence_is_refused() {
     let mut map = registry();
@@ -348,6 +441,60 @@ fn undisclosed_conflicting_evidence_is_refused() {
     assert!(
         !has(&problems, "conflicting_evidence"),
         "a disclosed conflict must be acceptable: {problems:?}"
+    );
+}
+
+/// Disclosing *other* registrations of the same facts does not discharge the
+/// conflict on the identifiers the claim cites.
+///
+/// A live moderate run oscillated three finalization attempts away from
+/// publishing on exactly this shape: `claim_market_regime` cited
+/// `evf_50e6…`, `evf_1ed2…`, `evf_2fd6…`, and its `disclosed_conflicts`
+/// listed `evf_4a36…`, `evf_5617…`, `evf_4813…` — different registrations it
+/// had seen in a search — so the finding fired again on every resubmission
+/// until the budget was spent.
+#[test]
+fn disclosing_different_registrations_does_not_discharge_the_conflict() {
+    let mut map = registry();
+    map.get_mut("evf_price").unwrap().conflicting = true;
+    let mut draft = valid_draft();
+    for c in &mut draft.claims {
+        if c.evidence_ids.iter().any(|id| id == "evf_price") {
+            // The live mistake: disclose some other id entirely.
+            c.disclosed_conflicts.push("evf_other_registration".into());
+        }
+    }
+    let problems = validate_draft(&draft, &map, &symbols());
+    assert!(
+        has(&problems, "conflicting_evidence"),
+        "a disclosure of unrelated identifiers must not discharge the conflict: {problems:?}"
+    );
+    // The repair target names the exact identifiers to disclose, so the model
+    // does not have to guess which registrations the finding concerns.
+    let response = astock_agent_runtime::validation_repair(
+        &problems,
+        astock_agent_runtime::RepairVerdict::Retry {
+            attempt: 1,
+            remaining: 1,
+            unchanged: false,
+        },
+    );
+    let target = response["repair"]
+        .as_array()
+        .expect("repair targets")
+        .iter()
+        .find(|target| {
+            target["codes"]
+                .as_array()
+                .is_some_and(|codes| codes.iter().any(|code| code == "conflicting_evidence"))
+        })
+        .expect("a conflicting-evidence target");
+    let ids = target["conflicting_evidence_ids"]
+        .as_array()
+        .expect("the exact ids");
+    assert!(
+        ids.iter().any(|id| id == "evf_price"),
+        "the disclosed list must name the cited identifier: {ids:?}"
     );
 }
 
@@ -420,14 +567,26 @@ fn every_inappropriate_mutation_of_a_valid_draft_is_refused() {
         ("fake evidence id", |d| {
             d.claims[0].evidence_ids = vec!["evf_does_not_exist".into()];
         }),
-        ("observed number on an inference", |d| {
+        ("number on an unknown claim", |d| {
+            d.claims[5].numeric_items = vec![NumericItem {
+                value: 12.0,
+                unit: None,
+                label: "未知数值".into(),
+                provenance: NumericProvenance::Observed {
+                    evidence_id: "evf_price".into(),
+                    field: None,
+                },
+            }];
+        }),
+        ("estimated number on an inference", |d| {
             d.claims[2].numeric_items = vec![NumericItem {
                 value: 12.0,
                 unit: None,
                 label: "推断数值".into(),
-                provenance: NumericProvenance::Observed {
-                    evidence_id: "evf_price".into(),
-                    field: None,
+                provenance: NumericProvenance::Estimated {
+                    method: "按历史区间推算".into(),
+                    basis_evidence_ids: vec!["evf_price".into()],
+                    range: None,
                 },
             }];
         }),
@@ -460,6 +619,15 @@ fn every_inappropriate_mutation_of_a_valid_draft_is_refused() {
                 method: "按历史区间推算".into(),
                 basis_evidence_ids: vec!["evf_eps".into()],
                 range: Some([0.09, 0.01]),
+            };
+        }),
+        ("arithmetic disguised as an estimate", |d| {
+            // The live shape: `method: "div(最新归母, 上一年归母)-1"` on a
+            // percentage restatement — an operation written out as a method.
+            d.claims[4].numeric_items[0].provenance = NumericProvenance::Estimated {
+                method: "div(最新归母, 上一年归母)-1".into(),
+                basis_evidence_ids: vec!["evf_eps".into()],
+                range: None,
             };
         }),
         ("contract version drift", |d| {
@@ -504,6 +672,34 @@ fn an_altered_number_is_presented_to_the_verifier_beside_its_own_evidence() {
         "and it must sit beside the evidence it claims to come from, so the \
          verifier can reproduce it: {line}"
     );
+}
+
+/// A multi-block report-level prose field stays one physical line in the
+/// verifier form.
+///
+/// The verifier reads the form line by line and attaches citations to the line
+/// a figure appears on. A summary written as Markdown blocks contains embedded
+/// newlines; emitted raw it split into several physical lines, stranding the
+/// substituted figures of a continuation line with no citation marker. A live
+/// run's clean draft — zero validation problems — was refused twice on exactly
+/// that shape (`numeric_claim_without_evidence:line_4`), and its repair loop
+/// had nothing to repair because the contract was satisfied.
+#[test]
+fn a_multi_block_summary_stays_one_line_with_its_citations() {
+    let mut draft = valid_draft();
+    draft.executive_summary =
+        "第一段引用收盘价 {最新价}。\n\n**当前行情**：收盘 {最新价} 元。".to_owned();
+    let rendered = render(&draft, &registry());
+    // Every physical line that carries the substituted figure also carries a
+    // citation marker.
+    for line in rendered.verifier_markdown.lines() {
+        if line.contains("34.47") {
+            assert!(
+                line.contains("【E:evf_price】"),
+                "a figure and its citation share a line: {line}"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -969,6 +1165,109 @@ fn evidence_with_no_numeric_value_is_not_judged_as_a_disagreement() {
     ));
     let problems = validate_draft(&draft, &map, &BTreeSet::new());
     assert!(problems.is_empty(), "{problems:?}");
+}
+
+/// An observed quantity whose own evidence carries no number is refused.
+///
+/// Companion citations (a timestamp next to a price) remain fine: the numeric item
+/// A dividend-plan description string carries its per-10-share amount in the
+/// last embedded number.
+///
+/// A live run exhausted all ten finalization attempts on
+/// `div_10_v = 3.8` citing evidence `10派3.80元(含税)`: the value is true, the
+/// source publishes it as prose, and validation refused it because the string
+/// did not parse as a bare float. The verifier's digit-segment matching
+/// already accepts this shape; validation now extracts the same number.
+#[test]
+fn a_descriptive_financial_string_supports_its_payload_number() {
+    let mut map = registry();
+    let mut plan = observed("evf_div_plan", "eastmoney_f10", "/dividends/10/plan", 0.0);
+    plan.value = Some(json!("10派3.80元(含税)"));
+    map.insert("evf_div_plan".into(), plan);
+    let draft = one_claim_draft(observed_claim(
+        "分红方案见下方数值。",
+        vec![NumericItem {
+            value: 3.8,
+            unit: Some("元".to_owned()),
+            label: "div_10_v".to_owned(),
+            provenance: NumericProvenance::Observed {
+                evidence_id: "evf_div_plan".to_owned(),
+                field: None,
+            },
+        }],
+        vec!["evf_div_plan"],
+    ));
+    let problems = validate_draft(&draft, &map, &BTreeSet::new());
+    assert!(
+        !problems
+            .iter()
+            .any(|p| p.code() == "number_disagrees_with_evidence"),
+        "the payload number is supported: {problems:?}"
+    );
+    // A different figure is still refused.
+    let wrong = one_claim_draft(observed_claim(
+        "分红方案见下方数值。",
+        vec![NumericItem {
+            value: 10.0,
+            unit: Some("元".to_owned()),
+            label: "div_10_v".to_owned(),
+            provenance: NumericProvenance::Observed {
+                evidence_id: "evf_div_plan".to_owned(),
+                field: None,
+            },
+        }],
+        vec!["evf_div_plan"],
+    ));
+    let problems = validate_draft(&wrong, &map, &BTreeSet::new());
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.code() == "number_disagrees_with_evidence"),
+        "the share count is not the payout: {problems:?}"
+    );
+}
+
+/// A number hung on boolean evidence is refused: companion citations aside,
+/// an observed quantity must cite evidence that holds a number. Live Case C
+/// run 3 printed `low_60d = 24.93` from an evidence id whose value was `false`.
+#[test]
+fn an_observed_number_cannot_cite_non_numeric_evidence() {
+    let mut map = registry();
+    let mut flag = observed(
+        "evf_stale",
+        "tencent",
+        "/quote/field_provenance/change/stale",
+        0.0,
+    );
+    flag.value = Some(json!(false));
+    map.insert("evf_stale".into(), flag);
+    let draft = one_claim_draft(observed_claim(
+        "期间最低价见下方数值。",
+        vec![NumericItem {
+            value: 24.93,
+            unit: Some("元".to_owned()),
+            label: "low_60d".to_owned(),
+            provenance: NumericProvenance::Observed {
+                evidence_id: "evf_stale".to_owned(),
+                field: None,
+            },
+        }],
+        vec!["evf_stale"],
+    ));
+    let problems = validate_draft(&draft, &map, &BTreeSet::new());
+    assert!(
+        problems.iter().any(|problem| {
+            matches!(
+                problem,
+                DraftProblem::NumberDisagreesWithEvidence {
+                    evidence_id,
+                    declared,
+                    ..
+                } if evidence_id == "evf_stale" && (*declared - 24.93).abs() < f64::EPSILON
+            )
+        }),
+        "expected number_disagrees_with_evidence, got {problems:?}"
+    );
 }
 
 /// A calculation claim may state the observed inputs it was computed from.

@@ -31,6 +31,14 @@ impl ModelProvider for MinimaxProvider {
         "minimax"
     }
 
+    fn manages_stream_liveness(&self) -> bool {
+        // MinimaxClient watches every raw SSE chunk (including private reasoning)
+        // and owns bounded pre-commit reconnects. The adapter intentionally hides
+        // reasoning, so the Runtime cannot infer transport idleness from visible
+        // ModelChunks without false timeouts.
+        true
+    }
+
     async fn selected_model(&self) -> Result<String, ProviderError> {
         self.client.selected_model().await.map_err(map_error)
     }

@@ -332,9 +332,82 @@ async fn an_identifier_absent_from_the_catalog_is_refused_and_repair_targets_the
         )),
         "the refusal must be recorded as a blocking finding"
     );
+    // The refusal event names the invented identifier, so a headless consumer
+    // can classify the failure without the model's context.
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::VerificationFinding { finding }
+            if finding.code == "unknown_evidence"
+                && finding.message.contains("evf_fabricated_bps")
+    )));
     assert!(tool_result_payloads(&events)
         .iter()
-        .any(|message| message.contains("结构化修复指引")));
+        .any(|message| message.contains("unknown_evidence")));
+}
+
+/// A refused submission says why in the event stream, at both stages.
+///
+/// The model receives the full structured guidance; a headless consumer of the
+/// typed events previously saw one fixed refusal string, so a decode failure was
+/// invisible — a live moderate run lost two finalization rounds to undecodable
+/// drafts and the event stream showed zero findings for them.
+#[tokio::test]
+async fn a_refused_submission_names_its_stage_and_problems_in_the_event_stream() {
+    // A draft that cannot decode: no title, no sections.
+    let undecodable = json!({
+        "claims": [{"id": "c1", "kind": "observed_fact", "statement": "见下方数值"}]
+    });
+    // A draft that decodes but cites an identifier the registry never held.
+    let invented = with_claims(
+        json!([{
+            "id": "c1",
+            "kind": "observed_fact",
+            "statement": "股价见下方数值。",
+            "numeric_items": [{
+                "label": "最新价",
+                "value": 21.5,
+                "provenance": "observed",
+                "evidence_id": "evf_invented"
+            }],
+            "evidence_ids": ["evf_invented"]
+        }]),
+        json!(["c1"]),
+    );
+    let (events, result) = run(
+        ScriptedProvider::new(vec![
+            quote_round(),
+            submit_round("call-undecodable", undecodable),
+            submit_round("call-invented", invented),
+            submit_round("call-good", valid_draft()),
+        ]),
+        ScriptedEngine::new(vec![passing(), passing()]),
+    )
+    .await;
+    result.expect("the corrected submission publishes");
+
+    let failures: Vec<&AgentEvent> = events
+        .iter()
+        .filter(
+            |event| matches!(event, AgentEvent::ToolFailed { tool, .. } if tool == "submit_report"),
+        )
+        .collect();
+    assert_eq!(failures.len(), 2, "two refusals before the publish");
+    let decode = match failures[0] {
+        AgentEvent::ToolFailed { message, .. } => message.clone(),
+        _ => unreachable!("filtered above"),
+    };
+    assert!(
+        decode.contains("decode") && decode.contains("title"),
+        "the decode refusal must name the stage and the missing field: {decode}"
+    );
+    let validation = match failures[1] {
+        AgentEvent::ToolFailed { message, .. } => message.clone(),
+        _ => unreachable!("filtered above"),
+    };
+    assert!(
+        validation.contains("validation") && validation.contains("unknown_evidence"),
+        "the validation refusal must carry the problem histogram: {validation}"
+    );
 }
 
 /// An estimate must not stand in for arithmetic the Engine can perform.
@@ -1153,6 +1226,7 @@ async fn retrieval_tools_are_withdrawn_once_the_research_budget_is_spent() {
     // Finalization still needs identifiers and deterministic arithmetic.
     for required in [
         "search_evidence",
+        "compute_from_evidence",
         "submit_report",
         "run_financial_calculation",
     ] {
@@ -1280,4 +1354,345 @@ async fn an_authentication_failure_is_terminal_rather_than_suspended() {
     assert!(events
         .iter()
         .any(|event| matches!(event, AgentEvent::Failed { .. })));
+}
+
+// ---------------------------------------------------------------------------
+// Batched calculation
+//
+// The calculation tool always accepted a program with many named outputs and the
+// model did not use it: measured live it issued 12, 13 and 24 separate calculation
+// calls in three balanced tasks, one per figure, at one model round each. Asking it
+// to batch in prose changed nothing, so the batch is now in the schema.
+// ---------------------------------------------------------------------------
+
+/// A batch of programs is one Engine dispatch per program, one tool result.
+#[tokio::test]
+async fn a_batch_of_calculation_programs_runs_in_one_tool_call() {
+    #[derive(Clone)]
+    struct CountingEngine {
+        calls: Arc<Mutex<Vec<Value>>>,
+    }
+    #[async_trait]
+    impl ToolExecutor for CountingEngine {
+        async fn execute(
+            &self,
+            engine_kind: &str,
+            payload: Value,
+            _cancellation: CancellationToken,
+        ) -> Result<Value, String> {
+            if engine_kind == "research.agent_report_verify" {
+                return Ok(passing());
+            }
+            self.calls.lock().unwrap().push(payload.clone());
+            Ok(json!({"execution": {"outputs": {"x": {"value": 1.0}}}}))
+        }
+    }
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let engine = CountingEngine {
+        calls: calls.clone(),
+    };
+    let program = json!({
+        "version": 1,
+        "outputs": {"x": {"op": "scalar", "value": 1.0}}
+    });
+    let batch = vec![
+        Ok(ModelChunk::ToolCallDelta {
+            index: 0,
+            id: Some("call-calc".into()),
+            name: Some("run_financial_calculation".into()),
+            arguments: Some(
+                json!({"programs": [program.clone(), program.clone(), program]}).to_string(),
+            ),
+        }),
+        Ok(ModelChunk::Finished {
+            reason: Some("tool_calls".into()),
+        }),
+    ];
+    let runtime = AgentRuntime::new(
+        Arc::new(ScriptedProvider::new(vec![batch, prose_round("完成。")])),
+        Arc::new(engine),
+        Arc::new(NullStore),
+    )
+    .with_config(RuntimeConfig {
+        max_finalization_attempts: 1,
+        ..RuntimeConfig::default()
+    });
+    let mut stream = runtime.start(RuntimeTask::ask("批量计算"));
+    let mut completions = 0usize;
+    while let Some(event) = stream.recv().await {
+        if let AgentEvent::ToolCompleted { tool, .. } = &event {
+            if tool == "run_financial_calculation" {
+                completions += 1;
+            }
+        }
+    }
+    let _ = stream.finish().await;
+
+    // Three programs, three Engine dispatches, but exactly one tool call and one
+    // tool result — which is the point: three figures cost one model round.
+    assert_eq!(calls.lock().unwrap().len(), 3, "each program is dispatched");
+    assert_eq!(completions, 1, "the batch is a single tool call");
+    for payload in calls.lock().unwrap().iter() {
+        assert!(
+            payload.get("program").is_some() && payload.get("programs").is_none(),
+            "each dispatch carries one program: {payload}"
+        );
+    }
+}
+
+/// An oversized batch is refused rather than dispatched.
+#[tokio::test]
+async fn an_oversized_calculation_batch_is_refused() {
+    let program = json!({"version": 1, "outputs": {"x": {"op": "scalar", "value": 1.0}}});
+    let programs: Vec<Value> = (0..40).map(|_| program.clone()).collect();
+    let batch = vec![
+        Ok(ModelChunk::ToolCallDelta {
+            index: 0,
+            id: Some("call-calc".into()),
+            name: Some("run_financial_calculation".into()),
+            arguments: Some(json!({"programs": programs}).to_string()),
+        }),
+        Ok(ModelChunk::Finished {
+            reason: Some("tool_calls".into()),
+        }),
+    ];
+    let runtime = AgentRuntime::new(
+        Arc::new(ScriptedProvider::new(vec![batch, prose_round("完成。")])),
+        Arc::new(ScriptedEngine::new(vec![])),
+        Arc::new(NullStore),
+    )
+    .with_config(RuntimeConfig {
+        max_finalization_attempts: 1,
+        ..RuntimeConfig::default()
+    });
+    let mut stream = runtime.start(RuntimeTask::ask("批量计算"));
+    let mut refusal = None;
+    while let Some(event) = stream.recv().await {
+        if let AgentEvent::ToolFailed { tool, message, .. } = &event {
+            if tool == "run_financial_calculation" {
+                refusal = Some(message.clone());
+            }
+        }
+    }
+    let _ = stream.finish().await;
+    let refusal = refusal.expect("an oversized batch is refused");
+    assert!(refusal.contains("at most"), "{refusal}");
+}
+
+/// Calculation tools are withdrawn after consecutive shape failures.
+///
+/// A budget the model can decline is not a budget: live Case C runs burned 16
+/// rounds on malformed ASTs after coverage was already complete. Three shape
+/// failures is enough to deliver the worked example twice; on the fourth round
+/// the tools are gone and the model must finalize with what it has.
+#[tokio::test]
+async fn calculation_tools_are_withdrawn_after_consecutive_shape_failures() {
+    fn calc_round(id: &str) -> Turn {
+        vec![
+            Ok(ModelChunk::ToolCallDelta {
+                index: 0,
+                id: Some(id.to_owned()),
+                name: Some("run_financial_calculation".into()),
+                arguments: Some(
+                    json!({"program": {"version": 1, "outputs": {"x": {"op": "scalar", "value": 1}}}})
+                        .to_string(),
+                ),
+            }),
+            Ok(ModelChunk::Finished {
+                reason: Some("tool_calls".into()),
+            }),
+        ]
+    }
+
+    #[derive(Clone)]
+    struct CountingFailEngine {
+        compute_calls: Arc<Mutex<usize>>,
+    }
+    #[async_trait]
+    impl ToolExecutor for CountingFailEngine {
+        async fn execute(
+            &self,
+            engine_kind: &str,
+            _payload: Value,
+            _cancellation: CancellationToken,
+        ) -> Result<Value, String> {
+            match engine_kind {
+                "market.quote" => Ok(quote_result()),
+                "research.compute" => {
+                    *self.compute_calls.lock().unwrap() += 1;
+                    Err(
+                        "invalid_payload: invalid request payload: program.bindings[0].expr:                          invalid type: string \"2.0\", expected struct"
+                            .into(),
+                    )
+                }
+                "research.agent_report_verify" => Ok(passing()),
+                other => Err(format!("unexpected Engine operation: {other}")),
+            }
+        }
+    }
+
+    let compute_calls = Arc::new(Mutex::new(0usize));
+    let provider = ScriptedProvider::new(vec![
+        calc_round("c1"),
+        calc_round("c2"),
+        calc_round("c3"),
+        // Provider may still forward a calc call even after the offer omits it.
+        calc_round("c4-should-be-refused"),
+        submit_round("s1", valid_draft()),
+    ]);
+    let offered = provider.offered_tool_names.clone();
+    let runtime = AgentRuntime::new(
+        Arc::new(provider),
+        Arc::new(CountingFailEngine {
+            compute_calls: compute_calls.clone(),
+        }),
+        Arc::new(NullStore),
+    );
+    let mut task = RuntimeTask::ask("紫金矿业估值");
+    task.symbol = Some("601899".into());
+    let mut stream = runtime.start(task);
+    while stream.recv().await.is_some() {}
+    let _ = stream.finish().await;
+
+    let rounds = offered.lock().unwrap().clone();
+    assert!(
+        rounds.len() >= 4,
+        "expected at least four model rounds, got {}",
+        rounds.len()
+    );
+    assert!(
+        rounds[0]
+            .iter()
+            .any(|name| name == "run_financial_calculation"),
+        "first round offers calculation: {:?}",
+        rounds[0]
+    );
+    assert!(
+        !rounds[3]
+            .iter()
+            .any(|name| name == "run_financial_calculation"),
+        "after three shape failures calculation must be withdrawn: {:?}",
+        rounds[3]
+    );
+    assert_eq!(
+        *compute_calls.lock().unwrap(),
+        3,
+        "a calc call after withdrawal must not reach the Engine"
+    );
+}
+
+/// compute_from_evidence builds the AST itself and registers Engine evidence.
+#[tokio::test]
+async fn compute_from_evidence_dispatches_a_program_built_by_the_runtime() {
+    #[derive(Clone)]
+    struct CaptureEngine {
+        payloads: Arc<Mutex<Vec<Value>>>,
+    }
+    #[async_trait]
+    impl ToolExecutor for CaptureEngine {
+        async fn execute(
+            &self,
+            engine_kind: &str,
+            payload: Value,
+            _cancellation: CancellationToken,
+        ) -> Result<Value, String> {
+            match engine_kind {
+                "market.quote" => Ok(quote_result()),
+                "research.compute" => {
+                    self.payloads.lock().unwrap().push(payload.clone());
+                    Ok(json!({
+                        "source": "astock-compute",
+                        "execution": {"outputs": {"pe": {"kind": "scalar", "value": 28.49}}},
+                        "evidence_registry": {"facts": [{
+                            "evidence_id": "evf_pe_calc",
+                            "path": "/value",
+                            "value": 28.49,
+                            "source": "astock-compute",
+                            "source_version_id": "calc-v1",
+                            "quality_blocking": false
+                        }]}
+                    }))
+                }
+                "research.agent_report_verify" => Ok(passing()),
+                other => Err(format!("unexpected: {other}")),
+            }
+        }
+    }
+
+    let payloads = Arc::new(Mutex::new(Vec::new()));
+    let compute = vec![
+        Ok(ModelChunk::ToolCallDelta {
+            index: 0,
+            id: Some("call-quote".into()),
+            name: Some("get_quote".into()),
+            arguments: Some(json!({"symbol": "601899"}).to_string()),
+        }),
+        Ok(ModelChunk::Finished {
+            reason: Some("tool_calls".into()),
+        }),
+    ];
+    let ratio = vec![
+        Ok(ModelChunk::ToolCallDelta {
+            index: 0,
+            id: Some("call-ratio".into()),
+            name: Some("compute_from_evidence".into()),
+            arguments: Some(
+                json!({
+                    "calculations": [{
+                        "label": "pe",
+                        "op": "div",
+                        "left": {"evidence_id": "evf_price"},
+                        "right": {"value": 0.755}
+                    }]
+                })
+                .to_string(),
+            ),
+        }),
+        Ok(ModelChunk::Finished {
+            reason: Some("tool_calls".into()),
+        }),
+    ];
+    let runtime = AgentRuntime::new(
+        Arc::new(ScriptedProvider::new(vec![
+            compute,
+            ratio,
+            prose_round("完成。"),
+        ])),
+        Arc::new(CaptureEngine {
+            payloads: payloads.clone(),
+        }),
+        Arc::new(NullStore),
+    );
+    let mut task = RuntimeTask::ask("算一下市盈率");
+    task.symbol = Some("601899".into());
+    let mut stream = runtime.start(task);
+    let mut saw = false;
+    while let Some(event) = stream.recv().await {
+        if let AgentEvent::ToolCompleted {
+            tool, evidence_ids, ..
+        } = &event
+        {
+            if tool == "compute_from_evidence" {
+                saw = true;
+                assert!(
+                    evidence_ids.iter().any(|id| id == "evf_pe_calc"),
+                    "calculation evidence must be recorded: {evidence_ids:?}"
+                );
+            }
+        }
+    }
+    let _ = stream.finish().await;
+    assert!(saw, "compute_from_evidence must complete");
+    let captured = payloads.lock().unwrap().clone();
+    assert_eq!(captured.len(), 1, "one Engine compute dispatch");
+    let program = &captured[0]["program"];
+    assert_eq!(program["version"], json!(1));
+    assert_eq!(program["inputs"]["left"], json!([21.5]));
+    assert_eq!(program["inputs"]["right"], json!([0.755]));
+    assert_eq!(
+        program["outputs"]["pe"]["op"],
+        json!("div"),
+        "the Runtime authored the AST, not the model"
+    );
 }

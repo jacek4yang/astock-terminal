@@ -76,6 +76,69 @@ impl ModelProvider for PendingProvider {
     }
 }
 
+/// A provider whose returned stream watches raw upstream activity itself.
+///
+/// It stays pending longer than the Runtime watchdog before yielding, modeling
+/// MiniMax while private reasoning is active or a pre-commit reconnect is in
+/// flight. The content remains private to the provider; Runtime receives only
+/// the eventual visible chunk.
+#[derive(Clone)]
+struct SelfManagedDelayedProvider;
+
+#[async_trait]
+impl ModelProvider for SelfManagedDelayedProvider {
+    fn name(&self) -> &'static str {
+        "self-managed-delayed"
+    }
+
+    fn manages_stream_liveness(&self) -> bool {
+        true
+    }
+
+    async fn selected_model(&self) -> Result<String, ProviderError> {
+        Ok("self-managed-financial-model".into())
+    }
+
+    async fn stream(&self, _request: ModelRequest) -> Result<ModelStream, ProviderError> {
+        Ok(Box::pin(futures::stream::once(async {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            Ok(ModelChunk::TextDelta("完整回答".into()))
+        })))
+    }
+}
+
+/// A self-managed provider that has exhausted its own recovery policy.
+#[derive(Clone)]
+struct SelfManagedFaultProvider {
+    stream_calls: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl ModelProvider for SelfManagedFaultProvider {
+    fn name(&self) -> &'static str {
+        "self-managed-fault"
+    }
+
+    fn manages_stream_liveness(&self) -> bool {
+        true
+    }
+
+    async fn selected_model(&self) -> Result<String, ProviderError> {
+        Ok("self-managed-financial-model".into())
+    }
+
+    async fn stream(&self, _request: ModelRequest) -> Result<ModelStream, ProviderError> {
+        *self.stream_calls.lock().unwrap() += 1;
+        Ok(Box::pin(futures::stream::iter(vec![Err(
+            ProviderError::new(
+                ProviderErrorKind::Network,
+                "provider recovery exhausted",
+                true,
+            ),
+        )])))
+    }
+}
+
 #[derive(Clone)]
 struct RecordingEngine {
     log: Arc<Mutex<Vec<String>>>,
@@ -709,6 +772,65 @@ async fn provider_idle_timeout_is_bounded_and_suspended() {
     }
     let error = stream.finish().await.unwrap_err();
     assert!(error.to_string().contains("idle timeout"));
+    assert!(matches!(events.last(), Some(AgentEvent::Suspended { .. })));
+}
+
+/// A self-managed provider is not preempted by the Runtime's second watchdog.
+///
+/// MiniMax owns raw-SSE first-chunk/inter-chunk watchdogs and bounded
+/// pre-commit reconnects. Private reasoning is valid upstream activity but is
+/// deliberately absent from Runtime output, so timing only visible chunks
+/// produces a false idle and races the provider recovery.
+#[tokio::test]
+async fn provider_managed_liveness_outlives_the_runtime_watchdog() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let runtime = AgentRuntime::new(
+        Arc::new(SelfManagedDelayedProvider),
+        Arc::new(RecordingEngine { log: log.clone() }),
+        Arc::new(RecordingStore { log }),
+    )
+    .with_config(RuntimeConfig {
+        provider_idle_timeout: Duration::from_millis(20),
+        verify_reports: false,
+        ..RuntimeConfig::default()
+    });
+    let mut stream = runtime.start(RuntimeTask::ask("自管理流活性"));
+    let mut events = Vec::new();
+    while let Some(event) = stream.recv().await {
+        events.push(event);
+    }
+    let outcome = stream
+        .finish()
+        .await
+        .expect("provider-owned liveness must outlive the outer watchdog");
+    assert_eq!(outcome.report, "完整回答");
+    assert!(matches!(events.last(), Some(AgentEvent::Completed { .. })));
+}
+
+/// Runtime does not multiply a self-managed provider's exhausted recovery.
+#[tokio::test]
+async fn provider_managed_fault_suspends_without_an_outer_replay() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let stream_calls = Arc::new(Mutex::new(0usize));
+    let runtime = AgentRuntime::new(
+        Arc::new(SelfManagedFaultProvider {
+            stream_calls: stream_calls.clone(),
+        }),
+        Arc::new(RecordingEngine { log: log.clone() }),
+        Arc::new(RecordingStore { log }),
+    );
+    let mut stream = runtime.start(RuntimeTask::ask("自管理流故障"));
+    let mut events = Vec::new();
+    while let Some(event) = stream.recv().await {
+        events.push(event);
+    }
+    let error = stream.finish().await.unwrap_err();
+    assert!(error.to_string().contains("provider recovery exhausted"));
+    assert_eq!(
+        *stream_calls.lock().unwrap(),
+        1,
+        "Runtime must not reopen a stream after provider recovery is exhausted"
+    );
     assert!(matches!(events.last(), Some(AgentEvent::Suspended { .. })));
 }
 

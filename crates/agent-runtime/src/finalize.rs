@@ -165,10 +165,12 @@ fn validation_action(code: &str) -> &'static str {
              either gather the data first or restate the claim with kind=unknown."
         }
         "unsupported_observed_number" => {
-            "The claim kind does not permit this number's provenance. An observed_fact carries \
-             only observed numbers, a deterministic_calculation only calculated ones, an estimate \
-             only estimated ones; inference and unknown carry no numbers at all. Change the kind \
-             or change how the number is sourced."
+            "This claim's kind does not permit this number's provenance. The claim's \
+             `kind_fixes` lists, per label, the kinds that accept it as-is — relabel the claim \
+             to one of those (or re-source the number). observed_fact carries only observed \
+             numbers; deterministic_calculation and inference carry observed and calculated; \
+             scenario carries assumption/observed/calculated/estimated; estimate only \
+             estimated; unknown carries none."
         }
         "missing_calculation_provenance" => {
             "A calculated number needs the calculation that produced it. Run \
@@ -185,9 +187,11 @@ fn validation_action(code: &str) -> &'static str {
              number with provenance=user_assumption."
         }
         "conflicting_evidence" => {
-            "This evidence conflicts with another registration of the same fact. List the \
-             identifiers in disclosed_conflicts and say in the statement what disagrees. Do not \
-             silently pick one side."
+            "This evidence conflicts with another registration of the same fact. Copy the \
+             conflicting_evidence_ids listed for this claim into its disclosed_conflicts field \
+             verbatim — the identifiers to disclose are the ones the claim already cites, not \
+             other registrations of the same fact — and say in the statement what disagrees. Do \
+             not silently pick one side."
         }
         "number_disagrees_with_evidence" => {
             "The value you declared is not the value the cited evidence contains. Read the value \
@@ -205,6 +209,16 @@ fn validation_action(code: &str) -> &'static str {
              limitations where a label may come from any claim. Do not delete the figure: a \
              report that states no checkable quantity is refused as well. Write no formulas in \
              prose; put the operation on the numeric_item."
+        }
+        "report_contains_no_verifiable_numeric_claims" => {
+            "The draft declares no quantity at all — this is what deleting figures produces. \
+             Restore every material figure as a numeric_item with real provenance. Do this in \
+             order: call search_evidence (batched) to obtain the canonical identifiers for the \
+             figures you will cite, then declare each numeric_item with a real evidence_id (or \
+             compute it and cite the calculation evidence), and reference it by label in braces. \
+             Never write an identifier from memory — an id search_evidence did not return is \
+             fabricated and will be refused. A research conclusion without checkable quantities \
+             is refused, not published."
         }
         "unknown_number_reference" => {
             "This prose references a number in braces that nothing declares. In a statement the \
@@ -383,6 +397,22 @@ pub fn validation_repair(problems: &[DraftProblem], verdict: RepairVerdict) -> V
     // it which. The token is the actionable part.
     let mut undeclared: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut unknown_ids: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // The exact identifiers a claim must list in disclosed_conflicts.
+    //
+    // A live run oscillated three finalization attempts away from publishing on
+    // one unresolved conflict: told to "list the identifiers in
+    // disclosed_conflicts", the model listed three identifiers it had *not*
+    // cited — different registrations of the same facts it had seen in a search
+    // — while the finding concerns the ones the claim actually references. The
+    // ids are in the problems array, but the per-claim repair target is what the
+    // model acts on, and it named no identifiers.
+    let mut conflicting_ids: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // Per claim, the kind relabels that would make its rejected numbers legal:
+    // label -> accepted kinds. Mechanical repair beats recalled rules — a live
+    // run exhausted its finalization budget on one observed_fact claim carrying
+    // calculated figures, the fix being a relabel the guidance described in
+    // prose three attempts in a row.
+    let mut kind_fixes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for problem in problems {
         match problem.claim_id() {
             Some(claim_id) => {
@@ -402,6 +432,22 @@ pub fn validation_repair(problems: &[DraftProblem], verdict: RepairVerdict) -> V
                             .entry(claim_id.to_owned())
                             .or_default()
                             .insert(supplied_id.clone());
+                    }
+                    DraftProblem::ConflictingEvidence { evidence_ids, .. } => {
+                        conflicting_ids
+                            .entry(claim_id.to_owned())
+                            .or_default()
+                            .extend(evidence_ids.iter().cloned());
+                    }
+                    DraftProblem::UnsupportedObservedNumber {
+                        label,
+                        permitted_kinds,
+                        ..
+                    } => {
+                        let entry = kind_fixes.entry(claim_id.to_owned()).or_default();
+                        for kind in permitted_kinds {
+                            entry.insert(format!("{label}: {kind}"));
+                        }
                     }
                     _ => {}
                 }
@@ -458,6 +504,29 @@ pub fn validation_repair(problems: &[DraftProblem], verdict: RepairVerdict) -> V
                     ids.iter()
                         .take(MAX_TOKENS_PER_TARGET)
                         .map(|id| Value::from(id.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(ids) = conflicting_ids.get(&claim_id) {
+            object.insert(
+                "conflicting_evidence_ids".into(),
+                Value::Array(
+                    ids.iter()
+                        .take(MAX_TOKENS_PER_TARGET)
+                        .map(|id| Value::from(id.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(fixes) = kind_fixes.get(&claim_id) {
+            object.insert(
+                "kind_fixes".into(),
+                Value::Array(
+                    fixes
+                        .iter()
+                        .take(MAX_TOKENS_PER_TARGET)
+                        .map(|fix| Value::from(fix.clone()))
                         .collect(),
                 ),
             );
@@ -902,6 +971,7 @@ mod tests {
             "scenario_without_assumption",
             "conflicting_evidence",
             "figure_in_free_text",
+            "report_contains_no_verifiable_numeric_claims",
             "unknown_number_reference",
             "ambiguous_number_reference",
             "number_disagrees_with_evidence",

@@ -3,6 +3,12 @@
   "runtime": "astock-agent-runtime",
   "tools": [
     {
+      "engine_kind": "",
+      "freshness": "runtime_state",
+      "handler": "runtime",
+      "name": "compute_from_evidence"
+    },
+    {
       "engine_kind": "research.fundamentals",
       "freshness": "latest_disclosed",
       "handler": "engine",

@@ -19025,5 +19025,1970 @@
   ],
   "title": "紫金矿业(601899)估值、趋势与主要风险简评",
   "version": "astock-report-contract-v1"
+ },
+ {
+  "claims": [
+   {
+    "id": "claim_quote_price",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_cf59113bcc791e8a21504a8b",
+      "field": "/quote/price",
+      "label": "price",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 33.01
+     },
+     {
+      "evidence_id": "evf_e28637f8ed3c8890b6ac3ede",
+      "field": "/quote/pct",
+      "label": "daily_change_pct",
+      "provenance": "observed",
+      "unit": "%",
+      "value": -2.13
+     },
+     {
+      "evidence_id": "evf_665740713c319b9063505f1b",
+      "field": "/quote/high",
+      "label": "day_high",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 33.23
+     },
+     {
+      "evidence_id": "evf_47d2ad9768279453d637e17d",
+      "field": "/quote/low",
+      "label": "day_low",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 32.19
+     },
+     {
+      "evidence_id": "evf_73469704b687f271979e64dd",
+      "field": "/quote/amount",
+      "label": "day_amount",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 6944594771
+     }
+    ],
+    "statement": "截至2026年9月2日盘中数据，紫金矿业(601899)收盘价{price}元，当日涨跌幅{daily_change_pct}%，日内振幅(day_high与day_low之间)约4.7%，当日成交额{day_amount}元。"
+   }
+  ],
+  "executive_summary": "紫金矿业(601899)当前价{price}元，市值{mktcap_yi}亿元。eastmoney_f10快照显示PE_TTM 12.97倍、PB_MRQ 4.44倍。基于2026H1资产负债表(总资产5413.5亿、总权益2730.9亿、归母权益2058.7亿、货币资金913.2亿)，公司财务结构体现矿企典型扩张特征(总负债/总权益98.2%)，但流动性充裕。250日价格区间19.58-42.65元，当前位置约位于区间中部偏下。最大回撤持续143个交易日，反映资源股长调整周期。核心风险包括金属价格周期、杠杆与项目减值、地缘与汇率、板块β轮动。主要数据盲区：净利润/EPS、分产品收入、金属价格走势未在本任务evidence中覆盖，估值论述因此受限。",
+  "item": {
+   "id": "claim_eps_unknown",
+   "kind": "unknown",
+   "numeric_items": "",
+   "statement": "本任务evidence未包含income_statement(净利润/EPS)、分金属产品收入、分矿种产量、全球铜金价格走势等核心驱动因子数据；当前基于资产规模推断盈利能力的论述存在重大缺失。建议读者结合公司年报/季报、Wind/iFinD金属价格数据交叉验证。",
+   "uncertainty": "利润表、分产品收入、矿种产量、金属价格走势等核心驱动指标在本任务evidence中未找到，是本次分析的关键盲区。"
+  },
+  "limitations": [
+   "利润表(净利润、营业收入、EPS)未在本任务evidence中找到，关键PE的盈利口径来自PE_TTM快照而非自计算",
+   "分金属产品收入构成、铜/金/锌/锂分品种产量数据缺失，无法拆分业绩来源",
+   "当前铜价、金价(LME/COMEX)走势数据缺失，无法直接量化金属价格风险敞口",
+   "PB的historical_history较短(本任务仅返回近期数条pb_mrq样本)，历史区间比较不完整",
+   "kline的max/min exact evidence_id未直接命中；价格区间与最大回撤周期引用基于间接计算与backtest模块",
+   "海外项目所在地缘事件、汇率波动的具体news证据缺失"
+  ],
+  "overall_uncertainty": "本报告基于2026-09-02盘中数据快照，估值倍数(PE_TTM 12.97、PB_MRQ 4.44)与市值(877.76亿元)为eastmoney_f10直接证据，可靠性较高；但盈利能力论述、分产品拆解、金属价格敏感性均超出本任务evidence范围，相关风险判断属于inference而非observation。读者需注意：(1)PB口径差异显著(归母vs总权益下PB差距约14倍)，引用时务必标明；(2)Resource股估值高度依赖金属价格周期，本文未提供铜金价格走势的量化锚点；(3)财务结构高杠杆是矿企特征而非异常，但需结合capex节奏判断是否过度扩张。结论本身不是投资建议。",
+  "sections": [
+   {
+    "claim_ids": [
+     "claim_quote_price"
+    ],
+    "heading": "当前行情快照"
+   },
+   {
+    "claim_ids": [
+     "claim_valuation_pe",
+     "claim_valuation_pb",
+     "claim_market_cap",
+     "claim_valuation_summary"
+    ],
+    "heading": "估值水平"
+   },
+   {
+    "claim_ids": [
+     "claim_kline_range",
+     "claim_drawdown_history",
+     "claim_market_regime"
+    ],
+    "heading": "价格趋势与市场背景"
+   },
+   {
+    "claim_ids": [
+     "claim_balance_structure",
+     "claim_balance_ratios"
+    ],
+    "heading": "财务结构与杠杆"
+   },
+   {
+    "claim_ids": [
+     "claim_risk_metal_price",
+     "claim_risk_leverage",
+     "claim_risk_geo",
+     "claim_risk_beta"
+    ],
+    "heading": "主要风险"
+   },
+   {
+    "claim_ids": [
+     "claim_eps_unknown"
+    ],
+    "heading": "证据盲区与未知项"
+   }
+  ],
+  "title": "紫金矿业(601899)估值、趋势与风险分析",
+  "uncertainty": "行情时间为2026-09-02 06:26Z快照；盘中价格波动剧烈，截取时点不同会有差异。",
+  "version": "astock-report-contract-v1"
+ },
+ {
+  "claims": [
+   {
+    "evidence_ids": [
+     "evf_cf59113bcc791e8a21504a8b",
+     "evf_e28637f8ed3c8890b6ac3ede",
+     "evf_665740713c319b9063505f1b",
+     "evf_47d2ad9768279453d637e17d",
+     "evf_73469704b687f271979e64dd"
+    ],
+    "id": "claim_quote_price",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_cf59113bcc791e8a21504a8b",
+      "field": "/quote/price",
+      "label": "price",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 33.01
+     },
+     {
+      "evidence_id": "evf_e28637f8ed3c8890b6ac3ede",
+      "field": "/quote/pct",
+      "label": "daily_pct",
+      "provenance": "observed",
+      "unit": "%",
+      "value": -2.13
+     },
+     {
+      "evidence_id": "evf_665740713c319b9063505f1b",
+      "field": "/quote/high",
+      "label": "day_high",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 33.23
+     },
+     {
+      "evidence_id": "evf_47d2ad9768279453d637e17d",
+      "field": "/quote/low",
+      "label": "day_low",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 32.19
+     },
+     {
+      "evidence_id": "evf_73469704b687f271979e64dd",
+      "field": "/quote/amount",
+      "label": "day_amount",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 6944594771
+     },
+     {
+      "calculation_evidence_id": "evf_c44b86544cbc13a66f7d5415",
+      "field": "day_range_pct",
+      "input_evidence_ids": [
+       "evf_665740713c319b9063505f1b",
+       "evf_47d2ad9768279453d637e17d"
+      ],
+      "label": "day_range_pct",
+      "operation": "div(sub(day_high,day_low),day_low)",
+      "provenance": "calculated",
+      "unit": "%",
+      "value": 3.231438
+     }
+    ],
+    "statement": "2026年9月2日盘中数据：紫金矿业收盘价{price}元，当日涨跌{daily_pct}%，日内区间{day_low}-{day_high}元，振幅{day_range_pct}%，成交额{day_amount}元。",
+    "uncertainty": "快照时间为2026-09-02 06:26Z，盘中价格波动剧烈，截取时点不同会有差异。"
+   },
+   {
+    "evidence_ids": [
+     "evf_d5df35912664db67b086afb4"
+    ],
+    "id": "claim_market_cap",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_d5df35912664db67b086afb4",
+      "field": "/valuation_snapshot/total_market_cap",
+      "label": "mktcap_yi",
+      "provenance": "observed",
+      "unit": "CNY(亿元)",
+      "value": 8777.5948967222
+     }
+    ],
+    "statement": "公司总市值约{mktcap_yi}元(eastmoney_f10 2026-09-02快照)。"
+   },
+   {
+    "evidence_ids": [
+     "evf_de88cce1b4699dcae1953cb9"
+    ],
+    "id": "claim_valuation_pe",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_de88cce1b4699dcae1953cb9",
+      "field": "/valuation_snapshot/pe_ttm",
+      "label": "pe_ttm",
+      "provenance": "observed",
+      "unit": "x",
+      "value": 12.97
+     }
+    ],
+    "statement": "滚动市盈率{pe_ttm}倍(eastmoney_f10快照口径)。盈利口径来自外部快照，本任务evidence不含利润表本身，无法独立验证。",
+    "uncertainty": "PE_TTM来自外部数据快照，本任务未获取净利润/EPS等独立验证数据。"
+   },
+   {
+    "evidence_ids": [
+     "evf_8a0312f6d97f533f7446ee8c"
+    ],
+    "id": "claim_valuation_pb",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_8a0312f6d97f533f7446ee8c",
+      "field": "/valuation_history/pb_mrq",
+      "label": "pb_mrq",
+      "provenance": "observed",
+      "unit": "x",
+      "value": 4.44082757
+     }
+    ],
+    "statement": "市净率(MRQ口径){pb_mrq}倍(eastmoney_f10 2026-09-01)。PB口径基于最近报告期股东权益，与紫金矿业的A股+H股合计口径相关，具体口径需结合原始披露核实。",
+    "uncertainty": "PB_MRQ使用外部数据快照口径，本任务未获取独立归母权益数据进行验证。"
+   },
+   {
+    "evidence_ids": [
+     "evf_de88cce1b4699dcae1953cb9",
+     "evf_8a0312f6d97f533f7446ee8c",
+     "evf_d5df35912664db67b086afb4"
+    ],
+    "id": "claim_valuation_summary",
+    "kind": "inference",
+    "numeric_items": [],
+    "statement": "综合PE_TTM约12-13倍、PB_MRQ约4.4倍看，紫金矿业当前估值在历史区间内属于中性偏低水平(铜金价格上行期盈利兑现度高，PE被压低)。但PE口径来自外部快照，PB_MRQ与归母口径PB(若使用A+H股本折算)可能存在差异，估值判断需谨慎。",
+    "uncertainty": "估值定位属于inference而非observation；缺乏历史PE/PB区间分布的独立evidence。"
+   },
+   {
+    "evidence_ids": [
+     "evf_fc1cfb48b73149215f21fcff",
+     "evf_0db77a7283244c97b9958215",
+     "evf_d394e4c2fc8d46aa33439c92",
+     "evf_16310e62ba828eb1b003773a"
+    ],
+    "id": "claim_kline_range",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_d394e4c2fc8d46aa33439c92",
+      "field": "/execution/outputs/high_250/value",
+      "label": "high_250",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 42.65
+     },
+     {
+      "evidence_id": "evf_16310e62ba828eb1b003773a",
+      "field": "/execution/outputs/low_250/value",
+      "label": "low_250",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 19.58
+     },
+     {
+      "calculation_evidence_id": "evf_c44b86544cbc13a66f7d5415",
+      "field": "drawdown_pct_from_high",
+      "input_evidence_ids": [
+       "evf_d394e4c2fc8d46aa33439c92",
+       "evf_cf59113bcc791e8a21504a8b"
+      ],
+      "label": "dd_pct",
+      "operation": "div(sub(high_250,price),high_250)",
+      "provenance": "calculated",
+      "unit": "%",
+      "value": 22.60258
+     }
+    ],
+    "statement": "过去250个交易日价格区间{low_250}-{high_250}元，当前价{price}元相对250日高点回撤约{dd_pct}%，相对250日低点仍有68.6%涨幅。形态上呈\"上涨—高位震荡—回调\"结构。",
+    "uncertainty": "低点位置精确evidence_id无法直接命中，结论依赖calculation计算结果。"
+   },
+   {
+    "evidence_ids": [
+     "evf_908e716fa5e3a6868d2eca2a"
+    ],
+    "id": "claim_drawdown_history",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_908e716fa5e3a6868d2eca2a",
+      "field": "/securities/0/advanced_analysis/historical_backtest/data/max_drawdown_duration_bars",
+      "label": "mdd_duration_bars",
+      "provenance": "observed",
+      "unit": "bars",
+      "value": 143
+     }
+    ],
+    "statement": "历史最大回撤持续{mdd_duration_bars}个交易日(backtest模块)，反映资源股典型长调整周期。",
+    "uncertainty": "backtest口径的具体起止区间与点对点回撤幅度未独立验证。"
+   },
+   {
+    "evidence_ids": [
+     "evf_2fd642fd11d335792d7add45",
+     "evf_50e682fe80c9a45c023a295f",
+     "evf_1ed22c7acb20108bba6716a8",
+     "evf_e4f0c88d087c1264f13f5cb6"
+    ],
+    "id": "claim_market_regime",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_50e682fe80c9a45c023a295f",
+      "field": "/breadth/ratio",
+      "label": "breadth_ratio",
+      "provenance": "observed",
+      "unit": "ratio",
+      "value": 0.2942
+     },
+     {
+      "evidence_id": "evf_1ed22c7acb20108bba6716a8",
+      "field": "/up_ratio_20",
+      "label": "up_ratio_20",
+      "provenance": "observed",
+      "unit": "ratio",
+      "value": 0.65
+     }
+    ],
+    "statement": "2026-09-02市场状态：A股中性(涨跌家数比{breadth_ratio}，近20日上涨占比{up_ratio_20})。系统性风险偏好温和，资源板块走势更多受金属价格驱动。"
+   },
+   {
+    "evidence_ids": [
+     "evf_4c1ae9c86c3a0f749faccf2d",
+     "evf_e4f0c88d087c1264f13f5cb6",
+     "evf_d9abaa664494981cdd6bf628"
+    ],
+    "id": "claim_balance_structure",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_d9abaa664494981cdd6bf628",
+      "field": "/balance/10/total_assets",
+      "label": "total_assets_h1",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 541354373608
+     },
+     {
+      "evidence_id": "evf_e4f0c88d087c1264f13f5cb6",
+      "field": "/balance/10/total_equity",
+      "label": "total_equity_h1",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 273087729696
+     }
+    ],
+    "statement": "2026年中期报表显示总资产{total_assets_h1}元，总股东权益{total_equity_h1}元(均来自eastmoney_f10基础数据)。具体period_end对应与口径需以原始公告为准。",
+    "uncertainty": "balance字段的period_end精确evidence_id未单独确认，本条采用eastmoney_f10基础事实，period_end引用balance/10(即2026H1报告期)。"
+   },
+   {
+    "evidence_ids": [
+     "evf_d9abaa664494981cdd6bf628",
+     "evf_e4f0c88d087c1264f13f5cb6",
+     "evf_f1d6e34ac36cb0c7a61c9a79",
+     "evf_f5875f74e0dd3ce2b54edbd2"
+    ],
+    "id": "claim_balance_ratios",
+    "kind": "calculated",
+    "numeric_items": [
+     {
+      "calculation_evidence_id": "evf_f1d6e34ac36cb0c7a61c9a79",
+      "field": "debt_to_equity",
+      "input_evidence_ids": [
+       "evf_0138be322a983a708aa7dae2",
+       "evf_e4f0c88d087c1264f13f5cb6"
+      ],
+      "label": "debt_to_equity",
+      "operation": "div(total_liabilities,total_equity)",
+      "provenance": "calculated",
+      "unit": "ratio",
+      "value": 0.982346018294682
+     },
+     {
+      "calculation_evidence_id": "evf_f5875f74e0dd3ce2b54edbd2",
+      "field": "cash_to_assets",
+      "input_evidence_ids": [
+       "evf_d9abaa664494981cdd6bf628",
+       "evf_d9abaa664494981cdd6bf628"
+      ],
+      "label": "cash_to_assets",
+      "operation": "div(monetary_funds,total_assets)",
+      "provenance": "calculated",
+      "unit": "ratio",
+      "value": 0.1686840746226688
+     }
+    ],
+    "statement": "2026H1资产负债率(总负债/总权益){debt_to_equity}，货币资金占总资产{cash_to_assets}。矿企因高资本开支+海外项目融资特征，资产负债率水平偏高属于行业属性；但流动性相对充裕。",
+    "uncertainty": "使用合并报表口径total_liabilities/total_equity(含少数股东权益)，与A+H口径归母权益不同。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_risk_metal_price",
+    "kind": "inference",
+    "numeric_items": [],
+    "statement": "金属价格周期性是核心风险。紫金矿业主营铜、金、锌、锂等大宗商品，盈利对LME铜价、COMEX金价高度敏感。当前股价相对250日高点已回撤约22%，部分反映市场对金属价格回调的提前定价；但本任务未提供铜金价格走势的量化evidence。",
+    "uncertainty": "金属价格走势数据缺失，无法量化敏感性；inference结论。"
+   },
+   {
+    "evidence_ids": [
+     "evf_d9abaa664494981cdd6bf628",
+     "evf_e4f0c88d087c1264f13f5cb6"
+    ],
+    "id": "claim_risk_leverage",
+    "kind": "inference",
+    "numeric_items": [],
+    "statement": "杠杆与项目周期风险。资产负债率近100%(合并报表口径)，在建工程+固定+无形资产合计规模庞大，新建项目集中爬坡期，若金属价格进入熊市可能引发减值；同时财务费用对净利的吞噬风险在利率上行周期加剧。",
+    "uncertainty": "capex/经营性现金流比、债务期限结构、海外项目并表节奏等细节evidence缺失。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_risk_geo",
+    "kind": "inference",
+    "numeric_items": [],
+    "statement": "地缘与汇率风险。海外项目分布于刚果(金)、塞尔维亚、阿根廷、秘鲁等，地缘政治、税收政策变动、汇率波动(美元、刚果法索、阿根廷比索)对盈利的扰动是估值溢价打折的合理来源。",
+    "uncertainty": "具体海外项目的政策事件、汇率波动的news级evidence缺失。"
+   },
+   {
+    "evidence_ids": [
+     "evf_50e682fe80c9a45c023a295f"
+    ],
+    "id": "claim_risk_beta",
+    "kind": "inference",
+    "numeric_items": [],
+    "statement": "板块β风险。资源股β系数通常>1.5，当前A股整体处于\"中性\"状态(涨跌家数比0.2942)，若风险偏好继续下行，资源板块轮动中可能受冲击。",
+    "uncertainty": "β值未独立计算，inference结论。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_eps_unknown",
+    "kind": "unknown",
+    "numeric_items": [],
+    "statement": "本任务evidence未包含income_statement(净利润、营业收入、EPS)、分金属产品收入构成、分矿种产量、全球铜金价格走势等核心驱动因子数据。所有估值倍数来自外部快照而非自计算，盈利拆分、敏感性测试均受限。",
+    "uncertainty": "利润表、分产品收入、矿种产量、金属价格走势等核心驱动指标在本任务evidence中未找到，是本次分析的关键盲区。"
+   }
+  ],
+  "executive_summary": "紫金矿业(601899)截至2026-09-02收盘价{price}元、当日涨跌{daily_pct}%。eastmoney_f10快照显示总市值{mktcap_yi}元、PE_TTM约13倍、PB_MRQ约4.4倍。2026H1报表(总资产5413.5亿元、总权益2730.9亿元)对应资产负债率(总负债/总权益)近1.0、货币资金占总资产16.9%，体现矿企典型扩张特征。250日价格区间19.58-42.65元，当前价相对高点回撤约22%，形态呈调整结构；历史最大回撤持续143个交易日。主要风险：金属价格周期、杠杆与项目减值、地缘与汇率、板块β轮动。本任务未获取利润表/分产品/金属价格等核心驱动evidence，估值与盈利判断受限。",
+  "limitations": [
+   "利润表(净利润、营业收入、EPS)未在本任务evidence中找到，关键PE来自PE_TTM快照而非自计算",
+   "分金属产品收入构成、铜/金/锌/锂分品种产量数据缺失，无法拆分业绩来源",
+   "当前铜价、金价(LME/COMEX)走势数据缺失，无法直接量化金属价格风险敞口",
+   "PB的historical_history较短(本任务仅返回近期数条pb_mrq样本)，历史区间比较不完整",
+   "kline的high/low精确evidence_id未直接命中，区间与最大回撤引用基于间接计算与backtest模块",
+   "海外项目所在地缘事件、汇率波动的具体news证据缺失"
+  ],
+  "overall_uncertainty": "本报告基于2026-09-02盘中数据快照，估值倍数(PE_TTM约13、PB_MRQ约4.4)与市值(877.76亿元)为eastmoney_f10直接evidence，可靠性较高；但盈利能力论述、分产品拆解、金属价格敏感性均超出本任务evidence范围，相关风险判断属于inference。读者需注意PB口径差异显著(合并报表vs归母口径PB差距可能达数倍)；Resource股估值高度依赖金属价格周期，本文未提供铜金价格走势的量化锚点；财务结构高杠杆是矿企特征而非异常，但需结合capex节奏判断是否过度扩张。结论本身不是投资建议。",
+  "sections": [
+   {
+    "claim_ids": [
+     "claim_quote_price",
+     "claim_market_cap"
+    ],
+    "heading": "当前行情与市值"
+   },
+   {
+    "claim_ids": [
+     "claim_valuation_pe",
+     "claim_valuation_pb",
+     "claim_valuation_summary"
+    ],
+    "heading": "估值水平"
+   },
+   {
+    "claim_ids": [
+     "claim_kline_range",
+     "claim_drawdown_history",
+     "claim_market_regime"
+    ],
+    "heading": "价格趋势与市场背景"
+   },
+   {
+    "claim_ids": [
+     "claim_balance_structure",
+     "claim_balance_ratios"
+    ],
+    "heading": "财务结构与杠杆"
+   },
+   {
+    "claim_ids": [
+     "claim_risk_metal_price",
+     "claim_risk_leverage",
+     "claim_risk_geo",
+     "claim_risk_beta"
+    ],
+    "heading": "主要风险"
+   },
+   {
+    "claim_ids": [
+     "claim_eps_unknown"
+    ],
+    "heading": "证据盲区与未知项"
+   }
+  ],
+  "title": "紫金矿业(601899)估值、趋势与风险分析",
+  "version": "astock-report-contract-v1"
+ },
+ {
+  "claims": [
+   {
+    "evidence_ids": [
+     "evf_cf59113bcc791e8a21504a8b",
+     "evf_e28637f8ed3c8890b6ac3ede",
+     "evf_665740713c319b9063505f1b",
+     "evf_47d2ad9768279453d637e17d",
+     "evf_73469704b687f271979e64dd"
+    ],
+    "id": "claim_quote_price",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_cf59113bcc791e8a21504a8b",
+      "field": "/quote/price",
+      "label": "price",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 33.01
+     },
+     {
+      "evidence_id": "evf_e28637f8ed3c8890b6ac3ede",
+      "field": "/quote/pct",
+      "label": "daily_pct",
+      "provenance": "observed",
+      "unit": "%",
+      "value": -2.13
+     },
+     {
+      "evidence_id": "evf_665740713c319b9063505f1b",
+      "field": "/quote/high",
+      "label": "day_high",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 33.23
+     },
+     {
+      "evidence_id": "evf_47d2ad9768279453d637e17d",
+      "field": "/quote/low",
+      "label": "day_low",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 32.19
+     },
+     {
+      "evidence_id": "evf_73469704b687f271979e64dd",
+      "field": "/quote/amount",
+      "label": "day_amount",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 6944594771
+     },
+     {
+      "calculation_evidence_id": "evf_c44b86544cbc13a66f7d5415",
+      "field": "day_range_pct",
+      "input_evidence_ids": [
+       "evf_665740713c319b9063505f1b",
+       "evf_47d2ad9768279453d637e17d"
+      ],
+      "label": "day_range_pct",
+      "operation": "div(sub(day_high,day_low),day_low)*100",
+      "provenance": "calculated",
+      "unit": "%",
+      "value": 3.231438
+     }
+    ],
+    "statement": "2026年9月2日盘中数据：紫金矿业收盘价{price}元，当日涨跌{daily_pct}%，日内区间{day_low}-{day_high}元，振幅{day_range_pct}%，成交额{day_amount}元。",
+    "uncertainty": "快照时间为2026-09-02 06:26Z，盘中价格波动剧烈，截取时点不同会有差异。"
+   },
+   {
+    "evidence_ids": [
+     "evf_d5df35912664db67b086afb4"
+    ],
+    "id": "claim_market_cap",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_d5df35912664db67b086afb4",
+      "field": "/valuation_snapshot/total_market_cap",
+      "label": "mktcap_yi",
+      "provenance": "observed",
+      "unit": "CNY(亿元)",
+      "value": 8777.5948967222
+     }
+    ],
+    "statement": "公司总市值约{mktcap_yi}元(eastmoney_f10 2026-09-02快照)。"
+   },
+   {
+    "evidence_ids": [
+     "evf_de88cce1b4699dcae1953cb9"
+    ],
+    "id": "claim_valuation_pe",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_de88cce1b4699dcae1953cb9",
+      "field": "/valuation_snapshot/pe_ttm",
+      "label": "pe_ttm",
+      "provenance": "observed",
+      "unit": "x",
+      "value": 12.97
+     }
+    ],
+    "statement": "滚动市盈率{pe_ttm}倍(eastmoney_f10快照口径)。盈利口径来自外部快照，本任务evidence不含利润表本身，无法独立验证。",
+    "uncertainty": "PE_TTM来自外部数据快照，本任务未获取净利润/EPS等独立验证数据。"
+   },
+   {
+    "evidence_ids": [
+     "evf_8a0312f6d97f533f7446ee8c"
+    ],
+    "id": "claim_valuation_pb",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_8a0312f6d97f533f7446ee8c",
+      "field": "/valuation_history/pb_mrq",
+      "label": "pb_mrq",
+      "provenance": "observed",
+      "unit": "x",
+      "value": 4.44082757
+     }
+    ],
+    "statement": "市净率(MRQ口径){pb_mrq}倍(eastmoney_f10 2026-09-01)。PB口径基于最近报告期股东权益，与紫金矿业的A股+H股合计口径相关，具体口径需结合原始披露核实。",
+    "uncertainty": "PB_MRQ使用外部数据快照口径，本任务未获取独立归母权益数据进行验证。"
+   },
+   {
+    "evidence_ids": [
+     "evf_de88cce1b4699dcae1953cb9",
+     "evf_8a0312f6d97f533f7446ee8c"
+    ],
+    "id": "claim_valuation_summary",
+    "kind": "inference",
+    "numeric_items": [],
+    "statement": "综合PE_TTM约13倍、PB_MRQ约4.4倍看，紫金矿业当前估值在历史区间内属于中性偏低水平(铜金价格上行期盈利兑现度高，PE被压低)。但PE口径来自外部快照，PB_MRQ与归母口径PB(若使用A+H股本折算)可能存在差异，估值判断需谨慎。",
+    "uncertainty": "估值定位属于inference而非observation；缺乏历史PE/PB区间分布的独立evidence。"
+   },
+   {
+    "evidence_ids": [
+     "evf_fc1cfb48b73149215f21fcff",
+     "evf_0db77a7283244c97b9958215",
+     "evf_d394e4c2fc8d46aa33439c92",
+     "evf_16310e62ba828eb1b003773a",
+     "evf_cf59113bcc791e8a21504a8b"
+    ],
+    "id": "claim_kline_range",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_d394e4c2fc8d46aa33439c92",
+      "field": "/execution/outputs/high_250/value",
+      "label": "high_250",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 42.65
+     },
+     {
+      "evidence_id": "evf_16310e62ba828eb1b003773a",
+      "field": "/execution/outputs/low_250/value",
+      "label": "low_250",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 19.58
+     },
+     {
+      "calculation_evidence_id": "evf_c44b86544cbc13a66f7d5415",
+      "field": "drawdown_pct_from_high",
+      "input_evidence_ids": [
+       "evf_d394e4c2fc8d46aa33439c92",
+       "evf_cf59113bcc791e8a21504a8b"
+      ],
+      "label": "dd_pct",
+      "operation": "div(sub(high_250,price),high_250)*100",
+      "provenance": "calculated",
+      "unit": "%",
+      "value": 22.60258
+     }
+    ],
+    "statement": "过去250个交易日价格区间{low_250}-{high_250}元，当前价{price}元相对250日高点回撤约{dd_pct}%，相对250日低点仍有68.6%涨幅。形态上呈\"上涨—高位震荡—回调\"结构。",
+    "uncertainty": "低点位置精确evidence_id无法直接命中，结论依赖calculation计算结果。"
+   },
+   {
+    "evidence_ids": [
+     "evf_908e716fa5e3a6868d2eca2a"
+    ],
+    "id": "claim_drawdown_history",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_908e716fa5e3a6868d2eca2a",
+      "field": "/securities/0/advanced_analysis/historical_backtest/data/max_drawdown_duration_bars",
+      "label": "mdd_duration_bars",
+      "provenance": "observed",
+      "unit": "bars",
+      "value": 143
+     }
+    ],
+    "statement": "历史最大回撤持续{mdd_duration_bars}个交易日(backtest模块)，反映资源股典型长调整周期。",
+    "uncertainty": "backtest口径的具体起止区间与点对点回撤幅度未独立验证。"
+   },
+   {
+    "evidence_ids": [
+     "evf_2fd642fd11d335792d7add45",
+     "evf_50e682fe80c9a45c023a295f",
+     "evf_1ed22c7acb20108bba6716a8"
+    ],
+    "id": "claim_market_regime",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_50e682fe80c9a45c023a295f",
+      "field": "/breadth/ratio",
+      "label": "breadth_ratio",
+      "provenance": "observed",
+      "unit": "ratio",
+      "value": 0.2942
+     },
+     {
+      "evidence_id": "evf_1ed22c7acb20108bba6716a8",
+      "field": "/up_ratio_20",
+      "label": "up_ratio_20",
+      "provenance": "observed",
+      "unit": "ratio",
+      "value": 0.65
+     }
+    ],
+    "statement": "2026-09-02市场状态：A股中性(涨跌家数比{breadth_ratio}，近20日上涨占比{up_ratio_20})。系统性风险偏好温和，资源板块走势更多受金属价格驱动。"
+   },
+   {
+    "evidence_ids": [
+     "evf_d9abaa664494981cdd6bf628",
+     "evf_e4f0c88d087c1264f13f5cb6"
+    ],
+    "id": "claim_balance_structure",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_d9abaa664494981cdd6bf628",
+      "field": "/balance/period_end=2026-06-30/total_assets",
+      "label": "total_assets_h1",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 541354373608
+     },
+     {
+      "evidence_id": "evf_e4f0c88d087c1264f13f5cb6",
+      "field": "/balance/period_end=2026-06-30/total_equity",
+      "label": "total_equity_h1",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 273087729696
+     }
+    ],
+    "statement": "2026年中期报表(2026-06-30 period_end)显示总资产{total_assets_h1}元，总股东权益{total_equity_h1}元(均来自eastmoney_f10基础数据)。"
+   },
+   {
+    "evidence_ids": [
+     "evf_f1d6e34ac36cb0c7a61c9a79",
+     "evf_f5875f74e0dd3ce2b54edbd2"
+    ],
+    "id": "claim_balance_ratios",
+    "kind": "deterministic_calculation",
+    "numeric_items": [
+     {
+      "calculation_evidence_id": "evf_f1d6e34ac36cb0c7a61c9a79",
+      "field": "debt_to_equity",
+      "input_evidence_ids": [
+       "evf_e4f0c88d087c1264f13f5cb6"
+      ],
+      "label": "debt_to_equity",
+      "operation": "div(total_liabilities_2026H1,total_equity_2026H1)",
+      "provenance": "calculated",
+      "unit": "ratio",
+      "value": 0.982346018294682
+     },
+     {
+      "calculation_evidence_id": "evf_f5875f74e0dd3ce2b54edbd2",
+      "field": "cash_to_assets",
+      "input_evidence_ids": [
+       "evf_d9abaa664494981cdd6bf628"
+      ],
+      "label": "cash_to_assets",
+      "operation": "div(monetary_funds_2026H1,total_assets_2026H1)",
+      "provenance": "calculated",
+      "unit": "ratio",
+      "value": 0.1686840746226688
+     }
+    ],
+    "statement": "2026H1资产负债率(总负债/总权益){debt_to_equity}，货币资金占总资产{cash_to_assets}。矿企因高资本开支+海外项目融资特征，资产负债率水平偏高属于行业属性；但流动性相对充裕。",
+    "uncertainty": "使用合并报表口径total_liabilities/total_equity(含少数股东权益)，与A+H口径归母权益不同。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_risk_metal_price",
+    "kind": "inference",
+    "numeric_items": [],
+    "statement": "金属价格周期性是核心风险。紫金矿业主营铜、金、锌、锂等大宗商品，盈利对LME铜价、COMEX金价高度敏感。当前股价相对250日高点已回撤约22%，部分反映市场对金属价格回调的提前定价；但本任务未提供铜金价格走势的量化evidence。",
+    "uncertainty": "金属价格走势数据缺失，无法量化敏感性；inference结论。"
+   },
+   {
+    "evidence_ids": [
+     "evf_f1d6e34ac36cb0c7a61c9a79"
+    ],
+    "id": "claim_risk_leverage",
+    "kind": "inference",
+    "numeric_items": [],
+    "statement": "杠杆与项目周期风险。资产负债率近100%(合并报表口径)，新建项目集中爬坡期，若金属价格进入熊市可能引发减值；同时财务费用对净利的吞噬风险在利率上行周期加剧。",
+    "uncertainty": "capex/经营性现金流比、债务期限结构、海外项目并表节奏等细节evidence缺失。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_risk_geo",
+    "kind": "inference",
+    "numeric_items": [],
+    "statement": "地缘与汇率风险。海外项目分布于刚果(金)、塞尔维亚、阿根廷、秘鲁等，地缘政治、税收政策变动、汇率波动(美元、刚果法索、阿根廷比索)对盈利的扰动是估值溢价打折的合理来源。",
+    "uncertainty": "具体海外项目的政策事件、汇率波动的news级evidence缺失。"
+   },
+   {
+    "evidence_ids": [
+     "evf_50e682fe80c9a45c023a295f"
+    ],
+    "id": "claim_risk_beta",
+    "kind": "inference",
+    "numeric_items": [],
+    "statement": "板块β风险。资源股β系数通常>1.5，当前A股整体处于\"中性\"状态(涨跌家数比{breadth_ratio})，若风险偏好继续下行，资源板块轮动中可能受冲击。",
+    "uncertainty": "β值未独立计算，inference结论。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_eps_unknown",
+    "kind": "unknown",
+    "numeric_items": [],
+    "statement": "本任务evidence未包含income_statement(净利润、营业收入、EPS)、分金属产品收入构成、分矿种产量、全球铜金价格走势等核心驱动因子数据。所有估值倍数来自外部快照而非自计算，盈利拆分、敏感性测试均受限。",
+    "uncertainty": "利润表、分产品收入、矿种产量、金属价格走势等核心驱动指标在本任务evidence中未找到，是本次分析的关键盲区。"
+   }
+  ],
+  "executive_summary": "紫金矿业(601899)截至2026-09-02收盘价{price}元、当日涨跌{daily_pct}%。eastmoney_f10快照显示总市值{mktcap_yi}元、PE_TTM{pe_ttm}倍、PB_MRQ{pb_mrq}倍。2026H1报表(总资产{total_assets_h1}元、总权益{total_equity_h1}元)对应资产负债率(总负债/总权益){debt_to_equity}、货币资金占总资产{cash_to_assets}，体现矿企典型扩张特征。250日价格区间{low_250}-{high_250}元，当前价相对高点回撤约{dd_pct}%，形态呈调整结构；历史最大回撤持续{mdd_duration_bars}个交易日。主要风险：金属价格周期、杠杆与项目减值、地缘与汇率、板块β轮动。本任务未获取利润表/分产品/金属价格等核心驱动evidence，估值与盈利判断受限。",
+  "limitations": [
+   "利润表(净利润、营业收入、EPS)未在本任务evidence中找到，关键PE来自PE_TTM快照而非自计算",
+   "分金属产品收入构成、铜/金/锌/锂分品种产量数据缺失，无法拆分业绩来源",
+   "当前铜价、金价(LME/COMEX)走势数据缺失，无法直接量化金属价格风险敞口",
+   "PB的historical_history较短(本任务仅返回近期数条pb_mrq样本)，历史区间比较不完整",
+   "kline的high/low精确evidence_id未直接命中，区间与最大回撤引用基于间接计算与backtest模块",
+   "海外项目所在地缘事件、汇率波动的具体news证据缺失"
+  ],
+  "overall_uncertainty": "本报告基于2026-09-02盘中数据快照，估值倍数(PE_TTM{pe_ttm}、PB_MRQ{pb_mrq})与市值(mktcap_yi元)为eastmoney_f10直接evidence，可靠性较高；但盈利能力论述、分产品拆解、金属价格敏感性均超出本任务evidence范围，相关风险判断属于inference。读者需注意PB口径差异显著(合并报表vs归母口径PB差距可能达数倍)；Resource股估值高度依赖金属价格周期，本文未提供铜金价格走势的量化锚点；财务结构高杠杆是矿企特征而非异常，但需结合capex节奏判断是否过度扩张。结论本身不是投资建议。",
+  "sections": [
+   {
+    "claim_ids": [
+     "claim_quote_price",
+     "claim_market_cap"
+    ],
+    "heading": "当前行情与市值"
+   },
+   {
+    "claim_ids": [
+     "claim_valuation_pe",
+     "claim_valuation_pb",
+     "claim_valuation_summary"
+    ],
+    "heading": "估值水平"
+   },
+   {
+    "claim_ids": [
+     "claim_kline_range",
+     "claim_drawdown_history",
+     "claim_market_regime"
+    ],
+    "heading": "价格趋势与市场背景"
+   },
+   {
+    "claim_ids": [
+     "claim_balance_structure",
+     "claim_balance_ratios"
+    ],
+    "heading": "财务结构与杠杆"
+   },
+   {
+    "claim_ids": [
+     "claim_risk_metal_price",
+     "claim_risk_leverage",
+     "claim_risk_geo",
+     "claim_risk_beta"
+    ],
+    "heading": "主要风险"
+   },
+   {
+    "claim_ids": [
+     "claim_eps_unknown"
+    ],
+    "heading": "证据盲区与未知项"
+   }
+  ],
+  "title": "紫金矿业(601899)估值、趋势与风险分析",
+  "version": "astock-report-contract-v1"
+ },
+ {
+  "claims": [
+   {
+    "evidence_ids": [
+     "evf_cf59113bcc791e8a21504a8b",
+     "evf_e28637f8ed3c8890b6ac3ede",
+     "evf_665740713c319b9063505f1b",
+     "evf_47d2ad9768279453d637e17d",
+     "evf_73469704b687f271979e64dd"
+    ],
+    "id": "claim_quote_price",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_cf59113bcc791e8a21504a8b",
+      "field": "/quote/price",
+      "label": "price",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 33.01
+     },
+     {
+      "evidence_id": "evf_e28637f8ed3c8890b6ac3ede",
+      "field": "/quote/pct",
+      "label": "daily_pct",
+      "provenance": "observed",
+      "unit": "%",
+      "value": -2.13
+     },
+     {
+      "evidence_id": "evf_665740713c319b9063505f1b",
+      "field": "/quote/high",
+      "label": "day_high",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 33.23
+     },
+     {
+      "evidence_id": "evf_47d2ad9768279453d637e17d",
+      "field": "/quote/low",
+      "label": "day_low",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 32.19
+     },
+     {
+      "evidence_id": "evf_73469704b687f271979e64dd",
+      "field": "/quote/amount",
+      "label": "day_amount",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 6944594771
+     }
+    ],
+    "statement": "2026-09-02盘中数据：紫金矿业收盘价{price}元，当日涨跌{daily_pct}%，日内区间{day_low}-{day_high}元，成交额{day_amount}元。",
+    "uncertainty": "快照时间为2026-09-02 06:26Z，盘中价格波动剧烈，截取时点不同会有差异。"
+   },
+   {
+    "evidence_ids": [
+     "evf_d5df35912664db67b086afb4"
+    ],
+    "id": "claim_market_cap",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_d5df35912664db67b086afb4",
+      "field": "/valuation_snapshot/total_market_cap",
+      "label": "mktcap_yi",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 877759489672.22
+     }
+    ],
+    "statement": "公司总市值约{mktcap_yi}元(eastmoney_f10 2026-09-02快照)。"
+   },
+   {
+    "evidence_ids": [
+     "evf_de88cce1b4699dcae1953cb9"
+    ],
+    "id": "claim_valuation_pe",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_de88cce1b4699dcae1953cb9",
+      "field": "/valuation_snapshot/pe_ttm",
+      "label": "pe_ttm",
+      "provenance": "observed",
+      "unit": "x",
+      "value": 12.97
+     }
+    ],
+    "statement": "滚动市盈率{pe_ttm}倍(eastmoney_f10快照口径)。盈利口径来自外部快照，本任务evidence不含利润表本身，无法独立验证。",
+    "uncertainty": "PE_TTM来自外部数据快照，本任务未获取净利润/EPS等独立验证数据。"
+   },
+   {
+    "evidence_ids": [
+     "evf_8a0312f6d97f533f7446ee8c"
+    ],
+    "id": "claim_valuation_pb",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_8a0312f6d97f533f7446ee8c",
+      "field": "/valuation_history/pb_mrq",
+      "label": "pb_mrq",
+      "provenance": "observed",
+      "unit": "x",
+      "value": 4.44082757
+     }
+    ],
+    "statement": "市净率(MRQ口径){pb_mrq}倍(eastmoney_f10 2026-09-01)。PB口径基于最近报告期股东权益，与紫金矿业的A股+H股合计口径相关，具体口径需结合原始披露核实。",
+    "uncertainty": "PB_MRQ使用外部数据快照口径，本任务未获取独立归母权益数据进行验证。"
+   },
+   {
+    "evidence_ids": [
+     "evf_908e716fa5e3a6868d2eca2a"
+    ],
+    "id": "claim_drawdown_history",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_908e716fa5e3a6868d2eca2a",
+      "field": "/securities/0/advanced_analysis/historical_backtest/data/max_drawdown_duration_bars",
+      "label": "mdd_duration_bars",
+      "provenance": "observed",
+      "unit": "bars",
+      "value": 143
+     }
+    ],
+    "statement": "历史最大回撤持续{mdd_duration_bars}个交易日(backtest模块)，反映资源股典型长调整周期。",
+    "uncertainty": "backtest口径的具体起止区间与点对点回撤幅度未独立验证。"
+   },
+   {
+    "evidence_ids": [
+     "evf_2fd642fd11d335792d7add45",
+     "evf_50e682fe80c9a45c023a295f",
+     "evf_1ed22c7acb20108bba6716a8"
+    ],
+    "id": "claim_market_regime",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_50e682fe80c9a45c023a295f",
+      "field": "/breadth/ratio",
+      "label": "breadth_ratio",
+      "provenance": "observed",
+      "unit": "ratio",
+      "value": 0.2942
+     },
+     {
+      "evidence_id": "evf_1ed22c7acb20108bba6716a8",
+      "field": "/up_ratio_20",
+      "label": "up_ratio_20",
+      "provenance": "observed",
+      "unit": "ratio",
+      "value": 0.65
+     }
+    ],
+    "statement": "2026-09-02市场状态：A股中性(涨跌家数比{breadth_ratio}，近20日上涨占比{up_ratio_20})。系统性风险偏好温和，资源板块走势更多受金属价格驱动。"
+   },
+   {
+    "evidence_ids": [
+     "evf_de88cce1b4699dcae1953cb9",
+     "evf_8a0312f6d97f533f7446ee8c"
+    ],
+    "id": "claim_valuation_summary",
+    "kind": "inference",
+    "numeric_items": [],
+    "statement": "综合PE_TTM{pe_ttm}倍、PB_MRQ{pb_mrq}倍看，紫金矿业当前估值在历史区间内属于中性偏低水平(铜金价格上行期盈利兑现度高，PE被压低)。但PE口径来自外部快照，PB_MRQ与归母口径PB可能存在差异，估值判断需谨慎。",
+    "uncertainty": "估值定位属于inference而非observation；缺乏历史PE/PB区间分布的独立evidence。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_risk_metal_price",
+    "kind": "unknown",
+    "numeric_items": [],
+    "statement": "金属价格周期性是核心风险。紫金矿业主营铜、金、锌、锂等大宗商品，盈利对LME铜价、COMEX金价高度敏感。但本任务evidence未包含金属价格走势数据，无法量化价格风险敞口。",
+    "uncertainty": "金属价格走势数据缺失，无法量化敏感性。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_risk_leverage",
+    "kind": "unknown",
+    "numeric_items": [],
+    "statement": "杠杆与项目周期风险定性描述：紫金矿业资产负债率较高(矿企行业属性)，新建项目集中爬坡期，若金属价格进入熊市可能引发减值，财务费用对净利吞噬风险在利率上行周期加剧。具体杠杆指标本任务evidence未直接给出，需以年报为准。",
+    "uncertainty": "具体capex/经营性现金流比、债务期限结构、海外项目并表节奏等细节evidence缺失。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_risk_geo",
+    "kind": "unknown",
+    "numeric_items": [],
+    "statement": "地缘与汇率风险定性描述：海外项目分布于刚果(金)、塞尔维亚、阿根廷、秘鲁等，地缘政治、税收政策变动、汇率波动对盈利的扰动是估值溢价打折的合理来源。具体事件、汇率数据本任务evidence缺失。",
+    "uncertainty": "具体海外项目的政策事件、汇率波动的news级evidence缺失。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_eps_unknown",
+    "kind": "unknown",
+    "numeric_items": [],
+    "statement": "本任务evidence未包含income_statement(净利润、营业收入、EPS)、分金属产品收入构成、分矿种产量、全球铜金价格走势等核心驱动因子数据。所有估值倍数来自外部快照而非自计算，盈利拆分、敏感性测试均受限。",
+    "uncertainty": "利润表、分产品收入、矿种产量、金属价格走势等核心驱动指标在本任务evidence中未找到，是本次分析的关键盲区。"
+   }
+  ],
+  "executive_summary": "紫金矿业(601899)截至2026-09-02收盘价{price}元、当日涨跌{daily_pct}%。eastmoney_f10快照显示总市值{mktcap_yi}元、PE_TTM{pe_ttm}倍、PB_MRQ{pb_mrq}倍。250日历史最大回撤持续{mdd_duration_bars}个交易日；当日市场状态\"中性\"(涨跌家数比{breadth_ratio})。主要风险：金属价格周期、杠杆与项目减值、地缘与汇率、板块β轮动。本任务未获取利润表/分产品/金属价格等核心驱动evidence，估值与盈利判断受限。",
+  "limitations": [
+   "利润表(净利润、营业收入、EPS)未在本任务evidence中找到，关键PE来自PE_TTM快照而非自计算",
+   "分金属产品收入构成、铜/金/锌/锂分品种产量数据缺失，无法拆分业绩来源",
+   "当前铜价、金价(LME/COMEX)走势数据缺失，无法直接量化金属价格风险敞口",
+   "PB的historical_history较短(本任务仅返回近期数条pb_mrq样本)，历史区间比较不完整",
+   "kline的high/low精确evidence_id未直接命中，区间与最大回撤引用基于间接计算与backtest模块",
+   "海外项目所在地缘事件、汇率波动的具体news证据缺失"
+  ],
+  "overall_uncertainty": "本报告基于2026-09-02盘中数据快照。估值倍数(PE_TTM{pe_ttm}、PB_MRQ{pb_mrq})与市值(mktcap_yi元)为eastmoney_f10直接evidence，可靠性较高。但盈利能力论述、分产品拆解、金属价格敏感性均超出本任务evidence范围，相关风险判断为inference或unknown。读者需注意PB口径差异显著(合并报表vs归母口径PB差距可能达数倍)；Resource股估值高度依赖金属价格周期，本文未提供铜金价格走势的量化锚点；财务结构高杠杆是矿企特征而非异常，但需结合capex节奏判断是否过度扩张。结论本身不是投资建议。",
+  "sections": [
+   {
+    "claim_ids": [
+     "claim_quote_price",
+     "claim_market_cap"
+    ],
+    "heading": "当前行情与市值"
+   },
+   {
+    "claim_ids": [
+     "claim_valuation_pe",
+     "claim_valuation_pb",
+     "claim_valuation_summary"
+    ],
+    "heading": "估值水平"
+   },
+   {
+    "claim_ids": [
+     "claim_drawdown_history",
+     "claim_market_regime"
+    ],
+    "heading": "价格趋势与市场背景"
+   },
+   {
+    "claim_ids": [
+     "claim_risk_metal_price",
+     "claim_risk_leverage",
+     "claim_risk_geo"
+    ],
+    "heading": "主要风险"
+   },
+   {
+    "claim_ids": [
+     "claim_eps_unknown"
+    ],
+    "heading": "证据盲区与未知项"
+   }
+  ],
+  "title": "紫金矿业(601899)估值、趋势与风险分析",
+  "version": "astock-report-contract-v1"
+ },
+ {
+  "claims": [
+   {
+    "evidence_ids": [
+     "evf_cf59113bcc791e8a21504a8b",
+     "evf_e28637f8ed3c8890b6ac3ede",
+     "evf_665740713c319b9063505f1b",
+     "evf_47d2ad9768279453d637e17d",
+     "evf_73469704b687f271979e64dd"
+    ],
+    "id": "claim_quote_price",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_cf59113bcc791e8a21504a8b",
+      "field": "/quote/price",
+      "label": "price",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 33.01
+     },
+     {
+      "evidence_id": "evf_e28637f8ed3c8890b6ac3ede",
+      "field": "/quote/pct",
+      "label": "daily_pct",
+      "provenance": "observed",
+      "unit": "%",
+      "value": -2.13
+     },
+     {
+      "evidence_id": "evf_665740713c319b9063505f1b",
+      "field": "/quote/high",
+      "label": "day_high",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 33.23
+     },
+     {
+      "evidence_id": "evf_47d2ad9768279453d637e17d",
+      "field": "/quote/low",
+      "label": "day_low",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 32.19
+     },
+     {
+      "evidence_id": "evf_73469704b687f271979e64dd",
+      "field": "/quote/amount",
+      "label": "day_amount",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 6944594771
+     }
+    ],
+    "statement": "2026-09-02盘中数据：紫金矿业收盘价{price}元，当日涨跌{daily_pct}%，日内区间{day_low}-{day_high}元，成交额{day_amount}元。",
+    "uncertainty": "快照时间为2026-09-02 06:26Z，盘中价格波动剧烈，截取时点不同会有差异。"
+   },
+   {
+    "evidence_ids": [
+     "evf_d5df35912664db67b086afb4"
+    ],
+    "id": "claim_market_cap",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_d5df35912664db67b086afb4",
+      "field": "/valuation_snapshot/total_market_cap",
+      "label": "mktcap_yi",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 877759489672.22
+     }
+    ],
+    "statement": "公司总市值约{mktcap_yi}元(eastmoney_f10 2026-09-02快照)。"
+   },
+   {
+    "evidence_ids": [
+     "evf_de88cce1b4699dcae1953cb9"
+    ],
+    "id": "claim_valuation_pe",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_de88cce1b4699dcae1953cb9",
+      "field": "/valuation_snapshot/pe_ttm",
+      "label": "pe_ttm",
+      "provenance": "observed",
+      "unit": "x",
+      "value": 12.97
+     }
+    ],
+    "statement": "滚动市盈率{pe_ttm}倍(eastmoney_f10快照口径)。盈利口径来自外部快照，本任务evidence不含利润表本身，无法独立验证。",
+    "uncertainty": "PE_TTM来自外部数据快照，本任务未获取净利润/EPS等独立验证数据。"
+   },
+   {
+    "evidence_ids": [
+     "evf_8a0312f6d97f533f7446ee8c"
+    ],
+    "id": "claim_valuation_pb",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_8a0312f6d97f533f7446ee8c",
+      "field": "/valuation_history/pb_mrq",
+      "label": "pb_mrq",
+      "provenance": "observed",
+      "unit": "x",
+      "value": 4.44082757
+     }
+    ],
+    "statement": "市净率(MRQ口径){pb_mrq}倍(eastmoney_f10 2026-09-01)。PB口径基于最近报告期股东权益，与紫金矿业的A股+H股合计口径相关，具体口径需结合原始披露核实。",
+    "uncertainty": "PB_MRQ使用外部数据快照口径，本任务未获取独立归母权益数据进行验证。"
+   },
+   {
+    "evidence_ids": [
+     "evf_908e716fa5e3a6868d2eca2a"
+    ],
+    "id": "claim_drawdown_history",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_908e716fa5e3a6868d2eca2a",
+      "field": "/securities/0/advanced_analysis/historical_backtest/data/max_drawdown_duration_bars",
+      "label": "mdd_duration_bars",
+      "provenance": "observed",
+      "unit": "bars",
+      "value": 143
+     }
+    ],
+    "statement": "历史最大回撤持续{mdd_duration_bars}个交易日(backtest模块)，反映资源股典型长调整周期。",
+    "uncertainty": "backtest口径的具体起止区间与点对点回撤幅度未独立验证。"
+   },
+   {
+    "evidence_ids": [
+     "evf_2fd642fd11d335792d7add45",
+     "evf_50e682fe80c9a45c023a295f",
+     "evf_1ed22c7acb20108bba6716a8"
+    ],
+    "id": "claim_market_regime",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_50e682fe80c9a45c023a295f",
+      "field": "/breadth/ratio",
+      "label": "breadth_ratio",
+      "provenance": "observed",
+      "unit": "ratio",
+      "value": 0.2942
+     },
+     {
+      "evidence_id": "evf_1ed22c7acb20108bba6716a8",
+      "field": "/up_ratio_20",
+      "label": "up_ratio_20",
+      "provenance": "observed",
+      "unit": "ratio",
+      "value": 0.65
+     }
+    ],
+    "statement": "2026-09-02市场状态：A股中性(涨跌家数比{breadth_ratio}，近20日上涨占比{up_ratio_20})。系统性风险偏好温和，资源板块走势更多受金属价格驱动。"
+   },
+   {
+    "evidence_ids": [
+     "evf_de88cce1b4699dcae1953cb9",
+     "evf_8a0312f6d97f533f7446ee8c"
+    ],
+    "id": "claim_valuation_summary",
+    "kind": "inference",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_de88cce1b4699dcae1953cb9",
+      "field": "/valuation_snapshot/pe_ttm",
+      "label": "pe_ref",
+      "provenance": "observed",
+      "unit": "x",
+      "value": 12.97
+     },
+     {
+      "evidence_id": "evf_8a0312f6d97f533f7446ee8c",
+      "field": "/valuation_history/pb_mrq",
+      "label": "pb_ref",
+      "provenance": "observed",
+      "unit": "x",
+      "value": 4.44082757
+     }
+    ],
+    "statement": "综合PE_TTM{pe_ref}倍、PB_MRQ{pb_ref}倍看，紫金矿业当前估值在历史区间内属于中性偏低水平(铜金价格上行期盈利兑现度高，PE被压低)。但PE口径来自外部快照，PB_MRQ与归母口径PB可能存在差异，估值判断需谨慎。",
+    "uncertainty": "估值定位属于inference而非observation；缺乏历史PE/PB区间分布的独立evidence。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_risk_metal_price",
+    "kind": "unknown",
+    "numeric_items": [],
+    "statement": "金属价格周期性是核心风险。紫金矿业主营铜、金、锌、锂等大宗商品，盈利对LME铜价、COMEX金价高度敏感。但本任务evidence未包含金属价格走势数据，无法量化价格风险敞口。",
+    "uncertainty": "金属价格走势数据缺失，无法量化敏感性。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_risk_leverage",
+    "kind": "unknown",
+    "numeric_items": [],
+    "statement": "杠杆与项目周期风险定性描述：紫金矿业资产负债率较高(矿企行业属性)，新建项目集中爬坡期，若金属价格进入熊市可能引发减值，财务费用对净利吞噬风险在利率上行周期加剧。具体杠杆指标本任务evidence未直接给出，需以年报为准。",
+    "uncertainty": "具体capex/经营性现金流比、债务期限结构、海外项目并表节奏等细节evidence缺失。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_risk_geo",
+    "kind": "unknown",
+    "numeric_items": [],
+    "statement": "地缘与汇率风险定性描述：海外项目分布于刚果(金)、塞尔维亚、阿根廷、秘鲁等，地缘政治、税收政策变动、汇率波动对盈利的扰动是估值溢价打折的合理来源。具体事件、汇率数据本任务evidence缺失。",
+    "uncertainty": "具体海外项目的政策事件、汇率波动的news级evidence缺失。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_eps_unknown",
+    "kind": "unknown",
+    "numeric_items": [],
+    "statement": "本任务evidence未包含income_statement(净利润、营业收入、EPS)、分金属产品收入构成、分矿种产量、全球铜金价格走势等核心驱动因子数据。所有估值倍数来自外部快照而非自计算，盈利拆分、敏感性测试均受限。",
+    "uncertainty": "利润表、分产品收入、矿种产量、金属价格走势等核心驱动指标在本任务evidence中未找到，是本次分析的关键盲区。"
+   }
+  ],
+  "executive_summary": "紫金矿业(601899)截至2026-09-02收盘价{price}元、当日涨跌{daily_pct}%。eastmoney_f10快照显示总市值{mktcap_yi}元、PE_TTM{pe_ref}倍、PB_MRQ{pb_ref}倍。250日历史最大回撤持续{mdd_duration_bars}个交易日；当日市场状态\"中性\"(涨跌家数比{breadth_ratio})。主要风险：金属价格周期、杠杆与项目减值、地缘与汇率、板块β轮动。本任务未获取利润表/分产品/金属价格等核心驱动evidence，估值与盈利判断受限。",
+  "limitations": [
+   "利润表(净利润、营业收入、EPS)未在本任务evidence中找到，关键PE来自PE_TTM快照而非自计算",
+   "分金属产品收入构成、铜/金/锌/锂分品种产量数据缺失，无法拆分业绩来源",
+   "当前铜价、金价(LME/COMEX)走势数据缺失，无法直接量化金属价格风险敞口",
+   "PB的historical_history较短(本任务仅返回近期数条pb_mrq样本)，历史区间比较不完整",
+   "kline的high/low精确evidence_id未直接命中，区间与最大回撤引用基于间接计算与backtest模块",
+   "海外项目所在地缘事件、汇率波动的具体news证据缺失"
+  ],
+  "overall_uncertainty": "本报告基于2026-09-02盘中数据快照。估值倍数(PE_TTM{pe_ref}、PB_MRQ{pb_ref})与市值(mktcap_yi元)为eastmoney_f10直接evidence，可靠性较高。但盈利能力论述、分产品拆解、金属价格敏感性均超出本任务evidence范围，相关风险判断为inference或unknown。读者需注意PB口径差异显著(合并报表vs归母口径PB差距可能达数倍)；Resource股估值高度依赖金属价格周期，本文未提供铜金价格走势的量化锚点；财务结构高杠杆是矿企特征而非异常，但需结合capex节奏判断是否过度扩张。结论本身不是投资建议。",
+  "sections": [
+   {
+    "claim_ids": [
+     "claim_quote_price",
+     "claim_market_cap"
+    ],
+    "heading": "当前行情与市值"
+   },
+   {
+    "claim_ids": [
+     "claim_valuation_pe",
+     "claim_valuation_pb",
+     "claim_valuation_summary"
+    ],
+    "heading": "估值水平"
+   },
+   {
+    "claim_ids": [
+     "claim_drawdown_history",
+     "claim_market_regime"
+    ],
+    "heading": "价格趋势与市场背景"
+   },
+   {
+    "claim_ids": [
+     "claim_risk_metal_price",
+     "claim_risk_leverage",
+     "claim_risk_geo"
+    ],
+    "heading": "主要风险"
+   },
+   {
+    "claim_ids": [
+     "claim_eps_unknown"
+    ],
+    "heading": "证据盲区与未知项"
+   }
+  ],
+  "title": "紫金矿业(601899)估值、趋势与风险分析",
+  "version": "astock-report-contract-v1"
+ },
+ {
+  "claims": [
+   {
+    "evidence_ids": [
+     "evf_cf59113bcc791e8a21504a8b",
+     "evf_e28637f8ed3c8890b6ac3ede",
+     "evf_665740713c319b9063505f1b",
+     "evf_47d2ad9768279453d637e17d",
+     "evf_73469704b687f271979e64dd"
+    ],
+    "id": "claim_quote_price",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_cf59113bcc791e8a21504a8b",
+      "field": "/quote/price",
+      "label": "price",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 33.01
+     },
+     {
+      "evidence_id": "evf_e28637f8ed3c8890b6ac3ede",
+      "field": "/quote/pct",
+      "label": "daily_pct",
+      "provenance": "observed",
+      "unit": "%",
+      "value": -2.13
+     },
+     {
+      "evidence_id": "evf_665740713c319b9063505f1b",
+      "field": "/quote/high",
+      "label": "day_high",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 33.23
+     },
+     {
+      "evidence_id": "evf_47d2ad9768279453d637e17d",
+      "field": "/quote/low",
+      "label": "day_low",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 32.19
+     },
+     {
+      "evidence_id": "evf_73469704b687f271979e64dd",
+      "field": "/quote/amount",
+      "label": "day_amount",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 6944594771
+     }
+    ],
+    "statement": "2026-09-02盘中数据：紫金矿业收盘价{price}元，当日涨跌{daily_pct}%，日内区间{day_low}-{day_high}元，成交额{day_amount}元。",
+    "uncertainty": "快照时间为2026-09-02 06:26Z，盘中价格波动剧烈，截取时点不同会有差异。"
+   },
+   {
+    "evidence_ids": [
+     "evf_d5df35912664db67b086afb4"
+    ],
+    "id": "claim_market_cap",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_d5df35912664db67b086afb4",
+      "field": "/valuation_snapshot/total_market_cap",
+      "label": "mktcap_yi",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 877759489672.22
+     }
+    ],
+    "statement": "公司总市值约{mktcap_yi}元(eastmoney_f10 2026-09-02快照)。"
+   },
+   {
+    "evidence_ids": [
+     "evf_de88cce1b4699dcae1953cb9"
+    ],
+    "id": "claim_valuation_pe",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_de88cce1b4699dcae1953cb9",
+      "field": "/valuation_snapshot/pe_ttm",
+      "label": "pe_ttm",
+      "provenance": "observed",
+      "unit": "x",
+      "value": 12.97
+     }
+    ],
+    "statement": "滚动市盈率{pe_ttm}倍(eastmoney_f10快照口径)。盈利口径来自外部快照，本任务evidence不含利润表本身，无法独立验证。",
+    "uncertainty": "PE_TTM来自外部数据快照，本任务未获取净利润/EPS等独立验证数据。"
+   },
+   {
+    "evidence_ids": [
+     "evf_8a0312f6d97f533f7446ee8c"
+    ],
+    "id": "claim_valuation_pb",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_8a0312f6d97f533f7446ee8c",
+      "field": "/valuation_history/pb_mrq",
+      "label": "pb_mrq",
+      "provenance": "observed",
+      "unit": "x",
+      "value": 4.44082757
+     }
+    ],
+    "statement": "市净率(MRQ口径){pb_mrq}倍(eastmoney_f10 2026-09-01)。PB口径基于最近报告期股东权益，与紫金矿业的A股+H股合计口径相关，具体口径需结合原始披露核实。",
+    "uncertainty": "PB_MRQ使用外部数据快照口径，本任务未获取独立归母权益数据进行验证。"
+   },
+   {
+    "evidence_ids": [
+     "evf_908e716fa5e3a6868d2eca2a"
+    ],
+    "id": "claim_drawdown_history",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_908e716fa5e3a6868d2eca2a",
+      "field": "/securities/0/advanced_analysis/historical_backtest/data/max_drawdown_duration_bars",
+      "label": "mdd_duration_bars",
+      "provenance": "observed",
+      "unit": "bars",
+      "value": 143
+     }
+    ],
+    "statement": "历史最大回撤持续{mdd_duration_bars}个交易日(backtest模块)，反映资源股典型长调整周期。",
+    "uncertainty": "backtest口径的具体起止区间与点对点回撤幅度未独立验证。"
+   },
+   {
+    "disclosed_conflicts": [
+     "evf_4a36ac6a414d21994b18d356",
+     "evf_56174197b6f731f1903f9960",
+     "evf_4813d66eca2d0c1172d70874"
+    ],
+    "evidence_ids": [
+     "evf_50e682fe80c9a45c023a295f",
+     "evf_1ed22c7acb20108bba6716a8",
+     "evf_2fd642fd11d335792d7add45"
+    ],
+    "id": "claim_market_regime",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_50e682fe80c9a45c023a295f",
+      "field": "/breadth/ratio",
+      "label": "breadth_ratio",
+      "provenance": "observed",
+      "unit": "ratio",
+      "value": 0.2942
+     },
+     {
+      "evidence_id": "evf_1ed22c7acb20108bba6716a8",
+      "field": "/up_ratio_20",
+      "label": "up_ratio_20",
+      "provenance": "observed",
+      "unit": "ratio",
+      "value": 0.65
+     }
+    ],
+    "statement": "2026-09-02市场状态：A股中性(涨跌家数比{breadth_ratio}，近20日上涨占比{up_ratio_20})。两次独立快照(breadth/ratio在6:26:09与6:27:34分别登记为evf_50e682fe80c9a45c023a295f与evf_4a36ac6a414d21994b18d356；up_ratio_20在6:26:09与6:27:34分别登记为evf_1ed22c7acb20108bba6716a8与evf_56174197b6f731f1903f9960；regime在6:26:09与6:27:34分别登记为evf_2fd642fd11d335792d7add45与evf_4813d66eca2d0c1172d70874)结果完全一致(0.2942/0.65/中性)，可视为稳定一致的双源观测。系统性风险偏好温和，资源板块走势更多受金属价格驱动。"
+   },
+   {
+    "evidence_ids": [
+     "evf_de88cce1b4699dcae1953cb9",
+     "evf_8a0312f6d97f533f7446ee8c"
+    ],
+    "id": "claim_valuation_summary",
+    "kind": "inference",
+    "numeric_items": [],
+    "statement": "综合PE_TTM约13倍、PB_MRQ约4.4倍看，紫金矿业当前估值在历史区间内属于中性偏低水平(铜金价格上行期盈利兑现度高，PE被压低)。但PE口径来自外部快照，PB_MRQ与归母口径PB可能存在差异，估值判断需谨慎。",
+    "uncertainty": "估值定位属于inference而非observation；缺乏历史PE/PB区间分布的独立evidence。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_risk_metal_price",
+    "kind": "unknown",
+    "numeric_items": [],
+    "statement": "金属价格周期性是核心风险。紫金矿业主营铜、金、锌、锂等大宗商品，盈利对LME铜价、COMEX金价高度敏感。但本任务evidence未包含金属价格走势数据，无法量化价格风险敞口。",
+    "uncertainty": "金属价格走势数据缺失，无法量化敏感性。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_risk_leverage",
+    "kind": "unknown",
+    "numeric_items": [],
+    "statement": "杠杆与项目周期风险定性描述：紫金矿业资产负债率较高(矿企行业属性)，新建项目集中爬坡期，若金属价格进入熊市可能引发减值，财务费用对净利吞噬风险在利率上行周期加剧。具体杠杆指标本任务evidence未直接给出，需以年报为准。",
+    "uncertainty": "具体capex/经营性现金流比、债务期限结构、海外项目并表节奏等细节evidence缺失。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_risk_geo",
+    "kind": "unknown",
+    "numeric_items": [],
+    "statement": "地缘与汇率风险定性描述：海外项目分布于刚果(金)、塞尔维亚、阿根廷、秘鲁等，地缘政治、税收政策变动、汇率波动对盈利的扰动是估值溢价打折的合理来源。具体事件、汇率数据本任务evidence缺失。",
+    "uncertainty": "具体海外项目的政策事件、汇率波动的news级evidence缺失。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_eps_unknown",
+    "kind": "unknown",
+    "numeric_items": [],
+    "statement": "本任务evidence未包含income_statement(净利润、营业收入、EPS)、分金属产品收入构成、分矿种产量、全球铜金价格走势等核心驱动因子数据。所有估值倍数来自外部快照而非自计算，盈利拆分、敏感性测试均受限。",
+    "uncertainty": "利润表、分产品收入、矿种产量、金属价格走势等核心驱动指标在本任务evidence中未找到，是本次分析的关键盲区。"
+   }
+  ],
+  "executive_summary": "紫金矿业(601899)截至2026-09-02收盘价{price}元、当日涨跌{daily_pct}%。eastmoney_f10快照显示总市值{mktcap_yi}元、PE_TTM{pe_ttm}倍、PB_MRQ{pb_mrq}倍。250日历史最大回撤持续{mdd_duration_bars}个交易日；当日市场状态\"中性\"(涨跌家数比{breadth_ratio}，两次快照一致)。主要风险：金属价格周期、杠杆与项目减值、地缘与汇率。本任务未获取利润表/分产品/金属价格等核心驱动evidence，估值与盈利判断受限。",
+  "limitations": [
+   "利润表(净利润、营业收入、EPS)未在本任务evidence中找到，关键PE来自PE_TTM快照而非自计算",
+   "分金属产品收入构成、铜/金/锌/锂分品种产量数据缺失，无法拆分业绩来源",
+   "当前铜价、金价(LME/COMEX)走势数据缺失，无法直接量化金属价格风险敞口",
+   "PB的historical_history较短(本任务仅返回近期数条pb_mrq样本)，历史区间比较不完整",
+   "kline的high/low精确evidence_id未直接命中，区间与最大回撤引用基于间接计算与backtest模块",
+   "海外项目所在地缘事件、汇率波动的具体news证据缺失"
+  ],
+  "overall_uncertainty": "本报告基于2026-09-02盘中数据快照。估值倍数(PE_TTM{pe_ttm}、PB_MRQ{pb_mrq})与市值(mktcap_yi元)为eastmoney_f10直接evidence，可靠性较高。但盈利能力论述、分产品拆解、金属价格敏感性均超出本任务evidence范围，相关风险判断为inference或unknown。读者需注意PB口径差异显著(合并报表vs归母口径PB差距可能达数倍)；Resource股估值高度依赖金属价格周期，本文未提供铜金价格走势的量化锚点；财务结构高杠杆是矿企特征而非异常，但需结合capex节奏判断是否过度扩张。结论本身不是投资建议。",
+  "sections": [
+   {
+    "claim_ids": [
+     "claim_quote_price",
+     "claim_market_cap"
+    ],
+    "heading": "当前行情与市值"
+   },
+   {
+    "claim_ids": [
+     "claim_valuation_pe",
+     "claim_valuation_pb",
+     "claim_valuation_summary"
+    ],
+    "heading": "估值水平"
+   },
+   {
+    "claim_ids": [
+     "claim_drawdown_history",
+     "claim_market_regime"
+    ],
+    "heading": "价格趋势与市场背景"
+   },
+   {
+    "claim_ids": [
+     "claim_risk_metal_price",
+     "claim_risk_leverage",
+     "claim_risk_geo"
+    ],
+    "heading": "主要风险"
+   },
+   {
+    "claim_ids": [
+     "claim_eps_unknown"
+    ],
+    "heading": "证据盲区与未知项"
+   }
+  ],
+  "title": "紫金矿业(601899)估值、趋势与风险分析",
+  "version": "astock-report-contract-v1"
+ },
+ {
+  "claims": [
+   {
+    "evidence_ids": [
+     "evf_cf59113bcc791e8a21504a8b",
+     "evf_e28637f8ed3c8890b6ac3ede",
+     "evf_665740713c319b9063505f1b",
+     "evf_47d2ad9768279453d637e17d",
+     "evf_73469704b687f271979e64dd"
+    ],
+    "id": "claim_quote_price",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_cf59113bcc791e8a21504a8b",
+      "field": "/quote/price",
+      "label": "price",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 33.01
+     },
+     {
+      "evidence_id": "evf_e28637f8ed3c8890b6ac3ede",
+      "field": "/quote/pct",
+      "label": "daily_pct",
+      "provenance": "observed",
+      "unit": "%",
+      "value": -2.13
+     },
+     {
+      "evidence_id": "evf_665740713c319b9063505f1b",
+      "field": "/quote/high",
+      "label": "day_high",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 33.23
+     },
+     {
+      "evidence_id": "evf_47d2ad9768279453d637e17d",
+      "field": "/quote/low",
+      "label": "day_low",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 32.19
+     },
+     {
+      "evidence_id": "evf_73469704b687f271979e64dd",
+      "field": "/quote/amount",
+      "label": "day_amount",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 6944594771
+     }
+    ],
+    "statement": "2026-09-02盘中数据：紫金矿业收盘价{price}元，当日涨跌{daily_pct}%，日内区间{day_low}-{day_high}元，成交额{day_amount}元。",
+    "uncertainty": "快照时间为2026-09-02 06:26Z，盘中价格波动剧烈，截取时点不同会有差异。"
+   },
+   {
+    "evidence_ids": [
+     "evf_d5df35912664db67b086afb4"
+    ],
+    "id": "claim_market_cap",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_d5df35912664db67b086afb4",
+      "field": "/valuation_snapshot/total_market_cap",
+      "label": "mktcap_yi",
+      "provenance": "observed",
+      "unit": "CNY",
+      "value": 877759489672.22
+     }
+    ],
+    "statement": "公司总市值约{mktcap_yi}元(eastmoney_f10 2026-09-02快照)。"
+   },
+   {
+    "evidence_ids": [
+     "evf_de88cce1b4699dcae1953cb9"
+    ],
+    "id": "claim_valuation_pe",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_de88cce1b4699dcae1953cb9",
+      "field": "/valuation_snapshot/pe_ttm",
+      "label": "pe_ttm",
+      "provenance": "observed",
+      "unit": "x",
+      "value": 12.97
+     }
+    ],
+    "statement": "滚动市盈率{pe_ttm}倍(eastmoney_f10快照口径)。盈利口径来自外部快照，本任务evidence不含利润表本身，无法独立验证。",
+    "uncertainty": "PE_TTM来自外部数据快照，本任务未获取净利润/EPS等独立验证数据。"
+   },
+   {
+    "evidence_ids": [
+     "evf_8a0312f6d97f533f7446ee8c"
+    ],
+    "id": "claim_valuation_pb",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_8a0312f6d97f533f7446ee8c",
+      "field": "/valuation_history/pb_mrq",
+      "label": "pb_mrq",
+      "provenance": "observed",
+      "unit": "x",
+      "value": 4.44082757
+     }
+    ],
+    "statement": "市净率(MRQ口径){pb_mrq}倍(eastmoney_f10 2026-09-01)。PB口径基于最近报告期股东权益，与紫金矿业的A股+H股合计口径相关，具体口径需结合原始披露核实。",
+    "uncertainty": "PB_MRQ使用外部数据快照口径，本任务未获取独立归母权益数据进行验证。"
+   },
+   {
+    "evidence_ids": [
+     "evf_908e716fa5e3a6868d2eca2a"
+    ],
+    "id": "claim_drawdown_history",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_908e716fa5e3a6868d2eca2a",
+      "field": "/securities/0/advanced_analysis/historical_backtest/data/max_drawdown_duration_bars",
+      "label": "mdd_duration_bars",
+      "provenance": "observed",
+      "unit": "bars",
+      "value": 143
+     }
+    ],
+    "statement": "历史最大回撤持续{mdd_duration_bars}个交易日(backtest模块)，反映资源股典型长调整周期。",
+    "uncertainty": "backtest口径的具体起止区间与点对点回撤幅度未独立验证。"
+   },
+   {
+    "disclosed_conflicts": [
+     "evf_4a36ac6a414d21994b18d356",
+     "evf_56174197b6f731f1903f9960",
+     "evf_4813d66eca2d0c1172d70874"
+    ],
+    "evidence_ids": [
+     "evf_50e682fe80c9a45c023a295f",
+     "evf_1ed22c7acb20108bba6716a8",
+     "evf_2fd642fd11d335792d7add45"
+    ],
+    "id": "claim_market_regime",
+    "kind": "observed_fact",
+    "numeric_items": [
+     {
+      "evidence_id": "evf_50e682fe80c9a45c023a295f",
+      "field": "/breadth/ratio",
+      "label": "breadth_ratio",
+      "provenance": "observed",
+      "unit": "ratio",
+      "value": 0.2942
+     },
+     {
+      "evidence_id": "evf_1ed22c7acb20108bba6716a8",
+      "field": "/up_ratio_20",
+      "label": "up_ratio_20",
+      "provenance": "observed",
+      "unit": "ratio",
+      "value": 0.65
+     }
+    ],
+    "statement": "2026-09-02市场状态：A股中性(涨跌家数比{breadth_ratio}，近20日上涨占比{up_ratio_20})。两次独立快照(breadth/ratio在6:26:09与6:27:34分别登记为evf_50e682fe80c9a45c023a295f与evf_4a36ac6a414d21994b18d356；up_ratio_20在6:26:09与6:27:34分别登记为evf_1ed22c7acb20108bba6716a8与evf_56174197b6f731f1903f9960；regime在6:26:09与6:27:34分别登记为evf_2fd642fd11d335792d7add45与evf_4813d66eca2d0c1172d70874)结果完全一致(0.2942/0.65/中性)，可视为稳定一致的双源观测。系统性风险偏好温和，资源板块走势更多受金属价格驱动。"
+   },
+   {
+    "evidence_ids": [
+     "evf_de88cce1b4699dcae1953cb9",
+     "evf_8a0312f6d97f533f7446ee8c"
+    ],
+    "id": "claim_valuation_summary",
+    "kind": "inference",
+    "numeric_items": [],
+    "statement": "综合PE_TTM{pe_ttm}倍、PB_MRQ{pb_mrq}倍看，紫金矿业当前估值在历史区间内属于中性偏低水平(铜金价格上行期盈利兑现度高，PE被压低)。但PE口径来自外部快照，PB_MRQ与归母口径PB可能存在差异，估值判断需谨慎。",
+    "uncertainty": "估值定位属于inference而非observation；缺乏历史PE/PB区间分布的独立evidence。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_risk_metal_price",
+    "kind": "unknown",
+    "numeric_items": [],
+    "statement": "金属价格周期性是核心风险。紫金矿业主营铜、金、锌、锂等大宗商品，盈利对LME铜价、COMEX金价高度敏感。但本任务evidence未包含金属价格走势数据，无法量化价格风险敞口。",
+    "uncertainty": "金属价格走势数据缺失，无法量化敏感性。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_risk_leverage",
+    "kind": "unknown",
+    "numeric_items": [],
+    "statement": "杠杆与项目周期风险定性描述：紫金矿业资产负债率较高(矿企行业属性)，新建项目集中爬坡期，若金属价格进入熊市可能引发减值，财务费用对净利吞噬风险在利率上行周期加剧。具体杠杆指标本任务evidence未直接给出，需以年报为准。",
+    "uncertainty": "具体capex/经营性现金流比、债务期限结构、海外项目并表节奏等细节evidence缺失。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_risk_geo",
+    "kind": "unknown",
+    "numeric_items": [],
+    "statement": "地缘与汇率风险定性描述：海外项目分布于刚果(金)、塞尔维亚、阿根廷、秘鲁等，地缘政治、税收政策变动、汇率波动对盈利的扰动是估值溢价打折的合理来源。具体事件、汇率数据本任务evidence缺失。",
+    "uncertainty": "具体海外项目的政策事件、汇率波动的news级evidence缺失。"
+   },
+   {
+    "evidence_ids": [],
+    "id": "claim_eps_unknown",
+    "kind": "unknown",
+    "numeric_items": [],
+    "statement": "本任务evidence未包含income_statement(净利润、营业收入、EPS)、分金属产品收入构成、分矿种产量、全球铜金价格走势等核心驱动因子数据。所有估值倍数来自外部快照而非自计算，盈利拆分、敏感性测试均受限。",
+    "uncertainty": "利润表、分产品收入、矿种产量、金属价格走势等核心驱动指标在本任务evidence中未找到，是本次分析的关键盲区。"
+   }
+  ],
+  "executive_summary": "紫金矿业(601899)截至2026-09-02收盘价{price}元、当日涨跌{daily_pct}%。eastmoney_f10快照显示总市值{mktcap_yi}元、PE_TTM{pe_ttm}倍、PB_MRQ{pb_mrq}倍。250日历史最大回撤持续{mdd_duration_bars}个交易日；当日市场状态\"中性\"(涨跌家数比{breadth_ratio}，两次快照一致)。主要风险：金属价格周期、杠杆与项目减值、地缘与汇率。本任务未获取利润表/分产品/金属价格等核心驱动evidence，估值与盈利判断受限。",
+  "limitations": [
+   "利润表(净利润、营业收入、EPS)未在本任务evidence中找到，关键PE来自PE_TTM快照而非自计算",
+   "分金属产品收入构成、铜/金/锌/锂分品种产量数据缺失，无法拆分业绩来源",
+   "当前铜价、金价(LME/COMEX)走势数据缺失，无法直接量化金属价格风险敞口",
+   "PB的historical_history较短(本任务仅返回近期数条pb_mrq样本)，历史区间比较不完整",
+   "kline的high/low精确evidence_id未直接命中，区间与最大回撤引用基于间接计算与backtest模块",
+   "海外项目所在地缘事件、汇率波动的具体news证据缺失"
+  ],
+  "overall_uncertainty": "本报告基于2026-09-02盘中数据快照。估值倍数(PE_TTM{pe_ttm}、PB_MRQ{pb_mrq})与市值(mktcap_yi元)为eastmoney_f10直接evidence，可靠性较高。但盈利能力论述、分产品拆解、金属价格敏感性均超出本任务evidence范围，相关风险判断为inference或unknown。读者需注意PB口径差异显著(合并报表vs归母口径PB差距可能达数倍)；Resource股估值高度依赖金属价格周期，本文未提供铜金价格走势的量化锚点；财务结构高杠杆是矿企特征而非异常，但需结合capex节奏判断是否过度扩张。结论本身不是投资建议。",
+  "sections": [
+   {
+    "claim_ids": [
+     "claim_quote_price",
+     "claim_market_cap"
+    ],
+    "heading": "当前行情与市值"
+   },
+   {
+    "claim_ids": [
+     "claim_valuation_pe",
+     "claim_valuation_pb",
+     "claim_valuation_summary"
+    ],
+    "heading": "估值水平"
+   },
+   {
+    "claim_ids": [
+     "claim_drawdown_history",
+     "claim_market_regime"
+    ],
+    "heading": "价格趋势与市场背景"
+   },
+   {
+    "claim_ids": [
+     "claim_risk_metal_price",
+     "claim_risk_leverage",
+     "claim_risk_geo"
+    ],
+    "heading": "主要风险"
+   },
+   {
+    "claim_ids": [
+     "claim_eps_unknown"
+    ],
+    "heading": "证据盲区与未知项"
+   }
+  ],
+  "title": "紫金矿业(601899)估值、趋势与风险分析",
+  "version": "astock-report-contract-v1"
  }
 ]

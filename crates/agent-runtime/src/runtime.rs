@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use astock_protocol::TaskSpec;
 
-use crate::catalog::{EvidenceCatalog, EvidenceQuery};
+use crate::catalog::{EvidenceCatalog, EvidenceSearchRequest};
 use crate::error::{ProviderErrorKind, RuntimeError};
 use crate::events::{AgentEvent, AgentPhase, VerificationFinding};
 use crate::finalize::{
@@ -243,7 +243,14 @@ impl Default for RuntimeConfig {
         Self {
             max_model_rounds: 32,
             max_research_rounds: 20,
-            max_finalization_attempts: 8,
+            // Finalization repair attempts. Measured live trajectories run
+            // 49 → 22 → 14 → 2 → publish-class within six to eight repairs
+            // when the first draft starts clean, but a draft that opens with a
+            // large undeclared-figure count needs the tail rounds too — one
+            // live run converged to one problem at attempt 7 and exhausted at
+            // 8. Identical-resubmission detection still ends a non-converging
+            // loop regardless of budget.
+            max_finalization_attempts: 10,
             max_model_chunks_per_round: 10_000,
             max_unknown_tool_rejections: 3,
             max_empty_turn_retries: 2,
@@ -252,7 +259,16 @@ impl Default for RuntimeConfig {
             max_tool_argument_chars: 256_000,
             max_parallel_tools: 4,
             max_tool_result_bytes: 2 * 1024 * 1024,
-            max_tokens: 8_192,
+            // Output ceiling per model round. A structured report draft is
+            // emitted as one tool-call payload, and the principal model also
+            // spends private reasoning from the same budget: a live balanced
+            // run wrote 9-claim drafts that cut off at ~14 KB of arguments
+            // under the previous 8,192 cap, losing required fields, and burned
+            // the whole finalization budget on the truncation. 32,768 leaves
+            // room for reasoning plus a full deep draft; shorter generations
+            // are billed the same as before, and the chunk/character bounds
+            // below still cap a runaway round.
+            max_tokens: 32_768,
             temperature: 0.2,
             provider_connect_timeout: Duration::from_secs(90),
             provider_idle_timeout: Duration::from_secs(120),
@@ -641,14 +657,21 @@ impl AgentRuntime {
                     .config
                     .max_research_rounds
                     .min(self.config.max_model_rounds);
+            let calc_withdrawn = state.calc_shape_failures >= MAX_CALC_SHAPE_FAILURES;
             let offered_tools = if finalization_only {
                 self.tools
                     .definitions()
                     .into_iter()
                     .filter(|tool| {
                         tool.handler == ToolHandler::Runtime
-                            || tool.name == "run_financial_calculation"
+                            || (!calc_withdrawn && tool.name == "run_financial_calculation")
                     })
+                    .collect()
+            } else if calc_withdrawn {
+                self.tools
+                    .definitions()
+                    .into_iter()
+                    .filter(|tool| !tool.name.contains("calculation"))
                     .collect()
             } else {
                 self.tools.definitions()
@@ -732,10 +755,23 @@ impl AgentRuntime {
                             .await?;
                             return Err(RuntimeError::Cancelled);
                         }
-                        result = tokio::time::timeout(
-                            self.config.provider_idle_timeout,
-                            stream.next(),
-                        ) => result,
+                        result = async {
+                            if self.provider.manages_stream_liveness() {
+                                // MiniMax resets its watchdog on every raw SSE
+                                // chunk, including private reasoning, and owns its
+                                // bounded pre-commit reconnects. The adapter hides
+                                // those chunks correctly; timing only its visible
+                                // output here caused false idles and multiplied the
+                                // provider retry budget.
+                                Ok(stream.next().await)
+                            } else {
+                                tokio::time::timeout(
+                                    self.config.provider_idle_timeout,
+                                    stream.next(),
+                                )
+                                .await
+                            }
+                        } => result,
                     };
                     match next {
                         Ok(Some(Ok(ModelChunk::TextDelta(delta)))) => {
@@ -965,8 +1001,8 @@ impl AgentRuntime {
                     messages.push(Message::text(
                         MessageRole::System,
                         "The research budget for this task is spent, so the retrieval tools have \
-                         been withdrawn. Only search_evidence, run_financial_calculation and \
-                         submit_report remain. Finalize with the evidence already gathered and \
+                         been withdrawn. Only search_evidence, compute_from_evidence, run_financial_calculation and \
+                         submit_report remain. Prefer compute_from_evidence for ratios. Finalize with the evidence already gathered and \
                          state remaining gaps as limitations or as claims of kind=unknown rather \
                          than asserting them.",
                     ));
@@ -1052,10 +1088,14 @@ impl AgentRuntime {
                     } else {
                         "The draft did not match the submit_report schema, so no claim was read. \
                          The error names the exact field: fix that field and resubmit the complete \
-                         draft. A numeric item must carry every field its provenance requires: \
-                         observed needs evidence_id; calculated needs calculation_evidence_id, \
-                         operation and input_evidence_ids; estimated needs method and \
-                         basis_evidence_ids."
+                         draft. Shape rules the live failures keep hitting: `claims` and \
+                         `sections` are arrays of objects; a numeric item's `value` is a number, \
+                         never text; every claim needs `id`, `kind` and `statement`; `kind` is \
+                         one of observed_fact, deterministic_calculation, inference, estimate, \
+                         scenario, unknown. A numeric item must carry every field its provenance \
+                         requires: observed needs evidence_id; calculated needs \
+                         calculation_evidence_id, operation and input_evidence_ids; estimated \
+                         needs method and basis_evidence_ids."
                     },
                 });
                 return Ok(match verdict {
@@ -1081,12 +1121,13 @@ impl AgentRuntime {
                         finding: VerificationFinding {
                             code: problem.code().to_owned(),
                             message: format!(
-                                "报告契约校验未通过：{}{}",
+                                "报告契约校验未通过：{}{}{}",
                                 problem.code(),
                                 problem
                                     .claim_id()
                                     .map(|id| format!("（结论 {id}）"))
-                                    .unwrap_or_default()
+                                    .unwrap_or_default(),
+                                problem.event_detail(),
                             ),
                             blocking: true,
                         },
@@ -1249,6 +1290,85 @@ impl AgentRuntime {
         }
     }
 
+    /// Compute ratios/products from catalog evidence without asking the model for an AST.
+    ///
+    /// Live Case C burned research rounds on malformed `run_financial_calculation`
+    /// programs after coverage was already complete. This path looks up operand
+    /// values in the catalog (or accepts a scalar), builds a one-output Program, and
+    /// dispatches it to the Engine so evidence registration stays the Engine's job.
+    async fn compute_from_evidence(
+        &self,
+        task: &RuntimeTask,
+        state: &RunState,
+        arguments: Value,
+    ) -> Result<Value, String> {
+        let calculations = arguments
+            .get("calculations")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "missing calculations array".to_owned())?;
+        if calculations.is_empty() || calculations.len() > MAX_BATCHED_PROGRAMS {
+            return Err(format!(
+                "calculations must contain 1 to {MAX_BATCHED_PROGRAMS} entries"
+            ));
+        }
+        let mut results = Vec::with_capacity(calculations.len());
+        for (index, calc) in calculations.iter().enumerate() {
+            let label = calc
+                .get("label")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("calculations[{index}]: missing label"))?;
+            let op = calc
+                .get("op")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("calculations[{index}]: missing op"))?;
+            if !matches!(op, "div" | "mul" | "add" | "sub") {
+                return Err(format!(
+                    "calculations[{index}]: op must be div, mul, add or sub"
+                ));
+            }
+            let (left_value, left_id) =
+                resolve_compute_operand(state, calc.get("left"), index, "left")?;
+            let (right_value, right_id) =
+                resolve_compute_operand(state, calc.get("right"), index, "right")?;
+            let program = json!({
+                "version": 1,
+                "inputs": {
+                    "left": [left_value],
+                    "right": [right_value]
+                },
+                "outputs": {
+                    label: {
+                        "op": op,
+                        "left": {"op": "var", "name": "left"},
+                        "right": {"op": "var", "name": "right"}
+                    }
+                }
+            });
+            let outcome = self
+                .executor
+                .execute(
+                    "research.compute",
+                    json!({"program": program}),
+                    state.cancellation.child_token(),
+                )
+                .await
+                .map_err(|error| format!("calculations[{index}] ({label}): {error}"))?;
+            results.push(json!({
+                "label": label,
+                "op": op,
+                "left_evidence_id": left_id,
+                "right_evidence_id": right_id,
+                "result": outcome
+            }));
+        }
+        Ok(json!({
+            "ok": true,
+            "symbol": task.symbol,
+            "calculations": results.len(),
+            "results": results
+        }))
+    }
+
     async fn execute_tools(
         &self,
         task: &RuntimeTask,
@@ -1299,6 +1419,34 @@ impl AgentRuntime {
                 }
             };
 
+            // Calculation tools withdrawn after consecutive shape failures must not
+            // run even if the provider still forwards a call for a tool that was
+            // removed from the offer. Live Case C run 5 withdrew at round 7, then
+            // the model called run_financial_calculation again at rounds 11 and 14
+            // and each call was still executed. Omitting from the offer is not
+            // enough when the provider does not enforce the list.
+            if state.calc_shape_failures >= MAX_CALC_SHAPE_FAILURES
+                && call.name.contains("calculation")
+            {
+                let message = format!(
+                    "calculation tools are withdrawn after {MAX_CALC_SHAPE_FAILURES} consecutive \
+                     shape failures; `{name}` was not executed. Use compute_from_evidence for PE/market_cap/YoY (no AST), or cite observed evidence, then submit_report.",
+                    name = call.name
+                );
+                self.record(
+                    state,
+                    AgentEvent::ToolFailed {
+                        call_id: call.id.clone(),
+                        tool: call.name.clone(),
+                        message: message.clone(),
+                        retryable: false,
+                    },
+                )
+                .await?;
+                rejected.push(CompletedTool::failure(call, message));
+                continue;
+            }
+
             // Malformed arguments on a *registered* tool are different: the model
             // asked for something it is permitted to ask for and mis-encoded it.
             // That is one bad call, not a reason to destroy a task that has
@@ -1331,10 +1479,24 @@ impl AgentRuntime {
                     // Name the truncation explicitly: the model needs to know the
                     // payload was cut off rather than semantically wrong, so it
                     // can re-emit a smaller program instead of rewriting it.
-                    let message = format!(
-                        "arguments were not valid JSON ({error}); if the payload was truncated, \
-                         re-send a smaller argument object"
+                    let mut message = enrich_calculation_error(
+                        &call.name,
+                        format!(
+                            "arguments were not valid JSON ({error}); if the payload was truncated, \
+                             re-send a smaller argument object"
+                        ),
                     );
+                    if is_calculation_shape_error(&call.name, &message) {
+                        state.calc_shape_failures = state.calc_shape_failures.saturating_add(1);
+                        if state.calc_shape_failures >= MAX_CALC_SHAPE_FAILURES {
+                            message = format!(
+                                "{message} Calculation tools are now withdrawn after \
+                                 {MAX_CALC_SHAPE_FAILURES} consecutive shape failures. \
+                                 Use compute_from_evidence for PE/market_cap/YoY (no AST), or cite observed \
+                                 evidence, then submit_report — do not keep rewriting the AST."
+                            );
+                        }
+                    }
                     self.record(
                         state,
                         AgentEvent::ToolFailed {
@@ -1404,7 +1566,8 @@ impl AgentRuntime {
                 async move {
                     let result = tokio::time::timeout(
                         prepared.definition.timeout,
-                        executor.execute(
+                        execute_possibly_batched(
+                            executor.as_ref(),
                             &prepared.definition.engine_kind,
                             prepared.arguments.clone(),
                             cancellation,
@@ -1423,6 +1586,9 @@ impl AgentRuntime {
             self.ensure_active(state)?;
             match result {
                 Ok(Ok(value)) => {
+                    if prepared.call.name.contains("calculation") {
+                        state.calc_shape_failures = 0;
+                    }
                     let encoded = serde_json::to_vec(&value)?;
                     if encoded.len() > self.config.max_tool_result_bytes {
                         let message = RuntimeError::ToolResultTooLarge {
@@ -1490,6 +1656,18 @@ impl AgentRuntime {
                     completed.push(CompletedTool::success(prepared.call, value, evidence_ids));
                 }
                 Ok(Err(message)) => {
+                    let mut message = enrich_calculation_error(&prepared.call.name, message);
+                    if is_calculation_shape_error(&prepared.call.name, &message) {
+                        state.calc_shape_failures = state.calc_shape_failures.saturating_add(1);
+                        if state.calc_shape_failures >= MAX_CALC_SHAPE_FAILURES {
+                            message = format!(
+                                "{message} Calculation tools are now withdrawn after \
+                                 {MAX_CALC_SHAPE_FAILURES} consecutive shape failures. \
+                                 Use compute_from_evidence for PE/market_cap/YoY (no AST), or cite observed \
+                                 evidence, then submit_report — do not keep rewriting the AST."
+                            );
+                        }
+                    }
                     self.complete_effect(&prepared.effect_id, "failed", json!({"error": message}))
                         .await?;
                     self.record(
@@ -1536,15 +1714,17 @@ impl AgentRuntime {
             self.ensure_active(state)?;
             let completed = match prepared.definition.name.as_str() {
                 "search_evidence" => {
-                    let response =
-                        match serde_json::from_value::<EvidenceQuery>(prepared.arguments.clone()) {
-                            Ok(query) => state.catalog.search(&query),
-                            Err(error) => json!({
-                                "ok": false,
-                                "error": error.to_string(),
-                                "instruction": "Correct the search arguments and try again.",
-                            }),
-                        };
+                    let response = match serde_json::from_value::<EvidenceSearchRequest>(
+                        prepared.arguments.clone(),
+                    ) {
+                        Ok(request) => state.catalog.search_batch(&request.queries()),
+                        Err(error) => json!({
+                            "ok": false,
+                            "error": error.to_string(),
+                            "instruction": "Correct the search arguments and try again. Prefer \
+                                            the batch form: {\"queries\": [{…}, {…}]}.",
+                        }),
+                    };
                     self.complete_effect(&prepared.effect_id, "succeeded", response.clone())
                         .await?;
                     self.record(
@@ -1557,6 +1737,55 @@ impl AgentRuntime {
                     )
                     .await?;
                     CompletedTool::runtime(prepared.call, response)
+                }
+                "compute_from_evidence" => {
+                    match self
+                        .compute_from_evidence(task, state, prepared.arguments.clone())
+                        .await
+                    {
+                        Ok(value) => {
+                            let evidence = evidence_ids(&value);
+                            state.catalog.ingest(&value, task.symbol.as_deref());
+                            state.evidence_ids.extend(evidence.iter().cloned());
+                            state.evidence_ids.sort();
+                            state.evidence_ids.dedup();
+                            self.complete_effect(&prepared.effect_id, "succeeded", value.clone())
+                                .await?;
+                            self.record(
+                                state,
+                                AgentEvent::ToolCompleted {
+                                    call_id: prepared.call.id.clone(),
+                                    tool: prepared.call.name.clone(),
+                                    evidence_ids: evidence.clone(),
+                                },
+                            )
+                            .await?;
+                            CompletedTool::runtime(prepared.call, value)
+                        }
+                        Err(error) => {
+                            let response = json!({
+                                "ok": false,
+                                "error": error,
+                                "instruction": "Each calculation needs label, op (div|mul|add|sub), \
+                                                 and left/right as {\"evidence_id\":\"evf_…\"} or \
+                                                 {\"value\":34.63}. Look up identifiers with \
+                                                 search_evidence first."
+                            });
+                            self.complete_effect(&prepared.effect_id, "failed", response.clone())
+                                .await?;
+                            self.record(
+                                state,
+                                AgentEvent::ToolFailed {
+                                    call_id: prepared.call.id.clone(),
+                                    tool: prepared.call.name.clone(),
+                                    message: error.clone(),
+                                    retryable: true,
+                                },
+                            )
+                            .await?;
+                            CompletedTool::runtime(prepared.call, response)
+                        }
+                    }
                 }
                 "submit_report" => {
                     let outcome = self
@@ -1588,6 +1817,7 @@ impl AgentRuntime {
                             break;
                         }
                         Finalization::Repair(response) => {
+                            let summary = repair_event_summary(&response);
                             self.complete_effect(
                                 &prepared.effect_id,
                                 "failed",
@@ -1599,7 +1829,7 @@ impl AgentRuntime {
                                 AgentEvent::ToolFailed {
                                     call_id: prepared.call.id.clone(),
                                     tool: prepared.call.name.clone(),
-                                    message: "报告未通过发布前校验，已返回结构化修复指引".into(),
+                                    message: summary,
                                     retryable: true,
                                 },
                             )
@@ -1941,6 +2171,16 @@ struct RunState {
     evidence_ids: Vec<String>,
     /// Calls to tools that do not exist, refused so far.
     unknown_tool_calls: usize,
+    /// Consecutive calculation shape failures in this task.
+    ///
+    /// A live Case C run finished research coverage in four rounds, then burned
+    /// sixteen more on malformed ASTs (strings in inputs, bare numbers as expr,
+    /// truncated payloads). The worked example helps intermittently; a model that
+    /// keeps thrashing simply declines it. After
+    /// [`MAX_CALC_SHAPE_FAILURES`] consecutive shape failures the calculation
+    /// tools are withdrawn, the same way retrieval tools are withdrawn when the
+    /// research budget is spent — a budget the model can decline is not a budget.
+    calc_shape_failures: usize,
     /// Canonical evidence the task has seen, with the metadata a citation needs.
     ///
     /// Durable task state, not model context: the model reaches it only through
@@ -1966,6 +2206,7 @@ impl RunState {
             completed_tool_ids: Vec::new(),
             evidence_ids: Vec::new(),
             unknown_tool_calls: 0,
+            calc_shape_failures: 0,
             catalog: EvidenceCatalog::default(),
             finalization: FinalizationLedger::new(max_finalization_attempts),
             sender,
@@ -2207,6 +2448,188 @@ impl CompletedTool {
     }
 }
 
+/// Run one Engine call, or a batch of calculation programs, as a single tool result.
+///
+/// The calculation tool has always accepted a program with many named outputs, and the
+/// model did not use it: measured live it issued 12, 13 and 24 separate calculation
+/// calls in three balanced tasks, one per figure, at one model round each. Asking it to
+/// batch in the tool description changed nothing, so the batch is now something the
+/// schema offers rather than something the prose requests.
+///
+/// Programs run sequentially and the first failure is returned, because a later program
+/// often depends on an earlier one's result being correct; reporting the first real
+/// error is more useful than a list of consequences. Each result is returned under its
+/// index so the model can attribute outputs.
+async fn execute_possibly_batched(
+    executor: &dyn ToolExecutor,
+    engine_kind: &str,
+    arguments: Value,
+    cancellation: CancellationToken,
+) -> Result<Value, String> {
+    let Some(programs) = arguments.get("programs") else {
+        return executor.execute(engine_kind, arguments, cancellation).await;
+    };
+    let Some(programs) = programs.as_array() else {
+        return Err("`programs` must be a JSON array of program objects; \
+             for one program use `program` instead"
+            .into());
+    };
+    if programs.len() > MAX_BATCHED_PROGRAMS {
+        return Err(format!(
+            "a calculation batch may contain at most {MAX_BATCHED_PROGRAMS} programs, received {}",
+            programs.len()
+        ));
+    }
+    // Everything except `programs` is shared by each call, so a batched JoinQuant
+    // calculation keeps its symbol and window.
+    let mut shared = arguments.clone();
+    if let Some(object) = shared.as_object_mut() {
+        object.remove("programs");
+    }
+    let mut results = Vec::with_capacity(programs.len());
+    for (index, program) in programs.iter().enumerate() {
+        let mut payload = shared.clone();
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("program".into(), program.clone());
+        }
+        let outcome = executor
+            .execute(engine_kind, payload, cancellation.child_token())
+            .await
+            .map_err(|error| format!("program {index}: {error}"))?;
+        results.push(outcome);
+    }
+    Ok(json!({"programs": results.len(), "results": results}))
+}
+
+/// Calculation programs answerable in one call.
+const MAX_BATCHED_PROGRAMS: usize = 12;
+
+/// Consecutive calculation shape failures before the tools are withdrawn.
+///
+/// Measured: one Case C run spent 16 rounds on malformed ASTs after coverage was
+/// already complete; another spent 2 and reached the verifier. Three is enough to
+/// deliver the worked example twice and still leave finalization budget.
+const MAX_CALC_SHAPE_FAILURES: usize = 3;
+
+/// Append a worked scalar example when a calculation payload is the wrong shape.
+///
+/// A live Case C run burned sixteen research rounds on malformed ASTs after research
+/// coverage was already complete: strings in `inputs`, bare numbers as `expr`, truncated
+/// payloads. Naming the field path (Engine) is necessary but not sufficient — the model
+/// also needs one correct shape to copy. The example is only attached to shape errors so
+/// a real compute failure (`unknown variable`, fuel exhausted) stays uncluttered.
+fn enrich_calculation_error(tool: &str, message: String) -> String {
+    if !tool.contains("calculation") {
+        return message;
+    }
+    let shape_error = message.contains("invalid type")
+        || message.contains("missing field")
+        || message.contains("unknown field")
+        || message.contains("invalid request payload")
+        || message.contains("not valid JSON")
+        || message.contains("must be a JSON array");
+    if !shape_error {
+        return message;
+    }
+    format!(
+        "{message}. Copy this scalar PE shape: \
+         {{\"program\":{{\"version\":1,\"inputs\":{{\"price\":[34.63],\"eps\":[1.95]}},\
+\"outputs\":{{\"pe\":{{\"op\":\"div\",\"left\":{{\"op\":\"var\",\"name\":\"price\"}},\
+\"right\":{{\"op\":\"var\",\"name\":\"eps\"}}}}}}}}}}. \
+         Inputs are arrays of numbers (never strings); every expr is a JSON object with \
+         an `op` field (never a string or bare number)."
+    )
+}
+
+/// One line of event-stream diagnosis for a refused submission.
+///
+/// The model receives the full structured repair guidance as its tool result;
+/// a headless consumer watching the typed event stream saw only a fixed refusal
+/// string, so a decode failure was invisible — a live moderate run lost two
+/// finalization rounds to undecodable drafts and the event stream showed zero
+/// findings for them, leaving the cause only in the model's ephemeral context.
+/// The stage, the decode error, or the validation problem histogram is enough
+/// to classify every refusal offline.
+fn repair_event_summary(response: &Value) -> String {
+    if response.get("stage").and_then(Value::as_str) == Some("decode") {
+        let error = response
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let bounded: String = error.chars().take(400).collect();
+        format!("报告未通过发布前校验（decode）：{bounded}")
+    } else {
+        let count = response
+            .get("problem_count")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        let mut codes: BTreeMap<String, usize> = BTreeMap::new();
+        if let Some(problems) = response.get("problems").and_then(Value::as_array) {
+            for problem in problems {
+                if let Some(code) = problem.get("problem").and_then(Value::as_str) {
+                    *codes.entry(code.to_owned()).or_default() += 1;
+                }
+            }
+        }
+        let histogram = codes
+            .iter()
+            .map(|(code, count)| format!("{code}×{count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if histogram.is_empty() {
+            format!("报告未通过发布前校验（validation）：{count} 个问题")
+        } else {
+            format!("报告未通过发布前校验（validation）：{count} 个问题：{histogram}")
+        }
+    }
+}
+
+fn is_calculation_shape_error(tool: &str, message: &str) -> bool {
+    tool.contains("calculation")
+        && (message.contains("invalid type")
+            || message.contains("missing field")
+            || message.contains("unknown field")
+            || message.contains("invalid request payload")
+            || message.contains("not valid JSON")
+            || message.contains("must be a JSON array")
+            || message.contains("Copy this scalar PE shape"))
+}
+
+/// Resolve one operand of `compute_from_evidence` to a numeric value.
+fn resolve_compute_operand(
+    state: &RunState,
+    operand: Option<&Value>,
+    index: usize,
+    side: &str,
+) -> Result<(f64, Option<String>), String> {
+    let Some(operand) = operand.and_then(Value::as_object) else {
+        return Err(format!("calculations[{index}]: missing {side} operand"));
+    };
+    if let Some(value) = operand.get("value").and_then(Value::as_f64) {
+        return Ok((value, None));
+    }
+    let Some(evidence_id) = operand.get("evidence_id").and_then(Value::as_str) else {
+        return Err(format!(
+            "calculations[{index}].{side}: provide evidence_id or value"
+        ));
+    };
+    let Some(descriptor) = state.catalog.descriptors().get(evidence_id) else {
+        return Err(format!(
+            "calculations[{index}].{side}: unknown evidence_id `{evidence_id}`; search_evidence first"
+        ));
+    };
+    let Some(value) = descriptor.value.as_ref().and_then(|raw| match raw {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.replace(',', "").parse::<f64>().ok(),
+        _ => None,
+    }) else {
+        return Err(format!(
+            "calculations[{index}].{side}: evidence `{evidence_id}` has no numeric value"
+        ));
+    };
+    Ok((value, Some(evidence_id.to_owned())))
+}
+
 fn evidence_ids(value: &Value) -> Vec<String> {
     fn collect(value: &Value, ids: &mut BTreeSet<String>) {
         match value {
@@ -2387,6 +2810,38 @@ mod tests {
         );
         assert!(message.contains("truncated"));
         assert!(message.contains("smaller"));
+    }
+
+    /// A calculation shape error carries a worked scalar example the model can copy.
+    ///
+    /// Measured: sixteen research rounds on malformed ASTs after coverage was already
+    /// complete. Naming the field path alone left the model without a correct shape.
+    #[test]
+    fn a_calculation_shape_error_includes_a_worked_scalar_example() {
+        let enriched = enrich_calculation_error(
+            "run_financial_calculation",
+            "invalid_payload: invalid request payload: program.bindings[0].expr: invalid type: string \"2.0\", expected struct"
+                .into(),
+        );
+        assert!(
+            enriched.contains("Scalar PE shape")
+                || enriched.contains("scalar PE shape")
+                || enriched.contains("Copy this scalar PE shape"),
+            "{enriched}"
+        );
+        assert!(enriched.contains("\"op\":\"div\""), "{enriched}");
+        assert!(
+            !enrich_calculation_error(
+                "run_financial_calculation",
+                "compute: unknown calculation variable `market_cap`".into(),
+            )
+            .contains("Copy this scalar PE shape"),
+            "a real compute failure must not be cluttered with the shape example"
+        );
+        assert_eq!(
+            enrich_calculation_error("get_quote", "upstream 429".into()),
+            "upstream 429"
+        );
     }
 
     /// The context budget must stay far below the storage ceiling.

@@ -37,14 +37,23 @@ fn invalid(message: impl Into<String>) -> ServiceError {
 /// apart, was treated as contradictory evidence. That produced hundreds of
 /// blocking findings with no bearing on the report's correctness.
 ///
-/// A genuine disagreement — the same identifier asserting a different value, unit
-/// or source — is still a conflict and still blocks when cited.
+/// The same applies to a derived calculation recomputed by an equivalent
+/// program: the source version id is the program hash, so three rounds of
+/// repairing a draft around the same figures registered the same identical
+/// outputs under three different hashes, and the verifier refused all four
+/// identifiers as conflicting — four blocking findings against values that
+/// were byte-identical. For a derived calculation the version id names *how*
+/// the value was produced, not what it asserts; value, source and path are
+/// what it asserts.
+///
+/// A genuine disagreement — the same identifier asserting a different value,
+/// unit or source — is still a conflict and still blocks when cited.
 fn materially_disagrees(left: &EvidenceFact, right: &EvidenceFact) -> bool {
     left.value != right.value
         || left.source != right.source
         || left.path != right.path
         || left.quality_blocking != right.quality_blocking
-        || left.source_version_id != right.source_version_id
+        || (!is_derived_calculation(left) && left.source_version_id != right.source_version_id)
 }
 
 /// Is this fact a deterministic calculation result rather than an observation?
@@ -374,14 +383,41 @@ pub struct ReportNumeral {
 impl ReportNumeral {
     /// Would this evidence value support the quantity as written?
     ///
-    /// Mirrors the verifier's numeric acceptance exactly, including the percentage
-    /// convention: evidence recording `3.5` supports a written `3.5%`, because
-    /// sources publish percentages both scaled and unscaled.
+    /// Mirrors the verifier's numeric acceptance exactly, including two
+    /// publication conventions:
+    ///
+    /// - percentages: sources publish percentages both scaled and unscaled, so
+    ///   evidence recording `3.5` supports a written `3.5%`;
+    /// - magnitude denominations: a figure written with a magnitude suffix
+    ///   (`亿元`, `万元`) asserts that denomination, and evidence recorded in the
+    ///   same denomination supports it — a calculation whose output is
+    ///   `market_cap_yi = 876.13` (already 亿-denominated) supports the written
+    ///   `876.13亿元`. A raw-denominated value (`87613000000`) supports it
+    ///   through the scaled comparison below. The reverse is never accepted:
+    ///   evidence of a different magnitude does not support the claim.
     pub fn supported_by(&self, value: f64) -> bool {
         if approximately_equal(value, self.value) {
             return true;
         }
-        self.unit.as_deref() == Some("%") && approximately_equal(value, self.value * 100.0)
+        if self.unit.as_deref() == Some("%") && approximately_equal(value, self.value * 100.0) {
+            return true;
+        }
+        if let Some(denomination) = magnitude_denomination(self.unit.as_deref()) {
+            if approximately_equal(value, self.value / denomination) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// The scaling factor a magnitude unit applies, when the unit is one.
+fn magnitude_denomination(unit: Option<&str>) -> Option<f64> {
+    match unit? {
+        "万" => Some(10_000.0),
+        "亿" | "亿元" => Some(100_000_000.0),
+        "万亿" => Some(1_000_000_000_000.0),
+        _ => None,
     }
 }
 
@@ -618,6 +654,101 @@ mod tests {
         assert_eq!(result["numeric_claims_checked"], 3);
     }
 
+    /// A recomputed identical calculation is not a conflict.
+    ///
+    /// A live run registered the same `astock-compute` outputs (identical
+    /// values, paths and source) under three different `source_version_id`s —
+    /// three equivalent programs producing the same figures across repair
+    /// rounds — and the verifier refused all four identifiers as conflicting,
+    /// blocking publication on byte-identical values. The program hash names
+    /// how a derived value was produced, not what it asserts.
+    #[test]
+    fn a_recomputed_identical_calculation_is_not_a_conflict() {
+        let mut ctx = context(false);
+        ctx["evidence_registry"]["facts"] = json!([
+            {"evidence_id":"evf_ttmy","path":"/execution/outputs/ttmy/values/0","value":0.024,"source":"astock-compute","observed_at":null,"source_version_id":"program-hash-a","quality_blocking":false},
+            {"evidence_id":"evf_ttmy","path":"/execution/outputs/ttmy/values/0","value":0.024,"source":"astock-compute","observed_at":null,"source_version_id":"program-hash-b","quality_blocking":false},
+            {"evidence_id":"evf_ttmy","path":"/execution/outputs/ttmy/values/0","value":0.024,"source":"astock-compute","observed_at":null,"source_version_id":"program-hash-c","quality_blocking":false},
+            {"evidence_id":"evf_price","path":"/quote/price","value":12.34,"source":"tdx","observed_at":"2026-08-25T10:00:00+08:00","source_version_id":"quote-v1","quality_blocking":false},
+            {"evidence_id":"evf_code","path":"/quote/symbol","value":"000001","source":"master","observed_at":"2026-08-25T10:00:00+08:00","source_version_id":"master-v1","quality_blocking":false},
+            {"evidence_id":"evf_date","path":"/quote/date","value":"2026-08-25","source":"tdx","observed_at":"2026-08-25T10:00:00+08:00","source_version_id":"quote-v1","quality_blocking":false}
+        ]);
+        let report =
+            "000001 价格12.34元【E:evf_code】【E:evf_price】，日期2026-08-25【E:evf_date】，TTM收益2.4%【E:evf_ttmy】。";
+        let result = verify(VerifyReportPayload {
+            report: report.into(),
+            context: ctx,
+            task_spec: task(),
+        })
+        .unwrap();
+        assert_eq!(result["passed"], true, "findings: {:?}", result["findings"]);
+    }
+
+    /// A genuinely different recomputation is still a conflict.
+    #[test]
+    fn a_conflicting_recomputation_still_blocks() {
+        let mut ctx = context(false);
+        ctx["evidence_registry"]["facts"] = json!([
+            {"evidence_id":"evf_ttmy","path":"/execution/outputs/ttmy/values/0","value":0.024,"source":"astock-compute","observed_at":null,"source_version_id":"program-hash-a","quality_blocking":false},
+            {"evidence_id":"evf_ttmy","path":"/execution/outputs/ttmy/values/0","value":0.031,"source":"astock-compute","observed_at":null,"source_version_id":"program-hash-b","quality_blocking":false},
+            {"evidence_id":"evf_price","path":"/quote/price","value":12.34,"source":"tdx","observed_at":"2026-08-25T10:00:00+08:00","source_version_id":"quote-v1","quality_blocking":false}
+        ]);
+        let report = "价格12.34元【E:evf_price】，TTM收益2.4%【E:evf_ttmy】。";
+        let result = verify(VerifyReportPayload {
+            report: report.into(),
+            context: ctx,
+            task_spec: task(),
+        })
+        .unwrap();
+        let findings = result["findings"].as_array().unwrap();
+        assert!(findings.iter().any(|f| f
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("invalid_or_conflicting_evidence_id:evf_ttmy")));
+    }
+
+    /// An observed fact whose revision differs is still a conflict — the
+    /// concession above is scoped to derived calculations only.
+    #[test]
+    fn a_differing_source_version_on_an_observation_is_still_a_conflict() {
+        let a = EvidenceFact {
+            evidence_id: "evf_x".into(),
+            path: "/quote/price".into(),
+            value: json!(12.34),
+            source: "tdx".into(),
+            observed_at: Some("2026-08-25T10:00:00+08:00".into()),
+            source_version_id: Some("v1".into()),
+            quality_blocking: false,
+        };
+        let b = EvidenceFact {
+            source_version_id: Some("v2-revised".into()),
+            ..a.clone()
+        };
+        assert!(materially_disagrees(&a, &b));
+
+        let calc = EvidenceFact {
+            evidence_id: "evf_c".into(),
+            path: "/execution/outputs/x/values/0".into(),
+            value: json!(0.5),
+            source: "astock-compute".into(),
+            observed_at: None,
+            source_version_id: Some("hash-a".into()),
+            quality_blocking: false,
+        };
+        let calc_b = EvidenceFact {
+            source_version_id: Some("hash-b".into()),
+            ..calc.clone()
+        };
+        assert!(!materially_disagrees(&calc, &calc_b));
+        // But a different derived value is.
+        let calc_c = EvidenceFact {
+            value: json!(0.6),
+            source_version_id: Some("hash-a".into()),
+            ..calc.clone()
+        };
+        assert!(materially_disagrees(&calc, &calc_c));
+    }
+
     #[test]
     fn rejects_unknown_blocked_and_unreproduced_numbers() {
         let report = "价格99.00元【E:evf_price】，目标88元【E:missing】。";
@@ -835,6 +966,55 @@ mod tests {
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].raw, "15");
         assert_eq!(found[0].unit.as_deref(), Some("%"));
+    }
+
+    /// A magnitude-denominated figure is supported by evidence recorded in the
+    /// same denomination, and by the raw value — not by a different magnitude.
+    ///
+    /// A live moderate run burned three finalization attempts on
+    /// `market_cap_yi = 876.131706963亿元` citing calculation evidence whose
+    /// value was exactly `876.131706963` (the output of a ÷1e8 market-cap
+    /// program, already 亿-denominated). The written token scaled ×1e8 and the
+    /// comparison read a mismatch that did not exist; the model published only
+    /// by declaring the market cap unknown. Sources publish magnitude figures
+    /// both ways, exactly as they do percentages.
+    #[test]
+    fn a_magnitude_figure_is_supported_by_denominated_and_raw_evidence() {
+        let token = "总市值 876.131706963亿元";
+        let numeral = &financial_numerals(token)[0];
+        assert_eq!(numeral.raw, "876.131706963");
+        // The extractor reads the magnitude suffix; `元` is currency prose.
+        assert_eq!(numeral.unit.as_deref(), Some("亿"));
+        assert_eq!(numeral.value, 8.76131706963e10);
+        // Same-denomination evidence (e.g. a computation whose output is in 亿).
+        assert!(numeral.supported_by(876.131706963));
+        // Raw evidence supports it through the scaled comparison.
+        assert!(numeral.supported_by(87_613_170_696.3));
+        // A different magnitude is never accepted.
+        assert!(!numeral.supported_by(8_761.31706963));
+        assert!(!numeral.supported_by(0.876131706963));
+        // An unmarked token asserts raw yuan; the raw 亿-value does not support it.
+        let bare = &financial_numerals("总市值 876.131706963元")[0];
+        assert!(!bare.supported_by(87_613_170_696.3));
+    }
+
+    /// The same acceptance applies through verify end to end.
+    #[test]
+    fn verify_accepts_a_denominated_figure_against_denominated_evidence() {
+        let mut ctx = context(false);
+        ctx["evidence_registry"]["facts"] = json!([
+            {"evidence_id":"evf_cap","path":"/calc/market_cap_yi","value":876.131706963,"source":"astock-compute","observed_at":null,"source_version_id":"calc-v1","quality_blocking":false},
+            {"evidence_id":"evf_price","path":"/quote/price","value":32.95,"source":"tencent","observed_at":"2026-09-02T10:00:00+08:00","source_version_id":"quote-v1","quality_blocking":false},
+            {"evidence_id":"evf_code","path":"/quote/symbol","value":"601899","source":"master","observed_at":"2026-09-02T10:00:00+08:00","source_version_id":"master-v1","quality_blocking":false},
+            {"evidence_id":"evf_date","path":"/quote/date","value":"2026-09-02","source":"tencent","observed_at":"2026-09-02T10:00:00+08:00","source_version_id":"quote-v1","quality_blocking":false}
+        ]);
+        let result = verify(VerifyReportPayload {
+            report: "601899 2026-09-02 收盘 32.95 元【E:evf_code】【E:evf_date】【E:evf_price】，总市值 876.131706963亿元【E:evf_cap】。".into(),
+            context: ctx,
+            task_spec: task(),
+        })
+        .unwrap();
+        assert_eq!(result["passed"], true, "findings: {:?}", result["findings"]);
     }
 
     /// An unsigned claim still fails against negative evidence, as before.
