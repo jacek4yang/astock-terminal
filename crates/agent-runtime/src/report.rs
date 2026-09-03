@@ -1430,6 +1430,29 @@ fn validate_numeric_item(
                         .to_owned(),
                 });
             }
+            // A method that names an arithmetic operation is a calculation in
+            // disguise, whatever its label. A live run passed eleven percentage
+            // restatements as estimates with `method: "div(最新归母, 上一年归母)-1"`
+            // — the operation written out — through validation, and the verifier
+            // refused all eleven as unreproducible, one independent round too
+            // late. Refusing the disguise here names the fix one round earlier.
+            const OPERATIONS: [&str; 10] = [
+                "div", "mul", "add(", "sub(", "÷", "×", "yoy", "returns", "pct", "ratio",
+            ];
+            let method_lower = method.to_lowercase();
+            if OPERATIONS
+                .iter()
+                .any(|needle| method_lower.contains(needle))
+            {
+                problems.push(DraftProblem::InvalidEstimate {
+                    claim_id: claim.id.clone(),
+                    label: item.label.clone(),
+                    reason: "the method names an arithmetic operation; compute it with \
+                             run_financial_calculation or compute_from_evidence and cite the \
+                             calculation, do not present arithmetic as an estimate"
+                        .to_owned(),
+                });
+            }
             if let Some([low, high]) = range {
                 if low > high {
                     problems.push(DraftProblem::InvalidEstimate {

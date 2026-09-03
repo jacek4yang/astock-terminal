@@ -621,6 +621,15 @@ fn every_inappropriate_mutation_of_a_valid_draft_is_refused() {
                 range: Some([0.09, 0.01]),
             };
         }),
+        ("arithmetic disguised as an estimate", |d| {
+            // The live shape: `method: "div(最新归母, 上一年归母)-1"` on a
+            // percentage restatement — an operation written out as a method.
+            d.claims[4].numeric_items[0].provenance = NumericProvenance::Estimated {
+                method: "div(最新归母, 上一年归母)-1".into(),
+                basis_evidence_ids: vec!["evf_eps".into()],
+                range: None,
+            };
+        }),
         ("contract version drift", |d| {
             d.version = "something-else".into();
         }),
