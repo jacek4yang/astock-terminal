@@ -252,7 +252,16 @@ impl Default for RuntimeConfig {
             max_tool_argument_chars: 256_000,
             max_parallel_tools: 4,
             max_tool_result_bytes: 2 * 1024 * 1024,
-            max_tokens: 8_192,
+            // Output ceiling per model round. A structured report draft is
+            // emitted as one tool-call payload, and the principal model also
+            // spends private reasoning from the same budget: a live balanced
+            // run wrote 9-claim drafts that cut off at ~14 KB of arguments
+            // under the previous 8,192 cap, losing required fields, and burned
+            // the whole finalization budget on the truncation. 32,768 leaves
+            // room for reasoning plus a full deep draft; shorter generations
+            // are billed the same as before, and the chunk/character bounds
+            // below still cap a runaway round.
+            max_tokens: 32_768,
             temperature: 0.2,
             provider_connect_timeout: Duration::from_secs(90),
             provider_idle_timeout: Duration::from_secs(120),
