@@ -212,10 +212,13 @@ fn validation_action(code: &str) -> &'static str {
         }
         "report_contains_no_verifiable_numeric_claims" => {
             "The draft declares no quantity at all — this is what deleting figures produces. \
-             Restore every material figure as a numeric_item with real provenance (observed \
-             evidence_id, or calculated with calculation_evidence_id, operation and inputs), \
-             reference it by label in braces, and put the operation on the item. A research \
-             conclusion without checkable quantities is refused, not published."
+             Restore every material figure as a numeric_item with real provenance. Do this in \
+             order: call search_evidence (batched) to obtain the canonical identifiers for the \
+             figures you will cite, then declare each numeric_item with a real evidence_id (or \
+             compute it and cite the calculation evidence), and reference it by label in braces. \
+             Never write an identifier from memory — an id search_evidence did not return is \
+             fabricated and will be refused. A research conclusion without checkable quantities \
+             is refused, not published."
         }
         "unknown_number_reference" => {
             "This prose references a number in braces that nothing declares. In a statement the \
