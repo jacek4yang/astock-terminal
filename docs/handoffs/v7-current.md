@@ -178,6 +178,47 @@ State: Case C publishes but not yet at ≥5 consecutive. Runs 2..5 on the
 fully corrected build (denomination fix included) are the repeatability
 measurement; CI on the branch was green through 6cf9a21.
 
+### Runs 6–8 + the network root cause (2026-09-03)
+
+- Run 6 failed at budget exhaustion: `unsupported_observed_number` stuck at
+  exactly 9 across three attempts — an inference claim carrying observed
+  balance-sheet figures (capex/lt_debt/bonds/st_debt) refused every time.
+  Fixed (commit 0e3182a): `ClaimKind::permits` now allows Inference and
+  Scenario claims to carry Observed/Calculated figures (same concession
+  DeterministicCalculation already had); Unknown stays number-free.
+- Run 5 (direct-transport attempt) failed in the endgame: validation
+  converged 49→22→14→2→1, then the model deleted its figures and the
+  verifier refused the emptied report twice. Fixed (commit f965d40):
+  validation raises the verifier's own
+  `report_contains_no_verifiable_numeric_claims` at draft time under the
+  same code (one round earlier, restore-the-figures instruction);
+  max_finalization_attempts 8→10 on measured trajectories.
+- Runs 4/7/8 suspended on `error decoding response body` / MiniMax idle
+  watchdog, runs 4–8 each losing 1–2 network-fault rounds.
+- **Root cause found (host-level, not MiniMax):** every `cargo`/`astock`
+  process on this host ran under proxywrap → LD_PRELOAD
+  `libproxychains.so.4` → the flaky local socks 127.0.0.1:10808 —
+  intercepting ALL connect() including loopback. This caused: the
+  intermittent MiniMax mid-stream breaks, the false idle-timeout
+  suspensions (runs 7/8's "120 s MiniMax watchdog" was proxychains
+  killing the connection), eastmoney 502s, and all 16
+  `astock-minimax` http tests failing locally (reqwest→loopback was
+  proxied). Proof: `env LD_PRELOAD=libproxychains.so.4 <testbin>` fails,
+  without it passes; `which cargo` resolves to the proxywrap shim which
+  re-injects the preload even under `env -u LD_PRELOAD`.
+- **Remediation:** run cargo via the real binary
+  `/home/jacek/.cargo/bin/cargo` (all 16 minimax http tests now pass
+  locally); run `astock` with an explicit stable proxy in
+  `~/.config/astock/config.toml`:
+  `[network] proxy = "socks5h://192.168.31.105:10808"` (LAN proxy,
+  verified fast/stable for api.minimaxi.com and market upstreams). A
+  temporary StreamPolicy raise (150/240 s) was applied and then reverted —
+  the suspensions it targeted were proxychains, not MiniMax.
+- CI on the branch: green through 0e3182a (last checks observed).
+
+Next: Case C repeatability series on the clean network path (in flight),
+target ≥5 consecutive publications.
+
 ## Next exact step
 
 1. Complete ≥5 consecutive fresh-session Case C publications on commit
