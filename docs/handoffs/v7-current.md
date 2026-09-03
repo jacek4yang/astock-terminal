@@ -219,6 +219,31 @@ measurement; CI on the branch was green through 6cf9a21.
 Next: Case C repeatability series on the clean network path (in flight),
 target ≥5 consecutive publications.
 
+### Final fix wave + current series state (2026-09-03 late)
+
+Nine deterministic defects total found by failing live runs, each fixed with
+a regression test on the branch (all commits pushed, workspace 1025
+passed / 0 failed, clippy -D warnings clean, CI green):
+
+9. **Arithmetic disguised as an estimate** (43eac86): eleven percentage
+   restatements with `method: "div(最新归母, 上一年归母)-1"` passed
+   validation; invalid_estimate now refuses a method naming an operation.
+
+Series state on successive branch states (details in
+docs/releases/v7.0.0-live-acceptance.md §PR #87): best consecutive = 3
+(on b57bdfb). After the last two fixes (15e62b1, 43eac86) two runs failed
+on *new* narrow shapes (final: figure_in_free_text×1 at budget exhaustion;
+an earlier one on 18 not_reproduced values from the estimate disguise).
+Failure modes have narrowed from 40-problem opening drafts to 1-problem
+endgames, but the ≥5-consecutive target is not yet met on a single final
+state.
+
+Branch: feat/batched-evidence-discovery @ 43eac86, PR #87 open, all CI
+green. Quota: ~43% interval / 54% weekly at last check; window resets
+hourly.
+
+## Next exact step (updated)
+
 ## Next exact step
 
 1. Complete ≥5 consecutive fresh-session Case C publications on commit
