@@ -37,14 +37,23 @@ fn invalid(message: impl Into<String>) -> ServiceError {
 /// apart, was treated as contradictory evidence. That produced hundreds of
 /// blocking findings with no bearing on the report's correctness.
 ///
-/// A genuine disagreement — the same identifier asserting a different value, unit
-/// or source — is still a conflict and still blocks when cited.
+/// The same applies to a derived calculation recomputed by an equivalent
+/// program: the source version id is the program hash, so three rounds of
+/// repairing a draft around the same figures registered the same identical
+/// outputs under three different hashes, and the verifier refused all four
+/// identifiers as conflicting — four blocking findings against values that
+/// were byte-identical. For a derived calculation the version id names *how*
+/// the value was produced, not what it asserts; value, source and path are
+/// what it asserts.
+///
+/// A genuine disagreement — the same identifier asserting a different value,
+/// unit or source — is still a conflict and still blocks when cited.
 fn materially_disagrees(left: &EvidenceFact, right: &EvidenceFact) -> bool {
     left.value != right.value
         || left.source != right.source
         || left.path != right.path
         || left.quality_blocking != right.quality_blocking
-        || left.source_version_id != right.source_version_id
+        || (!is_derived_calculation(left) && left.source_version_id != right.source_version_id)
 }
 
 /// Is this fact a deterministic calculation result rather than an observation?
@@ -643,6 +652,101 @@ mod tests {
         // unsupported. The report still passes; only the count of things that are
         // actually claims changed.
         assert_eq!(result["numeric_claims_checked"], 3);
+    }
+
+    /// A recomputed identical calculation is not a conflict.
+    ///
+    /// A live run registered the same `astock-compute` outputs (identical
+    /// values, paths and source) under three different `source_version_id`s —
+    /// three equivalent programs producing the same figures across repair
+    /// rounds — and the verifier refused all four identifiers as conflicting,
+    /// blocking publication on byte-identical values. The program hash names
+    /// how a derived value was produced, not what it asserts.
+    #[test]
+    fn a_recomputed_identical_calculation_is_not_a_conflict() {
+        let mut ctx = context(false);
+        ctx["evidence_registry"]["facts"] = json!([
+            {"evidence_id":"evf_ttmy","path":"/execution/outputs/ttmy/values/0","value":0.024,"source":"astock-compute","observed_at":null,"source_version_id":"program-hash-a","quality_blocking":false},
+            {"evidence_id":"evf_ttmy","path":"/execution/outputs/ttmy/values/0","value":0.024,"source":"astock-compute","observed_at":null,"source_version_id":"program-hash-b","quality_blocking":false},
+            {"evidence_id":"evf_ttmy","path":"/execution/outputs/ttmy/values/0","value":0.024,"source":"astock-compute","observed_at":null,"source_version_id":"program-hash-c","quality_blocking":false},
+            {"evidence_id":"evf_price","path":"/quote/price","value":12.34,"source":"tdx","observed_at":"2026-08-25T10:00:00+08:00","source_version_id":"quote-v1","quality_blocking":false},
+            {"evidence_id":"evf_code","path":"/quote/symbol","value":"000001","source":"master","observed_at":"2026-08-25T10:00:00+08:00","source_version_id":"master-v1","quality_blocking":false},
+            {"evidence_id":"evf_date","path":"/quote/date","value":"2026-08-25","source":"tdx","observed_at":"2026-08-25T10:00:00+08:00","source_version_id":"quote-v1","quality_blocking":false}
+        ]);
+        let report =
+            "000001 价格12.34元【E:evf_code】【E:evf_price】，日期2026-08-25【E:evf_date】，TTM收益2.4%【E:evf_ttmy】。";
+        let result = verify(VerifyReportPayload {
+            report: report.into(),
+            context: ctx,
+            task_spec: task(),
+        })
+        .unwrap();
+        assert_eq!(result["passed"], true, "findings: {:?}", result["findings"]);
+    }
+
+    /// A genuinely different recomputation is still a conflict.
+    #[test]
+    fn a_conflicting_recomputation_still_blocks() {
+        let mut ctx = context(false);
+        ctx["evidence_registry"]["facts"] = json!([
+            {"evidence_id":"evf_ttmy","path":"/execution/outputs/ttmy/values/0","value":0.024,"source":"astock-compute","observed_at":null,"source_version_id":"program-hash-a","quality_blocking":false},
+            {"evidence_id":"evf_ttmy","path":"/execution/outputs/ttmy/values/0","value":0.031,"source":"astock-compute","observed_at":null,"source_version_id":"program-hash-b","quality_blocking":false},
+            {"evidence_id":"evf_price","path":"/quote/price","value":12.34,"source":"tdx","observed_at":"2026-08-25T10:00:00+08:00","source_version_id":"quote-v1","quality_blocking":false}
+        ]);
+        let report = "价格12.34元【E:evf_price】，TTM收益2.4%【E:evf_ttmy】。";
+        let result = verify(VerifyReportPayload {
+            report: report.into(),
+            context: ctx,
+            task_spec: task(),
+        })
+        .unwrap();
+        let findings = result["findings"].as_array().unwrap();
+        assert!(findings.iter().any(|f| f
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("invalid_or_conflicting_evidence_id:evf_ttmy")));
+    }
+
+    /// An observed fact whose revision differs is still a conflict — the
+    /// concession above is scoped to derived calculations only.
+    #[test]
+    fn a_differing_source_version_on_an_observation_is_still_a_conflict() {
+        let a = EvidenceFact {
+            evidence_id: "evf_x".into(),
+            path: "/quote/price".into(),
+            value: json!(12.34),
+            source: "tdx".into(),
+            observed_at: Some("2026-08-25T10:00:00+08:00".into()),
+            source_version_id: Some("v1".into()),
+            quality_blocking: false,
+        };
+        let b = EvidenceFact {
+            source_version_id: Some("v2-revised".into()),
+            ..a.clone()
+        };
+        assert!(materially_disagrees(&a, &b));
+
+        let calc = EvidenceFact {
+            evidence_id: "evf_c".into(),
+            path: "/execution/outputs/x/values/0".into(),
+            value: json!(0.5),
+            source: "astock-compute".into(),
+            observed_at: None,
+            source_version_id: Some("hash-a".into()),
+            quality_blocking: false,
+        };
+        let calc_b = EvidenceFact {
+            source_version_id: Some("hash-b".into()),
+            ..calc.clone()
+        };
+        assert!(!materially_disagrees(&calc, &calc_b));
+        // But a different derived value is.
+        let calc_c = EvidenceFact {
+            value: json!(0.6),
+            source_version_id: Some("hash-a".into()),
+            ..calc.clone()
+        };
+        assert!(materially_disagrees(&calc, &calc_c));
     }
 
     #[test]
