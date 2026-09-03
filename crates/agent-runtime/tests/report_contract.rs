@@ -323,6 +323,51 @@ fn citing_a_calculation_as_an_observation_is_refused() {
     assert!(has(&validate(&draft), "missing_calculation_provenance"));
 }
 
+/// A kind/provenance refusal names the kinds that would accept the item.
+///
+/// A live run exhausted its finalization budget on exactly this shape: a trend
+/// claim of kind=observed_fact carrying two calculated figures (drawdown,
+/// annualized volatility), never relabelled across three attempts because the
+/// repair guidance described the matrix in prose. The refusal now carries, per
+/// label, the kinds that accept the provenance as-is, so the fix is mechanical.
+#[test]
+fn a_kind_provenance_refusal_names_the_accepting_kinds() {
+    let mut draft = valid_draft();
+    // c_price is observed_fact; give it a calculated item (the live shape).
+    draft.claims[0].numeric_items[0].provenance = NumericProvenance::Calculated {
+        calculation_evidence_id: "evf_pe".into(),
+        operation: "max_drawdown".into(),
+        input_evidence_ids: vec!["evf_price".into()],
+    };
+    let problems = validate(&draft);
+    let problem = problems
+        .iter()
+        .find(|p| p.code() == "unsupported_observed_number")
+        .expect("the kind/provenance mismatch is refused");
+    let response = astock_agent_runtime::validation_repair(
+        &problems,
+        astock_agent_runtime::RepairVerdict::Retry {
+            attempt: 1,
+            remaining: 1,
+            unchanged: false,
+        },
+    );
+    let target = response["repair"]
+        .as_array()
+        .expect("repair targets")
+        .iter()
+        .find(|t| t["claim_id"] == json!("c_price"))
+        .expect("the affected claim's target");
+    let fixes = target["kind_fixes"].as_array().expect("mechanical fixes");
+    assert!(
+        fixes.iter().any(|f| f
+            .as_str()
+            .is_some_and(|f| f.contains("deterministic_calculation"))),
+        "the relabel is named: {fixes:?}"
+    );
+    let _ = problem;
+}
+
 #[test]
 /// A draft whose claims declare no numeric item is refused at validation.
 ///
@@ -332,7 +377,6 @@ fn citing_a_calculation_as_an_observation_is_refused() {
 /// before the budget ran out. The verifier's own report-level check now also
 /// runs at validation, under the same code, so the emptied draft is repaired
 /// one round earlier with the restore-the-figures instruction.
-#[test]
 fn a_draft_that_declares_no_numbers_is_refused_at_validation() {
     let mut draft = valid_draft();
     for c in &mut draft.claims {
@@ -352,22 +396,19 @@ fn a_draft_that_declares_no_numbers_is_refused_at_validation() {
             unchanged: false,
         },
     );
-    let action = response["repair"]
-        .as_array()
-        .and_then(|targets| targets.first())
-        .map(|target| target["actions"].as_array().map(Vec::len))
-        .flatten()
-        .unwrap_or_default();
     let report_level = response["report_level"]
         .as_array()
         .expect("report-level problems are surfaced");
+    let entry = report_level
+        .iter()
+        .find(|item| item["code"] == "report_contains_no_verifiable_numeric_claims")
+        .expect("the refusal must be report-level");
     assert!(
-        report_level
-            .iter()
-            .any(|item| item["code"] == "report_contains_no_verifiable_numeric_claims"),
-        "the refusal must be report-level: {report_level:?}"
+        entry["action"]
+            .as_str()
+            .is_some_and(|action| action.contains("Restore every material figure")),
+        "the restore-the-figures action is carried: {response}"
     );
-    assert!(action >= 0);
     // The valid draft still passes — the check adds refusals to nothing valid.
     assert!(!has(
         &validate(&valid_draft()),
@@ -375,6 +416,7 @@ fn a_draft_that_declares_no_numbers_is_refused_at_validation() {
     ));
 }
 
+#[test]
 fn undisclosed_conflicting_evidence_is_refused() {
     let mut map = registry();
     map.get_mut("evf_price").unwrap().conflicting = true;

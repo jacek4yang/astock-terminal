@@ -130,6 +130,21 @@ impl ClaimKind {
             Self::Unknown => false,
         }
     }
+
+    /// Which claim kinds would accept this provenance as-is, for repair.
+    fn kinds_permitting(self, provenance: &NumericProvenance) -> Vec<ClaimKind> {
+        [
+            Self::ObservedFact,
+            Self::DeterministicCalculation,
+            Self::Inference,
+            Self::Estimate,
+            Self::Scenario,
+            Self::Unknown,
+        ]
+        .into_iter()
+        .filter(|kind| kind.permits(provenance))
+        .collect()
+    }
 }
 
 /// Where a number came from. Every number in a published report has one of these.
@@ -323,11 +338,14 @@ pub enum DraftProblem {
         claim_id: String,
         statement: String,
     },
-    /// A number asserted as observed on a claim that may not assert observations.
+    /// A number whose provenance its claim kind does not permit.
     UnsupportedObservedNumber {
         claim_id: String,
         label: String,
         value: f64,
+        /// The kinds that would accept this provenance as-is.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        permitted_kinds: Vec<String>,
     },
     /// A calculated figure whose calculation provenance is absent or incomplete.
     MissingCalculationProvenance {
@@ -1301,6 +1319,18 @@ fn validate_numeric_item(
             claim_id: claim.id.clone(),
             label: item.label.clone(),
             value: item.value,
+            // The kinds that would accept this item's provenance as-is, so the
+            // repair can be a mechanical relabel rather than recalled from the
+            // matrix. A live run exhausted its finalization budget with this
+            // exact refusal: a trend claim of kind=observed_fact carrying two
+            // calculated figures (drawdown, volatility) that the model never
+            // relabelled across three attempts.
+            permitted_kinds: claim
+                .kind
+                .kinds_permitting(&item.provenance)
+                .iter()
+                .map(|kind| kind.as_str().to_owned())
+                .collect(),
         });
     }
 

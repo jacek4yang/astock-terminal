@@ -165,11 +165,12 @@ fn validation_action(code: &str) -> &'static str {
              either gather the data first or restate the claim with kind=unknown."
         }
         "unsupported_observed_number" => {
-            "The claim kind does not permit this number's provenance. An observed_fact carries \
-             only observed numbers, a deterministic_calculation or an inference carries observed \
-             and calculated ones, a scenario carries its assumption plus observed, calculated or \
-             estimated figures, an estimate only estimated ones; unknown carries no numbers at \
-             all. Change the kind or change how the number is sourced."
+            "This claim's kind does not permit this number's provenance. The claim's \
+             `kind_fixes` lists, per label, the kinds that accept it as-is — relabel the claim \
+             to one of those (or re-source the number). observed_fact carries only observed \
+             numbers; deterministic_calculation and inference carry observed and calculated; \
+             scenario carries assumption/observed/calculated/estimated; estimate only \
+             estimated; unknown carries none."
         }
         "missing_calculation_provenance" => {
             "A calculated number needs the calculation that produced it. Run \
@@ -403,6 +404,12 @@ pub fn validation_repair(problems: &[DraftProblem], verdict: RepairVerdict) -> V
     // ids are in the problems array, but the per-claim repair target is what the
     // model acts on, and it named no identifiers.
     let mut conflicting_ids: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // Per claim, the kind relabels that would make its rejected numbers legal:
+    // label -> accepted kinds. Mechanical repair beats recalled rules — a live
+    // run exhausted its finalization budget on one observed_fact claim carrying
+    // calculated figures, the fix being a relabel the guidance described in
+    // prose three attempts in a row.
+    let mut kind_fixes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for problem in problems {
         match problem.claim_id() {
             Some(claim_id) => {
@@ -428,6 +435,16 @@ pub fn validation_repair(problems: &[DraftProblem], verdict: RepairVerdict) -> V
                             .entry(claim_id.to_owned())
                             .or_default()
                             .extend(evidence_ids.iter().cloned());
+                    }
+                    DraftProblem::UnsupportedObservedNumber {
+                        label,
+                        permitted_kinds,
+                        ..
+                    } => {
+                        let entry = kind_fixes.entry(claim_id.to_owned()).or_default();
+                        for kind in permitted_kinds {
+                            entry.insert(format!("{label}: {kind}"));
+                        }
                     }
                     _ => {}
                 }
@@ -495,6 +512,18 @@ pub fn validation_repair(problems: &[DraftProblem], verdict: RepairVerdict) -> V
                     ids.iter()
                         .take(MAX_TOKENS_PER_TARGET)
                         .map(|id| Value::from(id.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(fixes) = kind_fixes.get(&claim_id) {
+            object.insert(
+                "kind_fixes".into(),
+                Value::Array(
+                    fixes
+                        .iter()
+                        .take(MAX_TOKENS_PER_TARGET)
+                        .map(|fix| Value::from(fix.clone()))
                         .collect(),
                 ),
             );
